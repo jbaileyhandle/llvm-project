@@ -1,6 +1,7 @@
 #include "UncoalescedAnalysis.h"
 #include "llvm/Demangle/Demangle.h"
 #include <iostream>
+#include <regex>
 #include <stdio.h>
 
 #define DEBUG_TYPE "uncoalesced-analysis"
@@ -137,8 +138,8 @@ GPUState UncoalescedAnalysis::ExecuteInstruction(
         if (!name.compare("__HIP_Coordinates<__HIP_ThreadIdx>::__X::operator unsigned int() const")) {
           st.setValue(CI, MultiplierValue(ONE));
         } else if (
-            std::regex_match(name, std::regex{ "__HIP_Coordinates<__HIP_ThreadIdx>::__(Y|Z)::operator unsigned int\(\) const" } ||
-            std::regex_match(name, std::regex{ "__HIP_Coordinates<__HIP_(BlockDim|BlockIdx|GridDim)>::__(X|Y|Z)::operator unsigned int\(\) const" })
+            std::regex_match(name, std::regex{"__HIP_Coordinates<__HIP_ThreadIdx>::__[YZ]::operator unsigned int\\(\\) const", std::regex::extended}) ||
+            std::regex_match(name, std::regex{"__HIP_Coordinates<__HIP_(BlockDim|BlockIdx|GridDim)>::__[XYZ]::operator unsigned int\\(\\) const", std::regex::extended})
             ) {
             
           st.setValue(CI, MultiplierValue(ZERO));
