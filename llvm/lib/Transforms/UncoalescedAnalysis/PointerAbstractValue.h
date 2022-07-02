@@ -20,10 +20,10 @@ class PointerAbstractValue : public AbstractValue<T> {
 
   void setValueType() { isAddressType_ = false; }
 
-  virtual std::string getString() const = 0;
+  virtual std::string getString() const override = 0;
 
   // Returns a merge of this value with value v.
-  virtual T join(const T& v) const = 0;
+  virtual T join(const T& v) const override = 0;
 
  private:
   // Does this value represent the address (lvalue) of the variable or the

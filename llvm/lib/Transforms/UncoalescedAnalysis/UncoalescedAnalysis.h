@@ -47,7 +47,7 @@ class UncoalescedAnalysis
   void BuildAnalysisInfo(GPUState st);
 
   // Implements execution of different instructions on the abstract state.
-  GPUState ExecuteInstruction(const Instruction* I, GPUState st);
+  GPUState ExecuteInstruction(const Instruction* I, GPUState st) override;
 
  private:
   // Returns type size in bytes for a Type ty.

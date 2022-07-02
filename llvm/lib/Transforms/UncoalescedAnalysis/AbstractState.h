@@ -20,6 +20,7 @@ class AbstractState {
  );
  public:
   AbstractState() {}
+  AbstractState(const AbstractState&) = default;
 
   virtual ~AbstractState() = 0;
 

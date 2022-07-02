@@ -10,6 +10,7 @@ using namespace llvm;
 class GPUState : public AbstractState<MultiplierValue, GPUState> {
  public:
   GPUState() : numThreads_(MultiplierValue(MultiplierValueType::TOP)) {}
+  GPUState(const GPUState&) = default;
 
   void clear() {
     AbstractState::clear();
@@ -34,7 +35,7 @@ class GPUState : public AbstractState<MultiplierValue, GPUState> {
   GPUState mergeState(const GPUState& st) const override;
 
   // Pretty printing 
-  std::string getString() const;
+  std::string getString() const override;
   std::string printInstructionState(const Instruction* I) const override;
 
   // Test to check correctness.

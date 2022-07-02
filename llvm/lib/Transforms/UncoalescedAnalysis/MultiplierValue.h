@@ -47,7 +47,7 @@ class MultiplierValue : public PointerAbstractValue<MultiplierValue> {
       : t_(t), isBool_(isBool) {}
 
   // Merge values; returns the least value that supersedes both values.
-  MultiplierValue join(const MultiplierValue& v) const;
+  MultiplierValue join(const MultiplierValue& v) const override;
 
   // Binary operations 
   friend MultiplierValue operator+(const MultiplierValue& v1, const MultiplierValue& v2);
@@ -67,7 +67,7 @@ class MultiplierValue : public PointerAbstractValue<MultiplierValue> {
   bool isBoolean() const { return isBool_; }
 
   // Pretty printing 
-  std::string getString() const;
+  std::string getString() const override;
 
   // Test to check correctness.
   static bool testMultiplierValue();
