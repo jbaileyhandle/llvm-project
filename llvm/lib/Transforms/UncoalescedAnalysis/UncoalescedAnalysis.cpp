@@ -129,70 +129,74 @@ GPUState UncoalescedAnalysis::ExecuteInstruction(
     if (CI->isInlineAsm()) {
       st.setValue(CI, MultiplierValue(TOP));
     } else {
-      // If function has no name, return!
       Function *calledF = CI->getCalledFunction();
-      if (!calledF->hasName()) {
-        st.setValue(CI, MultiplierValue(TOP));
-      } else {
-        std::string name = demangle(calledF->getName().str());
-        if (!name.compare("__HIP_Coordinates<__HIP_ThreadIdx>::__X::operator unsigned int() const")) {
-          st.setValue(CI, MultiplierValue(ONE));
-        } else if (
-            std::regex_match(name, std::regex{"__HIP_Coordinates<__HIP_ThreadIdx>::__[YZ]::operator unsigned int\\(\\) const", std::regex::extended}) ||
-            std::regex_match(name, std::regex{"__HIP_Coordinates<__HIP_(BlockDim|BlockIdx|GridDim)>::__[XYZ]::operator unsigned int\\(\\) const", std::regex::extended})
-            ) {
-            
-          st.setValue(CI, MultiplierValue(ZERO));
-        } else if (!name.compare("memcpy(void*, void const*, unsigned long)")) {
-          // ***** Handling special case of copy between data structures. *****
-          Value* dstOperand = CI->getArgOperand(0);
-          if (isa<BitCastInst>(dstOperand)) {
-            // Get actual operand from the bitcast instruction.
-            dstOperand = cast<BitCastInst>(dstOperand)->getOperand(0);
+      if(calledF != nullptr) {
+          // If function has no name, return!
+          if (!calledF->hasName()) {
+            st.setValue(CI, MultiplierValue(TOP));
+          } else {
+            std::string name = demangle(calledF->getName().str());
+            if (!name.compare("__HIP_Coordinates<__HIP_ThreadIdx>::__X::operator unsigned int() const")) {
+              st.setValue(CI, MultiplierValue(ONE));
+            } else if (
+                std::regex_match(name, std::regex{"__HIP_Coordinates<__HIP_ThreadIdx>::__[YZ]::operator unsigned int\\(\\) const", std::regex::extended}) ||
+                std::regex_match(name, std::regex{"__HIP_Coordinates<__HIP_(BlockDim|BlockIdx|GridDim)>::__[XYZ]::operator unsigned int\\(\\) const", std::regex::extended})
+                ) {
+                
+              st.setValue(CI, MultiplierValue(ZERO));
+            } else if (!name.compare("memcpy(void*, void const*, unsigned long)")) {
+              // ***** Handling special case of copy between data structures. *****
+              Value* dstOperand = CI->getArgOperand(0);
+              if (isa<BitCastInst>(dstOperand)) {
+                // Get actual operand from the bitcast instruction.
+                dstOperand = cast<BitCastInst>(dstOperand)->getOperand(0);
+              }
+              Value* srcOperand = CI->getArgOperand(1);
+              if (isa<BitCastInst>(srcOperand)) {
+                // Get actual operand from the bitcast instruction.
+                srcOperand = cast<BitCastInst>(srcOperand)->getOperand(0);
+              }
+              st.setValue(dstOperand, st.getValue(srcOperand));
+            } else {
+              st.setValue(CI, MultiplierValue(TOP));
+            }
           }
-          Value* srcOperand = CI->getArgOperand(1);
-          if (isa<BitCastInst>(srcOperand)) {
-            // Get actual operand from the bitcast instruction.
-            srcOperand = cast<BitCastInst>(srcOperand)->getOperand(0);
-          }
-          st.setValue(dstOperand, st.getValue(srcOperand));
-        } else {
-          st.setValue(CI, MultiplierValue(TOP));
-        }
-      }
-      // If calledF is not a declaration and FunctionArgumentValues_ is not
-      // nullptr, create a call context consisting of mapping from arguments
-      // to their abstract values and merge it with the existing call context
-      // for calledF. This represents the values that flow during the call into
-      // the arguments of calledF.
-      if (!calledF->isDeclaration() && FunctionArgumentValues_) {
-        std::map<const Value*, MultiplierValue> argMap;
-        // Check if argument values exist in the map.
-        if (FunctionArgumentValues_->find(calledF) !=
-                FunctionArgumentValues_->end()) {
-          argMap = FunctionArgumentValues_->at(calledF);
-        }
-        // Iterate over arguments and update argMap.
-        unsigned i = 0;
-        for (auto argIt = calledF->arg_begin();
-             argIt != calledF->arg_end() && i < CI->arg_size();
-                                                                 argIt++) {
-          const Value* arg = &*argIt;
-          MultiplierValue v = st.getValue(CI->getArgOperand(i));
-          if (argMap.find(arg) == argMap.end()) { argMap[arg] = v; }
-          else { argMap[arg] = v.join(argMap[arg]); }
-          ++i;
-        }
-        FunctionArgumentValues_->emplace(calledF, argMap);
+          // If calledF is not a declaration and FunctionArgumentValues_ is not
+          // nullptr, create a call context consisting of mapping from arguments
+          // to their abstract values and merge it with the existing call context
+          // for calledF. This represents the values that flow during the call into
+          // the arguments of calledF.
+          if (!calledF->isDeclaration() && FunctionArgumentValues_) {
+            std::map<const Value*, MultiplierValue> argMap;
+            // Check if argument values exist in the map.
+            if (FunctionArgumentValues_->find(calledF) !=
+                    FunctionArgumentValues_->end()) {
+              argMap = FunctionArgumentValues_->at(calledF);
+            }
+            // Iterate over arguments and update argMap.
+            unsigned i = 0;
+            for (auto argIt = calledF->arg_begin();
+                 argIt != calledF->arg_end() && i < CI->arg_size();
+                                                                     argIt++) {
+              const Value* arg = &*argIt;
+              MultiplierValue v = st.getValue(CI->getArgOperand(i));
+              if (argMap.find(arg) == argMap.end()) { argMap[arg] = v; }
+              else { argMap[arg] = v.join(argMap[arg]); }
+              ++i;
+            }
+            FunctionArgumentValues_->emplace(calledF, argMap);
 
-        // Print called arguments.
-        LLVM_DEBUG(errs() << "Called function " << calledF->getName()
-              << " with args (");
-        for (auto argIt = calledF->arg_begin();
-             argIt != calledF->arg_end(); argIt++) {
-          LLVM_DEBUG(errs() << argMap[&*argIt].getString() << ", ");
-        }
-        LLVM_DEBUG(errs() << ")\n");
+            // Print called arguments.
+            LLVM_DEBUG(errs() << "Called function " << calledF->getName()
+                  << " with args (");
+            for (auto argIt = calledF->arg_begin();
+                 argIt != calledF->arg_end(); argIt++) {
+              LLVM_DEBUG(errs() << argMap[&*argIt].getString() << ", ");
+            }
+            LLVM_DEBUG(errs() << ")\n");
+          }
+      } else {
+        st.setValue(CI, MultiplierValue(TOP));
       }
     }
 

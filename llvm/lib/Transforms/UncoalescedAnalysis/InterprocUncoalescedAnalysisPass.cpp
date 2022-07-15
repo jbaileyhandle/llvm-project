@@ -33,14 +33,19 @@ bool InterproceduralUncoalescedAnalysisPass::runOnModule(Module &M) {
 
   // Run analysis on functions.
   for (Function *F : functionList) {
-    LLVM_DEBUG(errs() << "Analyzing function: " << F->getName());
-    DominatorTree DT(*F);
-    UncoalescedAnalysis UA(F, &DT, &FunctionArgumentValues);
-    errs() << "Analysis Results: \n";
-    GPUState st = UA.BuildInitialState();
-    UA.BuildAnalysisInfo(st);
-    std::set<const Instruction*> uncoalesced = UA.getUncoalescedAccesses();
-    UncoalescedAccessMap_.emplace(F, uncoalesced);
+    // Filter out function that don't target GPU
+    // TODO(jobaileyhandle): Right now hard-coded for gfx906, should broaden for all HIP-compatible gpus
+    // Just do !(x86 or arm)?
+    if(F->hasFnAttribute("target-cpu") && F->getFnAttribute("target-cpu").getValueAsString().equals("gfx906")) {
+        LLVM_DEBUG(errs() << "Analyzing function: " << F->getName());
+        DominatorTree DT(*F);
+        UncoalescedAnalysis UA(F, &DT, &FunctionArgumentValues);
+        errs() << "Analysis Results: \n";
+        GPUState st = UA.BuildInitialState();
+        UA.BuildAnalysisInfo(st);
+        std::set<const Instruction*> uncoalesced = UA.getUncoalescedAccesses();
+        UncoalescedAccessMap_.emplace(F, uncoalesced);
+    }
   }
   return false;
 }
