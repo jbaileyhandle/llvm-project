@@ -176,6 +176,7 @@ DUMMY_MACHINE_FUNCTION_PASS("twoaddressinstruction", TwoAddressInstructionPass, 
 DUMMY_MACHINE_FUNCTION_PASS("detect-dead-lanes", DetectDeadLanesPass, ())
 DUMMY_MACHINE_FUNCTION_PASS("processimpdefs", ProcessImplicitDefsPass, ())
 DUMMY_MACHINE_FUNCTION_PASS("liveintervals", LiveIntervalsPass, ())
+DUMMY_MACHINE_FUNCTION_PASS("livenessvisualization", LivenessVisualizationPass, ())
 DUMMY_MACHINE_FUNCTION_PASS("simple-register-coalescing", RegisterCoalescerPass, ())
 DUMMY_MACHINE_FUNCTION_PASS("rename-independent-subregs", RenameIndependentSubregsPass, ())
 DUMMY_MACHINE_FUNCTION_PASS("branch-folder", BranchFolderPass, ())

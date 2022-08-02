@@ -115,6 +115,9 @@ namespace llvm {
   /// and physical registers.
   extern char &LiveIntervalsID;
 
+  /// LivenessVisualization - This pass dumps visualization info for liveness.
+  extern char &LivenessVisualizationID;
+
   /// LiveStacks pass. An analysis keeping track of the liveness of stack slots.
   extern char &LiveStacksID;
 
