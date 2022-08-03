@@ -1468,6 +1468,9 @@ void TargetPassConfig::addOptimizedRegAlloc() {
   // PreRA instruction scheduling.
   addPass(&MachineSchedulerID);
 
+  // Dump liveness visualization.
+  addPass(&LivenessVisualizationID);
+
   if (addRegAssignAndRewriteOptimized()) {
     // Perform stack slot coloring and post-ra machine LICM.
     addPass(&StackSlotColoringID);

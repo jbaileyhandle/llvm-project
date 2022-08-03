@@ -70,6 +70,8 @@ INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
 INITIALIZE_PASS_DEPENDENCY(SlotIndexes)
 INITIALIZE_PASS_DEPENDENCY(LiveIntervals)
+INITIALIZE_PASS_DEPENDENCY(LiveDebugVariables)
+INITIALIZE_PASS_DEPENDENCY(LiveVariables)
 INITIALIZE_PASS_END(LivenessVisualization, "livenessvisualization",
                 "Live value visualization", false, false)
 
@@ -80,52 +82,25 @@ LivenessVisualization::LivenessVisualization() : MachineFunctionPass(ID) {
 LivenessVisualization::~LivenessVisualization() {}
 
 void LivenessVisualization::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.setPreservesCFG();
-  AU.addRequired<AAResultsWrapperPass>();
-  AU.addPreserved<AAResultsWrapperPass>();
-
-  AU.addRequired<LiveVariables>();
-  AU.addPreserved<LiveVariables>();
-
+  AU.setPreservesAll();
   AU.addRequired<LiveIntervals>();
-  AU.addPreserved<LiveIntervals>();
-
-  AU.addRequired<LiveDebugVariables>();
-  AU.addPreserved<LiveDebugVariables>();
-
-  AU.addRequired<LiveStacks>();
-  AU.addPreserved<LiveStacks>();
-
-  AU.addRequired<MachineBlockFrequencyInfo>();
-  AU.addPreserved<MachineBlockFrequencyInfo>();
-
-  AU.addRequiredID(MachineDominatorsID);
-  AU.addPreservedID(MachineDominatorsID);
-
-  AU.addRequiredTransitiveID(MachineDominatorsID);
-  AU.addPreservedID(MachineDominatorsID);
-
-  AU.addRequired<MachineLoopInfo>();
-  AU.addPreserved<MachineLoopInfo>();
-
-  AU.addPreserved<SlotIndexes>();
-  AU.addRequiredTransitive<SlotIndexes>();
-
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
 bool LivenessVisualization::doInitialization(Module &M) {
     printf("LivenessVisualization doInitialization\n");
     MachineFunctionPass::doInitialization(M);
+    return false;
 }
 
 bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
     MF = &fn;
-    printf("LivenessVisualization runOnMachineFunction\n");
+    printf("Running on fucntion\n");
     return false;
 }
 
 bool LivenessVisualization::doFinalization(Module &M) {
     printf("LivenessVisualization doFinalization\n");
     MachineFunctionPass::doFinalization(M);
+    return false;
 }
