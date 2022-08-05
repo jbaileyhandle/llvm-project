@@ -46,7 +46,6 @@ class TargetInstrInfo;
 class VirtRegMap;
 
   class LivenessVisualization : public MachineFunctionPass {
-    MachineFunction* MF;
 
   public:
     static char ID;
@@ -63,6 +62,29 @@ class VirtRegMap;
 
   private:
 
+    // Class used to build up information for a basic
+    // block in the final dot file.
+    class GraphBB {
+    public:
+        GraphBB(LivenessVisualization*, MachineBasicBlock &MBB);
+
+        std::string EmitDescription();
+        void AddInstructionAtSlotIndex(SlotIndex);
+        void AddVirtReg(LiveInterval&);
+
+        std::list<GraphBB*> children;
+    private:
+        LivenessVisualization *LVpass;
+        std::string name;
+        std::string label_str;
+        std::unique_ptr<raw_string_ostream> label_ostream_ptr;
+    };
+
+    LiveIntervals *LIA;
+    MachineFunction* MF;
+    MachineRegisterInfo* MRI;
+    const TargetRegisterInfo* TRI;
+    const TargetInstrInfo* TII;
   };
 
 } // end namespace llvm

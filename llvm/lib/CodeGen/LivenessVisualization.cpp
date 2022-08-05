@@ -36,6 +36,7 @@
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/CodeGen/Register.h"
 #include "llvm/CodeGen/SlotIndexes.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
@@ -75,6 +76,13 @@ INITIALIZE_PASS_DEPENDENCY(LiveVariables)
 INITIALIZE_PASS_END(LivenessVisualization, "livenessvisualization",
                 "Live value visualization", false, false)
 
+
+LivenessVisualization::GraphBB::GraphBB(LivenessVisualization *LVpass, MachineBasicBlock &MBB) {
+    name = MBB.getFullName();
+    label_ostream_ptr = std::make_unique<raw_string_ostream>(label_str);
+    *label_ostream_ptr << name << " [shape=box; label=\"" << name;
+}
+
 LivenessVisualization::LivenessVisualization() : MachineFunctionPass(ID) {
   initializeLivenessVisualizationPass(*PassRegistry::getPassRegistry());
 }
@@ -84,18 +92,88 @@ LivenessVisualization::~LivenessVisualization() {}
 void LivenessVisualization::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
   AU.addRequired<LiveIntervals>();
+  AU.addPreserved<LiveIntervals>();
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
 bool LivenessVisualization::doInitialization(Module &M) {
     printf("LivenessVisualization doInitialization\n");
+
     MachineFunctionPass::doInitialization(M);
     return false;
 }
 
 bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
+
     MF = &fn;
+    MRI = &MF->getRegInfo();
+    LIA = &getAnalysis<LiveIntervals>();
+    TRI = MF->getSubtarget().getRegisterInfo();
+    TII = MF->getSubtarget().getInstrInfo();
+    SlotIndexes *indexes = LIA->getSlotIndexes();
+
+    outs() << "\n\nFunction: " << MF->getName() << "\n";
+    /*
+    for (MachineBasicBlock &MBB : *MF) {
+        std::string bb_str;
+        raw_string_ostream bb_stream(bb_str);
+        MBB.printAsOperand(bb_stream, false);
+        outs() << "\tBB:"  << bb_str << "\n";
+        for (MachineInstr &MI : MBB) {
+            std::string mi_str;
+            raw_string_ostream mi_stream(mi_str);
+            if(MI.getDebugLoc().isImplicitCode()) {
+                mi_stream << "ImplicitCode";
+            } else {
+                MI.getDebugLoc().print(mi_stream);
+            }
+            mi_stream << ":\t";
+            MI.print(mi_stream);
+            outs() << "\t\t" << mi_str;
+        }
+    }
     printf("Running on fucntion\n");
+    */
+
+    /// Keeps a live range set for each register unit to track fixed physreg
+    /// interference.
+    /*
+    for(size_t i=0; i < LIA->getNumRegUnits(); ++i) {
+        LiveRange &LR = LIA->getRegUnit(i);
+        outs() << printRegUnit(i, TRI) << ' ' << LR << "\n";
+    }
+    */
+    
+    // Dump virtual ranges
+    for(unsigned i = 0; i < MRI->getNumVirtRegs(); ++i) {
+        Register reg = Register::index2VirtReg(i);
+        if(LIA->hasInterval(reg)) {
+            LiveInterval &interval = LIA->getInterval(reg);
+            outs() << interval << "\n";
+            for(auto segment_itr = interval.begin(); segment_itr != interval.end(); ++segment_itr) {
+                outs() << "\t" << *segment_itr << "\n";
+            }
+            /*
+            for(auto& subrange : interval.subranges()) {
+                outs() << "\t" << subrange << "\n";
+            }
+            */
+        }
+    }
+
+    for(SlotIndex si = indexes->getZeroIndex();; si = indexes->getNextNonNullIndex(si)) {
+        MachineInstr *mi = indexes->getInstructionFromIndex(si);
+        outs() << si << "\n";
+        if(mi != nullptr) {
+            outs() << *mi << "\n";
+        }
+
+        if(si == indexes->getLastIndex()) {
+            break;
+        }
+    }
+
+
     return false;
 }
 

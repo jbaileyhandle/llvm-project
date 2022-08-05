@@ -377,6 +377,11 @@ class VirtRegMap;
     bool checkRegMaskInterference(const LiveInterval &LI,
                                   BitVector &UsableRegs);
 
+    // Return the number of register units.
+    size_t getNumRegUnits() {
+        return RegUnitRanges.size();
+    }
+
     // Register unit functions.
     //
     // Fixed interference occurs when MachineInstrs use physregs directly
