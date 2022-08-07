@@ -27,6 +27,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include <cassert>
 #include <cstdint>
+#include <unordered_map>
 #include <utility>
 
 namespace llvm {
@@ -55,7 +56,7 @@ class VirtRegMap;
 
     void getAnalysisUsage(AnalysisUsage &AU) const override;
 
-    /// Pass entry point;
+    // Pass entry points;
     bool doInitialization(Module &M) override;
     bool runOnMachineFunction(MachineFunction&) override;
     bool doFinalization(Module &M) override;
@@ -66,25 +67,69 @@ class VirtRegMap;
     // block in the final dot file.
     class GraphBB {
     public:
-        GraphBB(LivenessVisualization*, MachineBasicBlock &MBB);
+        GraphBB(LivenessVisualization*, const MachineBasicBlock &MBB);
 
-        std::string EmitDescription();
-        void AddInstructionAtSlotIndex(SlotIndex);
-        void AddVirtReg(LiveInterval&);
+        // Return node description for dot file.
+        std::string emitDescription() const;
 
-        std::list<GraphBB*> children;
+        // Link this GraphBB to its children GraphBB's
+        void addChildren(std::unordered_map<const MachineBasicBlock*, GraphBB>& mbb_to_gbb);
+
+        // Add information for the given slot index to the node.
+        void addSlotIndex(const SlotIndex);
+
+        // Add text descriptor of connections to children to descriptor.
+        void emitChildren(std::string descriptor);
+
+        // Add node descriptor to descriptor.
+        void emitNode(std::string descriptor);
+
     private:
-        LivenessVisualization *LVpass;
-        std::string name;
-        std::string label_str;
-        std::unique_ptr<raw_string_ostream> label_ostream_ptr;
+
+        // Add instructions at the SlotIndex to node description.
+        void addInstructionAtSlotIndex(const SlotIndex);
+
+        // Return virtual registers that are live at the SlotIndex.
+        std::unique_ptr<std::vector<Register>> getLiveVirtRegsAtSlotIndex(const SlotIndex);
+
+        // Add the virtual instruciton for the LiveInterval to node description
+        // if it is live at at the given SlotIndex.
+        void addRegsAtSlotIndex(const SlotIndex);
+
+        // Add left-justified newline to label.
+        void addNewlineToLabel();
+
+        // The successor nodes of this basic block. 
+        std::vector<GraphBB*> children;
+
+        // Slot indexes.
+        SlotIndexes *indexes_;
+
+        // For building up a descriptor (instructions, live registers) of
+        // this basic block.
+        std::unique_ptr<raw_string_ostream> label_ostream_ptr_;
+        std::string label_str_;
+
+        const LivenessVisualization *LVpass_;
+
+        // Unique name of the basic block.
+        std::string name_;
+
+        // MachineBasicBlock which this graph node models.
+        const MachineBasicBlock *MBB_;
     };
 
-    LiveIntervals *LIA;
-    MachineFunction* MF;
-    MachineRegisterInfo* MRI;
-    const TargetRegisterInfo* TRI;
-    const TargetInstrInfo* TII;
+    static std::string getSanitizedFuncName(const MachineFunction *fn);
+
+    // Map MachineBasicBlock's of the function to the GraphBB's
+    // representing the basic blocks in the dot graph.
+    std::unordered_map<const MachineBasicBlock*, GraphBB> mbb_to_gbb_;
+
+    const LiveIntervals *LIA_;
+    const MachineFunction* MF_;
+    const MachineRegisterInfo* MRI_;
+    const TargetRegisterInfo* TRI_;
+    const TargetInstrInfo* TII_;
   };
 
 } // end namespace llvm

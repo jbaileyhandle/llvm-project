@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "LiveDebugVariables.h"
+#include "llvm/Demangle/Demangle.h"
 #include "llvm/CodeGen/LivenessVisualization.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DepthFirstIterator.h"
@@ -77,10 +78,63 @@ INITIALIZE_PASS_END(LivenessVisualization, "livenessvisualization",
                 "Live value visualization", false, false)
 
 
-LivenessVisualization::GraphBB::GraphBB(LivenessVisualization *LVpass, MachineBasicBlock &MBB) {
-    name = MBB.getFullName();
-    label_ostream_ptr = std::make_unique<raw_string_ostream>(label_str);
-    *label_ostream_ptr << name << " [shape=box; label=\"" << name;
+LivenessVisualization::GraphBB::GraphBB(LivenessVisualization *LVpass, const MachineBasicBlock &MBB) {
+    indexes_ = LVpass->LIA_->getSlotIndexes();
+    name_ = MBB.getFullName();
+    MBB_ = &MBB;
+    LVpass_ = LVpass;
+
+    label_ostream_ptr_ = std::make_unique<raw_string_ostream>(label_str_);
+    *label_ostream_ptr_ << name_ << " [shape=box; label=\"" << name_;
+    addNewlineToLabel();
+}
+
+void LivenessVisualization::GraphBB::addNewlineToLabel() {
+        *label_ostream_ptr_ << std::string("\\l");
+    }
+
+void LivenessVisualization::GraphBB::addChildren(std::unordered_map<const MachineBasicBlock*, GraphBB>& mbb_to_gbb) {
+    for(const MachineBasicBlock* successor_bb : MBB_->successors()) {
+        assert(mbb_to_gbb.find(successor_bb) != mbb_to_gbb.end());
+        children.push_back(&mbb_to_gbb.at(successor_bb));
+    }
+}
+
+void LivenessVisualization::GraphBB::addInstructionAtSlotIndex(SlotIndex si) {
+    MachineInstr *mi = indexes_->getInstructionFromIndex(si);
+    addNewlineToLabel();
+    if(mi != nullptr) {
+        // TODO add debug info, as below.
+        *label_ostream_ptr_ << *mi;
+    }
+    addNewlineToLabel();
+}
+
+std::unique_ptr<std::vector<Register>> LivenessVisualization::GraphBB::getLiveVirtRegsAtSlotIndex(SlotIndex si) {
+    std::unique_ptr<std::vector<Register>> live_virt_registers = std::make_unique<std::vector<Register>>();
+
+    for(unsigned i = 0; i < LVpass_->MRI_->getNumVirtRegs(); ++i) {
+        Register reg = Register::index2VirtReg(i);
+
+        if(LVpass_->LIA_->hasInterval(reg)) {
+            const LiveInterval &interval = LVpass_->LIA_->getInterval(reg);
+            if(interval.liveAt(si)) {
+                live_virt_registers->push_back(reg);
+            }
+        }
+    }
+
+    return live_virt_registers;
+}
+
+void LivenessVisualization::GraphBB::addRegsAtSlotIndex(SlotIndex si) {
+    std::unique_ptr<std::vector<Register>> live_virt_registers = getLiveVirtRegsAtSlotIndex(si);
+    // Get physical registers
+}
+
+void LivenessVisualization::GraphBB::addSlotIndex(SlotIndex si) {
+    addInstructionAtSlotIndex(si);
+    std::unique_ptr<std::vector<Register>> virt_regs = getLiveVirtRegsAtSlotIndex(si);
 }
 
 LivenessVisualization::LivenessVisualization() : MachineFunctionPass(ID) {
@@ -103,16 +157,62 @@ bool LivenessVisualization::doInitialization(Module &M) {
     return false;
 }
 
+std::string LivenessVisualization::getSanitizedFuncName(const MachineFunction *fn) {
+    std::string func_name = demangle(fn->getName().str());
+    auto new_func_name_end = std::remove(func_name.begin(), func_name.end(), ' ');
+    func_name.resize(new_func_name_end - func_name.begin());
+    return std::move(func_name);
+}
+
 bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
 
-    MF = &fn;
-    MRI = &MF->getRegInfo();
-    LIA = &getAnalysis<LiveIntervals>();
-    TRI = MF->getSubtarget().getRegisterInfo();
-    TII = MF->getSubtarget().getInstrInfo();
-    SlotIndexes *indexes = LIA->getSlotIndexes();
+    // Init variables.
+    MF_ = &fn;
+    MRI_ = &MF_->getRegInfo();
+    LIA_ = &getAnalysis<LiveIntervals>();
+    TRI_ = MF_->getSubtarget().getRegisterInfo();
+    TII_ = MF_->getSubtarget().getInstrInfo();
+    SlotIndexes *indexes = LIA_->getSlotIndexes();
+    std::string func_name = getSanitizedFuncName(MF_);
+    outs() << func_name << " test\n";
 
-    outs() << "\n\nFunction: " << MF->getName() << "\n";
+    // Make GraphBB objects.
+    for (const MachineBasicBlock &MBB : *MF_) {
+        assert(mbb_to_gbb_.find(&MBB) == mbb_to_gbb_.end());
+        mbb_to_gbb_.emplace(&MBB, GraphBB(this, MBB));
+    }
+
+    // Make connections between GraphBB's and their children.
+    for (const MachineBasicBlock &MBB : *MF_) {
+        assert(mbb_to_gbb_.find(&MBB) != mbb_to_gbb_.end());
+        GraphBB& gbb = mbb_to_gbb_.find(&MBB)->second;
+        gbb.addChildren(mbb_to_gbb_);
+    }
+
+    for (const MachineBasicBlock &MBB : *MF_) {
+        GraphBB& gbb = mbb_to_gbb_.at(&MBB);
+        for(SlotIndex si = indexes->getMBBStartIdx(&MBB);; si = indexes->getNextNonNullIndex(si)) {
+            gbb.addSlotIndex(si);
+            if(si == indexes->getMBBEndIdx(&MBB)) {
+                break;
+            }
+        }
+    }
+
+    /*
+    for(SlotIndex si = indexes->getZeroIndex();; si = indexes->getNextNonNullIndex(si)) {
+        const MachineBasicBlock* slot_mbb = indexes->getMBBFromIndex(si);
+        assert(mbb_to_gbb_.find(slot_mbb) != mbb_to_gbb_.end());
+        GraphBB& gbb = mbb_to_gbb_.at(slot_mbb);
+        gbb.AddSlotIndex(si);
+
+        if(si == indexes->getLastIndex()) {
+            break;
+        }
+    }
+    */
+
+    outs() << "\n\nFunction: " << MF_->getName() << "\n";
     /*
     for (MachineBasicBlock &MBB : *MF) {
         std::string bb_str;
@@ -145,10 +245,10 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
     */
     
     // Dump virtual ranges
-    for(unsigned i = 0; i < MRI->getNumVirtRegs(); ++i) {
+    for(unsigned i = 0; i < MRI_->getNumVirtRegs(); ++i) {
         Register reg = Register::index2VirtReg(i);
-        if(LIA->hasInterval(reg)) {
-            LiveInterval &interval = LIA->getInterval(reg);
+        if(LIA_->hasInterval(reg)) {
+            const LiveInterval &interval = LIA_->getInterval(reg);
             outs() << interval << "\n";
             for(auto segment_itr = interval.begin(); segment_itr != interval.end(); ++segment_itr) {
                 outs() << "\t" << *segment_itr << "\n";
