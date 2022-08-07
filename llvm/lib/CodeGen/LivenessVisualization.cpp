@@ -57,6 +57,7 @@
 #include <cassert>
 #include <cstdint>
 #include <iterator>
+#include <iostream>
 #include <tuple>
 #include <utility>
 
@@ -84,19 +85,18 @@ LivenessVisualization::GraphBB::GraphBB(LivenessVisualization *LVpass, const Mac
     MBB_ = &MBB;
     LVpass_ = LVpass;
 
-    label_ostream_ptr_ = std::make_unique<raw_string_ostream>(label_str_);
-    *label_ostream_ptr_ << name_ << " [shape=box; label=\"" << name_;
+    label_str_ = name_;
     addNewlineToLabel();
 }
 
 void LivenessVisualization::GraphBB::addNewlineToLabel() {
-        *label_ostream_ptr_ << std::string("\\l");
-    }
+        label_str_ += "\\l";
+}
 
 void LivenessVisualization::GraphBB::addChildren(std::unordered_map<const MachineBasicBlock*, GraphBB>& mbb_to_gbb) {
     for(const MachineBasicBlock* successor_bb : MBB_->successors()) {
         assert(mbb_to_gbb.find(successor_bb) != mbb_to_gbb.end());
-        children.push_back(&mbb_to_gbb.at(successor_bb));
+        children_.push_back(&mbb_to_gbb.at(successor_bb));
     }
 }
 
@@ -105,7 +105,22 @@ void LivenessVisualization::GraphBB::addInstructionAtSlotIndex(SlotIndex si) {
     addNewlineToLabel();
     if(mi != nullptr) {
         // TODO add debug info, as below.
-        *label_ostream_ptr_ << *mi;
+        std::string mi_str("\t");
+        raw_string_ostream mi_ostream(mi_str);
+
+        // Add location info.
+        if(mi->getDebugLoc().isImplicitCode()) {
+            mi_ostream << "ImplicitCode";
+        } else {
+            mi->getDebugLoc().print(mi_ostream);
+        }
+        mi_ostream << ":\t";
+
+        // Add instruciton.
+        mi_ostream << *mi;
+        auto new_mi_str_end = std::remove(mi_str.begin(), mi_str.end(), '\n');
+        mi_str.resize(new_mi_str_end - mi_str.begin());
+        label_str_ += mi_str;
     }
     addNewlineToLabel();
 }
@@ -124,7 +139,7 @@ std::unique_ptr<std::vector<Register>> LivenessVisualization::GraphBB::getLiveVi
         }
     }
 
-    return live_virt_registers;
+    return std::move(live_virt_registers);
 }
 
 void LivenessVisualization::GraphBB::addRegsAtSlotIndex(SlotIndex si) {
@@ -135,6 +150,16 @@ void LivenessVisualization::GraphBB::addRegsAtSlotIndex(SlotIndex si) {
 void LivenessVisualization::GraphBB::addSlotIndex(SlotIndex si) {
     addInstructionAtSlotIndex(si);
     std::unique_ptr<std::vector<Register>> virt_regs = getLiveVirtRegsAtSlotIndex(si);
+}
+
+void LivenessVisualization::GraphBB::emitConnections(std::ofstream &dot_file) const {
+    for(GraphBB* child : children_) {
+        dot_file << "\t" << name_ << " -> " << child->name_ << "\n";
+    }
+}
+
+void LivenessVisualization::GraphBB::emitNode(std::ofstream &dot_file) const {
+    dot_file << "\t" << name_ << " [shape=box; label=\"" << label_str_ << "\"]\n";
 }
 
 LivenessVisualization::LivenessVisualization() : MachineFunctionPass(ID) {
@@ -159,22 +184,15 @@ bool LivenessVisualization::doInitialization(Module &M) {
 
 std::string LivenessVisualization::getSanitizedFuncName(const MachineFunction *fn) {
     std::string func_name = demangle(fn->getName().str());
+    std::replace(func_name.begin(), func_name.end(), '(', '_');
+    std::replace(func_name.begin(), func_name.end(), ')', '_');
     auto new_func_name_end = std::remove(func_name.begin(), func_name.end(), ' ');
     func_name.resize(new_func_name_end - func_name.begin());
     return std::move(func_name);
 }
 
-bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
-
-    // Init variables.
-    MF_ = &fn;
-    MRI_ = &MF_->getRegInfo();
-    LIA_ = &getAnalysis<LiveIntervals>();
-    TRI_ = MF_->getSubtarget().getRegisterInfo();
-    TII_ = MF_->getSubtarget().getInstrInfo();
+void LivenessVisualization::buildGraphBBs() {
     SlotIndexes *indexes = LIA_->getSlotIndexes();
-    std::string func_name = getSanitizedFuncName(MF_);
-    outs() << func_name << " test\n";
 
     // Make GraphBB objects.
     for (const MachineBasicBlock &MBB : *MF_) {
@@ -189,15 +207,57 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
         gbb.addChildren(mbb_to_gbb_);
     }
 
+    // Add information at each index.
     for (const MachineBasicBlock &MBB : *MF_) {
         GraphBB& gbb = mbb_to_gbb_.at(&MBB);
-        for(SlotIndex si = indexes->getMBBStartIdx(&MBB);; si = indexes->getNextNonNullIndex(si)) {
+        for(SlotIndex si = indexes->getMBBStartIdx(&MBB); si <= indexes->getMBBEndIdx(&MBB); si = indexes->getNextNonNullIndex(si)) {
             gbb.addSlotIndex(si);
-            if(si == indexes->getMBBEndIdx(&MBB)) {
+            if(si == indexes->getLastIndex()) {
                 break;
             }
         }
     }
+}
+
+void LivenessVisualization::emitGraphBBs(std::ofstream &dot_file) const {
+    for (const MachineBasicBlock &MBB : *MF_) {
+        assert(mbb_to_gbb_.find(&MBB) != mbb_to_gbb_.end());
+        const GraphBB &gbb = mbb_to_gbb_.find(&MBB)->second;
+        gbb.emitConnections(dot_file);
+        gbb.emitNode(dot_file);
+    }
+}
+
+bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
+
+    // Init variables.
+    MF_ = &fn;
+    MRI_ = &MF_->getRegInfo();
+    LIA_ = &getAnalysis<LiveIntervals>();
+    TRI_ = MF_->getSubtarget().getRegisterInfo();
+    TII_ = MF_->getSubtarget().getInstrInfo();
+    std::string func_name = getSanitizedFuncName(MF_);
+
+    std::ofstream dot_file;
+    dot_file.open(func_name + ".dot");
+    dot_file << "digraph {\n";
+
+    outs() << "\n\nFunction: " << MF_->getName() << "\n";
+
+    buildGraphBBs();
+    emitGraphBBs(dot_file);
+
+    dot_file << "}\n";
+
+    /*
+    for (const MachineBasicBlock &MBB : *MF_) {
+        for (const MachineInstr &MI : MBB) {
+            outs() << MI << "\n";
+        }
+    }
+    */
+
+
 
     /*
     for(SlotIndex si = indexes->getZeroIndex();; si = indexes->getNextNonNullIndex(si)) {
@@ -212,7 +272,6 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
     }
     */
 
-    outs() << "\n\nFunction: " << MF_->getName() << "\n";
     /*
     for (MachineBasicBlock &MBB : *MF) {
         std::string bb_str;
@@ -243,6 +302,10 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
         outs() << printRegUnit(i, TRI) << ' ' << LR << "\n";
     }
     */
+
+
+    /*
+    SlotIndexes *indexes = LIA_->getSlotIndexes();
     
     // Dump virtual ranges
     for(unsigned i = 0; i < MRI_->getNumVirtRegs(); ++i) {
@@ -253,11 +316,11 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
             for(auto segment_itr = interval.begin(); segment_itr != interval.end(); ++segment_itr) {
                 outs() << "\t" << *segment_itr << "\n";
             }
-            /*
-            for(auto& subrange : interval.subranges()) {
-                outs() << "\t" << subrange << "\n";
-            }
-            */
+            
+            // for(auto& subrange : interval.subranges()) {
+            //     outs() << "\t" << subrange << "\n";
+            // }
+            
         }
     }
 
@@ -272,6 +335,7 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
             break;
         }
     }
+    */
 
 
     return false;

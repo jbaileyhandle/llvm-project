@@ -27,6 +27,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include <cassert>
 #include <cstdint>
+#include <fstream>
 #include <unordered_map>
 #include <utility>
 
@@ -79,10 +80,10 @@ class VirtRegMap;
         void addSlotIndex(const SlotIndex);
 
         // Add text descriptor of connections to children to descriptor.
-        void emitChildren(std::string descriptor);
+        void emitConnections(std::ofstream& dot_file) const;
 
         // Add node descriptor to descriptor.
-        void emitNode(std::string descriptor);
+        void emitNode(std::ofstream& dot_file) const;
 
     private:
 
@@ -100,14 +101,13 @@ class VirtRegMap;
         void addNewlineToLabel();
 
         // The successor nodes of this basic block. 
-        std::vector<GraphBB*> children;
+        std::vector<GraphBB*> children_;
 
         // Slot indexes.
         SlotIndexes *indexes_;
 
         // For building up a descriptor (instructions, live registers) of
         // this basic block.
-        std::unique_ptr<raw_string_ostream> label_ostream_ptr_;
         std::string label_str_;
 
         const LivenessVisualization *LVpass_;
@@ -119,6 +119,13 @@ class VirtRegMap;
         const MachineBasicBlock *MBB_;
     };
 
+    // Build up the GraphBBs.
+    void buildGraphBBs();
+
+    // Emit the GraphBBs to dot_file.
+    void emitGraphBBs(std::ofstream &dot_file) const;
+
+    // Get the name of the function, modified cleanliness.
     static std::string getSanitizedFuncName(const MachineFunction *fn);
 
     // Map MachineBasicBlock's of the function to the GraphBB's
