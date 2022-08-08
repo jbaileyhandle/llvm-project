@@ -70,9 +70,6 @@ class VirtRegMap;
     public:
         GraphBB(LivenessVisualization*, const MachineBasicBlock &MBB);
 
-        // Return node description for dot file.
-        std::string emitDescription() const;
-
         // Link this GraphBB to its children GraphBB's
         void addChildren(std::unordered_map<const MachineBasicBlock*, GraphBB>& mbb_to_gbb);
 
@@ -85,6 +82,9 @@ class VirtRegMap;
         // Add node descriptor to descriptor.
         void emitNode(std::ofstream& dot_file) const;
 
+        // Return an xdot-friendly name for the basic block.
+        std::string getSanitizedFuncName(const MachineBasicBlock &MBB);
+
     private:
 
         // Add instructions at the SlotIndex to node description.
@@ -95,7 +95,7 @@ class VirtRegMap;
 
         // Add the virtual instruciton for the LiveInterval to node description
         // if it is live at at the given SlotIndex.
-        void addRegsAtSlotIndex(const SlotIndex);
+        void addRegistersAtSlotIndex(const SlotIndex);
 
         // Add left-justified newline to label.
         void addNewlineToLabel();
@@ -109,6 +109,9 @@ class VirtRegMap;
         // For building up a descriptor (instructions, live registers) of
         // this basic block.
         std::string label_str_;
+
+        // Left justification padding.
+        static constexpr int location_padding_amount = 35;
 
         const LivenessVisualization *LVpass_;
 
