@@ -112,24 +112,9 @@ void LivenessVisualization::GraphBB::addChildren(std::unordered_map<const Machin
 
 void LivenessVisualization::GraphBB::addInstructionAtSlotIndex(SlotIndex si) {
     MachineInstr *mi = indexes_->getInstructionFromIndex(si);
-    addNewlineToLabel();
     if(mi != nullptr) {
-        // TODO add debug info, as below.
-        std::string mi_str;
+        std::string mi_str(location_padding_amount, ' ');
         raw_string_ostream mi_ostream(mi_str);
-
-        // Add location info.
-        if(mi->getDebugLoc().isImplicitCode()) {
-            mi_ostream << "ImplicitCode";
-        } else {
-            mi->getDebugLoc().print(mi_ostream);
-        }
-        mi_ostream << ":";
-        label_str_ += mi_str;
-        addNewlineToLabel();
-
-        mi_str.clear();
-        mi_str.resize(location_padding_amount, ' ');
 
         // Add instruciton.
         mi_ostream << *mi;
@@ -140,38 +125,61 @@ void LivenessVisualization::GraphBB::addInstructionAtSlotIndex(SlotIndex si) {
     addNewlineToLabel();
 }
 
-std::unique_ptr<std::vector<Register>> LivenessVisualization::GraphBB::getLiveVirtRegsAtSlotIndex(SlotIndex si) {
-    std::unique_ptr<std::vector<Register>> live_virt_registers = std::make_unique<std::vector<Register>>();
+void LivenessVisualization::GraphBB::addInstructionLocationAtSlotIndex(SlotIndex si) {
+    MachineInstr *mi = indexes_->getInstructionFromIndex(si);
+    if(mi != nullptr) {
+        std::string mi_str;
+        raw_string_ostream mi_ostream(mi_str);
+
+        // Add location info.
+        if(mi->getDebugLoc().isImplicitCode()) {
+            mi_ostream << "ImplicitCode";
+        } else {
+            mi->getDebugLoc().print(mi_ostream);
+        }
+        label_str_ += mi_str;
+    }
+    addNewlineToLabel();
+}
+
+std::vector<LivenessVisualization::GraphBB::RegSegment> LivenessVisualization::GraphBB::getLiveVirtRegsAtSlotIndex(const SlotIndex si) {
+    std::vector<RegSegment> live_virt_registers;
 
     for(unsigned i = 0; i < LVpass_->MRI_->getNumVirtRegs(); ++i) {
         Register reg = Register::index2VirtReg(i);
 
         if(LVpass_->LIA_->hasInterval(reg)) {
-            const LiveInterval &interval = LVpass_->LIA_->getInterval(reg);
-            if(interval.liveAt(si)) {
-                live_virt_registers->push_back(reg);
+            const LiveInterval *interval = &(LVpass_->LIA_->getInterval(reg));
+            if(interval->liveAt(si)) {
+                live_virt_registers.push_back(RegSegment(reg, interval->getSegmentContaining(si)));
             }
         }
     }
 
-    return std::move(live_virt_registers);
+    return live_virt_registers;
 }
 
 void LivenessVisualization::GraphBB::addRegistersAtSlotIndex(SlotIndex si) {
-    std::unique_ptr<std::vector<Register>> live_virt_registers = getLiveVirtRegsAtSlotIndex(si);
+    std::vector<RegSegment> live_virt_registers = getLiveVirtRegsAtSlotIndex(si);
     // Get physical registers
     std::string reg_str(location_padding_amount, ' ');
     raw_string_ostream reg_ostream(reg_str);
 
-    reg_str += "(" + std::to_string(live_virt_registers->size()) + "): ";
-    for(const auto& reg : *live_virt_registers) {
-        reg_ostream << printVRegOrUnit(reg, LVpass_->TRI_) << ", ";
+    reg_str += "(" + std::to_string(live_virt_registers.size()) + "): ";
+    for(const auto& reg_segment : live_virt_registers) {
+        reg_ostream << printVRegOrUnit(reg_segment.reg_, LVpass_->TRI_) << ":" << *(reg_segment.segment_) << ", ";
     }
     label_str_ += reg_str;
     addNewlineToLabel();
 }
 
 void LivenessVisualization::GraphBB::addSlotIndex(SlotIndex si) {
+    addNewlineToLabel();
+    addNewlineToLabel();
+    raw_string_ostream label_ostream(label_str_);
+    label_ostream << "si " << si;
+    addNewlineToLabel();
+    addInstructionLocationAtSlotIndex(si);
     addRegistersAtSlotIndex(si);
     addInstructionAtSlotIndex(si);
 }

@@ -62,8 +62,6 @@ class VirtRegMap;
     bool runOnMachineFunction(MachineFunction&) override;
     bool doFinalization(Module &M) override;
 
-  private:
-
     // Class used to build up information for a basic
     // block in the final dot file.
     class GraphBB {
@@ -85,13 +83,23 @@ class VirtRegMap;
         // Return an xdot-friendly name for the basic block.
         std::string getSanitizedFuncName(const MachineBasicBlock &MBB);
 
+        class RegSegment {
+        public:
+            RegSegment(const Register reg, const LiveRange::Segment *segment): reg_(reg), segment_(segment) {}
+            Register reg_;
+            const LiveRange::Segment *segment_;
+        };
+
     private:
 
         // Add instructions at the SlotIndex to node description.
         void addInstructionAtSlotIndex(const SlotIndex);
 
+        // Add instruction location at the SlotIndex to node description.
+        void addInstructionLocationAtSlotIndex(const SlotIndex);
+
         // Return virtual registers that are live at the SlotIndex.
-        std::unique_ptr<std::vector<Register>> getLiveVirtRegsAtSlotIndex(const SlotIndex);
+        std::vector<RegSegment> getLiveVirtRegsAtSlotIndex(const SlotIndex);
 
         // Add the virtual instruciton for the LiveInterval to node description
         // if it is live at at the given SlotIndex.
@@ -122,6 +130,8 @@ class VirtRegMap;
         const MachineBasicBlock *MBB_;
     };
 
+
+  private:
     // Build up the GraphBBs.
     void buildGraphBBs();
 
