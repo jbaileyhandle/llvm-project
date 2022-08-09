@@ -159,18 +159,46 @@ std::vector<LivenessVisualization::GraphBB::RegSegment> LivenessVisualization::G
     return live_virt_registers;
 }
 
-void LivenessVisualization::GraphBB::addRegistersAtSlotIndex(SlotIndex si) {
-    std::vector<RegSegment> live_virt_registers = getLiveVirtRegsAtSlotIndex(si);
-    // Get physical registers
+std::vector<LivenessVisualization::GraphBB::RegSegment> LivenessVisualization::GraphBB::getLivePhysRegsAtSlotIndex(const SlotIndex si) {
+    std::vector<RegSegment> live_phys_registers;
+
+    for(unsigned reg=0; reg < LVpass_->TRI_->getNumRegUnits(); ++reg) {
+        LiveRange &range = LVpass_->LIA_->getRegUnit(reg);
+        if(range.liveAt(si)) {
+            live_phys_registers.push_back(RegSegment(reg, range.getSegmentContaining(si)));
+        }
+    }
+    return live_phys_registers;
+}
+
+void LivenessVisualization::GraphBB::addSetOfLiveRegs(std::vector<RegSegment>& live_registers, std::string label) {
     std::string reg_str(location_padding_amount, ' ');
     raw_string_ostream reg_ostream(reg_str);
-
-    reg_str += "(" + std::to_string(live_virt_registers.size()) + "): ";
-    for(const auto& reg_segment : live_virt_registers) {
+    reg_str += "(" + std::to_string(live_registers.size()) + ")[" + label + "]: ";
+    for(const auto& reg_segment : live_registers) {
         reg_ostream << printVRegOrUnit(reg_segment.reg_, LVpass_->TRI_) << ":" << *(reg_segment.segment_) << ", ";
     }
     label_str_ += reg_str;
     addNewlineToLabel();
+}
+
+int LivenessVisualization::GraphBB::getMaxVirtLive() const {
+    return max_virt_live_;
+}
+
+void LivenessVisualization::GraphBB::addRegistersAtSlotIndex(SlotIndex si) {
+    std::vector<RegSegment> live_virt_registers = getLiveVirtRegsAtSlotIndex(si);
+    addSetOfLiveRegs(live_virt_registers, "virt");
+    max_virt_live_ = std::max(max_virt_live_, (int)live_virt_registers.size());
+
+    std::vector<RegSegment> live_registers = getLivePhysRegsAtSlotIndex(si);
+    addSetOfLiveRegs(live_registers, "phys");
+
+    live_registers.insert(live_registers.end(), live_virt_registers.begin(), live_virt_registers.end());
+    addSetOfLiveRegs(live_registers, "comb");
+}
+
+void LivenessVisualization::GraphBB::colorHotspot(int global_max_virt_live) {
 }
 
 void LivenessVisualization::GraphBB::addSlotIndex(SlotIndex si) {
@@ -239,7 +267,7 @@ void LivenessVisualization::buildGraphBBs() {
         gbb.addChildren(mbb_to_gbb_);
     }
 
-    // Add information at each index.
+    // Add information at each index in GraphBB's.
     for (const MachineBasicBlock &MBB : *MF_) {
         GraphBB& gbb = mbb_to_gbb_.at(&MBB);
         for(SlotIndex si = indexes->getMBBStartIdx(&MBB); si <= indexes->getMBBEndIdx(&MBB); si = indexes->getNextNonNullIndex(si)) {
@@ -248,6 +276,17 @@ void LivenessVisualization::buildGraphBBs() {
                 break;
             }
         }
+    }
+
+    // ID hotspots.
+    int max_virt_live = 0;
+    for (const MachineBasicBlock &MBB : *MF_) {
+        GraphBB& gbb = mbb_to_gbb_.at(&MBB);
+        max_virt_live = std::max(max_virt_live, gbb.getMaxVirtLive());
+    }
+    for (const MachineBasicBlock &MBB : *MF_) {
+        GraphBB& gbb = mbb_to_gbb_.at(&MBB);
+        gbb.colorHotspot(max_virt_live);
     }
 }
 

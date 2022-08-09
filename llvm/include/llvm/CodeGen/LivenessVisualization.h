@@ -74,19 +74,25 @@ class VirtRegMap;
         // Add information for the given slot index to the node.
         void addSlotIndex(const SlotIndex);
 
+        // Color BB if it is a register pressure hotspot.
+        void colorHotspot(int global_max_virt_live);
+
         // Add text descriptor of connections to children to descriptor.
         void emitConnections(std::ofstream& dot_file) const;
 
         // Add node descriptor to descriptor.
         void emitNode(std::ofstream& dot_file) const;
 
+        // Return max_virt_live.
+        int getMaxVirtLive() const;
+
         // Return an xdot-friendly name for the basic block.
         std::string getSanitizedFuncName(const MachineBasicBlock &MBB);
 
         class RegSegment {
         public:
-            RegSegment(const Register reg, const LiveRange::Segment *segment): reg_(reg), segment_(segment) {}
-            Register reg_;
+            RegSegment(const unsigned reg, const LiveRange::Segment *segment): reg_(reg), segment_(segment) {}
+            unsigned reg_;
             const LiveRange::Segment *segment_;
         };
 
@@ -98,15 +104,22 @@ class VirtRegMap;
         // Add instruction location at the SlotIndex to node description.
         void addInstructionLocationAtSlotIndex(const SlotIndex);
 
-        // Return virtual registers that are live at the SlotIndex.
-        std::vector<RegSegment> getLiveVirtRegsAtSlotIndex(const SlotIndex);
-
         // Add the virtual instruciton for the LiveInterval to node description
         // if it is live at at the given SlotIndex.
         void addRegistersAtSlotIndex(const SlotIndex);
 
+        // Helper function to addRegistersAtSlotIndex for printing registers to label.
+        void addSetOfLiveRegs(std::vector<RegSegment>& live_registers, std::string label);
+
         // Add left-justified newline to label.
         void addNewlineToLabel();
+
+        // Return virtual registers that are live at the SlotIndex.
+        std::vector<RegSegment> getLiveVirtRegsAtSlotIndex(const SlotIndex);
+
+        // Return virtual registers that are live at the SlotIndex.
+        std::vector<RegSegment> getLivePhysRegsAtSlotIndex(const SlotIndex);
+
 
         // The successor nodes of this basic block. 
         std::vector<GraphBB*> children_;
@@ -125,6 +138,9 @@ class VirtRegMap;
 
         // Unique name of the basic block.
         std::string name_;
+
+        // Greatest number of virtual registers live at any point in the BB.
+        int max_virt_live_ = 0;
 
         // MachineBasicBlock which this graph node models.
         const MachineBasicBlock *MBB_;
@@ -145,7 +161,7 @@ class VirtRegMap;
     // representing the basic blocks in the dot graph.
     std::unordered_map<const MachineBasicBlock*, GraphBB> mbb_to_gbb_;
 
-    const LiveIntervals *LIA_;
+    LiveIntervals *LIA_;
     const MachineFunction* MF_;
     const MachineRegisterInfo* MRI_;
     const TargetRegisterInfo* TRI_;
