@@ -84,6 +84,14 @@ INITIALIZE_PASS_DEPENDENCY(LiveVariables)
 INITIALIZE_PASS_END(LivenessVisualization, "livenessvisualization",
                 "Live value visualization", false, false)
 
+template <typename T>
+std::string objPtrToString(T *input) {
+    std::string str;
+    raw_string_ostream ostream(str);
+    ostream << *input;
+    return str;
+}
+
 std::string LivenessVisualization::GraphBB::getSanitizedFuncName(const MachineBasicBlock &MBB) {
     std::string name = MBB.getFullName();
     for(auto& character : name) {
@@ -115,22 +123,21 @@ void LivenessVisualization::GraphBB::addChildren(std::unordered_map<const Machin
     }
 }
 
-void LivenessVisualization::GraphBB::addInstructionAtSlotIndex(SlotIndex si) {
+void LivenessVisualization::GraphBB::addInstructionAtSlotIndex(SlotIndex si, SlotIndexInfo& info) {
     MachineInstr *mi = indexes_->getInstructionFromIndex(si);
     if(mi != nullptr) {
-        std::string mi_str(LOCATION_PADDING_AMOUNT, ' ');
-        raw_string_ostream mi_ostream(mi_str);
 
         // Add instruciton.
-        mi_ostream << *mi;
-        auto new_mi_str_end = std::remove(mi_str.begin(), mi_str.end(), '\n');
-        mi_str.resize(new_mi_str_end - mi_str.begin());
-        label_str_ += mi_str;
+        std::string mi_str = objPtrToString(mi);
+        mi_str.erase(std::remove(mi_str.begin(), mi_str.end(), '\n'), mi_str.end());
+        label_str_ += std::string(LOCATION_PADDING_AMOUNT, ' ') + mi_str;
+
+        info.mi_str_ = mi_str;
     }
     addNewlineToLabel();
 }
 
-void LivenessVisualization::GraphBB::addInstructionLocationAtSlotIndex(SlotIndex si) {
+void LivenessVisualization::GraphBB::addInstructionLocationAtSlotIndex(SlotIndex si, SlotIndexInfo &info) {
     MachineInstr *mi = indexes_->getInstructionFromIndex(si);
     if(mi != nullptr) {
         std::string mi_str;
@@ -143,15 +150,17 @@ void LivenessVisualization::GraphBB::addInstructionLocationAtSlotIndex(SlotIndex
             mi->getDebugLoc().print(mi_ostream);
         }
         label_str_ += mi_str;
+        info.src_location_ = mi_str;
     }
     addNewlineToLabel();
 }
 
-std::vector<LivenessVisualization::GraphBB::RegSegment> LivenessVisualization::GraphBB::getLiveVirtRegsAtSlotIndex(const SlotIndex si) {
+std::vector<LivenessVisualization::GraphBB::RegSegment> LivenessVisualization::GraphBB::getLiveVirtRegsAtSlotIndex(const SlotIndex si, SlotIndexInfo &info) {
     std::vector<RegSegment> live_virt_registers;
 
     for(unsigned i = 0; i < LVpass_->MRI_->getNumVirtRegs(); ++i) {
         Register reg = Register::index2VirtReg(i);
+        info.live_virt_registers_.push_back(reg);
 
         if(LVpass_->LIA_->hasInterval(reg)) {
             const LiveInterval *interval = &(LVpass_->LIA_->getInterval(reg));
@@ -178,10 +187,10 @@ std::vector<LivenessVisualization::GraphBB::RegSegment> LivenessVisualization::G
 
 void LivenessVisualization::GraphBB::addSetOfLiveRegs(std::vector<RegSegment>& live_registers, std::string label) {
     std::string reg_str(LOCATION_PADDING_AMOUNT, ' ');
-    raw_string_ostream reg_ostream(reg_str);
     reg_str += "(" + std::to_string(live_registers.size()) + ")[" + label + "]: ";
     for(const auto& reg_segment : live_registers) {
-        reg_ostream << printVRegOrUnit(reg_segment.reg_, LVpass_->TRI_) << ":" << *(reg_segment.segment_) << ", ";
+        auto printable_vreg_or_unit = printVRegOrUnit(reg_segment.reg_, LVpass_->TRI_);
+        reg_str += objPtrToString(&printable_vreg_or_unit) + ":" + objPtrToString(reg_segment.segment_) + ", ";
     }
     label_str_ += reg_str;
     addNewlineToLabel();
@@ -191,8 +200,8 @@ int LivenessVisualization::GraphBB::getMaxVirtLive() const {
     return max_virt_live_;
 }
 
-void LivenessVisualization::GraphBB::addRegistersAtSlotIndex(SlotIndex si) {
-    std::vector<RegSegment> live_virt_registers = getLiveVirtRegsAtSlotIndex(si);
+void LivenessVisualization::GraphBB::addRegistersAtSlotIndex(SlotIndex si, SlotIndexInfo &info) {
+    std::vector<RegSegment> live_virt_registers = getLiveVirtRegsAtSlotIndex(si, info);
     addSetOfLiveRegs(live_virt_registers, "virt");
     max_virt_live_ = std::max(max_virt_live_, (int)live_virt_registers.size());
 
@@ -221,15 +230,17 @@ std::string LivenessVisualization::GraphBB::getHotspotAttr() const {
     return attr_str;
 }
 
-void LivenessVisualization::GraphBB::addSlotIndex(SlotIndex si) {
+void LivenessVisualization::GraphBB::addSlotIndex(SlotIndex si, SlotIndexInfo& info) {
     addNewlineToLabel();
     addNewlineToLabel();
-    raw_string_ostream label_ostream(label_str_);
-    label_ostream << "si " << si;
+
+    label_str_ += "si " + objPtrToString(&si);
+    info.si_ = si;
+
     addNewlineToLabel();
-    addInstructionLocationAtSlotIndex(si);
-    addRegistersAtSlotIndex(si);
-    addInstructionAtSlotIndex(si);
+    addInstructionLocationAtSlotIndex(si, info);
+    addRegistersAtSlotIndex(si, info);
+    addInstructionAtSlotIndex(si, info);
 }
 
 void LivenessVisualization::GraphBB::emitConnections(std::ofstream &dot_file) const {
@@ -291,7 +302,8 @@ void LivenessVisualization::buildGraphBBs() {
     for (const MachineBasicBlock &MBB : *MF_) {
         GraphBB& gbb = mbb_to_gbb_.at(&MBB);
         for(SlotIndex si = indexes->getMBBStartIdx(&MBB); si <= indexes->getMBBEndIdx(&MBB); si = indexes->getNextNonNullIndex(si)) {
-            gbb.addSlotIndex(si);
+            si_to_info_.emplace(si, SlotIndexInfo());
+            gbb.addSlotIndex(si, si_to_info_.at(si));
             if(si == indexes->getLastIndex()) {
                 break;
             }
@@ -306,6 +318,13 @@ void LivenessVisualization::buildGraphBBs() {
     for (const MachineBasicBlock &MBB : *MF_) {
         GraphBB& gbb = mbb_to_gbb_.at(&MBB);
         gbb.markHotspot(function_max_virt_live_);
+        for(SlotIndex si = indexes->getMBBStartIdx(&MBB); si <= indexes->getMBBEndIdx(&MBB); si = indexes->getNextNonNullIndex(si)) {
+            SlotIndexInfo &info = si_to_info_.at(si);
+            info.percent_virt_live_registers_ = (float)info.live_virt_registers_.size() / (float)function_max_virt_live_;
+            if(si == indexes->getLastIndex()) {
+                break;
+            }
+        }
     }
 }
 
