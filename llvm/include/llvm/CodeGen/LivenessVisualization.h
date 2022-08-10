@@ -75,7 +75,7 @@ class VirtRegMap;
         void addSlotIndex(const SlotIndex);
 
         // Color BB if it is a register pressure hotspot.
-        void colorHotspot(int global_max_virt_live);
+        void markHotspot(int function_max_virt_live);
 
         // Add text descriptor of connections to children to descriptor.
         void emitConnections(std::ofstream& dot_file) const;
@@ -114,6 +114,10 @@ class VirtRegMap;
         // Add left-justified newline to label.
         void addNewlineToLabel();
 
+        // Return a string w/ graphviz attributes to mark this BB as a hotspot
+        // Return an empty string if this BB is not a hotspot.
+        std::string getHotspotAttr() const;
+
         // Return virtual registers that are live at the SlotIndex.
         std::vector<RegSegment> getLiveVirtRegsAtSlotIndex(const SlotIndex);
 
@@ -131,9 +135,6 @@ class VirtRegMap;
         // this basic block.
         std::string label_str_;
 
-        // Left justification padding.
-        static constexpr int location_padding_amount = 35;
-
         const LivenessVisualization *LVpass_;
 
         // Unique name of the basic block.
@@ -141,6 +142,8 @@ class VirtRegMap;
 
         // Greatest number of virtual registers live at any point in the BB.
         int max_virt_live_ = 0;
+        // "max_virt_live_" as a percent of function_max_virt_live_.
+        float percent_max_virt_live_;
 
         // MachineBasicBlock which this graph node models.
         const MachineBasicBlock *MBB_;
@@ -160,6 +163,9 @@ class VirtRegMap;
     // Map MachineBasicBlock's of the function to the GraphBB's
     // representing the basic blocks in the dot graph.
     std::unordered_map<const MachineBasicBlock*, GraphBB> mbb_to_gbb_;
+
+    // Greatest number of virtual registers live at any point in the function.
+    int function_max_virt_live_ = 0;
 
     LiveIntervals *LIA_;
     const MachineFunction* MF_;

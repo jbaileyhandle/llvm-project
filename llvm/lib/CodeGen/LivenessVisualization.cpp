@@ -66,6 +66,11 @@ using namespace llvm;
 
 #define DEBUG_TYPE "livenessvisualization"
 
+// Left justification padding.
+#define LOCATION_PADDING_AMOUNT 35
+
+#define SEMI_HOT_PERCENT 0.8
+
 char LivenessVisualization::ID = 0;
 char &llvm::LivenessVisualizationID = LivenessVisualization::ID;
 INITIALIZE_PASS_BEGIN(LivenessVisualization, "livenessvisualization",
@@ -113,7 +118,7 @@ void LivenessVisualization::GraphBB::addChildren(std::unordered_map<const Machin
 void LivenessVisualization::GraphBB::addInstructionAtSlotIndex(SlotIndex si) {
     MachineInstr *mi = indexes_->getInstructionFromIndex(si);
     if(mi != nullptr) {
-        std::string mi_str(location_padding_amount, ' ');
+        std::string mi_str(LOCATION_PADDING_AMOUNT, ' ');
         raw_string_ostream mi_ostream(mi_str);
 
         // Add instruciton.
@@ -172,7 +177,7 @@ std::vector<LivenessVisualization::GraphBB::RegSegment> LivenessVisualization::G
 }
 
 void LivenessVisualization::GraphBB::addSetOfLiveRegs(std::vector<RegSegment>& live_registers, std::string label) {
-    std::string reg_str(location_padding_amount, ' ');
+    std::string reg_str(LOCATION_PADDING_AMOUNT, ' ');
     raw_string_ostream reg_ostream(reg_str);
     reg_str += "(" + std::to_string(live_registers.size()) + ")[" + label + "]: ";
     for(const auto& reg_segment : live_registers) {
@@ -198,7 +203,22 @@ void LivenessVisualization::GraphBB::addRegistersAtSlotIndex(SlotIndex si) {
     addSetOfLiveRegs(live_registers, "comb");
 }
 
-void LivenessVisualization::GraphBB::colorHotspot(int global_max_virt_live) {
+void LivenessVisualization::GraphBB::markHotspot(int function_max_virt_live) {
+    percent_max_virt_live_ = (float)max_virt_live_ / (float)function_max_virt_live;
+}
+
+std::string LivenessVisualization::GraphBB::getHotspotAttr() const {
+    std::string attr_str;
+    if(percent_max_virt_live_ >= SEMI_HOT_PERCENT) {
+        std::string color("blue");
+        if(percent_max_virt_live_ == 1.0) {
+            color = "purple";
+        }
+        attr_str += std::string("color=") + color + "; fontcolor=" + color + "; fontsize=20;";
+
+    }
+
+    return attr_str;
 }
 
 void LivenessVisualization::GraphBB::addSlotIndex(SlotIndex si) {
@@ -219,7 +239,7 @@ void LivenessVisualization::GraphBB::emitConnections(std::ofstream &dot_file) co
 }
 
 void LivenessVisualization::GraphBB::emitNode(std::ofstream &dot_file) const {
-    dot_file << "\t" << name_ << " [shape=box; label=\"" << label_str_ << "\"]\n";
+    dot_file << "\t" << name_ << "[shape=box; label=\"" << label_str_ << "\";" << getHotspotAttr() << "]\n";
 }
 
 LivenessVisualization::LivenessVisualization() : MachineFunctionPass(ID) {
@@ -279,14 +299,13 @@ void LivenessVisualization::buildGraphBBs() {
     }
 
     // ID hotspots.
-    int max_virt_live = 0;
     for (const MachineBasicBlock &MBB : *MF_) {
         GraphBB& gbb = mbb_to_gbb_.at(&MBB);
-        max_virt_live = std::max(max_virt_live, gbb.getMaxVirtLive());
+        function_max_virt_live_ = std::max(function_max_virt_live_, gbb.getMaxVirtLive());
     }
     for (const MachineBasicBlock &MBB : *MF_) {
         GraphBB& gbb = mbb_to_gbb_.at(&MBB);
-        gbb.colorHotspot(max_virt_live);
+        gbb.markHotspot(function_max_virt_live_);
     }
 }
 
