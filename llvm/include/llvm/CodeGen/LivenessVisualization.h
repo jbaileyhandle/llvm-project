@@ -61,15 +61,44 @@ class VirtRegMap;
     bool runOnMachineFunction(MachineFunction&) override;
     bool doFinalization(Module &M) override;
 
+    // Store information about liveness at a SlotIndex.
     class SlotIndexInfo {
     public:
-        SlotIndexInfo() {}
-        SlotIndex si_;
+        SlotIndexInfo(SlotIndex si, LivenessVisualization *LVpass): si_(si), mi_(LVpass->member_vars_.indexes_->getInstructionFromIndex(si)), LVpass_(LVpass) {}
+
+        void probe() const {
+            MachineInstr *new_mi = LVpass_->member_vars_.indexes_->getInstructionFromIndex(si_);
+            outs() << "probe this: " << this << "\n";
+            outs() << "probe LVpass_: " << LVpass_ << "\n";
+            outs() << "probe indexes_: " << LVpass_->member_vars_.indexes_ << "\n";
+            outs() << "probe si_: " << si_ << "\n";
+            outs() << "probe new_mi: " << new_mi << "\n";
+            outs() << "probe vs mi_: " << mi_ << "\n";
+            outs().flush();
+            assert(mi_ == new_mi);
+        }
+
+        // Return a string representing the SlotIndexInfo.
+        // "registers" indicates for which registers to report register
+        // liveness.
+        std::string toString(const std::vector<Register>& registers) const;
+
+        // For the register "reg" at this slot index, return
+        // ' ' if the register is not live
+        // ':' if the register is live but not read or written by mi_
+        // 'v' if the register is written
+        // '^' if the register is read
+        // 'X' if the register is both read and written
+        char getRegUsageSymbol(Register reg) const;
+
+        const SlotIndex si_;
         float percent_virt_live_registers_;
         std::vector<Register> live_virt_registers_;
-        const MachineInstr *mi_;
+        const MachineInstr * const mi_;
         std::string mi_str_;
         std::string src_location_;
+
+        const LivenessVisualization *LVpass_;
     };
 
     // Class used to build up information for a basic
@@ -90,6 +119,9 @@ class VirtRegMap;
         // Add text descriptor of connections to children to descriptor.
         void emitConnections(std::ofstream& dot_file) const;
 
+        // Write a linear / text report showing register liveness for the BB.
+        void emitLinearReport() const;
+
         // Add node descriptor to descriptor.
         void emitNode(std::ofstream& dot_file) const;
 
@@ -97,7 +129,7 @@ class VirtRegMap;
         int getMaxVirtLive() const;
 
         // Return an xdot-friendly name for the basic block.
-        std::string getSanitizedFuncName(const MachineBasicBlock &MBB);
+        std::string getSanitizedMBBName(const MachineBasicBlock &MBB);
 
         class RegSegment {
         public:
@@ -167,24 +199,47 @@ class VirtRegMap;
     // Emit the GraphBBs to dot_file.
     void emitGraphBBs(std::ofstream &dot_file) const;
 
+    // Write a linear / text report showing register liveness in the range [begin, end_inclusive]
+    std::string regHeaderStr(const std::vector<Register>& registers) const;
+    void emitLinearReport(std::string name_stub, SlotIndex begin, SlotIndex end_inclusive) const;
+
+    // Return the virtual registers that are live in the range [begin, end_inclusive], ordered
+    // by first instance of liveness.
+    std::vector<Register> getLiveVirtRegsInRange(SlotIndex begin, SlotIndex end_inclusive) const;
+
     // Get the name of the function, modified cleanliness.
     static std::string getSanitizedFuncName(const MachineFunction *fn);
 
-    // Map MachineBasicBlock's of the function to the GraphBB's
-    // representing the basic blocks in the dot graph.
-    std::unordered_map<const MachineBasicBlock*, GraphBB> mbb_to_gbb_;
+    // Initialize member variables to run pass on a new function.
+    void initVarsPerFunction(const MachineFunction &fn);
 
-    // Map form SlotIndexes to info about SlotIndexes.
-    std::map<SlotIndex, SlotIndexInfo> si_to_info_;
+    // Use a struct to hold members so that we don't forget to reset
+    // a member for a new function.
+    class MemberVars {
+    public:
+        MemberVars() {}
+        MemberVars(const MachineFunction &fn, LiveIntervals *LIA);
 
-    // Greatest number of virtual registers live at any point in the function.
-    int function_max_virt_live_ = 0;
+        // Map MachineBasicBlock's of the function to the GraphBB's
+        // representing the basic blocks in the dot graph.
+        std::unordered_map<const MachineBasicBlock*, GraphBB> mbb_to_gbb_;
 
-    LiveIntervals *LIA_;
-    const MachineFunction* MF_;
-    const MachineRegisterInfo* MRI_;
-    const TargetRegisterInfo* TRI_;
-    const TargetInstrInfo* TII_;
+        // Map form SlotIndexes to info about SlotIndexes.
+        std::map<SlotIndex, SlotIndexInfo> si_to_info_;
+
+        // Greatest number of virtual registers live at any point in the function.
+        int function_max_virt_live_ = 0;
+
+        std::string sanitized_func_name_;
+        LiveIntervals *LIA_ = nullptr;
+        SlotIndexes *indexes_ = nullptr;
+        const MachineFunction* MF_ = nullptr;
+        const MachineRegisterInfo* MRI_ = nullptr;
+        const TargetRegisterInfo* TRI_ = nullptr;
+        const TargetInstrInfo* TII_ = nullptr;
+    };
+
+    MemberVars member_vars_;
   };
 
 } // end namespace llvm
