@@ -210,6 +210,9 @@ class VirtRegMap;
     // Get the name of the function, modified cleanliness.
     static std::string getSanitizedFuncName(const MachineFunction *fn);
 
+    // Get a modified version of str which is safe to emit as an xdot label.
+    static std::string getSanitizedXdotLabelStr(const std::string& str);
+
     // Initialize member variables to run pass on a new function.
     void initVarsPerFunction(const MachineFunction &fn);
 

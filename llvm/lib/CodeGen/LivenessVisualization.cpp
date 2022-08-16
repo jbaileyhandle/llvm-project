@@ -48,6 +48,7 @@
 #include "llvm/MC/LaneBitmask.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/Pass.h"
+#include "llvm/Target/TargetMachine.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
@@ -94,9 +95,19 @@ std::string objPtrToString(T *input) {
     return str;
 }
 
+std::string LivenessVisualization::getSanitizedXdotLabelStr(const std::string& str) {
+    std::string cpy = str;
+    for(char& character : cpy) {
+        if(character == '"') {
+            character = '_';
+        }
+    }
+    return cpy;
+}
+
 std::string LivenessVisualization::GraphBB::getSanitizedMBBName(const MachineBasicBlock &MBB) {
     std::string name = MBB.getFullName();
-    for(char character : name) {
+    for(char& character : name) {
         if(!isalnum(character) && character != '_') {
             character = '_';
         }
@@ -250,7 +261,7 @@ void LivenessVisualization::GraphBB::emitConnections(std::ofstream &dot_file) co
 }
 
 void LivenessVisualization::GraphBB::emitNode(std::ofstream &dot_file) const {
-    dot_file << "\t" << name_ << "[shape=box; label=\"" << label_str_ << "\";" << getHotspotAttr() << "]\n";
+    dot_file << "\t" << name_ << "[shape=box; label=\"" << getSanitizedXdotLabelStr(label_str_) << "\"; " << getHotspotAttr() << "]\n";
 }
 
 LivenessVisualization::LivenessVisualization() : MachineFunctionPass(ID) {
@@ -449,6 +460,10 @@ LivenessVisualization::MemberVars::MemberVars(const MachineFunction &fn, LiveInt
 }
 
 bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
+    // Only care about GPU code.
+    if(!(fn.getTarget().getTargetTriple().isAMDGPU() || fn.getTarget().getTargetTriple().isNVPTX())) {
+        return false;
+    }
 
     // Init variables.
     member_vars_ = MemberVars(fn, &getAnalysis<LiveIntervals>());
