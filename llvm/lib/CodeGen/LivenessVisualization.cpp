@@ -73,6 +73,8 @@ using namespace llvm;
 #define LOCATION_PADDING_AMOUNT 35
 
 #define SEMI_HOT_PERCENT 0.8
+const int col_width[] = {6,6,6,5,30,45};
+
 
 char LivenessVisualization::ID = 0;
 char &llvm::LivenessVisualizationID = LivenessVisualization::ID;
@@ -261,7 +263,8 @@ void LivenessVisualization::GraphBB::emitConnections(std::ofstream &dot_file) co
 }
 
 void LivenessVisualization::GraphBB::emitNode(std::ofstream &dot_file) const {
-    dot_file << "\t" << name_ << "[shape=box; label=\"" << getSanitizedXdotLabelStr(label_str_) << "\"; " << getHotspotAttr() << "]\n";
+    //dot_file << "\t" << name_ << "[shape=box; label=\"" << getSanitizedXdotLabelStr(label_str_) << "\"; " << getHotspotAttr() << "]\n";
+    dot_file << "\t" << name_ << "[shape=box; fontname=\"Courier New\", label=\"" << getSanitizedXdotLabelStr(getLinearReport()) << "\"; " << getHotspotAttr() << "]\n";
 }
 
 LivenessVisualization::LivenessVisualization() : MachineFunctionPass(ID) {
@@ -375,63 +378,74 @@ char LivenessVisualization::SlotIndexInfo::getRegUsageSymbol(Register reg) const
     }
 }
 
+std::string LivenessVisualization::regHeaderStr(const std::vector<Register>& registers) const {
+    std::stringstream sstream;
+    std::string dummy;
+
+    sstream << std::right << std::setw(col_width[0]) << "slot" << " | ";
+    sstream << std::right << std::setw(col_width[1]) << "\%peak" << " | ";
+    sstream << std::right << std::setw(col_width[2]) << "#live" << " | ";
+    for(Register reg : registers) {
+        auto printable_vreg_or_unit = printVRegOrUnit(reg, member_vars_.TRI_);
+        sstream << std::setw(col_width[3]) << objPtrToString(&printable_vreg_or_unit);
+    }
+    sstream << " | ";
+    sstream << std::left << std::setw(col_width[4]) << "src" << " | ";
+
+    return sstream.str();
+}
+
 std::string LivenessVisualization::SlotIndexInfo::toString(const std::vector<Register>& registers) const {
     std::stringstream sstream;
 
-    sstream << std::right << std::setw(6) << objPtrToString(&si_) << " | ";
-    sstream << std::right << std::setw(2) << std::fixed << std::setprecision(0) << percent_virt_live_registers_*100.0 << "% | ";
-    sstream << std::right << std::setw(3) << live_virt_registers_.size() << " | ";
+    sstream << std::right << std::setw(col_width[0]) << objPtrToString(&si_) << " | ";
+    sstream << std::right << std::setw(col_width[1]-1) << std::fixed << std::setprecision(0) << percent_virt_live_registers_*100.0 << "% | ";
+    sstream << std::right << std::setw(col_width[2]) << live_virt_registers_.size() << " | ";
     for(Register reg : registers) {
-        sstream << std::setw(4) << getRegUsageSymbol(reg);
+        sstream << std::setw(col_width[3]) << getRegUsageSymbol(reg);
     }
     sstream << " | ";
     /*
     std::string mi_str_copy = mi_str_;
     mi_str_copy.resize(std::min(mi_str_copy.size(), 200 - sstream.str().size()));
     */
-    sstream << std::left << std::setw(45) << mi_str_;
-    //sstream << std::left << src_location_;
-    sstream << std::endl;
+    sstream << std::left << std::setw(col_width[4]) << src_location_ << " | ";
+    sstream << std::left << std::setw(col_width[5]) << mi_str_;
 
     return sstream.str();
 }
 
-std::string LivenessVisualization::regHeaderStr(const std::vector<Register>& registers) const {
-    std::stringstream sstream;
-    std::string dummy;
 
-    sstream << std::right << std::setw(6) << dummy << " | ";
-    sstream << std::right << std::setw(2) << dummy << "% | ";
-    sstream << std::right << std::setw(3) << dummy << " | ";
-    for(Register reg : registers) {
-        auto printable_vreg_or_unit = printVRegOrUnit(reg, member_vars_.TRI_);
-        sstream << " " << std::setw(3) << objPtrToString(&printable_vreg_or_unit);
-    }
-    sstream << " | ";
-    sstream << std::endl;
-
-    return sstream.str();
-}
-
-void LivenessVisualization::emitLinearReport(std::string name_stub, SlotIndex begin, SlotIndex end_inclusive) const {
+std::string LivenessVisualization::getLinearReport(std::string title, std::string newline, SlotIndex begin, SlotIndex end_inclusive) const {
     std::vector<Register> registers = getLiveVirtRegsInRange(begin, end_inclusive);
 
-    std::ofstream linear_file;
-    linear_file.open(name_stub + "_linearReport.txt");
-
-
-    linear_file << regHeaderStr(registers);
+    std::stringstream linear_report;
+    linear_report << title << newline;
+    linear_report << regHeaderStr(registers) << newline;
     for(SlotIndex si = begin; si <= end_inclusive; si = member_vars_.indexes_->getNextNonNullIndex(si)) {
         const SlotIndexInfo& info = member_vars_.si_to_info_.at(si);
         if(info.mi_ != nullptr) {
             std::string si_str = member_vars_.si_to_info_.at(si).toString(registers);
-            linear_file << si_str;
+            linear_report << si_str << newline;
         }
 
         if(si == member_vars_.indexes_->getLastIndex()) {
             break;
         }
     }
+
+    return linear_report.str();
+}
+
+std::string LivenessVisualization::GraphBB::getLinearReport() const {
+    return LVpass_->getLinearReport(name_, "\\l", indexes_->getMBBStartIdx(MBB_), indexes_->getMBBEndIdx(MBB_));
+}
+
+void LivenessVisualization::emitLinearReport(std::string name_stub, SlotIndex begin, SlotIndex end_inclusive) const {
+    std::ofstream linear_file;
+    linear_file.open(name_stub + "_linearReport.txt");
+    std::string linear_report = getLinearReport(name_stub, "\n", begin, end_inclusive);
+    linear_file << linear_report;
 }
 
 void LivenessVisualization::GraphBB::emitLinearReport() const {

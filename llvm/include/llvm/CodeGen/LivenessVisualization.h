@@ -119,6 +119,9 @@ class VirtRegMap;
         // Add text descriptor of connections to children to descriptor.
         void emitConnections(std::ofstream& dot_file) const;
 
+        // Get a report showing register liveness for the BB.
+        std::string getLinearReport() const;
+
         // Write a linear / text report showing register liveness for the BB.
         void emitLinearReport() const;
 
@@ -199,9 +202,17 @@ class VirtRegMap;
     // Emit the GraphBBs to dot_file.
     void emitGraphBBs(std::ofstream &dot_file) const;
 
-    // Write a linear / text report showing register liveness in the range [begin, end_inclusive]
-    std::string regHeaderStr(const std::vector<Register>& registers) const;
+    // Generate a text report showing register liveness in the range [begin, end_inclusive].
+    // name_stub forms the base of the file name.
     void emitLinearReport(std::string name_stub, SlotIndex begin, SlotIndex end_inclusive) const;
+
+    // Generate a string showing register liveness in the range [begin, end_inclusive].
+    // title is placed in the first line of the stirng.
+    // newline is inserted between each line.
+    std::string getLinearReport(std::string title, std::string newline, SlotIndex begin, SlotIndex end_inclusive) const;
+
+    // Helper function for the above linear report functions.
+    std::string regHeaderStr(const std::vector<Register>& registers) const;
 
     // Return the virtual registers that are live in the range [begin, end_inclusive], ordered
     // by first instance of liveness.
