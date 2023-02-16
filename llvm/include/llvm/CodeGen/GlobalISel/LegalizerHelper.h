@@ -167,10 +167,6 @@ public:
   /// def by inserting a G_BITCAST from \p CastTy
   void bitcastDst(MachineInstr &MI, LLT CastTy, unsigned OpIdx);
 
-  /// Widen \p OrigReg to \p WideTy by merging to a wider type, padding with
-  /// G_IMPLICIT_DEF, and producing dead results.
-  Register widenWithUnmerge(LLT WideTy, Register OrigReg);
-
 private:
   LegalizeResult
   widenScalarMergeValues(MachineInstr &MI, unsigned TypeIdx, LLT WideTy);
@@ -331,9 +327,6 @@ public:
   LegalizeResult reduceLoadStoreWidth(GLoadStore &MI, unsigned TypeIdx,
                                       LLT NarrowTy);
 
-  LegalizeResult fewerElementsVectorSextInReg(MachineInstr &MI, unsigned TypeIdx,
-                                              LLT NarrowTy);
-
   LegalizeResult narrowScalarShiftByConstant(MachineInstr &MI, const APInt &Amt,
                                              LLT HalfTy, LLT ShiftAmtTy);
 
@@ -366,6 +359,7 @@ public:
   LegalizeResult bitcastInsertVectorElt(MachineInstr &MI, unsigned TypeIdx,
                                         LLT CastTy);
 
+  LegalizeResult lowerFConstant(MachineInstr &MI);
   LegalizeResult lowerBitcast(MachineInstr &MI);
   LegalizeResult lowerLoad(GAnyLoad &MI);
   LegalizeResult lowerStore(GStore &MI);
@@ -385,6 +379,8 @@ public:
   LegalizeResult lowerFPTRUNC_F64_TO_F16(MachineInstr &MI);
   LegalizeResult lowerFPTRUNC(MachineInstr &MI);
   LegalizeResult lowerFPOWI(MachineInstr &MI);
+
+  LegalizeResult lowerISFPCLASS(MachineInstr &MI);
 
   LegalizeResult lowerMinMax(MachineInstr &MI);
   LegalizeResult lowerFCopySign(MachineInstr &MI);

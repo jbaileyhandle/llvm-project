@@ -28,7 +28,8 @@ def CortexA53Model : SchedMachineModel {
 
   list<Predicate> UnsupportedFeatures = !listconcat(SVEUnsupported.F,
                                                     PAUnsupported.F,
-                                                    SMEUnsupported.F);
+                                                    SMEUnsupported.F,
+                                                    [HasMTE]);
 }
 
 
@@ -204,6 +205,7 @@ def : ReadAdvance<ReadID, 1, [WriteImm,WriteI,
 // Miscellaneous
 //---
 def : InstRW<[WriteI], (instrs COPY)>;
+def : InstRW<[WriteI], (instrs PRED_COPY)>;
 
 //---
 // Vector Loads

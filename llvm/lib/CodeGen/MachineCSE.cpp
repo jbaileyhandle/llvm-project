@@ -60,6 +60,11 @@ STATISTIC(NumCrossBBCSEs,
           "Number of cross-MBB physreg referencing CS eliminated");
 STATISTIC(NumCommutes,  "Number of copies coalesced after commuting");
 
+// Threshold to avoid excessive cost to compute isProfitableToCSE.
+static cl::opt<int>
+    CSUsesThreshold("csuses-threshold", cl::Hidden, cl::init(1024),
+                    cl::desc("Threshold for the size of CSUses"));
+
 namespace {
 
   class MachineCSE : public MachineFunctionPass {
@@ -88,6 +93,11 @@ namespace {
       AU.addPreserved<MachineDominatorTree>();
       AU.addRequired<MachineBlockFrequencyInfo>();
       AU.addPreserved<MachineBlockFrequencyInfo>();
+    }
+
+    MachineFunctionProperties getRequiredProperties() const override {
+      return MachineFunctionProperties()
+        .set(MachineFunctionProperties::Property::IsSSA);
     }
 
     void releaseMemory() override {
@@ -135,7 +145,7 @@ namespace {
                          DenseMap<MachineDomTreeNode*, unsigned> &OpenChildren);
     bool PerformCSE(MachineDomTreeNode *Node);
 
-    bool isPRECandidate(MachineInstr *MI);
+    bool isPRECandidate(MachineInstr *MI, SmallSet<MCRegister, 8> &PhysRefs);
     bool ProcessBlockPRE(MachineDominatorTree *MDT, MachineBasicBlock *MBB);
     bool PerformSimplePRE(MachineDominatorTree *DT);
     /// Heuristics to see if it's profitable to move common computations of MBB
@@ -169,14 +179,14 @@ bool MachineCSE::PerformTrivialCopyPropagation(MachineInstr *MI,
     if (!MO.isReg() || !MO.isUse())
       continue;
     Register Reg = MO.getReg();
-    if (!Register::isVirtualRegister(Reg))
+    if (!Reg.isVirtual())
       continue;
     bool OnlyOneUse = MRI->hasOneNonDBGUse(Reg);
     MachineInstr *DefMI = MRI->getVRegDef(Reg);
     if (!DefMI->isCopy())
       continue;
     Register SrcReg = DefMI->getOperand(1).getReg();
-    if (!Register::isVirtualRegister(SrcReg))
+    if (!SrcReg.isVirtual())
       continue;
     if (DefMI->getOperand(0).getSubReg())
       continue;
@@ -285,7 +295,7 @@ bool MachineCSE::hasLivePhysRegDefUses(const MachineInstr *MI,
     Register Reg = MO.getReg();
     if (!Reg)
       continue;
-    if (Register::isVirtualRegister(Reg))
+    if (Reg.isVirtual())
       continue;
     // Reading either caller preserved or constant physregs is ok.
     if (!isCallerPreservedOrConstPhysReg(Reg.asMCReg(), *MI->getMF(), *TRI))
@@ -304,7 +314,7 @@ bool MachineCSE::hasLivePhysRegDefUses(const MachineInstr *MI,
     Register Reg = MO.getReg();
     if (!Reg)
       continue;
-    if (Register::isVirtualRegister(Reg))
+    if (Reg.isVirtual())
       continue;
     // Check against PhysRefs even if the def is "dead".
     if (PhysRefs.count(Reg.asMCReg()))
@@ -379,7 +389,7 @@ bool MachineCSE::PhysRegDefsReach(MachineInstr *CSMI, MachineInstr *MI,
       if (!MO.isReg() || !MO.isDef())
         continue;
       Register MOReg = MO.getReg();
-      if (Register::isVirtualRegister(MOReg))
+      if (MOReg.isVirtual())
         continue;
       if (PhysRefs.count(MOReg.asMCReg()))
         return false;
@@ -410,7 +420,7 @@ bool MachineCSE::isCSECandidate(MachineInstr *MI) {
     // Okay, this instruction does a load. As a refinement, we allow the target
     // to decide whether the loaded value is actually a constant. If so, we can
     // actually use it as a load.
-    if (!MI->isDereferenceableInvariantLoad(AA))
+    if (!MI->isDereferenceableInvariantLoad())
       // FIXME: we should be able to hoist loads with no other side effects if
       // there are no other instructions which can change memory in this loop.
       // This is a trivial form of alias analysis.
@@ -435,18 +445,26 @@ bool MachineCSE::isProfitableToCSE(Register CSReg, Register Reg,
   // If CSReg is used at all uses of Reg, CSE should not increase register
   // pressure of CSReg.
   bool MayIncreasePressure = true;
-  if (Register::isVirtualRegister(CSReg) && Register::isVirtualRegister(Reg)) {
+  if (CSReg.isVirtual() && Reg.isVirtual()) {
     MayIncreasePressure = false;
     SmallPtrSet<MachineInstr*, 8> CSUses;
+    int NumOfUses = 0;
     for (MachineInstr &MI : MRI->use_nodbg_instructions(CSReg)) {
       CSUses.insert(&MI);
-    }
-    for (MachineInstr &MI : MRI->use_nodbg_instructions(Reg)) {
-      if (!CSUses.count(&MI)) {
+      // Too costly to compute if NumOfUses is very large. Conservatively assume
+      // MayIncreasePressure to avoid spending too much time here.
+      if (++NumOfUses > CSUsesThreshold) {
         MayIncreasePressure = true;
         break;
       }
     }
+    if (!MayIncreasePressure)
+      for (MachineInstr &MI : MRI->use_nodbg_instructions(Reg)) {
+        if (!CSUses.count(&MI)) {
+          MayIncreasePressure = true;
+          break;
+        }
+      }
   }
   if (!MayIncreasePressure) return true;
 
@@ -463,7 +481,7 @@ bool MachineCSE::isProfitableToCSE(Register CSReg, Register Reg,
   // of the redundant computation are copies, do not cse.
   bool HasVRegUse = false;
   for (const MachineOperand &MO : MI->operands()) {
-    if (MO.isReg() && MO.isUse() && Register::isVirtualRegister(MO.getReg())) {
+    if (MO.isReg() && MO.isUse() && MO.getReg().isVirtual()) {
       HasVRegUse = true;
       break;
     }
@@ -627,8 +645,7 @@ bool MachineCSE::ProcessBlockCSE(MachineBasicBlock *MBB) {
         continue;
       }
 
-      assert(Register::isVirtualRegister(OldReg) &&
-             Register::isVirtualRegister(NewReg) &&
+      assert(OldReg.isVirtual() && NewReg.isVirtual() &&
              "Do not CSE physical register defs!");
 
       if (!isProfitableToCSE(NewReg, OldReg, CSMI->getParent(), &MI)) {
@@ -780,22 +797,24 @@ bool MachineCSE::PerformCSE(MachineDomTreeNode *Node) {
 // We use stronger checks for PRE candidate rather than for CSE ones to embrace
 // checks inside ProcessBlockCSE(), not only inside isCSECandidate(). This helps
 // to exclude instrs created by PRE that won't be CSEed later.
-bool MachineCSE::isPRECandidate(MachineInstr *MI) {
+bool MachineCSE::isPRECandidate(MachineInstr *MI,
+                                SmallSet<MCRegister, 8> &PhysRefs) {
   if (!isCSECandidate(MI) ||
       MI->isNotDuplicable() ||
       MI->mayLoad() ||
-      MI->isAsCheapAsAMove() ||
+      TII->isAsCheapAsAMove(*MI) ||
       MI->getNumDefs() != 1 ||
       MI->getNumExplicitDefs() != 1)
     return false;
 
-  for (const auto &def : MI->defs())
-    if (!Register::isVirtualRegister(def.getReg()))
-      return false;
-
-  for (const auto &use : MI->uses())
-    if (use.isReg() && !Register::isVirtualRegister(use.getReg()))
-      return false;
+  for (const MachineOperand &MO : MI->operands()) {
+    if (MO.isReg() && !MO.getReg().isVirtual()) {
+      if (MO.isDef())
+        return false;
+      else
+        PhysRefs.insert(MO.getReg());
+    }
+  }
 
   return true;
 }
@@ -804,7 +823,8 @@ bool MachineCSE::ProcessBlockPRE(MachineDominatorTree *DT,
                                  MachineBasicBlock *MBB) {
   bool Changed = false;
   for (MachineInstr &MI : llvm::make_early_inc_range(*MBB)) {
-    if (!isPRECandidate(&MI))
+    SmallSet<MCRegister, 8> PhysRefs;
+    if (!isPRECandidate(&MI, PhysRefs))
       continue;
 
     if (!PREMap.count(&MI)) {
@@ -838,6 +858,15 @@ bool MachineCSE::ProcessBlockPRE(MachineDominatorTree *DT,
         // subset of `isConvergent` instructions which do fall into this
         // extended definition.
         if (MI.isConvergent() && CMBB != MBB)
+          continue;
+
+        // If this instruction uses physical registers then we can only do PRE
+        // if it's using the value that is live at the place we're hoisting to.
+        bool NonLocal;
+        PhysDefVector PhysDefs;
+        if (!PhysRefs.empty() &&
+            !PhysRegDefsReach(&*(CMBB->getFirstTerminator()), &MI, PhysRefs,
+                              PhysDefs, NonLocal))
           continue;
 
         assert(MI.getOperand(0).isDef() &&

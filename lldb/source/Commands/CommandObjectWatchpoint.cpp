@@ -18,6 +18,7 @@
 #include "lldb/Core/ValueObject.h"
 #include "lldb/Host/OptionParser.h"
 #include "lldb/Interpreter/CommandInterpreter.h"
+#include "lldb/Interpreter/CommandOptionArgumentTable.h"
 #include "lldb/Interpreter/CommandReturnObject.h"
 #include "lldb/Symbol/Variable.h"
 #include "lldb/Symbol/VariableList.h"
@@ -164,7 +165,7 @@ public:
 
   class CommandOptions : public Options {
   public:
-    CommandOptions() {}
+    CommandOptions() = default;
 
     ~CommandOptions() override = default;
 
@@ -195,7 +196,7 @@ public:
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_watchpoint_list_options);
+      return llvm::ArrayRef(g_watchpoint_list_options);
     }
 
     // Instance variables to hold the values for command options.
@@ -208,13 +209,13 @@ protected:
     Target *target = &GetSelectedTarget();
 
     if (target->GetProcessSP() && target->GetProcessSP()->IsAlive()) {
-      uint32_t num_supported_hardware_watchpoints;
-      Status error = target->GetProcessSP()->GetWatchpointSupportInfo(
-          num_supported_hardware_watchpoints);
-      if (error.Success())
+      std::optional<uint32_t> num_supported_hardware_watchpoints =
+          target->GetProcessSP()->GetWatchpointSlotCount();
+
+      if (num_supported_hardware_watchpoints)
         result.AppendMessageWithFormat(
             "Number of supported hardware watchpoints: %u\n",
-            num_supported_hardware_watchpoints);
+            *num_supported_hardware_watchpoints);
     }
 
     const WatchpointList &watchpoints = target->GetWatchpointList();
@@ -454,7 +455,7 @@ public:
 
   class CommandOptions : public Options {
   public:
-    CommandOptions() {}
+    CommandOptions() = default;
 
     ~CommandOptions() override = default;
 
@@ -478,7 +479,7 @@ public:
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_watchpoint_delete_options);
+      return llvm::ArrayRef(g_watchpoint_delete_options);
     }
 
     // Instance variables to hold the values for command options.
@@ -577,7 +578,7 @@ public:
 
   class CommandOptions : public Options {
   public:
-    CommandOptions() {}
+    CommandOptions() = default;
 
     ~CommandOptions() override = default;
 
@@ -604,7 +605,7 @@ public:
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_watchpoint_ignore_options);
+      return llvm::ArrayRef(g_watchpoint_ignore_options);
     }
 
     // Instance variables to hold the values for command options.
@@ -702,7 +703,7 @@ public:
 
   class CommandOptions : public Options {
   public:
-    CommandOptions() {}
+    CommandOptions() = default;
 
     ~CommandOptions() override = default;
 
@@ -729,7 +730,7 @@ public:
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_watchpoint_modify_options);
+      return llvm::ArrayRef(g_watchpoint_modify_options);
     }
 
     // Instance variables to hold the values for command options.
@@ -929,7 +930,7 @@ protected:
         // We're in business.
         // Find out the size of this variable.
         size = m_option_watchpoint.watch_size == 0
-                   ? valobj_sp->GetByteSize().getValueOr(0)
+                   ? valobj_sp->GetByteSize().value_or(0)
                    : m_option_watchpoint.watch_size;
       }
       compiler_type = valobj_sp->GetCompilerType();
@@ -1082,7 +1083,7 @@ protected:
     options.SetUnwindOnError(true);
     options.SetKeepInMemory(false);
     options.SetTryAllThreads(true);
-    options.SetTimeout(llvm::None);
+    options.SetTimeout(std::nullopt);
 
     ExpressionResults expr_result =
         target->EvaluateExpression(expr, frame, valobj_sp, options);

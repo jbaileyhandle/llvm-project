@@ -13,6 +13,7 @@
 #define OMPTARGET_DEVICERTL_DEBUG_H
 
 #include "Configuration.h"
+#include "LibC.h"
 
 /// Assertion
 ///
@@ -23,6 +24,7 @@ void __assert_fail(const char *assertion, const char *file, unsigned line,
                    const char *function);
 }
 
+#if !defined(OMPTARGET_DEBUG) || (OMPTARGET_DEBUG != 0)
 #define ASSERT(expr)                                                           \
   {                                                                            \
     if (config::isDebugMode(config::DebugKind::Assertion) && !(expr))          \
@@ -33,14 +35,6 @@ void __assert_fail(const char *assertion, const char *file, unsigned line,
 
 ///}
 
-/// Print
-/// printf() calls are rewritten by CGGPUBuiltin to __llvm_omp_vprintf
-/// {
-
-extern "C" {
-int printf(const char *format, ...);
-}
-
 #define PRINTF(fmt, ...) (void)printf(fmt, ##__VA_ARGS__);
 #define PRINT(str) PRINTF("%s", str)
 
@@ -50,6 +44,12 @@ int printf(const char *format, ...);
 /// FunctionTracting set in the debug kind.
 #define FunctionTracingRAII()                                                  \
   DebugEntryRAII Entry(__FILE__, __LINE__, __PRETTY_FUNCTION__);
+#else
+#define ASSERT(expr)
+#define PRINTF(fmt, ...)
+#define PRINT(str) PRINTF("%s", str)
+#define FunctionTracingRAII()
+#endif
 
 /// An RAII class for handling entries to debug locations. The current location
 /// and function will be printed on entry. Nested levels increase the

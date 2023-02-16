@@ -27,7 +27,8 @@ def ThunderXT8XModel : SchedMachineModel {
 
   list<Predicate> UnsupportedFeatures = !listconcat(SVEUnsupported.F,
                                                     PAUnsupported.F,
-                                                    SMEUnsupported.F);
+                                                    SMEUnsupported.F,
+                                                    [HasMTE]);
   // FIXME: Remove when all errors have been fixed.
   let FullInstRWOverlapCheck = 0;
 }
@@ -265,6 +266,7 @@ def : InstRW<[THXT8XWriteRET], (instregex "^RET$")>;
 // Miscellaneous
 //---
 def : InstRW<[WriteI], (instrs COPY)>;
+def : InstRW<[WriteI], (instrs PRED_COPY)>;
 
 //---
 // Vector Loads

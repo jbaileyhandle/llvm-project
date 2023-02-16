@@ -108,29 +108,18 @@ defm FNMSUB_D : FPFMA_rrr_frm_m<OPC_NMSUB, 0b01, "fnmsub.d", DINX>;
 defm FNMADD_D : FPFMA_rrr_frm_m<OPC_NMADD, 0b01, "fnmadd.d", DINX>;
 }
 
-defm : FPFMADynFrmAlias_m<FMADD_D,  "fmadd.d",  DINX>;
-defm : FPFMADynFrmAlias_m<FMSUB_D,  "fmsub.d",  DINX>;
-defm : FPFMADynFrmAlias_m<FNMSUB_D, "fnmsub.d", DINX>;
-defm : FPFMADynFrmAlias_m<FNMADD_D, "fnmadd.d", DINX>;
-
-let SchedRW = [WriteFALU64, ReadFALU64, ReadFALU64] in {
-defm FADD_D : FPALU_rr_frm_m<0b0000001, "fadd.d", DINX>;
+let SchedRW = [WriteFAdd64, ReadFAdd64, ReadFAdd64] in {
+defm FADD_D : FPALU_rr_frm_m<0b0000001, "fadd.d", DINX, /*Commutable*/1>;
 defm FSUB_D : FPALU_rr_frm_m<0b0000101, "fsub.d", DINX>;
 }
 let SchedRW = [WriteFMul64, ReadFMul64, ReadFMul64] in
-defm FMUL_D : FPALU_rr_frm_m<0b0001001, "fmul.d", DINX>;
+defm FMUL_D : FPALU_rr_frm_m<0b0001001, "fmul.d", DINX, /*Commutable*/1>;
 
 let SchedRW = [WriteFDiv64, ReadFDiv64, ReadFDiv64] in
 defm FDIV_D : FPALU_rr_frm_m<0b0001101, "fdiv.d", DINX>;
 
-defm : FPALUDynFrmAlias_m<FADD_D, "fadd.d", DINX>;
-defm : FPALUDynFrmAlias_m<FSUB_D, "fsub.d", DINX>;
-defm : FPALUDynFrmAlias_m<FMUL_D, "fmul.d", DINX>;
-defm : FPALUDynFrmAlias_m<FDIV_D, "fdiv.d", DINX>;
-
 defm FSQRT_D : FPUnaryOp_r_frm_m<0b0101101, 0b00000, DDINX, "fsqrt.d">,
                Sched<[WriteFSqrt64, ReadFSqrt64]>;
-defm         : FPUnaryOpDynFrmAlias_m<FSQRT_D, "fsqrt.d", DDINX>;
 
 let SchedRW = [WriteFSGNJ64, ReadFSGNJ64, ReadFSGNJ64],
     mayRaiseFPException = 0 in {
@@ -140,19 +129,18 @@ defm FSGNJX_D : FPALU_rr_m<0b0010001, 0b010, "fsgnjx.d", DINX>;
 }
 
 let SchedRW = [WriteFMinMax64, ReadFMinMax64, ReadFMinMax64] in {
-defm FMIN_D   : FPALU_rr_m<0b0010101, 0b000, "fmin.d", DINX>;
-defm FMAX_D   : FPALU_rr_m<0b0010101, 0b001, "fmax.d", DINX>;
+defm FMIN_D   : FPALU_rr_m<0b0010101, 0b000, "fmin.d", DINX, /*Commutable*/1>;
+defm FMAX_D   : FPALU_rr_m<0b0010101, 0b001, "fmax.d", DINX, /*Commutable*/1>;
 }
 
 defm FCVT_S_D : FPUnaryOp_r_frm_m<0b0100000, 0b00001, FDINX, "fcvt.s.d">,
                 Sched<[WriteFCvtF64ToF32, ReadFCvtF64ToF32]>;
-defm          : FPUnaryOpDynFrmAlias_m<FCVT_S_D, "fcvt.s.d", FDINX>;
 
 defm FCVT_D_S : FPUnaryOp_r_m<0b0100001, 0b00000, 0b000, DFINX, "fcvt.d.s">,
                 Sched<[WriteFCvtF32ToF64, ReadFCvtF32ToF64]>;
 
 let SchedRW = [WriteFCmp64, ReadFCmp64, ReadFCmp64] in {
-defm FEQ_D : FPCmp_rr_m<0b1010001, 0b010, "feq.d", DINX>;
+defm FEQ_D : FPCmp_rr_m<0b1010001, 0b010, "feq.d", DINX, /*Commutable*/1>;
 defm FLT_D : FPCmp_rr_m<0b1010001, 0b001, "flt.d", DINX>;
 defm FLE_D : FPCmp_rr_m<0b1010001, 0b000, "fle.d", DINX>;
 }
@@ -160,13 +148,13 @@ defm FLE_D : FPCmp_rr_m<0b1010001, 0b000, "fle.d", DINX>;
 defm FCLASS_D : FPUnaryOp_r_m<0b1110001, 0b00000, 0b001, XDINX, "fclass.d">,
                 Sched<[WriteFClass64, ReadFClass64]>;
 
+let IsSignExtendingOpW = 1 in
 defm FCVT_W_D : FPUnaryOp_r_frm_m<0b1100001, 0b00000, XDINX, "fcvt.w.d">,
                Sched<[WriteFCvtF64ToI32, ReadFCvtF64ToI32]>;
-defm          : FPUnaryOpDynFrmAlias_m<FCVT_W_D, "fcvt.w.d", XDINX>;
 
+let IsSignExtendingOpW = 1 in
 defm FCVT_WU_D : FPUnaryOp_r_frm_m<0b1100001, 0b00001, XDINX, "fcvt.wu.d">,
                  Sched<[WriteFCvtF64ToI32, ReadFCvtF64ToI32]>;
-defm           : FPUnaryOpDynFrmAlias_m<FCVT_WU_D, "fcvt.wu.d", XDINX>;
 
 defm FCVT_D_W : FPUnaryOp_r_m<0b1101001, 0b00000, 0b000, DXINX, "fcvt.d.w">,
                 Sched<[WriteFCvtI32ToF64, ReadFCvtI32ToF64]>;
@@ -176,11 +164,9 @@ defm FCVT_D_WU : FPUnaryOp_r_m<0b1101001, 0b00001, 0b000, DXINX, "fcvt.d.wu">,
 
 defm FCVT_L_D : FPUnaryOp_r_frm_m<0b1100001, 0b00010, XDIN64X, "fcvt.l.d">,
                 Sched<[WriteFCvtF64ToI64, ReadFCvtF64ToI64]>;
-defm          : FPUnaryOpDynFrmAlias_m<FCVT_L_D, "fcvt.l.d", XDIN64X>;
 
 defm FCVT_LU_D : FPUnaryOp_r_frm_m<0b1100001, 0b00011, XDIN64X, "fcvt.lu.d">,
                  Sched<[WriteFCvtF64ToI64, ReadFCvtF64ToI64]>;
-defm           : FPUnaryOpDynFrmAlias_m<FCVT_LU_D, "fcvt.lu.d", XDIN64X>;
 
 let Predicates = [HasStdExtD, IsRV64], mayRaiseFPException = 0 in
 def FMV_X_D : FPUnaryOp_r<0b1110001, 0b00000, 0b000, GPR, FPR64, "fmv.x.d">,
@@ -188,11 +174,9 @@ def FMV_X_D : FPUnaryOp_r<0b1110001, 0b00000, 0b000, GPR, FPR64, "fmv.x.d">,
 
 defm FCVT_D_L : FPUnaryOp_r_frm_m<0b1101001, 0b00010, DXIN64X, "fcvt.d.l">,
                 Sched<[WriteFCvtI64ToF64, ReadFCvtI64ToF64]>;
-defm          : FPUnaryOpDynFrmAlias_m<FCVT_D_L, "fcvt.d.l", DXIN64X>;
 
 defm FCVT_D_LU : FPUnaryOp_r_frm_m<0b1101001, 0b00011, DXIN64X, "fcvt.d.lu">,
                  Sched<[WriteFCvtI64ToF64, ReadFCvtI64ToF64]>;
-defm           : FPUnaryOpDynFrmAlias_m<FCVT_D_LU, "fcvt.d.lu", DXIN64X>;
 
 let Predicates = [HasStdExtD, IsRV64], mayRaiseFPException = 0 in
 def FMV_D_X : FPUnaryOp_r<0b1111001, 0b00000, 0b000, FPR64, GPR, "fmv.d.x">,
@@ -294,6 +278,10 @@ def : Pat<(any_fma (fneg FPR64:$rs1), FPR64:$rs2, FPR64:$rs3),
 def : Pat<(any_fma (fneg FPR64:$rs1), FPR64:$rs2, (fneg FPR64:$rs3)),
           (FNMADD_D FPR64:$rs1, FPR64:$rs2, FPR64:$rs3, 0b111)>;
 
+// fnmadd: -(rs1 * rs2 + rs3) (the nsz flag on the FMA)
+def : Pat<(fneg (any_fma_nsz FPR64:$rs1, FPR64:$rs2, FPR64:$rs3)),
+          (FNMADD_D FPR64:$rs1, FPR64:$rs2, FPR64:$rs3, 0b111)>;
+
 // The ratified 20191213 ISA spec defines fmin and fmax in a way that matches
 // LLVM's fminnum and fmaxnum.
 // <https://github.com/riscv/riscv-isa-manual/commit/cd20cee7efd9bac7c5aa127ec3b451749d2b3cce>.
@@ -330,7 +318,9 @@ def : PatSetCC<FPR64, any_fsetccs, SETOLT, FLT_D>;
 def : PatSetCC<FPR64, any_fsetccs, SETLE, FLE_D>;
 def : PatSetCC<FPR64, any_fsetccs, SETOLE, FLE_D>;
 
-def Select_FPR64_Using_CC_GPR : SelectCC_rrirr<FPR64, GPR>;
+defm Select_FPR64 : SelectCC_GPR_rrirr<FPR64>;
+
+def PseudoFROUND_D : PseudoFROUND<FPR64>;
 
 /// Loads
 
@@ -358,11 +348,6 @@ def SplitF64Pseudo
 
 let Predicates = [HasStdExtD, IsRV32] in {
 
-/// Float constants
-def : Pat<(f64 (fpimm0)), (FCVT_D_W (i32 X0))>;
-def : Pat<(f64 (fpimmneg0)), (FSGNJN_D (FCVT_D_W (i32 X0)),
-                                       (FCVT_D_W (i32 X0)))>;
-
 // double->[u]int. Round-to-zero must be used.
 def : Pat<(i32 (any_fp_to_sint FPR64:$rs1)), (FCVT_W_D FPR64:$rs1, 0b001)>;
 def : Pat<(i32 (any_fp_to_uint FPR64:$rs1)), (FCVT_WU_D FPR64:$rs1, 0b001)>;
@@ -383,11 +368,6 @@ def : Pat<(any_uint_to_fp (i32 GPR:$rs1)), (FCVT_D_WU GPR:$rs1)>;
 } // Predicates = [HasStdExtD, IsRV32]
 
 let Predicates = [HasStdExtD, IsRV64] in {
-
-/// Float constants
-def : Pat<(f64 (fpimm0)), (FMV_D_X (i64 X0))>;
-def : Pat<(f64 (fpimmneg0)), (FSGNJN_D (FMV_D_X (i64 X0)),
-                                       (FMV_D_X (i64 X0)))>;
 
 // Moves (no conversion)
 def : Pat<(bitconvert (i64 GPR:$rs1)), (FMV_D_X GPR:$rs1)>;

@@ -396,7 +396,7 @@ bool ARMConstantIslands::runOnMachineFunction(MachineFunction &mf) {
                     << MCP->getConstants().size() << " CP entries, aligned to "
                     << MCP->getConstantPoolAlign().value() << " bytes *****\n");
 
-  STI = &static_cast<const ARMSubtarget &>(MF->getSubtarget());
+  STI = &MF->getSubtarget<ARMSubtarget>();
   TII = STI->getInstrInfo();
   isPositionIndependentOrROPI =
       STI->getTargetLowering()->isPositionIndependent() || STI->isROPI();
@@ -801,7 +801,7 @@ initializeFunctionInfo(const std::vector<MachineInstr*> &CPEMIs) {
         case ARM::Bcc:
           isCond = true;
           UOpc = ARM::B;
-          LLVM_FALLTHROUGH;
+          [[fallthrough]];
         case ARM::B:
           Bits = 24;
           Scale = 4;
@@ -2278,9 +2278,12 @@ bool ARMConstantIslands::optimizeThumb2JumpTables() {
       //   %t = tLDRr %base, %idx
       Register BaseReg = User.MI->getOperand(0).getReg();
 
-      if (User.MI->getIterator() == User.MI->getParent()->begin())
+      MachineBasicBlock *UserMBB = User.MI->getParent();
+      MachineBasicBlock::iterator Shift = User.MI->getIterator();
+      if (Shift == UserMBB->begin())
         continue;
-      MachineInstr *Shift = User.MI->getPrevNode();
+
+      Shift = prev_nodbg(Shift, UserMBB->begin());
       if (Shift->getOpcode() != ARM::tLSLri ||
           Shift->getOperand(3).getImm() != 2 ||
           !Shift->getOperand(2).isKill())

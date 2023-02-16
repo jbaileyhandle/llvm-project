@@ -25,6 +25,7 @@
 #include "llvm/Target/TargetOptions.h"
 
 #include <functional>
+#include <optional>
 
 namespace llvm {
 
@@ -43,22 +44,20 @@ struct Config {
     ELF,
   };
   // Note: when adding fields here, consider whether they need to be added to
-  // computeCacheKey in LTO.cpp.
+  // computeLTOCacheKey in LTO.cpp.
   std::string CPU;
   TargetOptions Options;
   std::vector<std::string> MAttrs;
+  std::vector<std::string> MllvmArgs;
   std::vector<std::string> PassPlugins;
   /// For adding passes that run right before codegen.
   std::function<void(legacy::PassManager &)> PreCodeGenPassesHook;
-  Optional<Reloc::Model> RelocModel = Reloc::PIC_;
-  Optional<CodeModel::Model> CodeModel = None;
+  std::optional<Reloc::Model> RelocModel = Reloc::PIC_;
+  std::optional<CodeModel::Model> CodeModel;
   CodeGenOpt::Level CGOptLevel = CodeGenOpt::Default;
   CodeGenFileType CGFileType = CGFT_ObjectFile;
   unsigned OptLevel = 2;
   bool DisableVerify = false;
-
-  /// Use the new pass manager
-  bool UseNewPM = LLVM_ENABLE_NEW_PASS_MANAGER;
 
   /// Use the standard optimization pipeline.
   bool UseDefaultPipeline = false;
@@ -154,7 +153,7 @@ struct Config {
   ///                    compilation.
   ///
   /// If threshold option is not specified, it is disabled by default.
-  llvm::Optional<uint64_t> RemarksHotnessThreshold = 0;
+  std::optional<uint64_t> RemarksHotnessThreshold = 0;
 
   /// The format used for serializing remarks (default: YAML).
   std::string RemarksFormat;
@@ -266,8 +265,12 @@ struct Config {
   /// the given output file name, and (2) creates a resolution file whose name
   /// is prefixed by the given output file name and sets ResolutionFile to its
   /// file handle.
+  ///
+  /// SaveTempsArgs can be specified to select which temps to save.
+  /// If SaveTempsArgs is not provided, all temps are saved.
   Error addSaveTemps(std::string OutputFileName,
-                     bool UseInputModulePath = false);
+                     bool UseInputModulePath = false,
+                     const DenseSet<StringRef> &SaveTempsArgs = {});
 };
 
 struct LTOLLVMDiagnosticHandler : public DiagnosticHandler {

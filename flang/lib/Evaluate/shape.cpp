@@ -53,7 +53,7 @@ Shape GetShapeHelper::ConstantShape(const Constant<ExtentType> &arrayConstant) {
   return result;
 }
 
-auto GetShapeHelper::AsShape(ExtentExpr &&arrayExpr) const -> Result {
+auto GetShapeHelper::AsShapeResult(ExtentExpr &&arrayExpr) const -> Result {
   if (context_) {
     arrayExpr = Fold(*context_, std::move(arrayExpr));
   }
@@ -63,17 +63,17 @@ auto GetShapeHelper::AsShape(ExtentExpr &&arrayExpr) const -> Result {
   if (auto *constructor{UnwrapExpr<ArrayConstructor<ExtentType>>(arrayExpr)}) {
     Shape result;
     for (auto &value : *constructor) {
-      if (auto *expr{std::get_if<ExtentExpr>(&value.u)}) {
-        if (expr->Rank() == 0) {
-          result.emplace_back(std::move(*expr));
-          continue;
-        }
+      auto *expr{std::get_if<ExtentExpr>(&value.u)};
+      if (expr && expr->Rank() == 0) {
+        result.emplace_back(std::move(*expr));
+      } else {
+        return std::nullopt;
       }
-      return std::nullopt;
     }
     return result;
+  } else {
+    return std::nullopt;
   }
-  return std::nullopt;
 }
 
 Shape GetShapeHelper::CreateShape(int rank, NamedEntity &base) {
@@ -244,7 +244,7 @@ public:
     return Result{1};
   }
 
-  Result operator()(const Symbol &symbol0) const {
+  Result GetLowerBound(const Symbol &symbol0, NamedEntity &&base) const {
     const Symbol &symbol{symbol0.GetUltimate()};
     if (const auto *details{
             symbol.detailsIf<semantics::ObjectEntityDetails>()}) {
@@ -301,7 +301,7 @@ public:
           }
         }
         if (IsDescriptor(symbol)) {
-          return ExtentExpr{DescriptorInquiry{NamedEntity{symbol0},
+          return ExtentExpr{DescriptorInquiry{std::move(base),
               DescriptorInquiry::Field::LowerBound, dimension_}};
         }
       }
@@ -310,11 +310,21 @@ public:
       if (assoc->rank()) { // SELECT RANK case
         const Symbol &resolved{ResolveAssociations(symbol)};
         if (IsDescriptor(resolved) && dimension_ < *assoc->rank()) {
-          return ExtentExpr{DescriptorInquiry{NamedEntity{symbol0},
+          return ExtentExpr{DescriptorInquiry{std::move(base),
               DescriptorInquiry::Field::LowerBound, dimension_}};
         }
       } else {
-        return (*this)(assoc->expr());
+        auto exprLowerBound{((*this)(assoc->expr()))};
+        if (IsActuallyConstant(exprLowerBound)) {
+          return std::move(exprLowerBound);
+        } else {
+          // If the lower bound of the associated entity is not resolved to
+          // constant expression at the time of the association, it is unsafe
+          // to re-evaluate it later in the associate construct. Statements
+          // in-between may have modified its operands value.
+          return ExtentExpr{DescriptorInquiry{std::move(base),
+              DescriptorInquiry::Field::LowerBound, dimension_}};
+        }
       }
     }
     if constexpr (LBOUND_SEMANTICS) {
@@ -324,9 +334,14 @@ public:
     }
   }
 
+  Result operator()(const Symbol &symbol0) const {
+    return GetLowerBound(symbol0, NamedEntity{symbol0});
+  }
+
   Result operator()(const Component &component) const {
     if (component.base().Rank() == 0) {
-      return (*this)(component.GetLastSymbol());
+      return GetLowerBound(
+          component.GetLastSymbol(), NamedEntity{common::Clone(component)});
     }
     return Result{1};
   }
@@ -424,20 +439,38 @@ static MaybeExtentExpr GetNonNegativeExtent(
   }
 }
 
+MaybeExtentExpr GetAssociatedExtent(const NamedEntity &base,
+    const semantics::AssocEntityDetails &assoc, int dimension) {
+  if (auto shape{GetShape(assoc.expr())}) {
+    if (dimension < static_cast<int>(shape->size())) {
+      auto &extent{shape->at(dimension)};
+      if (extent && IsActuallyConstant(*extent)) {
+        return std::move(extent);
+      } else {
+        // Otherwise, evaluating the associated expression extent expression
+        // after the associate statement is unsafe given statements inside the
+        // associate may have modified the associated expression operands
+        // values.
+        return ExtentExpr{DescriptorInquiry{
+            NamedEntity{base}, DescriptorInquiry::Field::Extent, dimension}};
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 MaybeExtentExpr GetExtent(const NamedEntity &base, int dimension) {
   CHECK(dimension >= 0);
   const Symbol &last{base.GetLastSymbol()};
-  const Symbol &symbol{ResolveAssociations(last)};
+  const Symbol &symbol{ResolveAssociationsExceptSelectRank(last)};
   if (const auto *assoc{last.detailsIf<semantics::AssocEntityDetails>()}) {
     if (assoc->rank()) { // SELECT RANK case
       if (semantics::IsDescriptor(symbol) && dimension < *assoc->rank()) {
         return ExtentExpr{DescriptorInquiry{
             NamedEntity{base}, DescriptorInquiry::Field::Extent, dimension}};
       }
-    } else if (auto shape{GetShape(assoc->expr())}) {
-      if (dimension < static_cast<int>(shape->size())) {
-        return std::move(shape->at(dimension));
-      }
+    } else {
+      return GetAssociatedExtent(base, *assoc, dimension);
     }
   }
   if (const auto *details{symbol.detailsIf<semantics::ObjectEntityDetails>()}) {
@@ -475,7 +508,7 @@ MaybeExtentExpr GetExtent(
 
 MaybeExtentExpr GetExtent(
     const Subscript &subscript, const NamedEntity &base, int dimension) {
-  return std::visit(
+  return common::visit(
       common::visitors{
           [&](const Triplet &triplet) -> MaybeExtentExpr {
             MaybeExtentExpr upper{triplet.upper()};
@@ -526,7 +559,8 @@ MaybeExtentExpr ComputeUpperBound(
 }
 
 MaybeExtentExpr GetRawUpperBound(const NamedEntity &base, int dimension) {
-  const Symbol &symbol{ResolveAssociations(base.GetLastSymbol())};
+  const Symbol &symbol{
+      ResolveAssociationsExceptSelectRank(base.GetLastSymbol())};
   if (const auto *details{symbol.detailsIf<semantics::ObjectEntityDetails>()}) {
     int rank{details->shape().Rank()};
     if (dimension < rank) {
@@ -542,11 +576,9 @@ MaybeExtentExpr GetRawUpperBound(const NamedEntity &base, int dimension) {
     }
   } else if (const auto *assoc{
                  symbol.detailsIf<semantics::AssocEntityDetails>()}) {
-    if (auto shape{GetShape(assoc->expr())}) {
-      if (dimension < static_cast<int>(shape->size())) {
-        return ComputeUpperBound(
-            GetRawLowerBound(base, dimension), std::move(shape->at(dimension)));
-      }
+    if (auto extent{GetAssociatedExtent(base, *assoc, dimension)}) {
+      return ComputeUpperBound(
+          GetRawLowerBound(base, dimension), std::move(extent));
     }
   }
   return std::nullopt;
@@ -577,7 +609,8 @@ static MaybeExtentExpr GetExplicitUBOUND(
 
 static MaybeExtentExpr GetUBOUND(
     FoldingContext *context, const NamedEntity &base, int dimension) {
-  const Symbol &symbol{ResolveAssociations(base.GetLastSymbol())};
+  const Symbol &symbol{
+      ResolveAssociationsExceptSelectRank(base.GetLastSymbol())};
   if (const auto *details{symbol.detailsIf<semantics::ObjectEntityDetails>()}) {
     int rank{details->shape().Rank()};
     if (dimension < rank) {
@@ -592,12 +625,9 @@ static MaybeExtentExpr GetUBOUND(
     }
   } else if (const auto *assoc{
                  symbol.detailsIf<semantics::AssocEntityDetails>()}) {
-    if (auto shape{GetShape(assoc->expr())}) {
-      if (dimension < static_cast<int>(shape->size())) {
-        if (auto lb{GetLBOUND(base, dimension)}) {
-          return ComputeUpperBound(
-              std::move(*lb), std::move(shape->at(dimension)));
-        }
+    if (auto extent{GetAssociatedExtent(base, *assoc, dimension)}) {
+      if (auto lb{GetLBOUND(base, dimension)}) {
+        return ComputeUpperBound(std::move(*lb), std::move(extent));
       }
     }
   }
@@ -614,7 +644,8 @@ MaybeExtentExpr GetUBOUND(
 }
 
 static Shape GetUBOUNDs(FoldingContext *context, const NamedEntity &base) {
-  const Symbol &symbol{ResolveAssociations(base.GetLastSymbol())};
+  const Symbol &symbol{
+      ResolveAssociationsExceptSelectRank(base.GetLastSymbol())};
   if (const auto *details{symbol.detailsIf<semantics::ObjectEntityDetails>()}) {
     Shape result;
     int dim{0};
@@ -645,7 +676,7 @@ Shape GetUBOUNDs(FoldingContext &context, const NamedEntity &base) {
 Shape GetUBOUNDs(const NamedEntity &base) { return GetUBOUNDs(nullptr, base); }
 
 auto GetShapeHelper::operator()(const Symbol &symbol) const -> Result {
-  return std::visit(
+  return common::visit(
       common::visitors{
           [&](const semantics::ObjectEntityDetails &object) {
             if (IsImpliedShape(symbol) && object.init()) {
@@ -662,19 +693,29 @@ auto GetShapeHelper::operator()(const Symbol &symbol) const -> Result {
             return ScalarShape(); // no dimensions seen
           },
           [&](const semantics::ProcEntityDetails &proc) {
-            if (const Symbol * interface{proc.interface().symbol()}) {
+            if (const Symbol * interface{proc.procInterface()}) {
               return (*this)(*interface);
             } else {
               return ScalarShape();
             }
           },
           [&](const semantics::AssocEntityDetails &assoc) {
+            NamedEntity base{symbol};
             if (assoc.rank()) { // SELECT RANK case
               int n{assoc.rank().value()};
-              NamedEntity base{symbol};
               return Result{CreateShape(n, base)};
             } else {
-              return (*this)(assoc.expr());
+              auto exprShape{((*this)(assoc.expr()))};
+              if (exprShape) {
+                int rank{static_cast<int>(exprShape->size())};
+                for (int dimension{0}; dimension < rank; ++dimension) {
+                  auto &extent{(*exprShape)[dimension]};
+                  if (extent && !IsActuallyConstant(*extent)) {
+                    extent = GetExtent(base, dimension);
+                  }
+                }
+              }
+              return exprShape;
             }
           },
           [&](const semantics::SubprogramDetails &subp) -> Result {
@@ -685,9 +726,9 @@ auto GetShapeHelper::operator()(const Symbol &symbol) const -> Result {
                 // to symbols that belong to the subroutine scope and are
                 // meaningless on the caller side without the related call
                 // expression.
-                for (auto extent : *resultShape) {
-                  if (extent && !IsConstantExpr(*extent)) {
-                    return std::nullopt;
+                for (auto &extent : *resultShape) {
+                  if (extent && !IsActuallyConstant(*extent)) {
+                    extent.reset();
                   }
                 }
               }
@@ -842,15 +883,6 @@ auto GetShapeHelper::operator()(const ProcedureRef &call) const -> Result {
           }
         }
       }
-    } else if (intrinsic->name == "reshape") {
-      if (call.arguments().size() >= 2 && call.arguments().at(1)) {
-        // SHAPE(RESHAPE(array,shape)) -> shape
-        if (const auto *shapeExpr{
-                call.arguments().at(1).value().UnwrapExpr()}) {
-          auto shape{std::get<Expr<SomeInteger>>(shapeExpr->u)};
-          return AsShape(ConvertToType<ExtentType>(std::move(shape)));
-        }
-      }
     } else if (intrinsic->name == "pack") {
       if (call.arguments().size() >= 3 && call.arguments().at(2)) {
         // SHAPE(PACK(,,VECTOR=v)) -> SHAPE(v)
@@ -883,6 +915,18 @@ auto GetShapeHelper::operator()(const ProcedureRef &call) const -> Result {
             return Shape{ExtentExpr{FunctionRef<ExtentType>{
                 ProcedureDesignator{std::move(specific->specificIntrinsic)},
                 std::move(specific->arguments)}}};
+          }
+        }
+      }
+    } else if (intrinsic->name == "reshape") {
+      if (call.arguments().size() >= 2 && call.arguments().at(1)) {
+        // SHAPE(RESHAPE(array,shape)) -> shape
+        if (const auto *shapeExpr{
+                call.arguments().at(1).value().UnwrapExpr()}) {
+          auto shapeArg{std::get<Expr<SomeInteger>>(shapeExpr->u)};
+          if (auto result{AsShapeResult(
+                  ConvertToType<ExtentType>(std::move(shapeArg)))}) {
+            return result;
           }
         }
       }
@@ -923,19 +967,34 @@ auto GetShapeHelper::operator()(const ProcedureRef &call) const -> Result {
           } else {
             // SIZE= is absent and MOLD= is array: result is vector whose
             // length is determined by sizes of types.  See 16.9.193p4 case(ii).
+            // Note that if sourceBytes is not known to be empty, we
+            // can fold only when moldElementBytes is known to not be zero;
+            // the most general case risks a division by zero otherwise.
             if (auto sourceTypeAndShape{
                     characteristics::TypeAndShape::Characterize(
                         call.arguments().at(0), *context_)}) {
-              auto sourceBytes{
-                  sourceTypeAndShape->MeasureSizeInBytes(*context_)};
-              auto moldElementBytes{
-                  moldTypeAndShape->MeasureElementSizeInBytes(*context_, true)};
-              if (sourceBytes && moldElementBytes) {
-                ExtentExpr extent{Fold(*context_,
-                    (std::move(*sourceBytes) +
-                        common::Clone(*moldElementBytes) - ExtentExpr{1}) /
-                        common::Clone(*moldElementBytes))};
-                return Shape{MaybeExtentExpr{std::move(extent)}};
+              if (auto sourceBytes{
+                      sourceTypeAndShape->MeasureSizeInBytes(*context_)}) {
+                *sourceBytes = Fold(*context_, std::move(*sourceBytes));
+                if (auto sourceBytesConst{ToInt64(*sourceBytes)}) {
+                  if (*sourceBytesConst == 0) {
+                    return Shape{ExtentExpr{0}};
+                  }
+                }
+                if (auto moldElementBytes{
+                        moldTypeAndShape->MeasureElementSizeInBytes(
+                            *context_, true)}) {
+                  *moldElementBytes =
+                      Fold(*context_, std::move(*moldElementBytes));
+                  auto moldElementBytesConst{ToInt64(*moldElementBytes)};
+                  if (moldElementBytesConst && *moldElementBytesConst != 0) {
+                    ExtentExpr extent{Fold(*context_,
+                        (std::move(*sourceBytes) +
+                            common::Clone(*moldElementBytes) - ExtentExpr{1}) /
+                            common::Clone(*moldElementBytes))};
+                    return Shape{MaybeExtentExpr{std::move(extent)}};
+                  }
+                }
               }
             }
           }
@@ -961,7 +1020,18 @@ auto GetShapeHelper::operator()(const ProcedureRef &call) const -> Result {
       // TODO: shapes of other non-elemental intrinsic results
     }
   }
-  return std::nullopt;
+  // The rank is always known even if the extents are not.
+  return Shape(static_cast<std::size_t>(call.Rank()), MaybeExtentExpr{});
+}
+
+void GetShapeHelper::AccumulateExtent(
+    ExtentExpr &result, ExtentExpr &&n) const {
+  result = std::move(result) + std::move(n);
+  if (context_) {
+    // Fold during expression creation to avoid creating an expression so
+    // large we can't evalute it without overflowing the stack.
+    result = Fold(*context_, std::move(result));
+  }
 }
 
 // Check conformance of the passed shapes.

@@ -3,9 +3,10 @@
 #include "ClangTidyDiagnosticConsumer.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/ScopedPrinter.h"
-#include "llvm/Testing/Support/Annotations.h"
+#include "llvm/Testing/Annotations/Annotations.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include <optional>
 
 namespace clang {
 namespace tidy {
@@ -19,7 +20,7 @@ template <> struct OptionEnumMapping<Colours> {
         {Colours::Yellow, "Yellow"}, {Colours::Green, "Green"},
         {Colours::Blue, "Blue"},     {Colours::Indigo, "Indigo"},
         {Colours::Violet, "Violet"}};
-    return makeArrayRef(Mapping);
+    return ArrayRef(Mapping);
   }
 };
 
@@ -129,14 +130,14 @@ TEST(ParseConfiguration, MergeConfigurations) {
   EXPECT_EQ("check1,check2,check3,check4", *Options.Checks);
   EXPECT_EQ("filter2", *Options.HeaderFilterRegex);
   EXPECT_EQ("user2", *Options.User);
-  ASSERT_TRUE(Options.ExtraArgs.hasValue());
+  ASSERT_TRUE(Options.ExtraArgs.has_value());
   EXPECT_EQ("arg1,arg2,arg3,arg4", llvm::join(Options.ExtraArgs->begin(),
                                               Options.ExtraArgs->end(), ","));
-  ASSERT_TRUE(Options.ExtraArgsBefore.hasValue());
+  ASSERT_TRUE(Options.ExtraArgsBefore.has_value());
   EXPECT_EQ("arg-before1,arg-before2,arg-before3,arg-before4",
             llvm::join(Options.ExtraArgsBefore->begin(),
                        Options.ExtraArgsBefore->end(), ","));
-  ASSERT_TRUE(Options.UseColor.hasValue());
+  ASSERT_TRUE(Options.UseColor.has_value());
   EXPECT_TRUE(*Options.UseColor);
 }
 
@@ -167,7 +168,7 @@ public:
     std::string Message;
     llvm::SourceMgr::DiagKind Kind;
     size_t Pos;
-    Optional<llvm::Annotations::Range> Range;
+    std::optional<llvm::Annotations::Range> Range;
 
     friend void PrintTo(const Diag &D, std::ostream *OS) {
       *OS << (D.Kind == llvm::SourceMgr::DK_Error ? "error: " : "warning: ")
@@ -292,7 +293,7 @@ TEST(CheckOptionsValidation, MissingOptions) {
                        &DiagConsumer, false);
   Context.setDiagnosticsEngine(&DE);
   TestCheck TestCheck(&Context);
-  EXPECT_FALSE(TestCheck.getLocal("Opt").hasValue());
+  EXPECT_FALSE(TestCheck.getLocal("Opt"));
   EXPECT_EQ(TestCheck.getLocal("Opt", "Unknown"), "Unknown");
   // Missing options aren't errors.
   EXPECT_TRUE(DiagConsumer.take().empty());
@@ -326,9 +327,9 @@ TEST(CheckOptionsValidation, ValidIntOptions) {
 
   CHECK_VAL(TestCheck.getIntLocal("IntExpected"), 1);
   CHECK_VAL(TestCheck.getIntGlobal("GlobalIntExpected"), 1);
-  EXPECT_FALSE(TestCheck.getIntLocal("IntInvalid1").hasValue());
-  EXPECT_FALSE(TestCheck.getIntLocal("IntInvalid2").hasValue());
-  EXPECT_FALSE(TestCheck.getIntGlobal("GlobalIntInvalid").hasValue());
+  EXPECT_FALSE(TestCheck.getIntLocal("IntInvalid1").has_value());
+  EXPECT_FALSE(TestCheck.getIntLocal("IntInvalid2").has_value());
+  EXPECT_FALSE(TestCheck.getIntGlobal("GlobalIntInvalid").has_value());
   ASSERT_EQ(TestCheck.getIntLocal("DefaultedIntInvalid", 1), 1);
 
   CHECK_VAL(TestCheck.getIntLocal<bool>("BoolITrueValue"), true);
@@ -338,7 +339,7 @@ TEST(CheckOptionsValidation, ValidIntOptions) {
 // FIXME: SWDEV-268185.
 //  CHECK_VAL(TestCheck.getIntLocal<bool>("BoolTrueShort"), true);
 //  CHECK_VAL(TestCheck.getIntLocal<bool>("BoolFalseShort"), false);
-  EXPECT_FALSE(TestCheck.getIntLocal<bool>("BoolUnparseable").hasValue());
+  EXPECT_FALSE(TestCheck.getIntLocal<bool>("BoolUnparseable"));
 
   EXPECT_THAT(
       DiagConsumer.take(),
@@ -397,14 +398,14 @@ TEST(ValidConfiguration, ValidEnumOptions) {
                                             /*IgnoreCase*/ true),
             Colours::Violet);
 
-  EXPECT_FALSE(TestCheck.getIntLocal<Colours>("ValidWrongCase").hasValue());
-  EXPECT_FALSE(TestCheck.getIntLocal<Colours>("NearMiss").hasValue());
-  EXPECT_FALSE(TestCheck.getIntGlobal<Colours>("GlobalInvalid").hasValue());
+  EXPECT_FALSE(TestCheck.getIntLocal<Colours>("ValidWrongCase").has_value());
+  EXPECT_FALSE(TestCheck.getIntLocal<Colours>("NearMiss").has_value());
+  EXPECT_FALSE(TestCheck.getIntGlobal<Colours>("GlobalInvalid").has_value());
   EXPECT_FALSE(
-      TestCheck.getIntGlobal<Colours>("GlobalValidWrongCase").hasValue());
-  EXPECT_FALSE(TestCheck.getIntGlobal<Colours>("GlobalNearMiss").hasValue());
+      TestCheck.getIntGlobal<Colours>("GlobalValidWrongCase").has_value());
+  EXPECT_FALSE(TestCheck.getIntGlobal<Colours>("GlobalNearMiss").has_value());
 
-  EXPECT_FALSE(TestCheck.getIntLocal<Colours>("Invalid").hasValue());
+  EXPECT_FALSE(TestCheck.getIntLocal<Colours>("Invalid").has_value());
   EXPECT_THAT(
       DiagConsumer.take(),
       UnorderedElementsAre(

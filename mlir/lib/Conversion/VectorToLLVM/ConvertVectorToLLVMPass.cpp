@@ -8,13 +8,11 @@
 
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
 
-#include "../PassDetail.h"
-
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/AMX/AMXDialect.h"
 #include "mlir/Dialect/AMX/Transforms.h"
-#include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ArmNeon/ArmNeonDialect.h"
 #include "mlir/Dialect/ArmSVE/ArmSVEDialect.h"
 #include "mlir/Dialect/ArmSVE/Transforms.h"
@@ -24,26 +22,27 @@
 #include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
 #include "mlir/Dialect/X86Vector/Transforms.h"
 #include "mlir/Dialect/X86Vector/X86VectorDialect.h"
+#include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+
+namespace mlir {
+#define GEN_PASS_DEF_CONVERTVECTORTOLLVMPASS
+#include "mlir/Conversion/Passes.h.inc"
+} // namespace mlir
 
 using namespace mlir;
 using namespace mlir::vector;
 
 namespace {
 struct LowerVectorToLLVMPass
-    : public ConvertVectorToLLVMBase<LowerVectorToLLVMPass> {
-  LowerVectorToLLVMPass(const LowerVectorToLLVMOptions &options) {
-    this->reassociateFPReductions = options.reassociateFPReductions;
-    this->indexOptimizations = options.indexOptimizations;
-    this->armNeon = options.armNeon;
-    this->armSVE = options.armSVE;
-    this->amx = options.amx;
-    this->x86Vector = options.x86Vector;
-  }
+    : public impl::ConvertVectorToLLVMPassBase<LowerVectorToLLVMPass> {
+
+  using Base::Base;
+
   // Override explicitly to allow conditional dialect dependence.
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<LLVM::LLVMDialect>();
-    registry.insert<arith::ArithmeticDialect>();
+    registry.insert<arith::ArithDialect>();
     registry.insert<memref::MemRefDialect>();
     if (armNeon)
       registry.insert<arm_neon::ArmNeonDialect>();
@@ -75,18 +74,20 @@ void LowerVectorToLLVMPass::runOnOperation() {
   }
 
   // Convert to the LLVM IR dialect.
-  LLVMTypeConverter converter(&getContext());
+  LowerToLLVMOptions options(&getContext());
+  options.useOpaquePointers = useOpaquePointers;
+  LLVMTypeConverter converter(&getContext(), options);
   RewritePatternSet patterns(&getContext());
-  populateVectorMaskMaterializationPatterns(patterns, indexOptimizations);
+  populateVectorMaskMaterializationPatterns(patterns, force32BitVectorIndices);
   populateVectorTransferLoweringPatterns(patterns);
   populateVectorToLLVMMatrixConversionPatterns(converter, patterns);
-  populateVectorToLLVMConversionPatterns(converter, patterns,
-                                         reassociateFPReductions);
+  populateVectorToLLVMConversionPatterns(
+      converter, patterns, reassociateFPReductions, force32BitVectorIndices);
   populateVectorToLLVMMatrixConversionPatterns(converter, patterns);
 
   // Architecture specific augmentations.
   LLVMConversionTarget target(getContext());
-  target.addLegalDialect<arith::ArithmeticDialect>();
+  target.addLegalDialect<arith::ArithDialect>();
   target.addLegalDialect<memref::MemRefDialect>();
   target.addLegalOp<UnrealizedConversionCastOp>();
   if (armNeon) {
@@ -111,9 +112,4 @@ void LowerVectorToLLVMPass::runOnOperation() {
   if (failed(
           applyPartialConversion(getOperation(), target, std::move(patterns))))
     signalPassFailure();
-}
-
-std::unique_ptr<OperationPass<ModuleOp>>
-mlir::createConvertVectorToLLVMPass(const LowerVectorToLLVMOptions &options) {
-  return std::make_unique<LowerVectorToLLVMPass>(options);
 }

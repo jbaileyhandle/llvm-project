@@ -29,12 +29,13 @@
 
 using namespace llvm;
 
-static cl::opt<unsigned> CountThreshold("hexagon-cext-threshold",
-  cl::init(3), cl::Hidden, cl::ZeroOrMore,
-  cl::desc("Minimum number of extenders to trigger replacement"));
+static cl::opt<unsigned> CountThreshold(
+    "hexagon-cext-threshold", cl::init(3), cl::Hidden,
+    cl::desc("Minimum number of extenders to trigger replacement"));
 
-static cl::opt<unsigned> ReplaceLimit("hexagon-cext-limit", cl::init(0),
-  cl::Hidden, cl::ZeroOrMore, cl::desc("Maximum number of replacements"));
+static cl::opt<unsigned>
+    ReplaceLimit("hexagon-cext-limit", cl::init(0), cl::Hidden,
+                 cl::desc("Maximum number of replacements"));
 
 namespace llvm {
   void initializeHexagonConstExtendersPass(PassRegistry&);
@@ -1744,7 +1745,7 @@ bool HCE::replaceInstrExpr(const ExtDesc &ED, const ExtenderInit &ExtI,
       // "alignment" as Diff.
       uint32_t UD = Diff;
       OffsetRange R = getOffsetRange(MI.getOperand(0));
-      uint32_t A = std::min<uint32_t>(R.Align, 1u << countTrailingZeros(UD));
+      uint32_t A = std::min<uint32_t>(R.Align, 1u << llvm::countr_zero(UD));
       D &= ~(A-1);
     }
     BuildMI(MBB, At, dl, HII->get(IdxOpc))

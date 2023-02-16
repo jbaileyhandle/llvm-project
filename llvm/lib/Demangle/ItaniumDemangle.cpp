@@ -172,6 +172,50 @@ struct DumpVisitor {
       return printStr("TemplateParamKind::Template");
     }
   }
+  void print(Node::Prec P) {
+    switch (P) {
+    case Node::Prec::Primary:
+      return printStr("Node::Prec::Primary");
+    case Node::Prec::Postfix:
+      return printStr("Node::Prec::Postfix");
+    case Node::Prec::Unary:
+      return printStr("Node::Prec::Unary");
+    case Node::Prec::Cast:
+      return printStr("Node::Prec::Cast");
+    case Node::Prec::PtrMem:
+      return printStr("Node::Prec::PtrMem");
+    case Node::Prec::Multiplicative:
+      return printStr("Node::Prec::Multiplicative");
+    case Node::Prec::Additive:
+      return printStr("Node::Prec::Additive");
+    case Node::Prec::Shift:
+      return printStr("Node::Prec::Shift");
+    case Node::Prec::Spaceship:
+      return printStr("Node::Prec::Spaceship");
+    case Node::Prec::Relational:
+      return printStr("Node::Prec::Relational");
+    case Node::Prec::Equality:
+      return printStr("Node::Prec::Equality");
+    case Node::Prec::And:
+      return printStr("Node::Prec::And");
+    case Node::Prec::Xor:
+      return printStr("Node::Prec::Xor");
+    case Node::Prec::Ior:
+      return printStr("Node::Prec::Ior");
+    case Node::Prec::AndIf:
+      return printStr("Node::Prec::AndIf");
+    case Node::Prec::OrIf:
+      return printStr("Node::Prec::OrIf");
+    case Node::Prec::Conditional:
+      return printStr("Node::Prec::Conditional");
+    case Node::Prec::Assign:
+      return printStr("Node::Prec::Assign");
+    case Node::Prec::Comma:
+      return printStr("Node::Prec::Comma");
+    case Node::Prec::Default:
+      return printStr("Node::Prec::Default");
+    }
+  }
 
   void newLine() {
     printStr("\n");
@@ -331,15 +375,12 @@ char *llvm::itaniumDemangle(const char *MangledName, char *Buf,
 
   int InternalStatus = demangle_success;
   Demangler Parser(MangledName, MangledName + std::strlen(MangledName));
-  OutputBuffer OB;
-
   Node *AST = Parser.parse();
 
   if (AST == nullptr)
     InternalStatus = demangle_invalid_mangled_name;
-  else if (!initializeOutputBuffer(Buf, N, OB, 1024))
-    InternalStatus = demangle_memory_alloc_failure;
   else {
+    OutputBuffer OB(Buf, N);
     assert(Parser.ForwardTemplateRefs.empty());
     AST->print(OB);
     OB += '\0';
@@ -383,9 +424,7 @@ bool ItaniumPartialDemangler::partialDemangle(const char *MangledName) {
 }
 
 static char *printNode(const Node *RootNode, char *Buf, size_t *N) {
-  OutputBuffer OB;
-  if (!initializeOutputBuffer(Buf, N, OB, 128))
-    return nullptr;
+  OutputBuffer OB(Buf, N);
   RootNode->print(OB);
   OB += '\0';
   if (N != nullptr)
@@ -428,9 +467,7 @@ char *ItaniumPartialDemangler::getFunctionDeclContextName(char *Buf,
     return nullptr;
   const Node *Name = static_cast<const FunctionEncoding *>(RootNode)->getName();
 
-  OutputBuffer OB;
-  if (!initializeOutputBuffer(Buf, N, OB, 128))
-    return nullptr;
+  OutputBuffer OB(Buf, N);
 
  KeepGoingLocalFunction:
   while (true) {
@@ -481,9 +518,7 @@ char *ItaniumPartialDemangler::getFunctionParameters(char *Buf,
     return nullptr;
   NodeArray Params = static_cast<FunctionEncoding *>(RootNode)->getParams();
 
-  OutputBuffer OB;
-  if (!initializeOutputBuffer(Buf, N, OB, 128))
-    return nullptr;
+  OutputBuffer OB(Buf, N);
 
   OB += '(';
   Params.printWithComma(OB);
@@ -499,9 +534,7 @@ char *ItaniumPartialDemangler::getFunctionReturnType(
   if (!isFunction())
     return nullptr;
 
-  OutputBuffer OB;
-  if (!initializeOutputBuffer(Buf, N, OB, 128))
-    return nullptr;
+  OutputBuffer OB(Buf, N);
 
   if (const Node *Ret =
           static_cast<const FunctionEncoding *>(RootNode)->getReturnType())

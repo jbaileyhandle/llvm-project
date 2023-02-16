@@ -1,3 +1,8 @@
+# This chapter depends on JIT support enabled.
+if(NOT MLIR_ENABLE_EXECUTION_ENGINE)
+  return()
+endif()
+
 # For a better template to copy, see examples/standalone
 include_directories(include)
 add_subdirectory(include)
@@ -44,7 +49,7 @@ target_link_libraries(toyc-ch7
     MLIRIR
     MLIRLLVMCommonConversion
     MLIRLLVMToLLVMIRTranslation
-    MLIRMemRef
+    MLIRMemRefDialect
     MLIRParser
     MLIRPass
     MLIRSideEffectInterfaces

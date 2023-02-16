@@ -28,12 +28,12 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileUtilities.h"
-#include "llvm/Support/Host.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Host.h"
 
 using namespace llvm;
 
@@ -63,7 +63,7 @@ std::string FeaturesStr;
 
 static cl::list<std::string>
     FuzzerArgs("fuzzer-args", cl::Positional,
-               cl::desc("Options to pass to the fuzzer"), cl::ZeroOrMore,
+               cl::desc("Options to pass to the fuzzer"),
                cl::PositionalEatsArgs);
 static std::vector<char *> ModifiedArgv;
 

@@ -32,9 +32,10 @@ public:
   }
 };
 
-class TestConvertCallOp
+struct TestConvertCallOp
     : public PassWrapper<TestConvertCallOp, OperationPass<ModuleOp>> {
-public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestConvertCallOp)
+
   void getDependentDialects(DialectRegistry &registry) const final {
     registry.insert<LLVM::LLVMDialect>();
   }
@@ -47,8 +48,11 @@ public:
   void runOnOperation() override {
     ModuleOp m = getOperation();
 
+    LowerToLLVMOptions options(m.getContext());
+    options.useOpaquePointers = false;
+
     // Populate type conversions.
-    LLVMTypeConverter typeConverter(m.getContext());
+    LLVMTypeConverter typeConverter(m.getContext(), options);
     typeConverter.addConversion([&](test::TestType type) {
       return LLVM::LLVMPointerType::get(IntegerType::get(m.getContext(), 8));
     });

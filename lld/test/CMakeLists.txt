@@ -1,14 +1,7 @@
-if (CMAKE_CFG_INTDIR STREQUAL ".")
-  set(LLVM_BUILD_MODE ".")
-else ()
-  set(LLVM_BUILD_MODE "%(build_mode)s")
-endif ()
-
-string(REPLACE "${CMAKE_CFG_INTDIR}" "${LLVM_BUILD_MODE}" LLD_LIBS_DIR "${LLVM_LIBRARY_OUTPUT_INTDIR}")
-string(REPLACE "${CMAKE_CFG_INTDIR}" "${LLVM_BUILD_MODE}" LLD_TOOLS_DIR "${LLVM_RUNTIME_OUTPUT_INTDIR}")
-
 llvm_canonicalize_cmake_booleans(
+  ENABLE_BACKTRACES
   LLVM_ENABLE_ZLIB
+  LLVM_ENABLE_ZSTD
   LLVM_ENABLE_LIBXML2
   LLD_DEFAULT_LD_LLD_IS_MINGW
   LLVM_HAVE_LIBXAR
@@ -22,12 +15,6 @@ configure_lit_site_cfg(
   ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.py
   MAIN_CONFIG
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.cfg.py
-  )
-configure_lit_site_cfg(
-  ${CMAKE_CURRENT_SOURCE_DIR}/Unit/lit.site.cfg.py.in
-  ${CMAKE_CURRENT_BINARY_DIR}/Unit/lit.site.cfg.py
-  MAIN_CONFIG
-  ${CMAKE_CURRENT_SOURCE_DIR}/Unit/lit.cfg.py
   )
 
 set(LLD_TEST_DEPS lld)

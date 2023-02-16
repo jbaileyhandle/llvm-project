@@ -20,11 +20,14 @@
 namespace llvm {
 class CSKYTargetMachine;
 class FunctionPass;
+class PassRegistry;
 
-FunctionPass *createCSKYISelDag(CSKYTargetMachine &TM);
+FunctionPass *createCSKYISelDag(CSKYTargetMachine &TM,
+                                CodeGenOpt::Level OptLevel);
 FunctionPass *createCSKYConstantIslandPass();
 
 void initializeCSKYConstantIslandsPass(PassRegistry &);
+void initializeCSKYDAGToDAGISelPass(PassRegistry &);
 
 } // namespace llvm
 

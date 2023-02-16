@@ -62,16 +62,16 @@ define void @test_mixed(i32 addrspace(1)* %a, i32 addrspace(1)* %b, i32 addrspac
 ; CHECK-NEXT:    .cfi_offset %rbx, -32
 ; CHECK-NEXT:    .cfi_offset %r14, -24
 ; CHECK-NEXT:    .cfi_offset %r15, -16
-; CHECK-NEXT:    movq %rdx, %r14
-; CHECK-NEXT:    movq %rsi, %r15
-; CHECK-NEXT:    movq %rdi, %rbx
+; CHECK-NEXT:    movq %rdx, %rbx
+; CHECK-NEXT:    movq %rsi, %r14
+; CHECK-NEXT:    movq %rdi, %r15
 ; CHECK-NEXT:    callq func@PLT
 ; CHECK-NEXT:  .Ltmp1:
-; CHECK-NEXT:    movq %rbx, %rdi
+; CHECK-NEXT:    movq %r15, %rdi
 ; CHECK-NEXT:    xorl %esi, %esi
-; CHECK-NEXT:    movq %r15, %rdx
+; CHECK-NEXT:    movq %r14, %rdx
 ; CHECK-NEXT:    xorl %ecx, %ecx
-; CHECK-NEXT:    movq %r14, %r8
+; CHECK-NEXT:    movq %rbx, %r8
 ; CHECK-NEXT:    callq consume5@PLT
 ; CHECK-NEXT:    popq %rbx
 ; CHECK-NEXT:    .cfi_def_cfa_offset 24
@@ -252,17 +252,17 @@ define i1 @test_cross_bb(i32 addrspace(1)* %a, i1 %external_cond) gc "statepoint
 ; CHECK-NEXT:    .cfi_offset %rbx, -32
 ; CHECK-NEXT:    .cfi_offset %r14, -24
 ; CHECK-NEXT:    .cfi_offset %rbp, -16
-; CHECK-NEXT:    movl %esi, %ebp
+; CHECK-NEXT:    movl %esi, %r14d
 ; CHECK-NEXT:    movq %rdi, %rbx
 ; CHECK-NEXT:    callq return_i1@PLT
 ; CHECK-NEXT:  .Ltmp7:
-; CHECK-NEXT:    testb $1, %bpl
+; CHECK-NEXT:    testb $1, %r14b
 ; CHECK-NEXT:    je .LBB7_2
 ; CHECK-NEXT:  # %bb.1: # %left
-; CHECK-NEXT:    movl %eax, %r14d
+; CHECK-NEXT:    movl %eax, %ebp
 ; CHECK-NEXT:    movq %rbx, %rdi
 ; CHECK-NEXT:    callq consume@PLT
-; CHECK-NEXT:    movl %r14d, %eax
+; CHECK-NEXT:    movl %ebp, %eax
 ; CHECK-NEXT:    jmp .LBB7_3
 ; CHECK-NEXT:  .LBB7_2: # %right
 ; CHECK-NEXT:    movb $1, %al
@@ -354,18 +354,18 @@ define void @test_limit(i32 addrspace(1)* %a, i32 addrspace(1)* %b, i32 addrspac
 ; CHECK-NEXT:    .cfi_offset %r12, -32
 ; CHECK-NEXT:    .cfi_offset %r14, -24
 ; CHECK-NEXT:    .cfi_offset %r15, -16
-; CHECK-NEXT:    movq %r8, %r14
-; CHECK-NEXT:    movq %rcx, %r15
-; CHECK-NEXT:    movq %rdx, %r12
-; CHECK-NEXT:    movq %rsi, %rbx
+; CHECK-NEXT:    movq %r8, %rbx
+; CHECK-NEXT:    movq %rcx, %r14
+; CHECK-NEXT:    movq %rdx, %r15
+; CHECK-NEXT:    movq %rsi, %r12
 ; CHECK-NEXT:    movq %rdi, (%rsp)
 ; CHECK-NEXT:    callq func@PLT
 ; CHECK-NEXT:  .Ltmp11:
 ; CHECK-NEXT:    movq (%rsp), %rdi
-; CHECK-NEXT:    movq %rbx, %rsi
-; CHECK-NEXT:    movq %r12, %rdx
-; CHECK-NEXT:    movq %r15, %rcx
-; CHECK-NEXT:    movq %r14, %r8
+; CHECK-NEXT:    movq %r12, %rsi
+; CHECK-NEXT:    movq %r15, %rdx
+; CHECK-NEXT:    movq %r14, %rcx
+; CHECK-NEXT:    movq %rbx, %r8
 ; CHECK-NEXT:    callq consume5@PLT
 ; CHECK-NEXT:    addq $8, %rsp
 ; CHECK-NEXT:    .cfi_def_cfa_offset 40
@@ -434,20 +434,20 @@ define void @test_sched(float %0, i32 %1, i8 addrspace(1)* %2) gc "statepoint-ex
 ; CHECK-NEXT:    movsd %xmm0, {{[-0-9]+}}(%r{{[sb]}}p) # 8-byte Spill
 ; CHECK-NEXT:    nopl 8(%rax,%rax)
 ; CHECK-NEXT:  .Ltmp14:
-; CHECK-NEXT:    movsd {{[-0-9]+}}(%r{{[sb]}}p), %xmm0 # 8-byte Reload
-; CHECK-NEXT:    # xmm0 = mem[0],zero
-; CHECK-NEXT:    movsd %xmm0, {{[0-9]+}}(%rsp)
 ; CHECK-NEXT:    movss {{[-0-9]+}}(%r{{[sb]}}p), %xmm0 # 4-byte Reload
 ; CHECK-NEXT:    # xmm0 = mem[0],zero,zero,zero
 ; CHECK-NEXT:    movss %xmm0, (%rsp)
+; CHECK-NEXT:    movsd {{[-0-9]+}}(%r{{[sb]}}p), %xmm0 # 8-byte Reload
+; CHECK-NEXT:    # xmm0 = mem[0],zero
+; CHECK-NEXT:    movsd %xmm0, {{[0-9]+}}(%rsp)
 ; CHECK-NEXT:    nopl 8(%rax,%rax)
 ; CHECK-NEXT:  .Ltmp15:
-; CHECK-NEXT:    movsd {{[-0-9]+}}(%r{{[sb]}}p), %xmm0 # 8-byte Reload
-; CHECK-NEXT:    # xmm0 = mem[0],zero
-; CHECK-NEXT:    movsd %xmm0, {{[0-9]+}}(%rsp)
 ; CHECK-NEXT:    movss {{[-0-9]+}}(%r{{[sb]}}p), %xmm0 # 4-byte Reload
 ; CHECK-NEXT:    # xmm0 = mem[0],zero,zero,zero
 ; CHECK-NEXT:    movss %xmm0, (%rsp)
+; CHECK-NEXT:    movsd {{[-0-9]+}}(%r{{[sb]}}p), %xmm1 # 8-byte Reload
+; CHECK-NEXT:    # xmm1 = mem[0],zero
+; CHECK-NEXT:    movsd %xmm1, {{[0-9]+}}(%rsp)
 ; CHECK-NEXT:    nopl 8(%rax,%rax)
 ; CHECK-NEXT:  .Ltmp16:
 ; CHECK-NEXT:    xorl %eax, %eax

@@ -36,6 +36,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Transforms/Utils/SanitizerStats.h"
+#include <optional>
 
 namespace llvm {
 class Module;
@@ -47,6 +48,10 @@ class DataLayout;
 class FunctionType;
 class LLVMContext;
 class IndexedInstrProfReader;
+
+namespace vfs {
+class FileSystem;
+}
 }
 
 namespace clang {
@@ -85,6 +90,7 @@ class CGObjCRuntime;
 class CGOpenCLRuntime;
 class CGOpenMPRuntime;
 class CGCUDARuntime;
+class CGHLSLRuntime;
 class CoverageMappingModuleGen;
 class TargetCodeGenInfo;
 
@@ -277,21 +283,101 @@ class CodeGenModule : public CodeGenTypeCache {
 
 public:
   struct Structor {
-    Structor() : Priority(0), Initializer(nullptr), AssociatedData(nullptr) {}
-    Structor(int Priority, llvm::Constant *Initializer,
+    Structor()
+        : Priority(0), LexOrder(~0u), Initializer(nullptr),
+          AssociatedData(nullptr) {}
+    Structor(int Priority, unsigned LexOrder, llvm::Constant *Initializer,
              llvm::Constant *AssociatedData)
-        : Priority(Priority), Initializer(Initializer),
+        : Priority(Priority), LexOrder(LexOrder), Initializer(Initializer),
           AssociatedData(AssociatedData) {}
     int Priority;
+    unsigned LexOrder;
     llvm::Constant *Initializer;
     llvm::Constant *AssociatedData;
   };
 
   typedef std::vector<Structor> CtorList;
 
+  enum NoLoopXteamErr {
+    NxSuccess,
+    NxNonSPMD,
+    NxOptionDisabled,
+    NxUnsupportedDirective,
+    NxUnsupportedSplitDirective,
+    NxNoStmt,
+    NxUnsupportedTargetClause,
+    NxNotLoopDirective,
+    NxNotCapturedStmt,
+    NxNotExecutableStmt,
+    NxUnsupportedNestedSplitDirective,
+    NxSplitConstructImproperlyNested,
+    NxNestedOmpDirective,
+    NxNestedOmpCall,
+    NxNoSingleForStmt,
+    NxUnsupportedLoopInit,
+    NxUnsupportedLoopStop,
+    NxUnsupportedLoopStep,
+    NxGuidedOrRuntimeSched,
+    NxNonUnitStaticChunk,
+    NxNonConcurrentOrder,
+    NxUnsupportedRedType,
+    NxUnsupportedRedIntSize,
+    NxNotScalarRed,
+    NxNotBinOpRed,
+    NxUnsupportedRedOp,
+    NxNoRedVar,
+    NxMultRedVar,
+    NxUnsupportedRedExpr,
+    NxUnsupportedXteamRedThreadLimit
+  };
+
+  /// Top-level and nested OpenMP directives that may use no-loop codegen.
+  using NoLoopIntermediateStmts =
+      llvm::SmallVector<const OMPExecutableDirective *, 3>;
+  /// Map construct statement to the intermediate ones for no-loop codegen
+  using NoLoopKernelMap = llvm::DenseMap<const Stmt *, NoLoopIntermediateStmts>;
+
+  struct BigJumpLoopKernelInfo {
+    BigJumpLoopKernelInfo(int BlkSz, NoLoopIntermediateStmts Stmts)
+        : BlockSize{BlkSz}, BigJumpLoopIntStmts{Stmts} {}
+
+    int BlockSize;
+    NoLoopIntermediateStmts BigJumpLoopIntStmts;
+  };
+  using BigJumpLoopKernelMap =
+      llvm::DenseMap<const Stmt *, BigJumpLoopKernelInfo>;
+
+  /// Map a reduction variable to the corresponding metadata. The metadata
+  /// contains
+  // the reduction expression, the coorresponding Xteam local aggregator var,
+  // and the start arg position in the offloading function signature.
+  struct XteamRedVarInfo {
+    XteamRedVarInfo(const Expr *E, Address A, size_t Pos)
+        : RedVarExpr{E}, RedVarAddr{A}, ArgPos{Pos} {}
+    XteamRedVarInfo() = delete;
+    const Expr *RedVarExpr;
+    Address RedVarAddr;
+    size_t ArgPos;
+  };
+  using XteamRedVarMap = llvm::DenseMap<const VarDecl *, XteamRedVarInfo>;
+  struct XteamRedKernelInfo {
+    XteamRedKernelInfo(llvm::Value *TSI, llvm::Value *NT, int BlkSz,
+                       NoLoopIntermediateStmts Stmts, XteamRedVarMap RVM)
+        : ThreadStartIndex{TSI}, NumTeams{NT}, BlockSize{BlkSz},
+          XteamIntStmts{Stmts}, XteamRedVars{RVM} {}
+
+    llvm::Value *ThreadStartIndex;
+    llvm::Value *NumTeams;
+    int BlockSize;
+    NoLoopIntermediateStmts XteamIntStmts;
+    XteamRedVarMap XteamRedVars;
+  };
+  using XteamRedKernelMap = llvm::DenseMap<const Stmt *, XteamRedKernelInfo>;
+
 private:
   ASTContext &Context;
   const LangOptions &LangOpts;
+  IntrusiveRefCntPtr<llvm::vfs::FileSystem> FS; // Only used for debug info.
   const HeaderSearchOptions &HeaderSearchOpts; // Only used for debug info.
   const PreprocessorOptions &PreprocessorOpts; // Only used for debug info.
   const CodeGenOptions &CodeGenOpts;
@@ -302,7 +388,11 @@ private:
   std::unique_ptr<CGCXXABI> ABI;
   llvm::LLVMContext &VMContext;
   std::string ModuleNameHash;
+  bool CXX20ModuleInits = false;
   std::unique_ptr<CodeGenTBAA> TBAA;
+
+  /// Used by emitParallelCall
+  bool isSPMDExecutionMode = false;
 
   mutable std::unique_ptr<TargetCodeGenInfo> TheTargetCodeGenInfo;
 
@@ -318,6 +408,7 @@ private:
   std::unique_ptr<CGOpenCLRuntime> OpenCLRuntime;
   std::unique_ptr<CGOpenMPRuntime> OpenMPRuntime;
   std::unique_ptr<CGCUDARuntime> CUDARuntime;
+  std::unique_ptr<CGHLSLRuntime> HLSLRuntime;
   std::unique_ptr<CGDebugInfo> DebugInfo;
   std::unique_ptr<ObjCEntrypoints> ObjCData;
   llvm::MDNode *NoObjCARCExceptionsMetadata = nullptr;
@@ -325,8 +416,12 @@ private:
   InstrProfStats PGOStats;
   std::unique_ptr<llvm::SanitizerStatReport> SanStats;
 
-  /// A set of OpenMP directives for which no-loop kernels are generated.
-  llvm::SmallPtrSet<const Stmt *, 1> NoLoopKernels;
+  /// Statement for which Xteam reduction code is being generated currently
+  const Stmt *CurrentXteamRedStmt = nullptr;
+
+  NoLoopKernelMap NoLoopKernels;
+  BigJumpLoopKernelMap BigJumpLoopKernels;
+  XteamRedKernelMap XteamRedKernels;
 
   // A set of references that have only been seen via a weakref so far. This is
   // used to remove the weak of the reference if we ever see a direct reference
@@ -344,14 +439,29 @@ private:
   std::vector<GlobalDecl> DeferredDeclsToEmit;
   void addDeferredDeclToEmit(GlobalDecl GD) {
     DeferredDeclsToEmit.emplace_back(GD);
+    addEmittedDeferredDecl(GD);
+  }
+
+  /// Decls that were DeferredDecls and have now been emitted.
+  llvm::DenseMap<llvm::StringRef, GlobalDecl> EmittedDeferredDecls;
+
+  void addEmittedDeferredDecl(GlobalDecl GD) {
+    if (!llvm::isa<FunctionDecl>(GD.getDecl()))
+      return;
+    llvm::GlobalVariable::LinkageTypes L = getFunctionLinkage(GD);
+    if (llvm::GlobalValue::isLinkOnceLinkage(L) ||
+        llvm::GlobalValue::isWeakLinkage(L)) {
+      EmittedDeferredDecls[getMangledName(GD)] = GD;
+    }
   }
 
   /// List of alias we have emitted. Used to make sure that what they point to
   /// is defined once we get to the end of the of the translation unit.
   std::vector<GlobalDecl> Aliases;
 
-  /// List of multiversion functions that have to be emitted.  Used to make sure
-  /// we properly emit the iFunc.
+  /// List of multiversion functions to be emitted. This list is processed in
+  /// conjunction with other deferred symbols and is used to ensure that
+  /// multiversion function resolvers and ifuncs are defined and emitted.
   std::vector<GlobalDecl> MultiVersionFuncs;
 
   typedef llvm::StringMap<llvm::TrackingVH<llvm::Constant> > ReplacementsTy;
@@ -408,6 +518,8 @@ private:
   llvm::StringMap<llvm::GlobalVariable *> CFConstantStringMap;
 
   llvm::DenseMap<llvm::Constant *, llvm::GlobalVariable *> ConstantStringMap;
+  llvm::DenseMap<const UnnamedGlobalConstantDecl *, llvm::GlobalVariable *>
+      UnnamedGlobalConstantDeclMap;
   llvm::DenseMap<const Decl*, llvm::Constant *> StaticLocalDeclMap;
   llvm::DenseMap<const Decl*, llvm::GlobalVariable*> StaticLocalDeclGuardMap;
   llvm::DenseMap<const Expr*, llvm::Constant *> MaterializedGlobalTemporaryMap;
@@ -511,6 +623,7 @@ private:
   void createOpenCLRuntime();
   void createOpenMPRuntime();
   void createCUDARuntime();
+  void createHLSLRuntime();
 
   bool isTriviallyRecursive(const FunctionDecl *F);
   bool shouldEmitFunction(GlobalDecl GD);
@@ -563,8 +676,16 @@ private:
   MetadataTypeMap VirtualMetadataIdMap;
   MetadataTypeMap GeneralizedMetadataIdMap;
 
+  llvm::DenseMap<const llvm::Constant *, llvm::GlobalVariable *> RTTIProxyMap;
+
+  // Helps squashing blocks of TopLevelStmtDecl into a single llvm::Function
+  // when used with -fincremental-extensions.
+  std::pair<std::unique_ptr<CodeGenFunction>, const TopLevelStmtDecl *>
+      GlobalTopLevelStmtBlockInFlight;
+
 public:
-  CodeGenModule(ASTContext &C, const HeaderSearchOptions &headersearchopts,
+  CodeGenModule(ASTContext &C, IntrusiveRefCntPtr<llvm::vfs::FileSystem> FS,
+                const HeaderSearchOptions &headersearchopts,
                 const PreprocessorOptions &ppopts,
                 const CodeGenOptions &CodeGenOpts, llvm::Module &M,
                 DiagnosticsEngine &Diags,
@@ -591,6 +712,9 @@ public:
 
   const std::string &getModuleNameHash() const { return ModuleNameHash; }
 
+  void setIsSPMDExecutionMode(bool isSPMD) { isSPMDExecutionMode = isSPMD; }
+  bool IsSPMDExecutionMode() { return isSPMDExecutionMode; }
+
   /// Return a reference to the configured OpenCL runtime.
   CGOpenCLRuntime &getOpenCLRuntime() {
     assert(OpenCLRuntime != nullptr);
@@ -607,6 +731,12 @@ public:
   CGCUDARuntime &getCUDARuntime() {
     assert(CUDARuntime != nullptr);
     return *CUDARuntime;
+  }
+
+  /// Return a reference to the configured HLSL runtime.
+  CGHLSLRuntime &getHLSLRuntime() {
+    assert(HLSLRuntime != nullptr);
+    return *HLSLRuntime;
   }
 
   ObjCEntrypoints &getObjCEntrypoints() const {
@@ -680,12 +810,16 @@ public:
 
   llvm::MDNode *getNoObjCARCExceptionsMetadata() {
     if (!NoObjCARCExceptionsMetadata)
-      NoObjCARCExceptionsMetadata = llvm::MDNode::get(getLLVMContext(), None);
+      NoObjCARCExceptionsMetadata =
+          llvm::MDNode::get(getLLVMContext(), std::nullopt);
     return NoObjCARCExceptionsMetadata;
   }
 
   ASTContext &getContext() const { return Context; }
   const LangOptions &getLangOpts() const { return LangOpts; }
+  const IntrusiveRefCntPtr<llvm::vfs::FileSystem> &getFileSystem() const {
+    return FS;
+  }
   const HeaderSearchOptions &getHeaderSearchOpts()
     const { return HeaderSearchOpts; }
   const PreprocessorOptions &getPreprocessorOpts()
@@ -713,6 +847,10 @@ public:
   CodeGenVTables &getVTables() { return VTables; }
 
   ItaniumVTableContext &getItaniumVTableContext() {
+    return VTables.getItaniumVTableContext();
+  }
+
+  const ItaniumVTableContext &getItaniumVTableContext() const {
     return VTables.getItaniumVTableContext();
   }
 
@@ -788,6 +926,14 @@ public:
 
   void setDSOLocal(llvm::GlobalValue *GV) const;
 
+  bool shouldMapVisibilityToDLLExport(const NamedDecl *D) const {
+    return getLangOpts().hasDefaultVisibilityExportMapping() && D &&
+           (D->getLinkageAndVisibility().getVisibility() ==
+            DefaultVisibility) &&
+           (getLangOpts().isAllDefaultVisibilityExportMapping() ||
+            (getLangOpts().isExplicitDefaultVisibilityExportMapping() &&
+             D->getLinkageAndVisibility().isVisibilityExplicit()));
+  }
   void setDLLImportDLLExport(llvm::GlobalValue *GV, GlobalDecl D) const;
   void setDLLImportDLLExport(llvm::GlobalValue *GV, const NamedDecl *D) const;
   /// Set visibility, dllimport/dllexport and dso_local.
@@ -824,11 +970,13 @@ public:
   llvm::GlobalVariable *
   CreateOrReplaceCXXRuntimeVariable(StringRef Name, llvm::Type *Ty,
                                     llvm::GlobalValue::LinkageTypes Linkage,
-                                    unsigned Alignment);
+                                    llvm::Align Alignment);
 
   llvm::Function *CreateGlobalInitOrCleanUpFunction(
       llvm::FunctionType *ty, const Twine &name, const CGFunctionInfo &FI,
-      SourceLocation Loc = SourceLocation(), bool TLS = false);
+      SourceLocation Loc = SourceLocation(), bool TLS = false,
+      llvm::GlobalVariable::LinkageTypes Linkage =
+          llvm::GlobalVariable::InternalLinkage);
 
   /// Return the AST address space of the underlying global variable for D, as
   /// determined by its declaration. Normally this is the same as the address
@@ -874,6 +1022,10 @@ public:
 
   /// Get the address of a GUID.
   ConstantAddress GetAddrOfMSGuidDecl(const MSGuidDecl *GD);
+
+  /// Get the address of a UnnamedGlobalConstant
+  ConstantAddress
+  GetAddrOfUnnamedGlobalConstantDecl(const UnnamedGlobalConstantDecl *GCD);
 
   /// Get the address of a template parameter object.
   ConstantAddress
@@ -1027,7 +1179,8 @@ public:
   llvm::Constant *getBuiltinLibFunction(const FunctionDecl *FD,
                                         unsigned BuiltinID);
 
-  llvm::Function *getIntrinsic(unsigned IID, ArrayRef<llvm::Type*> Tys = None);
+  llvm::Function *getIntrinsic(unsigned IID,
+                               ArrayRef<llvm::Type *> Tys = std::nullopt);
 
   /// Emit code for a single top level declaration.
   void EmitTopLevelDecl(Decl *D);
@@ -1215,6 +1368,7 @@ public:
 
   StringRef getMangledName(GlobalDecl GD);
   StringRef getBlockMangledName(GlobalDecl GD, const BlockDecl *BD);
+  const GlobalDecl getMangledNameDecl(StringRef);
 
   void EmitTentativeDefinition(const VarDecl *D);
 
@@ -1289,8 +1443,9 @@ public:
   bool isInNoSanitizeList(SanitizerMask Kind, llvm::Function *Fn,
                           SourceLocation Loc) const;
 
-  bool isInNoSanitizeList(llvm::GlobalVariable *GV, SourceLocation Loc,
-                          QualType Ty, StringRef Category = StringRef()) const;
+  bool isInNoSanitizeList(SanitizerMask Kind, llvm::GlobalVariable *GV,
+                          SourceLocation Loc, QualType Ty,
+                          StringRef Category = StringRef()) const;
 
   /// Imbue XRay attributes to a function, applying the always/never attribute
   /// lists in the process. Returns true if we did imbue attributes this way,
@@ -1298,9 +1453,16 @@ public:
   bool imbueXRayAttrs(llvm::Function *Fn, SourceLocation Loc,
                       StringRef Category = StringRef()) const;
 
-  /// Returns true if function at the given location should be excluded from
-  /// profile instrumentation.
-  bool isProfileInstrExcluded(llvm::Function *Fn, SourceLocation Loc) const;
+  /// \returns true if \p Fn at \p Loc should be excluded from profile
+  /// instrumentation by the SCL passed by \p -fprofile-list.
+  ProfileList::ExclusionType
+  isFunctionBlockedByProfileList(llvm::Function *Fn, SourceLocation Loc) const;
+
+  /// \returns true if \p Fn at \p Loc should be excluded from profile
+  /// instrumentation.
+  ProfileList::ExclusionType
+  isFunctionBlockedFromProfileInstr(llvm::Function *Fn,
+                                    SourceLocation Loc) const;
 
   SanitizerMetadata *getSanitizerMetadata() {
     return SanitizerMD.get();
@@ -1348,15 +1510,18 @@ public:
   /// \param D The allocate declaration
   void EmitOMPAllocateDecl(const OMPAllocateDecl *D);
 
+  /// Return the alignment specified in an allocate directive, if present.
+  std::optional<CharUnits> getOMPAllocateAlignment(const VarDecl *VD);
+
   /// Returns whether the given record has hidden LTO visibility and therefore
   /// may participate in (single-module) CFI and whole-program vtable
   /// optimization.
   bool HasHiddenLTOVisibility(const CXXRecordDecl *RD);
 
-  /// Returns whether the given record has public std LTO visibility
-  /// and therefore may not participate in (single-module) CFI and whole-program
-  /// vtable optimization.
-  bool HasLTOVisibilityPublicStd(const CXXRecordDecl *RD);
+  /// Returns whether the given record has public LTO visibility (regardless of
+  /// -lto-whole-program-visibility) and therefore may not participate in
+  /// (single-module) CFI and whole-program vtable optimization.
+  bool AlwaysHasLTOVisibilityPublic(const CXXRecordDecl *RD);
 
   /// Returns the vcall visibility of the given type. This is the scope in which
   /// a virtual function call could be made which ends up being dispatched to a
@@ -1373,8 +1538,13 @@ public:
                               llvm::GlobalVariable *VTable,
                               const VTableLayout &VTLayout);
 
+  llvm::Type *getVTableComponentType() const;
+
   /// Generate a cross-DSO type identifier for MD.
   llvm::ConstantInt *CreateCrossDsoCfiTypeId(llvm::Metadata *MD);
+
+  /// Generate a KCFI type identifier for T.
+  llvm::ConstantInt *CreateKCFITypeId(QualType T);
 
   /// Create a metadata identifier for the given type. This may either be an
   /// MDString (for external identifiers) or a distinct unnamed MDNode (for
@@ -1394,9 +1564,16 @@ public:
   void CreateFunctionTypeMetadataForIcall(const FunctionDecl *FD,
                                           llvm::Function *F);
 
+  /// Set type metadata to the given function.
+  void setKCFIType(const FunctionDecl *FD, llvm::Function *F);
+
+  /// Emit KCFI type identifier constants and remove unused identifiers.
+  void finalizeKCFITypes();
+
   /// Whether this function's return type has no side effects, and thus may
   /// be trivially discarded if it is unused.
-  bool MayDropFunctionReturn(const ASTContext &Context, QualType ReturnType);
+  bool MayDropFunctionReturn(const ASTContext &Context,
+                             QualType ReturnType) const;
 
   /// Returns whether this module needs the "all-vtables" type identifier.
   bool NeedAllVtablesTypeId() const;
@@ -1412,6 +1589,9 @@ public:
   /// including C itself, that does not have any bases.
   std::vector<const CXXRecordDecl *>
   getMostBaseClasses(const CXXRecordDecl *RD);
+
+  llvm::GlobalVariable *
+  GetOrCreateRTTIProxyGlobalVariable(llvm::Constant *Addr);
 
   /// Get the declaration of std::terminate for the platform.
   llvm::FunctionCallee getTerminateFn();
@@ -1431,7 +1611,7 @@ public:
   /// \param FN is a pointer to IR function being generated.
   /// \param FD is a pointer to function declaration if any.
   /// \param CGF is a pointer to CodeGenFunction that generates this function.
-  void GenOpenCLArgMetadata(llvm::Function *FN,
+  void GenKernelArgMetadata(llvm::Function *FN,
                             const FunctionDecl *FD = nullptr,
                             CodeGenFunction *CGF = nullptr);
 
@@ -1449,9 +1629,26 @@ public:
                                            TBAAAccessInfo *TBAAInfo = nullptr);
   bool stopAutoInit();
 
-  /// Print the postfix for externalized static variable for single source
-  /// offloading languages CUDA and HIP.
-  void printPostfixForExternalizedStaticVar(llvm::raw_ostream &OS) const;
+  /// Print the postfix for externalized static variable or kernels for single
+  /// source offloading languages CUDA and HIP. The unique postfix is created
+  /// using either the CUID argument, or the file's UniqueID and active macros.
+  /// The fallback method without a CUID requires that the offloading toolchain
+  /// does not define separate macros via the -cc1 options.
+  void printPostfixForExternalizedDecl(llvm::raw_ostream &OS,
+                                       const Decl *D) const;
+
+  // Should be called under debug mode for printing analysis result.
+  void emitNxResult(std::string StatusMsg, const OMPExecutableDirective &D,
+                    NoLoopXteamErr Status);
+
+  /// Given the schedule clause, can No-Loop code be generated?
+  NoLoopXteamErr getNoLoopCompatibleSchedStatus(const OMPLoopDirective &LD);
+
+  /// Given the order clause, can No-Loop code be generated?
+  NoLoopXteamErr getNoLoopCompatibleOrderStatus(const OMPLoopDirective &LD);
+
+  NoLoopXteamErr
+  getXteamRedCompatibleThreadLimitStatus(const OMPLoopDirective &LD);
 
   /// Helper functions for generating a NoLoop kernel
   /// For a captured statement, get the single For statement, if it exists,
@@ -1459,23 +1656,140 @@ public:
   const ForStmt *getSingleForStmt(const Stmt *S);
 
   /// Does the loop init qualify for a NoLoop kernel?
-  bool checkDeclStmt(const ForStmt &FStmt);
-  bool checkInitExpr(const ForStmt &FStmt);
-  bool checkLoopInit(const ForStmt &FStmt);
+  const VarDecl *checkLoopInit(const OMPLoopDirective &LD);
 
   /// Does the loop increment qualify for a NoLoop kernel?
-  bool checkLoopStep(const ForStmt &FStmt);
+  bool checkLoopStep(const Expr *Inc, const VarDecl *VD);
 
   /// Does the loop condition qualify for a NoLoop kernel?
-  bool checkLoopStop(const ForStmt &FStmt);
+  bool checkLoopStop(const OMPLoopDirective &, const ForStmt &);
 
-  /// Are we able to generate a NoLoop kernel for this directive?
-  bool isGeneratingNoLoopKernel(const OMPExecutableDirective &D);
+  /// If the step is a binary expression, extract and return the step.
+  /// If the step is a unary expression, return nullptr.
+  const Expr *getBinaryExprStep(const Expr *Inc, const VarDecl *VD);
 
-  /// Utility routines for tracking a NoLoop kernel
-  void setNoLoopKernel(const Stmt *S) { NoLoopKernels.insert(S); }
+  /// If we are able to generate a NoLoop kernel for this directive, return
+  /// true, otherwise return false. If successful, a map is created from the
+  /// top-level statement to the intermediate statements. For a combined
+  /// construct, there are no intermediate statements. Used for a combined
+  /// construct
+  NoLoopXteamErr checkAndSetNoLoopKernel(const OMPExecutableDirective &D);
+
+  /// Given a top-level target construct for no-loop codegen, get the
+  /// intermediate OpenMP constructs
+  const NoLoopIntermediateStmts &getNoLoopStmts(const Stmt *S) {
+    assert(isNoLoopKernel(S));
+    return NoLoopKernels.find(S)->second;
+  }
+
+  /// Erase no-loop related metadata for the input statement
   void resetNoLoopKernel(const Stmt *S) { NoLoopKernels.erase(S); }
-  bool isNoLoopKernel(const Stmt *S) { return NoLoopKernels.contains(S); }
+  /// Are we generating no-loop kernel for the input statement
+  bool isNoLoopKernel(const Stmt *S) {
+    return NoLoopKernels.find(S) != NoLoopKernels.end();
+  }
+
+  /// Given a top-level target construct for BigJumpLoop codegen, get the
+  /// intermediate OpenMP constructs.
+  const NoLoopIntermediateStmts &getBigJumpLoopStmts(const Stmt *S) {
+    assert(isBigJumpLoopKernel(S));
+    return BigJumpLoopKernels.find(S)->second.BigJumpLoopIntStmts;
+  }
+
+  /// Get the cached blocksize to be used for this BigJumpLoop kernel.
+  int getBigJumpLoopBlockSize(const Stmt *S) {
+    assert(isBigJumpLoopKernel(S));
+    return BigJumpLoopKernels.find(S)->second.BlockSize;
+  }
+
+  /// Erase BigJumpLoop related metadata for the input statement.
+  void resetBigJumpLoopKernel(const Stmt *S) { BigJumpLoopKernels.erase(S); }
+  /// Is a BigJumpLoop kernel generated for the input statement?
+  bool isBigJumpLoopKernel(const Stmt *S) {
+    return BigJumpLoopKernels.find(S) != BigJumpLoopKernels.end();
+  }
+
+  /// If we are able to generate a Xteam reduction kernel for this directive,
+  /// return true, otherwise return false. If successful, metadata for the
+  /// reduction variables are created for subsequent codegen phases to work on.
+  NoLoopXteamErr checkAndSetXteamRedKernel(const OMPExecutableDirective &D);
+
+  /// Compute the block size to be used for a kernel
+  int getWorkGroupSizeSPMDHelper(const OMPExecutableDirective &D);
+
+  /// Given a ForStmt for which Xteam codegen will be done, return the
+  /// intermediate statements for a split directive.
+  const NoLoopIntermediateStmts &getXteamRedStmts(const Stmt *S) {
+    assert(isXteamRedKernel(S));
+    return XteamRedKernels.find(S)->second.XteamIntStmts;
+  }
+
+  /// Given a ForStmt for which Xteam codegen will be done, return the
+  /// corresponding metadata
+  XteamRedVarMap &getXteamRedVarMap(const Stmt *S) {
+    assert(isXteamRedKernel(S));
+    return XteamRedKernels.find(S)->second.XteamRedVars;
+  }
+
+  llvm::Value *getXteamRedThreadStartIndex(const Stmt *S) {
+    assert(isXteamRedKernel(S));
+    return XteamRedKernels.find(S)->second.ThreadStartIndex;
+  }
+
+  llvm::Value *getXteamRedNumTeams(const Stmt *S) {
+    assert(isXteamRedKernel(S));
+    return XteamRedKernels.find(S)->second.NumTeams;
+  }
+
+  /// Given a ForStmt for which Xteam codegen will be done, update the metadata.
+  /// \p VD is the reduction variable for which metadata is updated.
+  void updateXteamRedVarMap(const Stmt *S, const VarDecl *VD, const Expr *RVE,
+                            Address AggVarAddr) {
+    assert(isXteamRedKernel(S));
+    XteamRedVarMap &RVM = getXteamRedVarMap(S);
+    assert(RVM.find(VD) != RVM.end());
+    RVM.find(VD)->second.RedVarExpr = RVE;
+    RVM.find(VD)->second.RedVarAddr = AggVarAddr;
+    // Another API is used to set ArgPos
+  }
+
+  void updateXteamRedVarArgPos(XteamRedVarInfo *RVInfo, size_t ArgP) {
+    assert(RVInfo);
+    RVInfo->ArgPos = ArgP;
+  }
+
+  void updateXteamRedKernel(const Stmt *S, llvm::Value *ThdIndex,
+                            llvm::Value *NTeams) {
+    assert(isXteamRedKernel(S));
+    auto &KernelInfo = XteamRedKernels.find(S)->second;
+    KernelInfo.ThreadStartIndex = ThdIndex;
+    KernelInfo.NumTeams = NTeams;
+  }
+
+  void updateXteamRedKernel(const Stmt *S, int BlkSz) {
+    assert(isXteamRedKernel(S));
+    XteamRedKernels.find(S)->second.BlockSize = BlkSz;
+  }
+
+  // Get the already-computed block size used by Xteam reduction
+  int getXteamRedBlockSize(const ForStmt *FStmt);
+  int getXteamRedBlockSize(const OMPExecutableDirective &D);
+
+  /// Erase spec-red related metadata for the input statement
+  void resetXteamRedKernel(const Stmt *S) { XteamRedKernels.erase(S); }
+  /// Are we generating xteam reduction kernel for the statement
+  bool isXteamRedKernel(const Stmt *S) {
+    return XteamRedKernels.find(S) != XteamRedKernels.end();
+  }
+  bool isXteamRedKernel(const OMPExecutableDirective &D);
+
+  void setCurrentXteamRedStmt(const Stmt *S) { CurrentXteamRedStmt = S; }
+  const Stmt *getCurrentXteamRedStmt() { return CurrentXteamRedStmt; }
+
+  /// Move some lazily-emitted states to the NewBuilder. This is especially
+  /// essential for the incremental parsing environment like Clang Interpreter,
+  /// because we'll lose all important information after each repl.
+  void moveLazyEmissionStates(CodeGenModule *NewBuilder);
 
 private:
   llvm::Constant *GetOrCreateLLVMFunction(
@@ -1484,9 +1798,18 @@ private:
       llvm::AttributeList ExtraAttrs = llvm::AttributeList(),
       ForDefinition_t IsForDefinition = NotForDefinition);
 
-  llvm::Constant *GetOrCreateMultiVersionResolver(GlobalDecl GD,
-                                                  llvm::Type *DeclTy,
-                                                  const FunctionDecl *FD);
+  // References to multiversion functions are resolved through an implicitly
+  // defined resolver function. This function is responsible for creating
+  // the resolver symbol for the provided declaration. The value returned
+  // will be for an ifunc (llvm::GlobalIFunc) if the current target supports
+  // that feature and for a regular function (llvm::GlobalValue) otherwise.
+  llvm::Constant *GetOrCreateMultiVersionResolver(GlobalDecl GD);
+
+  // In scenarios where a function is not known to be a multiversion function
+  // until a later declaration, it is sometimes necessary to change the
+  // previously created mangled name to align with requirements of whatever
+  // multiversion function kind the function is now known to be. This function
+  // is responsible for performing such mangled name updates.
   void UpdateMultiVersionNames(GlobalDecl GD, const FunctionDecl *FD,
                                StringRef &CurName);
 
@@ -1513,7 +1836,6 @@ private:
   void EmitAliasDefinition(GlobalDecl GD);
   void emitIFuncDefinition(GlobalDecl GD);
   void emitCPUDispatchDefinition(GlobalDecl GD);
-  void EmitTargetClonesResolver(GlobalDecl GD);
   void EmitObjCPropertyImplementations(const ObjCImplementationDecl *D);
   void EmitObjCIvarInitializations(ObjCImplementationDecl *D);
 
@@ -1521,9 +1843,13 @@ private:
 
   void EmitDeclContext(const DeclContext *DC);
   void EmitLinkageSpec(const LinkageSpecDecl *D);
+  void EmitTopLevelStmt(const TopLevelStmtDecl *D);
 
   /// Emit the function that initializes C++ thread_local variables.
   void EmitCXXThreadLocalInitFunc();
+
+  /// Emit the function that initializes global variables for a C++ Module.
+  void EmitCXXModuleInitFunc(clang::Module *Primary);
 
   /// Emit the function that initializes C++ globals.
   void EmitCXXGlobalInitFunc();
@@ -1542,6 +1868,7 @@ private:
 
   // FIXME: Hardcoding priority here is gross.
   void AddGlobalCtor(llvm::Function *Ctor, int Priority = 65535,
+                     unsigned LexOrder = ~0U,
                      llvm::Constant *AssociatedData = nullptr);
   void AddGlobalDtor(llvm::Function *Dtor, int Priority = 65535,
                      bool IsDtorAttrFunc = false);
@@ -1579,6 +1906,7 @@ private:
   // registered by the atexit subroutine using unatexit.
   void unregisterGlobalDtorsWithUnAtExit();
 
+  /// Emit deferred multiversion function resolvers and associated variants.
   void emitMultiVersionFunctions();
 
   /// Emit any vtables which we deferred and still have a use for.
@@ -1591,8 +1919,21 @@ private:
   /// Emit the llvm.used and llvm.compiler.used metadata.
   void emitLLVMUsed();
 
+  /// For C++20 Itanium ABI, emit the initializers for the module.
+  void EmitModuleInitializers(clang::Module *Primary);
+
   /// Emit the link options introduced by imported modules.
   void EmitModuleLinkOptions();
+
+  /// Helper function for EmitStaticExternCAliases() to redirect ifuncs that
+  /// have a resolver name that matches 'Elem' to instead resolve to the name of
+  /// 'CppFunc'. This redirection is necessary in cases where 'Elem' has a name
+  /// that will be emitted as an alias of the name bound to 'CppFunc'; ifuncs
+  /// may not reference aliases. Redirection is only performed if 'Elem' is only
+  /// used by ifuncs in which case, 'Elem' is destroyed. 'true' is returned if
+  /// redirection is successful, and 'false' is returned otherwise.
+  bool CheckAndReplaceExternCIFuncs(llvm::GlobalValue *Elem,
+                                    llvm::GlobalValue *CppFunc);
 
   /// Emit aliases for internal-linkage declarations inside "C" language
   /// linkage specifications, giving them the "expected" name where possible.
@@ -1640,6 +1981,42 @@ private:
 
   llvm::Metadata *CreateMetadataIdentifierImpl(QualType T, MetadataTypeMap &Map,
                                                StringRef Suffix);
+
+  /// Top level checker for no-loop on the for statement
+  NoLoopXteamErr getNoLoopForStmtStatus(const OMPExecutableDirective &,
+                                        const Stmt *);
+
+  // Compute the block size used by Xteam reduction
+  int computeXteamRedBlockSize(const OMPExecutableDirective &D);
+
+  /// Top level checker for xteam reduction of the loop
+  NoLoopXteamErr getXteamRedForStmtStatus(const OMPExecutableDirective &,
+                                          const Stmt *, const XteamRedVarMap &);
+
+  /// Used for a target construct
+  NoLoopXteamErr
+  checkAndSetNoLoopTargetConstruct(const OMPExecutableDirective &D);
+
+  /// Are clauses on a combined OpenMP construct compatible with no-loop
+  /// codegen?
+  NoLoopXteamErr
+  getNoLoopCombinedClausesStatus(const OMPExecutableDirective &D);
+
+  /// Are clauses on a combined OpenMP construct compatible with xteam
+  /// reduction codegen?
+  NoLoopXteamErr
+  getXteamRedCombinedClausesStatus(const OMPExecutableDirective &D);
+
+  /// Collect the reduction variables that may satisfy Xteam criteria
+  std::pair<NoLoopXteamErr, CodeGenModule::XteamRedVarMap>
+  collectXteamRedVars(const OMPExecutableDirective &D);
+
+  /// Populate the map used for no-loop codegen
+  void setNoLoopKernel(const Stmt *S,
+                       NoLoopIntermediateStmts IntermediateStmts) {
+    assert(!isNoLoopKernel(S) && "No-Loop already set");
+    NoLoopKernels[S] = IntermediateStmts;
+  }
 };
 
 }  // end namespace CodeGen

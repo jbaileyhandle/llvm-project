@@ -26,7 +26,8 @@ def ExynosM5Model : SchedMachineModel {
 
   list<Predicate> UnsupportedFeatures = !listconcat(SVEUnsupported.F,
                                                     PAUnsupported.F,
-                                                    SMEUnsupported.F);
+                                                    SMEUnsupported.F,
+                                                    [HasMTE]);
 }
 
 //===----------------------------------------------------------------------===//
@@ -650,6 +651,7 @@ def : InstRW<[M5WriteA1X], (instrs CSELXr, CSINCXr, CSINVXr, CSNEGXr)>;
 
 // Move instructions.
 def : InstRW<[M5WriteCOPY], (instrs COPY)>;
+def : InstRW<[M5WriteCOPY], (instrs PRED_COPY)>;
 def : InstRW<[M5WriteZ0],   (instrs ADR, ADRP)>;
 def : InstRW<[M5WriteZ0],   (instregex "^MOV[NZ][WX]i$")>;
 

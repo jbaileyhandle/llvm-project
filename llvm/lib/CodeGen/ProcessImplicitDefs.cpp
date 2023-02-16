@@ -46,6 +46,11 @@ public:
   void getAnalysisUsage(AnalysisUsage &au) const override;
 
   bool runOnMachineFunction(MachineFunction &MF) override;
+
+  MachineFunctionProperties getRequiredProperties() const override {
+    return MachineFunctionProperties().set(
+        MachineFunctionProperties::Property::IsSSA);
+  }
 };
 } // end anonymous namespace
 
@@ -77,7 +82,7 @@ void ProcessImplicitDefs::processImplicitDef(MachineInstr *MI) {
   LLVM_DEBUG(dbgs() << "Processing " << *MI);
   Register Reg = MI->getOperand(0).getReg();
 
-  if (Register::isVirtualRegister(Reg)) {
+  if (Reg.isVirtual()) {
     // For virtual registers, mark all uses as <undef>, and convert users to
     // implicit-def when possible.
     for (MachineOperand &MO : MRI->use_nodbg_operands(Reg)) {
@@ -103,8 +108,7 @@ void ProcessImplicitDefs::processImplicitDef(MachineInstr *MI) {
       if (!MO.isReg())
         continue;
       Register UserReg = MO.getReg();
-      if (!Register::isPhysicalRegister(UserReg) ||
-          !TRI->regsOverlap(Reg, UserReg))
+      if (!UserReg.isPhysical() || !TRI->regsOverlap(Reg, UserReg))
         continue;
       // UserMI uses or redefines Reg. Set <undef> flags on all uses.
       Found = true;
@@ -141,7 +145,6 @@ bool ProcessImplicitDefs::runOnMachineFunction(MachineFunction &MF) {
   TII = MF.getSubtarget().getInstrInfo();
   TRI = MF.getSubtarget().getRegisterInfo();
   MRI = &MF.getRegInfo();
-  assert(MRI->isSSA() && "ProcessImplicitDefs only works on SSA form.");
   assert(WorkList.empty() && "Inconsistent worklist state");
 
   for (MachineBasicBlock &MBB : MF) {

@@ -1,5 +1,5 @@
-// RUN: %clang_cc1 -triple arm64-linux-gnu -emit-llvm -o - %s | FileCheck --check-prefix=CHECK --check-prefix=CHECK-LE %s
-// RUN: %clang_cc1 -triple aarch64_be-linux-gnu -emit-llvm -o - %s | FileCheck --check-prefix=CHECK --check-prefix=CHECK-BE %s
+// RUN: %clang_cc1 -no-opaque-pointers -triple arm64-linux-gnu -emit-llvm -o - %s | FileCheck --check-prefix=CHECK --check-prefix=CHECK-LE %s
+// RUN: %clang_cc1 -no-opaque-pointers -triple aarch64_be-linux-gnu -emit-llvm -o - %s | FileCheck --check-prefix=CHECK --check-prefix=CHECK-BE %s
 
 #include <stdarg.h>
 
@@ -894,4 +894,10 @@ void check_start(int n, ...) {
 // CHECK: call void @llvm.va_start(i8* [[VOIDP_THE_LIST]])
 }
 
-
+typedef struct {} empty;
+empty empty_record_test(void) {
+// CHECK-LABEL: define{{.*}} void @empty_record_test()
+  return va_arg(the_list, empty);
+// CHECK: [[GR_OFFS:%[a-z_0-9]+]] = load i8*, i8** getelementptr inbounds (%struct.__va_list, %struct.__va_list* @the_list, i32 0, i32 0)
+// CHECK: [[ADDR:%[a-z._0-9]+]] = bitcast i8* [[GR_OFFS]] to %struct.empty*
+}

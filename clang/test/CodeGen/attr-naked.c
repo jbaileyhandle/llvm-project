@@ -27,7 +27,7 @@ __attribute((naked)) void t3(int x) {
 // variably-modified type. Naked functions get no prolog, so this evaluation
 // should not take place.
 __attribute__((naked)) void t4(int len, char x[len]) {
-  // CHECK: define{{.*}} void @t4(i32 noundef{{.*}}, i8* noundef{{.*}})
+  // CHECK: define{{.*}} void @t4(i32 noundef{{.*}}, ptr noundef{{.*}})
   // CHECK: unreachable
 }
 

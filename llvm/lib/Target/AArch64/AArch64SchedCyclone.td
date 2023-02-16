@@ -20,7 +20,8 @@ def CycloneModel : SchedMachineModel {
 
   list<Predicate> UnsupportedFeatures = !listconcat(SVEUnsupported.F,
                                                     PAUnsupported.F,
-                                                    SMEUnsupported.F);
+                                                    SMEUnsupported.F,
+                                                    [HasMTE]);
 }
 
 //===----------------------------------------------------------------------===//
@@ -126,7 +127,7 @@ def WriteMov      : SchedWriteVariant<[
                       SchedVar<WriteIMovPred, [WriteX]>,
                       SchedVar<WriteVMovPred, [WriteX]>,
                       SchedVar<NoSchedPred,   [WriteI]>]>;
-def : InstRW<[WriteMov], (instrs COPY,ORRXrr,ADDXrr)>;
+def : InstRW<[WriteMov], (instrs COPY,PRED_COPY,ORRXrr,ADDXrr)>;
 
 // Move non-zero immediate is an integer ALU op.
 // MOVN,MOVZ,MOVK

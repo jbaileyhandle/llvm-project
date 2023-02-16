@@ -15,13 +15,16 @@
 
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <list>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <thread>
 #include <vector>
 
+#include "ExclusiveAccess.h"
 #include "omptarget.h"
 #include "rtl.h"
 
@@ -98,6 +101,11 @@ private:
     /// mechanism for D2H, and if the event cannot be shared between them, Event
     /// should be written as <tt>void *Event[2]</tt>.
     void *Event = nullptr;
+
+    /// Number of threads currently holding a reference to the entry at a
+    /// targetDataEnd. This is used to ensure that only the last thread that
+    /// references this entry will actually delete it.
+    int32_t DataEndThreadCount = 0;
   };
   // When HostDataToTargetTy is used by std::set, std::set::iterator is const
   // use unique_ptr to make States mutable.
@@ -139,6 +147,18 @@ public:
   /// Returns OFFLOAD_FAIL if something went wrong, OFFLOAD_SUCCESS otherwise.
   int addEventIfNecessary(DeviceTy &Device, AsyncInfoTy &AsyncInfo) const;
 
+  /// Functions that manages the number of threads referencing the entry in a
+  /// targetDataEnd.
+  void incDataEndThreadCount() { ++States->DataEndThreadCount; }
+
+  [[nodiscard]] int32_t decDataEndThreadCount() {
+    return --States->DataEndThreadCount;
+  }
+
+  [[nodiscard]] int32_t getDataEndThreadCount() const {
+    return States->DataEndThreadCount;
+  }
+
   /// Set the event bound to this data map.
   void setEvent(void *Event) const { States->Event = Event; }
 
@@ -173,7 +193,7 @@ public:
       if (ThisRefCount > 0)
         --ThisRefCount;
       else
-        assert(OtherRefCount > 0 && "total refcount underflow");
+        assert(OtherRefCount >= 0 && "total refcount underflow");
     }
     return getTotalRefCount();
   }
@@ -217,19 +237,31 @@ public:
   void unlock() const { States->UpdateMtx.unlock(); }
 };
 
-typedef uintptr_t HstPtrBeginTy;
-inline bool operator<(const HostDataToTargetTy &lhs, const HstPtrBeginTy &rhs) {
-  return lhs.HstPtrBegin < rhs;
-}
-inline bool operator<(const HstPtrBeginTy &lhs, const HostDataToTargetTy &rhs) {
-  return lhs < rhs.HstPtrBegin;
-}
-inline bool operator<(const HostDataToTargetTy &lhs,
-                      const HostDataToTargetTy &rhs) {
-  return lhs.HstPtrBegin < rhs.HstPtrBegin;
-}
+/// Wrapper around the HostDataToTargetTy to be used in the HDTT map. In
+/// addition to the HDTT pointer we store the key value explicitly. This
+/// allows the set to inspect (sort/search/...) this entry without an additional
+/// load of HDTT. HDTT is a pointer to allow the modification of the set without
+/// invalidating HDTT entries which can now be inspected at the same time.
+struct HostDataToTargetMapKeyTy {
+  uintptr_t KeyValue;
 
-typedef std::set<HostDataToTargetTy, std::less<>> HostDataToTargetListTy;
+  HostDataToTargetMapKeyTy(void *Key) : KeyValue(uintptr_t(Key)) {}
+  HostDataToTargetMapKeyTy(HostDataToTargetTy *HDTT)
+      : KeyValue(HDTT->HstPtrBegin), HDTT(HDTT) {}
+  HostDataToTargetTy *HDTT;
+};
+inline bool operator<(const HostDataToTargetMapKeyTy &LHS,
+                      const uintptr_t &RHS) {
+  return LHS.KeyValue < RHS;
+}
+inline bool operator<(const uintptr_t &LHS,
+                      const HostDataToTargetMapKeyTy &RHS) {
+  return LHS < RHS.KeyValue;
+}
+inline bool operator<(const HostDataToTargetMapKeyTy &LHS,
+                      const HostDataToTargetMapKeyTy &RHS) {
+  return LHS.KeyValue < RHS.KeyValue;
+}
 
 struct LookupResult {
   struct {
@@ -238,7 +270,8 @@ struct LookupResult {
     unsigned ExtendsAfter : 1;
   } Flags;
 
-  HostDataToTargetListTy::iterator Entry;
+  /// The corresponding map table entry which is stable.
+  HostDataToTargetTy *Entry = nullptr;
 
   LookupResult() : Flags({0, 0, 0}), Entry() {}
 };
@@ -251,10 +284,16 @@ struct TargetPointerResultTy {
     unsigned IsNewEntry : 1;
     /// If the pointer is actually a host pointer (when unified memory enabled)
     unsigned IsHostPointer : 1;
-  } Flags = {0, 0};
+    /// If the pointer is present in the mapping table.
+    unsigned IsPresent : 1;
+  } Flags = {0, 0, 0};
 
-  /// The iterator to the corresponding map table entry
-  HostDataToTargetListTy::iterator MapTableEntry{};
+  bool isPresent() const { return Flags.IsPresent; }
+
+  bool isHostPointer() const { return Flags.IsHostPointer; }
+
+  /// The corresponding map table entry which is stable.
+  HostDataToTargetTy *Entry = nullptr;
 
   /// The corresponding target pointer
   void *TargetPointer = nullptr;
@@ -280,21 +319,37 @@ struct DeviceTy {
   int32_t DeviceID;
   RTLInfoTy *RTL;
   int32_t RTLDeviceID;
+  /// The physical number of processors that may concurrently execute a team
+  /// For cuda, this is number of SMs, for amdgcn, this is number of CUs.
+  /// This field is used by ompx_get_team_procs(devid).
+  int32_t TeamProcs;
 
   bool IsInit;
   std::once_flag InitFlag;
   bool HasPendingGlobals;
 
-  HostDataToTargetListTy HostDataToTargetMap;
+  /// Host data to device map type with a wrapper key indirection that allows
+  /// concurrent modification of the entries without invalidating the underlying
+  /// entries.
+  using HostDataToTargetListTy =
+      std::set<HostDataToTargetMapKeyTy, std::less<>>;
+
+  /// The HDTTMap is a protected object that can only be accessed by one thread
+  /// at a time.
+  ProtectedObj<HostDataToTargetListTy> HostDataToTargetMap;
+
+  /// The type used to access the HDTT map.
+  using HDTTMapAccessorTy = decltype(HostDataToTargetMap)::AccessorTy;
+
   PendingCtorsDtorsPerLibrary PendingCtorsDtors;
 
   ShadowPtrListTy ShadowPtrMap;
 
-  std::mutex DataMapMtx, PendingGlobalsMtx, ShadowMtx;
+  std::mutex PendingGlobalsMtx, ShadowMtx;
 
-  // NOTE: Once libomp gains full target-task support, this state should be
-  // moved into the target task in libomp.
-  std::map<int32_t, uint64_t> LoopTripCnt;
+  /// Flag to force synchronous data transfers
+  /// Controlled via environment flag OMPX_FORCE_SYNC_REGIONS
+  bool ForceSynchronousTargetRegions;
 
   DeviceTy(RTLInfoTy *RTL);
   // DeviceTy is not copyable
@@ -306,7 +361,11 @@ struct DeviceTy {
   // Return true if data can be copied to DstDevice directly
   bool isDataExchangable(const DeviceTy &DstDevice);
 
-  LookupResult lookupMapping(void *HstPtrBegin, int64_t Size);
+  /// Lookup the mapping of \p HstPtrBegin in \p HDTTMap. The accessor ensures
+  /// exclusive access to the HDTT map.
+  LookupResult lookupMapping(HDTTMapAccessorTy &HDTTMap, void *HstPtrBegin,
+                             int64_t Size);
+
   /// Get the target pointer based on host pointer begin and base. If the
   /// mapping already exists, the target pointer will be returned directly. In
   /// addition, if required, the memory region pointed by \p HstPtrBegin of size
@@ -323,26 +382,50 @@ struct DeviceTy {
                    bool HasFlagAlways, bool IsImplicit, bool UpdateRefCount,
                    bool HasCloseModifier, bool HasPresentModifier,
                    bool HasHoldModifier, AsyncInfoTy &AsyncInfo);
-  void *getTgtPtrBegin(void *HstPtrBegin, int64_t Size);
-  TargetPointerResultTy getTgtPtrBegin(void *HstPtrBegin, int64_t Size,
-                                       bool &IsLast, bool UpdateRefCount,
-                                       bool UseHoldRefCount, bool &IsHostPtr,
-                                       bool MustContain = false,
-                                       bool ForceDelete = false);
-  /// For the map entry for \p HstPtrBegin, decrement the reference count
-  /// specified by \p HasHoldModifier and, if the the total reference count is
-  /// then zero, deallocate the corresponding device storage and remove the map
-  /// entry.  Return \c OFFLOAD_SUCCESS if the map entry existed, and return
-  /// \c OFFLOAD_FAIL if not.  It is the caller's responsibility to skip calling
-  /// this function if the map entry is not expected to exist because
-  /// \p HstPtrBegin uses shared memory.
-  int deallocTgtPtr(void *HstPtrBegin, int64_t Size, bool HasHoldModifier);
+
+  /// Return the target pointer for \p HstPtrBegin in \p HDTTMap. The accessor
+  /// ensures exclusive access to the HDTT map.
+  void *getTgtPtrBegin(HDTTMapAccessorTy &HDTTMap, void *HstPtrBegin,
+                       int64_t Size);
+
+  /// Return the target pointer begin (where the data will be moved).
+  /// Used by targetDataBegin, targetDataEnd, targetDataUpdate and target.
+  /// - \p UpdateRefCount and \p UseHoldRefCount controls which and if the entry
+  /// reference counters will be decremented.
+  /// - \p MustContain enforces that the query must not extend beyond an already
+  /// mapped entry to be valid.
+  /// - \p ForceDelete deletes the entry regardless of its reference counting
+  /// (unless it is infinite).
+  /// - \p FromDataEnd tracks the number of threads referencing the entry at
+  /// targetDataEnd for delayed deletion purpose.
+  [[nodiscard]] TargetPointerResultTy
+  getTgtPtrBegin(void *HstPtrBegin, int64_t Size, bool &IsLast,
+                 bool UpdateRefCount, bool UseHoldRefCount, bool &IsHostPtr,
+                 bool MustContain = false, bool ForceDelete = false,
+                 bool FromDataEnd = false);
+
+  /// Remove the \p Entry from the data map. Expect the entry's total reference
+  /// count to be zero and the caller thread to be the last one using it. \p
+  /// HDTTMap ensure the caller holds exclusive access and can modify the map.
+  /// Return \c OFFLOAD_SUCCESS if the map entry existed, and return \c
+  /// OFFLOAD_FAIL if not. It is the caller's responsibility to skip calling
+  /// this function if the map entry is not expected to exist because \p
+  /// HstPtrBegin uses shared memory.
+  [[nodiscard]] int eraseMapEntry(HDTTMapAccessorTy &HDTTMap,
+                                  HostDataToTargetTy *Entry, int64_t Size);
+
+  /// Deallocate the \p Entry from the device memory and delete it. Return \c
+  /// OFFLOAD_SUCCESS if the deallocation operations executed successfully, and
+  /// return \c OFFLOAD_FAIL otherwise.
+  [[nodiscard]] int deallocTgtPtrAndEntry(HostDataToTargetTy *Entry,
+                                          int64_t Size);
+
   int associatePtr(void *HstPtrBegin, void *TgtPtrBegin, int64_t Size);
   int disassociatePtr(void *HstPtrBegin);
 
   // calls to RTL
   int32_t initOnce();
-  __tgt_target_table *load_binary(void *Img);
+  __tgt_target_table *loadBinary(void *Img);
 
   // device memory allocation/deallocation routines
   /// Allocates \p Size bytes on the device, host or shared memory space
@@ -356,8 +439,9 @@ struct DeviceTy {
   void *allocData(int64_t Size, void *HstPtr = nullptr,
                   int32_t Kind = TARGET_ALLOC_DEFAULT);
   /// Deallocates memory which \p TgtPtrBegin points at and returns
-  /// OFFLOAD_SUCCESS/OFFLOAD_FAIL when succeeds/fails.
-  int32_t deleteData(void *TgtPtrBegin);
+  /// OFFLOAD_SUCCESS/OFFLOAD_FAIL when succeeds/fails. p Kind dictates what
+  /// allocator should be used (host, shared, device).
+  int32_t deleteData(void *TgtPtrBegin, int32_t Kind = TARGET_ALLOC_DEFAULT);
 
   // Data transfer. When AsyncInfo is nullptr, the transfer will be
   // synchronous.
@@ -371,16 +455,28 @@ struct DeviceTy {
   int32_t dataExchange(void *SrcPtr, DeviceTy &DstDev, void *DstPtr,
                        int64_t Size, AsyncInfoTy &AsyncInfo);
 
-  int32_t runRegion(void *TgtEntryPtr, void **TgtVarsPtr, ptrdiff_t *TgtOffsets,
-                    int32_t TgtVarsSize, AsyncInfoTy &AsyncInfo);
-  int32_t runTeamRegion(void *TgtEntryPtr, void **TgtVarsPtr,
-                        ptrdiff_t *TgtOffsets, int32_t TgtVarsSize,
-                        int32_t NumTeams, int32_t ThreadLimit,
-                        uint64_t LoopTripCount, AsyncInfoTy &AsyncInfo);
+  /// Notify the plugin about a new mapping starting at the host address
+  /// \p HstPtr and \p Size bytes.
+  int32_t notifyDataMapped(void *HstPtr, int64_t Size);
+
+  /// Notify the plugin about an existing mapping being unmapped starting at
+  /// the host address \p HstPtr.
+  int32_t notifyDataUnmapped(void *HstPtr);
+
+  // Launch the kernel identified by \p TgtEntryPtr with the given arguments.
+  int32_t launchKernel(void *TgtEntryPtr, void **TgtVarsPtr,
+                       ptrdiff_t *TgtOffsets, const KernelArgsTy &KernelArgs,
+                       AsyncInfoTy &AsyncInfo);
 
   /// Synchronize device/queue/event based on \p AsyncInfo and return
   /// OFFLOAD_SUCCESS/OFFLOAD_FAIL when succeeds/fails.
   int32_t synchronize(AsyncInfoTy &AsyncInfo);
+
+  /// Query for device/queue/event based completion on \p AsyncInfo in a
+  /// non-blocking manner and return OFFLOAD_SUCCESS/OFFLOAD_FAIL when
+  /// succeeds/fails. Must be called multiple times until AsyncInfo is
+  /// completed and AsyncInfo.isDone() returns true.
+  int32_t queryAsync(AsyncInfoTy &AsyncInfo);
 
   /// Calls the corresponding print in the \p RTLDEVID
   /// device RTL to obtain the information of the specific device.
@@ -406,6 +502,9 @@ struct DeviceTy {
 
   /// Destroy the event.
   int32_t destroyEvent(void *Event);
+
+  void setTeamProcs(int32_t num_team_procs) { TeamProcs = num_team_procs; }
+  int32_t getTeamProcs() { return TeamProcs; }
   /// }
 
 private:
@@ -416,7 +515,7 @@ private:
   void deinit();
 };
 
-extern bool device_is_ready(int device_num);
+extern bool deviceIsReady(int DeviceNum);
 
 /// Struct for the data required to handle plugins
 struct PluginManager {
@@ -425,6 +524,10 @@ struct PluginManager {
 
   /// RTLs identified on the host
   RTLsTy RTLs;
+
+  /// Executable images and information extracted from the input images passed
+  /// to the runtime.
+  std::list<std::pair<__tgt_device_image, __tgt_image_info>> Images;
 
   /// Devices associated with RTLs
   std::vector<std::unique_ptr<DeviceTy>> Devices;
@@ -447,6 +550,31 @@ struct PluginManager {
   /// Flag to indicate if we use events to ensure the atomicity of
   /// map clauses or not. Can be modified with an environment variable.
   const bool UseEventsForAtomicTransfers;
+
+  // Work around for plugins that call dlopen on shared libraries that call
+  // tgt_register_lib during their initialisation. Stash the pointers in a
+  // vector until the plugins are all initialised and then register them.
+  bool maybeDelayRegisterLib(__tgt_bin_desc *Desc) {
+    if (!RTLsLoaded) {
+      // Only reachable from libomptarget constructor
+      DelayedBinDesc.push_back(Desc);
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  void registerDelayedLibraries() {
+    // Only called by libomptarget constructor
+    RTLsLoaded = true;
+    for (auto *Desc : DelayedBinDesc)
+      __tgt_register_lib(Desc);
+    DelayedBinDesc.clear();
+  }
+
+private:
+  bool RTLsLoaded = false;
+  llvm::SmallVector<__tgt_bin_desc *> DelayedBinDesc;
 };
 
 extern PluginManager *PM;

@@ -13,10 +13,10 @@
 #include "ARM.h"
 
 #include "ARMCallLowering.h"
-#include "ARMLegalizerInfo.h"
-#include "ARMRegisterBankInfo.h"
 #include "ARMFrameLowering.h"
 #include "ARMInstrInfo.h"
+#include "ARMLegalizerInfo.h"
+#include "ARMRegisterBankInfo.h"
 #include "ARMSubtarget.h"
 #include "ARMTargetMachine.h"
 #include "MCTargetDesc/ARMMCTargetDesc.h"
@@ -24,9 +24,9 @@
 #include "Thumb1InstrInfo.h"
 #include "Thumb2InstrInfo.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/GlobalISel/InstructionSelect.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
@@ -34,9 +34,10 @@
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/ARMTargetParser.h"
-#include "llvm/Support/TargetParser.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/ARMTargetParser.h"
+#include "llvm/TargetParser/TargetParser.h"
+#include "llvm/TargetParser/Triple.h"
 
 using namespace llvm;
 
@@ -56,12 +57,11 @@ enum ITMode {
 };
 
 static cl::opt<ITMode>
-IT(cl::desc("IT block support"), cl::Hidden, cl::init(DefaultIT),
-   cl::ZeroOrMore,
-   cl::values(clEnumValN(DefaultIT, "arm-default-it",
-                         "Generate any type of IT block"),
-              clEnumValN(RestrictedIT, "arm-restrict-it",
-                         "Disallow complex IT blocks")));
+    IT(cl::desc("IT block support"), cl::Hidden, cl::init(DefaultIT),
+       cl::values(clEnumValN(DefaultIT, "arm-default-it",
+                             "Generate any type of IT block"),
+                  clEnumValN(RestrictedIT, "arm-restrict-it",
+                             "Disallow complex IT blocks")));
 
 /// ForceFastISel - Use the fast-isel, even for subtargets where it is not
 /// currently supported (for testing only).
@@ -393,6 +393,14 @@ bool ARMSubtarget::enableSubRegLiveness() const {
   return hasMVEIntegerOps();
 }
 
+bool ARMSubtarget::enableMachinePipeliner() const {
+  // Enable the MachinePipeliner before register allocation for subtargets
+  // with the use-mipipeliner feature.
+  return getSchedModel().hasInstrSchedModel() && useMachinePipeliner();
+}
+
+bool ARMSubtarget::useDFAforSMS() const { return false; }
+
 // This overrides the PostRAScheduler bit in the SchedModel for any CPU.
 bool ARMSubtarget::enablePostRAScheduler() const {
   if (enableMachineScheduler())
@@ -482,4 +490,13 @@ bool ARMSubtarget::ignoreCSRForAllocationOrder(const MachineFunction &MF,
   // they are CSR because usually push/pop can be folded into existing ones.
   return isThumb2() && MF.getFunction().hasMinSize() &&
          ARM::GPRRegClass.contains(PhysReg);
+}
+
+bool ARMSubtarget::splitFramePointerPush(const MachineFunction &MF) const {
+  const Function &F = MF.getFunction();
+  if (!MF.getTarget().getMCAsmInfo()->usesWindowsCFI() ||
+      !F.needsUnwindTableEntry())
+    return false;
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  return MFI.hasVarSizedObjects() || getRegisterInfo()->hasStackRealignment(MF);
 }

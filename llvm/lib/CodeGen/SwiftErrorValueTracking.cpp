@@ -202,11 +202,10 @@ void SwiftErrorValueTracking::propagateVRegs() {
       // downward defs.
       bool needPHI =
           VRegs.size() >= 1 &&
-          llvm::find_if(
+          llvm::any_of(
               VRegs,
               [&](const std::pair<const MachineBasicBlock *, Register> &V)
-                  -> bool { return V.second != VRegs[0].second; }) !=
-              VRegs.end();
+                  -> bool { return V.second != VRegs[0].second; });
 
       // If there is no upwards exposed used and we don't need a phi just
       // forward the swifterror vreg from the predecessor(s).
@@ -229,9 +228,8 @@ void SwiftErrorValueTracking::propagateVRegs() {
         assert(!VRegs.empty() &&
                "No predecessors?  Is the Calling Convention correct?");
         Register DestReg = UUseVReg;
-        BuildMI(*MBB, MBB->getFirstNonPHI(), DLoc, TII->get(TargetOpcode::COPY),
-                DestReg)
-            .addReg(VRegs[0].second);
+        TII->buildCopy(*MBB, MBB->getFirstNonPHI(), DLoc, DestReg,
+                       VRegs[0].second);
         continue;
       }
 
@@ -267,7 +265,7 @@ void SwiftErrorValueTracking::preassignVRegs(
     if (auto *CB = dyn_cast<CallBase>(&*It)) {
       // A call-site with a swifterror argument is both use and def.
       const Value *SwiftErrorAddr = nullptr;
-      for (auto &Arg : CB->args()) {
+      for (const auto &Arg : CB->args()) {
         if (!Arg->isSwiftError())
           continue;
         // Use of swifterror.

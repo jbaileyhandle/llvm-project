@@ -1875,6 +1875,11 @@ TEST_F(FormatTestJS, Modules) {
                                               " myX} from 'm';");
   verifyFormat("import * as lib from 'some/module.js';");
   verifyFormat("var x = {import: 1};\nx.import = 2;");
+  // Ensure an import statement inside a block is at the correct level.
+  verifyFormat("function() {\n"
+               "  var x;\n"
+               "  import 'some/module.js';\n"
+               "}");
 
   verifyFormat("export function fn() {\n"
                "  return 'fn';\n"
@@ -2140,6 +2145,9 @@ TEST_F(FormatTestJS, NestedTemplateStrings) {
 
   // Crashed at some point.
   verifyFormat("}");
+  verifyFormat("`");
+  // FIXME: still crashing?
+  // verifyFormat("`\\");
 }
 
 TEST_F(FormatTestJS, TaggedTemplateStrings) {

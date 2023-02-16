@@ -31,12 +31,10 @@ using namespace llvm;
 /// ScalarOpts library.
 void llvm::initializeScalarOpts(PassRegistry &Registry) {
   initializeADCELegacyPassPass(Registry);
-  initializeAnnotationRemarksLegacyPass(Registry);
   initializeBDCELegacyPassPass(Registry);
   initializeAlignmentFromAssumptionsPass(Registry);
   initializeCallSiteSplittingLegacyPassPass(Registry);
   initializeConstantHoistingLegacyPassPass(Registry);
-  initializeConstraintEliminationPass(Registry);
   initializeCorrelatedValuePropagationPass(Registry);
   initializeDCELegacyPassPass(Registry);
   initializeDivRemPairsLegacyPassPass(Registry);
@@ -73,8 +71,6 @@ void llvm::initializeScalarOpts(PassRegistry &Registry) {
   initializeLoopRerollLegacyPassPass(Registry);
   initializeLoopUnrollPass(Registry);
   initializeLoopUnrollAndJamPass(Registry);
-  initializeLoopUnswitchPass(Registry);
-  initializeWarnMissedTransformationsLegacyPass(Registry);
   initializeLoopVersioningLICMLegacyPassPass(Registry);
   initializeLoopIdiomRecognizeLegacyPassPass(Registry);
   initializeLowerAtomicLegacyPassPass(Registry);
@@ -108,12 +104,7 @@ void llvm::initializeScalarOpts(PassRegistry &Registry) {
   initializePlaceBackedgeSafepointsImplPass(Registry);
   initializePlaceSafepointsPass(Registry);
   initializeFloat2IntLegacyPassPass(Registry);
-  initializeLoopDistributeLegacyPass(Registry);
-  initializeLoopLoadEliminationPass(Registry);
   initializeLoopSimplifyCFGLegacyPassPass(Registry);
-  initializeLoopVersioningLegacyPassPass(Registry);
-  initializeEntryExitInstrumenterPass(Registry);
-  initializePostInlineEntryExitInstrumenterPass(Registry);
 }
 
 void LLVMAddLoopSimplifyCFGPass(LLVMPassManagerRef PM) {
@@ -210,10 +201,6 @@ void LLVMAddLoopUnrollPass(LLVMPassManagerRef PM) {
 
 void LLVMAddLoopUnrollAndJamPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createLoopUnrollAndJamPass());
-}
-
-void LLVMAddLoopUnswitchPass(LLVMPassManagerRef PM) {
-  unwrap(PM)->add(createLoopUnswitchPass());
 }
 
 void LLVMAddLowerAtomicPass(LLVMPassManagerRef PM) {

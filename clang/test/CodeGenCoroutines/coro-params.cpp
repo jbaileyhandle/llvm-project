@@ -2,7 +2,7 @@
 // Verifies that parameter copies are destroyed
 // Vefifies that parameter copies are used in the body of the coroutine
 // Verifies that parameter copies are used to construct the promise type, if that type has a matching constructor
-// RUN: %clang_cc1 -std=c++20 -triple=x86_64-unknown-linux-gnu -emit-llvm -o - %s -disable-llvm-passes -fexceptions | FileCheck %s
+// RUN: %clang_cc1 -no-opaque-pointers -std=c++20 -triple=x86_64-unknown-linux-gnu -emit-llvm -o - %s -disable-llvm-passes -fexceptions | FileCheck %s
 
 namespace std {
 template <typename... T> struct coroutine_traits;
@@ -64,8 +64,8 @@ void consume(int,int,int) noexcept;
 // TODO: Add support for CopyOnly params
 // CHECK: define{{.*}} void @_Z1fi8MoveOnly11MoveAndCopy(i32 noundef %val, %struct.MoveOnly* noundef %[[MoParam:.+]], %struct.MoveAndCopy* noundef %[[McParam:.+]]) #0 personality i8* bitcast (i32 (...)* @__gxx_personality_v0 to i8*
 void f(int val, MoveOnly moParam, MoveAndCopy mcParam) {
-  // CHECK: %[[MoCopy:.+]] = alloca %struct.MoveOnly
-  // CHECK: %[[McCopy:.+]] = alloca %struct.MoveAndCopy
+  // CHECK: %[[MoCopy:.+]] = alloca %struct.MoveOnly,
+  // CHECK: %[[McCopy:.+]] = alloca %struct.MoveAndCopy,
   // CHECK: store i32 %val, i32* %[[ValAddr:.+]]
 
   // CHECK: call i8* @llvm.coro.begin(
@@ -110,7 +110,7 @@ void f(int val, MoveOnly moParam, MoveAndCopy mcParam) {
 // CHECK-LABEL: void @_Z16dependent_paramsI1A1BEvT_T0_S3_(%struct.A* noundef %x, %struct.B* noundef %0, %struct.B* noundef %y)
 template <typename T, typename U>
 void dependent_params(T x, U, U y) {
-  // CHECK: %[[x_copy:.+]] = alloca %struct.A
+  // CHECK: %[[x_copy:.+]] = alloca %struct.A,
   // CHECK-NEXT: %[[unnamed_copy:.+]] = alloca %struct.B
   // CHECK-NEXT: %[[y_copy:.+]] = alloca %struct.B
 

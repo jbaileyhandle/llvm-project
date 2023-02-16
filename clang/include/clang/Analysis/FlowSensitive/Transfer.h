@@ -15,6 +15,7 @@
 #define LLVM_CLANG_ANALYSIS_FLOWSENSITIVE_TRANSFER_H
 
 #include "clang/AST/Stmt.h"
+#include "clang/Analysis/FlowSensitive/DataflowAnalysisContext.h"
 #include "clang/Analysis/FlowSensitive/DataflowEnvironment.h"
 
 namespace clang {
@@ -35,7 +36,7 @@ public:
 ///
 /// Requirements:
 ///
-///  The type of `S` must not be `ParenExpr`.
+///  `S` must not be `ParenExpr` or `ExprWithCleanups`.
 void transfer(const StmtToEnvMap &StmtToEnv, const Stmt &S, Environment &Env);
 
 } // namespace dataflow

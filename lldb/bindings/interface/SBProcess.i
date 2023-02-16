@@ -345,6 +345,12 @@ public:
     GetDescription (lldb::SBStream &description);
 
     %feature("autodoc", "
+    Returns the implementation object of the process plugin if available. None
+    otherwise.") GetScriptedImplementation;
+    ScriptedObject
+    GetScriptedImplementation();
+
+    %feature("autodoc", "
     Returns the process' extended crash information.") GetExtendedCrashInformation;
     lldb::SBStructuredData
     GetExtendedCrashInformation ();
@@ -398,6 +404,9 @@ public:
     IsInstrumentationRuntimePresent(lldb::InstrumentationRuntimeType type);
 
     lldb::SBError
+    SaveCore(const char *file_name, const char *flavor, lldb::SaveCoreStyle core_style);
+
+    lldb::SBError
     SaveCore(const char *file_name);
 
     lldb::SBError
@@ -419,7 +428,7 @@ public:
 
     %feature("autodoc", "
     Allocates a block of memory within the process, with size and
-    access permissions specified in the arguments. The permisssions
+    access permissions specified in the arguments. The permissions
     argument is an or-combination of zero or more of
     lldb.ePermissionsWritable, lldb.ePermissionsReadable, and
     lldb.ePermissionsExecutable. Returns the address
@@ -478,8 +487,11 @@ public:
                 return 0
 
             def __getitem__(self, key):
-                if type(key) is int and key < len(self):
-                    return self.sbprocess.GetThreadAtIndex(key)
+                if isinstance(key, int):
+                    count = len(self)
+                    if -count <= key < count:
+                        key %= count
+                        return self.sbprocess.GetThreadAtIndex(key)
                 return None
 
         def get_threads_access_object(self):

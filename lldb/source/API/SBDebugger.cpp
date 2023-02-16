@@ -27,6 +27,7 @@
 #include "lldb/API/SBStructuredData.h"
 #include "lldb/API/SBTarget.h"
 #include "lldb/API/SBThread.h"
+#include "lldb/API/SBTrace.h"
 #include "lldb/API/SBTypeCategory.h"
 #include "lldb/API/SBTypeFilter.h"
 #include "lldb/API/SBTypeFormat.h"
@@ -50,6 +51,7 @@
 #include "lldb/Target/Process.h"
 #include "lldb/Target/TargetList.h"
 #include "lldb/Utility/Args.h"
+#include "lldb/Utility/Diagnostics.h"
 #include "lldb/Utility/State.h"
 #include "lldb/Version/Version.h"
 
@@ -57,6 +59,8 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/PrettyStackTrace.h"
+#include "llvm/Support/Signals.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -153,6 +157,7 @@ const char *SBDebugger::GetProgressFromEvent(const lldb::SBEvent &event,
                                              uint64_t &total,
                                              bool &is_debugger_specific) {
   LLDB_INSTRUMENT_VA(event);
+
   const ProgressEventData *progress_data =
       ProgressEventData::GetEventDataFromEvent(event.get());
   if (progress_data == nullptr)
@@ -161,26 +166,37 @@ const char *SBDebugger::GetProgressFromEvent(const lldb::SBEvent &event,
   completed = progress_data->GetCompleted();
   total = progress_data->GetTotal();
   is_debugger_specific = progress_data->IsDebuggerSpecific();
-  return progress_data->GetMessage().c_str();
+  ConstString message(progress_data->GetMessage());
+  return message.AsCString();
+}
+
+lldb::SBStructuredData
+SBDebugger::GetProgressDataFromEvent(const lldb::SBEvent &event) {
+  LLDB_INSTRUMENT_VA(event);
+
+  StructuredData::DictionarySP dictionary_sp =
+      ProgressEventData::GetAsStructuredData(event.get());
+
+  if (!dictionary_sp)
+    return {};
+
+  SBStructuredData data;
+  data.m_impl_up->SetObjectSP(std::move(dictionary_sp));
+  return data;
 }
 
 lldb::SBStructuredData
 SBDebugger::GetDiagnosticFromEvent(const lldb::SBEvent &event) {
   LLDB_INSTRUMENT_VA(event);
 
-  const DiagnosticEventData *diagnostic_data =
-      DiagnosticEventData::GetEventDataFromEvent(event.get());
-  if (!diagnostic_data)
+  StructuredData::DictionarySP dictionary_sp =
+      DiagnosticEventData::GetAsStructuredData(event.get());
+
+  if (!dictionary_sp)
     return {};
 
-  auto dictionary = std::make_unique<StructuredData::Dictionary>();
-  dictionary->AddStringItem("message", diagnostic_data->GetMessage());
-  dictionary->AddStringItem("type", diagnostic_data->GetPrefix());
-  dictionary->AddBooleanItem("debugger_specific",
-                             diagnostic_data->IsDebuggerSpecific());
-
   SBStructuredData data;
-  data.m_impl_up->SetObjectSP(std::move(dictionary));
+  data.m_impl_up->SetObjectSP(std::move(dictionary_sp));
   return data;
 }
 
@@ -204,6 +220,25 @@ lldb::SBError SBDebugger::InitializeWithErrorHandling() {
     error.SetError(Status(std::move(e)));
   }
   return error;
+}
+
+void SBDebugger::PrintStackTraceOnError() {
+  LLDB_INSTRUMENT();
+
+  llvm::EnablePrettyStackTrace();
+  static std::string executable =
+      llvm::sys::fs::getMainExecutable(nullptr, nullptr);
+  llvm::sys::PrintStackTraceOnErrorSignal(executable);
+}
+
+static void DumpDiagnostics(void *cookie) {
+  Diagnostics::Instance().Dump(llvm::errs());
+}
+
+void SBDebugger::PrintDiagnosticsOnError() {
+  LLDB_INSTRUMENT();
+
+  llvm::sys::AddSignalHandler(&DumpDiagnostics, nullptr);
 }
 
 void SBDebugger::Terminate() {
@@ -365,7 +400,11 @@ SBError SBDebugger::SetInputFile(SBFile file) {
     error.ref().SetErrorString("invalid debugger");
     return error;
   }
-  error.SetError(m_opaque_sp->SetInputFile(file.m_opaque_sp));
+  if (!file) {
+    error.ref().SetErrorString("invalid file");
+    return error;
+  }
+  m_opaque_sp->SetInputFile(file.m_opaque_sp);
   return error;
 }
 
@@ -422,6 +461,29 @@ SBError SBDebugger::SetErrorFile(SBFile file) {
   }
   m_opaque_sp->SetErrorFile(file.m_opaque_sp);
   return error;
+}
+
+lldb::SBStructuredData SBDebugger::GetSetting(const char *setting) {
+  LLDB_INSTRUMENT_VA(this, setting);
+
+  SBStructuredData data;
+  if (!m_opaque_sp)
+    return data;
+
+  StreamString json_strm;
+  ExecutionContext exe_ctx(
+      m_opaque_sp->GetCommandInterpreter().GetExecutionContext());
+  if (setting && strlen(setting) > 0)
+    m_opaque_sp->DumpPropertyValue(&exe_ctx, json_strm, setting,
+                                   /*dump_mask*/ 0,
+                                   /*is_json*/ true);
+  else
+    m_opaque_sp->DumpAllPropertyValues(&exe_ctx, json_strm, /*dump_mask*/ 0,
+                                       /*is_json*/ true);
+
+  data.m_impl_up->SetObjectSP(
+      StructuredData::ParseJSON(json_strm.GetString().str()));
+  return data;
 }
 
 FILE *SBDebugger::GetInputFileHandle() {
@@ -1353,9 +1415,7 @@ void SBDebugger::SetPrompt(const char *prompt) {
 const char *SBDebugger::GetReproducerPath() const {
   LLDB_INSTRUMENT_VA(this);
 
-  return (m_opaque_sp
-              ? ConstString(m_opaque_sp->GetReproducerPath()).GetCString()
-              : nullptr);
+  return "GetReproducerPath has been deprecated";
 }
 
 ScriptLanguage SBDebugger::GetScriptLanguage() const {
@@ -1449,21 +1509,11 @@ SBError SBDebugger::SetCurrentPlatform(const char *platform_name_cstr) {
   SBError sb_error;
   if (m_opaque_sp) {
     if (platform_name_cstr && platform_name_cstr[0]) {
-      ConstString platform_name(platform_name_cstr);
-      PlatformSP platform_sp(Platform::Find(platform_name));
-
-      if (platform_sp) {
-        // Already have a platform with this name, just select it
-        m_opaque_sp->GetPlatformList().SetSelectedPlatform(platform_sp);
-      } else {
-        // We don't have a platform by this name yet, create one
-        platform_sp = Platform::Create(platform_name, sb_error.ref());
-        if (platform_sp) {
-          // We created the platform, now append and select it
-          bool make_selected = true;
-          m_opaque_sp->GetPlatformList().Append(platform_sp, make_selected);
-        }
-      }
+      PlatformList &platforms = m_opaque_sp->GetPlatformList();
+      if (PlatformSP platform_sp = platforms.GetOrCreate(platform_name_cstr))
+        platforms.SetSelectedPlatform(platform_sp);
+      else
+        sb_error.ref().SetErrorString("platform not found");
     } else {
       sb_error.ref().SetErrorString("invalid platform name");
     }
@@ -1607,7 +1657,7 @@ static llvm::ArrayRef<const char *> GetCategoryArray(const char **categories) {
   size_t len = 0;
   while (categories[len] != nullptr)
     ++len;
-  return llvm::makeArrayRef(categories, len);
+  return llvm::ArrayRef(categories, len);
 }
 
 bool SBDebugger::EnableLog(const char *channel, const char **categories) {
@@ -1619,7 +1669,8 @@ bool SBDebugger::EnableLog(const char *channel, const char **categories) {
     std::string error;
     llvm::raw_string_ostream error_stream(error);
     return m_opaque_sp->EnableLog(channel, GetCategoryArray(categories), "",
-                                  log_options, error_stream);
+                                  log_options, /*buffer_size=*/0,
+                                  eLogHandlerStream, error_stream);
   } else
     return false;
 }
@@ -1631,4 +1682,11 @@ void SBDebugger::SetLoggingCallback(lldb::LogOutputCallback log_callback,
   if (m_opaque_sp) {
     return m_opaque_sp->SetLoggingCallback(log_callback, baton);
   }
+}
+
+SBTrace
+SBDebugger::LoadTraceFromFile(SBError &error,
+                              const SBFileSpec &trace_description_file) {
+  LLDB_INSTRUMENT_VA(this, error, trace_description_file);
+  return SBTrace::LoadTraceFromFile(error, *this, trace_description_file);
 }

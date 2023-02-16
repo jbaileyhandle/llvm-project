@@ -94,7 +94,7 @@ void ReportMmapWriteExec(int prot, int flags) {
   if ((prot & pflags) != pflags)
     return;
 
-#  if SANITIZER_MAC && defined(MAP_JIT)
+#  if SANITIZER_APPLE && defined(MAP_JIT)
   if ((flags & MAP_JIT) == MAP_JIT)
     return;
 #  endif
@@ -107,8 +107,7 @@ void ReportMmapWriteExec(int prot, int flags) {
   stack->Reset();
   uptr top = 0;
   uptr bottom = 0;
-  GET_CALLER_PC_BP_SP;
-  (void)sp;
+  GET_CALLER_PC_BP;
   bool fast = common_flags()->fast_unwind_on_fatal;
   if (StackTrace::WillUseFastUnwind(fast)) {
     GetThreadStackTopAndBottom(false, &top, &bottom);

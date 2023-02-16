@@ -2,18 +2,14 @@
 Test SBProcess APIs, including ReadMemory(), WriteMemory(), and others.
 """
 
-from __future__ import print_function
-
-
 import lldb
+import sys
 from lldbsuite.test.decorators import *
 from lldbsuite.test.lldbtest import *
 from lldbsuite.test.lldbutil import get_stopped_thread, state_type_to_str
 
 
 class ProcessAPITestCase(TestBase):
-
-    mydir = TestBase.compute_mydir(__file__)
 
     def setUp(self):
         # Call super's setUp().
@@ -22,6 +18,18 @@ class ProcessAPITestCase(TestBase):
         self.line = line_number(
             "main.cpp",
             "// Set break point at this line and check variable 'my_char'.")
+
+    def test_scripted_implementation(self):
+        self.build()
+        exe = self.getBuildArtifact("a.out")
+
+        (target, process, _, _) = \
+            lldbutil.run_to_source_breakpoint(self, "Set break point",
+                                              lldb.SBFileSpec("main.cpp"))
+
+        self.assertTrue(process, PROCESS_IS_VALID)
+        self.assertEqual(process.GetScriptedImplementation(), None)
+
 
     def test_read_memory(self):
         """Test Python SBProcess.ReadMemory() API."""
@@ -320,6 +328,7 @@ class ProcessAPITestCase(TestBase):
             print("Number of supported hardware watchpoints: %d" % num)
 
     @no_debug_info_test
+    @skipIfRemote
     def test_get_process_info(self):
         """Test SBProcess::GetProcessInfo() API with a locally launched process."""
         self.build()

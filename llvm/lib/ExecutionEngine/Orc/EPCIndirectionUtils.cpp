@@ -88,7 +88,6 @@ EPCTrampolinePool::EPCTrampolinePool(EPCIndirectionUtils &EPCIU)
 }
 
 Error EPCTrampolinePool::deallocatePool() {
-  Error Err = Error::success();
   std::promise<MSVCPError> DeallocResultP;
   auto DeallocResultF = DeallocResultP.get_future();
 
@@ -251,6 +250,9 @@ EPCIndirectionUtils::Create(ExecutorProcessControl &EPC) {
   case Triple::x86:
     return CreateWithABI<OrcI386>(EPC);
 
+  case Triple::loongarch64:
+    return CreateWithABI<OrcLoongArch64>(EPC);
+
   case Triple::mips:
     return CreateWithABI<OrcMips32Be>(EPC);
 
@@ -260,6 +262,9 @@ EPCIndirectionUtils::Create(ExecutorProcessControl &EPC) {
   case Triple::mips64:
   case Triple::mips64el:
     return CreateWithABI<OrcMips64>(EPC);
+
+  case Triple::riscv64:
+    return CreateWithABI<OrcRiscv64>(EPC);
 
   case Triple::x86_64:
     if (TT.getOS() == Triple::OSType::Win32)

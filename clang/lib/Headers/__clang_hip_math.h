@@ -92,9 +92,9 @@ __DEVICE__ void __static_assert_equal_size() {
 #endif
 
 __DEVICE_NOCE__
-uint64_t __make_mantissa_base8(const char *__tagp) {
+uint64_t __make_mantissa_base8(const char *__tagp __attribute__((nonnull))) {
   uint64_t __r = 0;
-  while (__tagp) {
+  while (*__tagp != '\0') {
     char __tmp = *__tagp;
 
     if (__tmp >= '0' && __tmp <= '7')
@@ -109,9 +109,9 @@ uint64_t __make_mantissa_base8(const char *__tagp) {
 }
 
 __DEVICE_NOCE__
-uint64_t __make_mantissa_base10(const char *__tagp) {
+uint64_t __make_mantissa_base10(const char *__tagp __attribute__((nonnull))) {
   uint64_t __r = 0;
-  while (__tagp) {
+  while (*__tagp != '\0') {
     char __tmp = *__tagp;
 
     if (__tmp >= '0' && __tmp <= '9')
@@ -126,9 +126,9 @@ uint64_t __make_mantissa_base10(const char *__tagp) {
 }
 
 __DEVICE_NOCE__
-uint64_t __make_mantissa_base16(const char *__tagp) {
+uint64_t __make_mantissa_base16(const char *__tagp __attribute__((nonnull))) {
   uint64_t __r = 0;
-  while (__tagp) {
+  while (*__tagp != '\0') {
     char __tmp = *__tagp;
 
     if (__tmp >= '0' && __tmp <= '9')
@@ -147,10 +147,7 @@ uint64_t __make_mantissa_base16(const char *__tagp) {
 }
 
 __DEVICE__
-uint64_t __make_mantissa(const char *__tagp) {
-  if (!__tagp)
-    return 0u;
-
+uint64_t __make_mantissa(const char *__tagp __attribute__((nonnull))) {
   if (*__tagp == '0') {
     ++__tagp;
 
@@ -164,7 +161,6 @@ uint64_t __make_mantissa(const char *__tagp) {
 }
 
 // BEGIN FLOAT
-#if defined(__cplusplus)
 __DEVICE__
 int abs(int __x) {
   int __sgn = __x >> (sizeof(int) * CHAR_BIT - 1);
@@ -180,7 +176,6 @@ long long llabs(long long __x) {
   long long __sgn = __x >> (sizeof(long long) * CHAR_BIT - 1);
   return (__x ^ __sgn) - __sgn;
 }
-#endif
 
 __DEVICE__
 float acosf(float __x) { return __ocml_acos_f32(__x); }
@@ -255,7 +250,7 @@ __DEVICE__
 float expm1f(float __x) { return __ocml_expm1_f32(__x); }
 
 __DEVICE__
-float fabsf(float __x) { return __ocml_fabs_f32(__x); }
+float fabsf(float __x) { return __builtin_fabsf(__x); }
 
 __DEVICE__
 float fdimf(float __x, float __y) { return __ocml_fdim_f32(__x, __y); }
@@ -386,7 +381,7 @@ float modff(float __x, float *__iptr) {
 // FIXME need a c version of nanf
 #if defined(__cplusplus)
 __DEVICE__
-float nanf(const char *__tagp) {
+float nanf(const char *__tagp __attribute__((nonnull))) {
   union {
     float val;
     struct ieee_float {
@@ -836,7 +831,7 @@ __DEVICE__
 double expm1(double __x) { return __ocml_expm1_f64(__x); }
 
 __DEVICE__
-double fabs(double __x) { return __ocml_fabs_f64(__x); }
+double fabs(double __x) { return __builtin_fabs(__x); }
 
 __DEVICE__
 double fdim(double __x, double __y) { return __ocml_fdim_f64(__x, __y); }

@@ -8,6 +8,7 @@
 
 #include "Gnu.h"
 #include "Arch/ARM.h"
+#include "Arch/CSKY.h"
 #include "Arch/Mips.h"
 #include "Arch/PPC.h"
 #include "Arch/RISCV.h"
@@ -22,12 +23,14 @@
 #include "clang/Driver/Options.h"
 #include "clang/Driver/Tool.h"
 #include "clang/Driver/ToolChain.h"
+#include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/CodeGen.h"
-#include "llvm/Support/Host.h"
 #include "llvm/Support/Path.h"
-#include "llvm/Support/TargetParser.h"
 #include "llvm/Support/VirtualFileSystem.h"
+#include "llvm/TargetParser/Host.h"
+#include "llvm/TargetParser/TargetParser.h"
 #include <system_error>
 
 using namespace clang::driver;
@@ -83,7 +86,7 @@ void tools::gcc::Common::ConstructJob(Compilation &C, const JobAction &JA,
 
   RenderExtraToolArgs(JA, CmdArgs);
 
-  // If using a driver driver, force the arch.
+  // If using a driver, force the arch.
   if (getToolChain().getTriple().isOSDarwin()) {
     CmdArgs.push_back("-arch");
     CmdArgs.push_back(
@@ -227,7 +230,7 @@ static bool isArmBigEndian(const llvm::Triple &Triple,
   case llvm::Triple::armeb:
   case llvm::Triple::thumbeb:
     IsBigEndian = true;
-    LLVM_FALLTHROUGH;
+    [[fallthrough]];
   case llvm::Triple::arm:
   case llvm::Triple::thumb:
     if (Arg *A = Args.getLastArg(options::OPT_mlittle_endian,
@@ -278,6 +281,10 @@ static const char *getLDMOption(const llvm::Triple &T, const ArgList &Args) {
     return "elf32_sparc";
   case llvm::Triple::sparcv9:
     return "elf64_sparc";
+  case llvm::Triple::loongarch32:
+    return "elf32loongarch";
+  case llvm::Triple::loongarch64:
+    return "elf64loongarch";
   case llvm::Triple::mips:
     return "elf32btsmip";
   case llvm::Triple::mipsel:
@@ -300,6 +307,8 @@ static const char *getLDMOption(const llvm::Triple &T, const ArgList &Args) {
     return "elf_x86_64";
   case llvm::Triple::ve:
     return "elf64ve";
+  case llvm::Triple::csky:
+    return "cskyelf_linux";
   default:
     return nullptr;
   }
@@ -324,8 +333,8 @@ static bool getStaticPIE(const ArgList &Args, const ToolChain &TC) {
   if (HasStaticPIE && Args.hasArg(options::OPT_nopie)) {
     const Driver &D = TC.getDriver();
     const llvm::opt::OptTable &Opts = D.getOpts();
-    const char *StaticPIEName = Opts.getOptionName(options::OPT_static_pie);
-    const char *NoPIEName = Opts.getOptionName(options::OPT_nopie);
+    StringRef StaticPIEName = Opts.getOptionName(options::OPT_static_pie);
+    StringRef NoPIEName = Opts.getOptionName(options::OPT_nopie);
     D.Diag(diag::err_drv_cannot_mix_options) << StaticPIEName << NoPIEName;
   }
   return HasStaticPIE;
@@ -463,6 +472,8 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     D.Diag(diag::err_target_unknown_triple) << Triple.str();
     return;
   }
+  if (Triple.isRISCV())
+    CmdArgs.push_back("-X");
 
   if (Args.hasArg(options::OPT_shared))
     CmdArgs.push_back("-shared");
@@ -473,7 +484,8 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     if (Args.hasArg(options::OPT_rdynamic))
       CmdArgs.push_back("-export-dynamic");
 
-    if (!Args.hasArg(options::OPT_shared) && !IsStaticPIE) {
+    if (!Args.hasArg(options::OPT_shared) && !IsStaticPIE &&
+        !Args.hasArg(options::OPT_r)) {
       CmdArgs.push_back("-dynamic-linker");
       CmdArgs.push_back(Args.MakeArgString(Twine(D.DyldPrefix) +
                                            ToolChain.getDynamicLinker(Args)));
@@ -566,6 +578,9 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
   bool NeedsXRayDeps = addXRayRuntime(ToolChain, Args, CmdArgs);
   addLinkerCompressDebugSectionsOption(ToolChain, Args, CmdArgs);
   AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
+
+  addHIPRuntimeLibArgs(ToolChain, Args, CmdArgs);
+
   // The profile runtime also needs access to system libraries.
   getToolChain().addProfileRTLibs(Args, CmdArgs);
 
@@ -596,15 +611,19 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back("-lm");
   }
 
-  // If we are linking for the device all symbols should be bound locally. The
-  // symbols are already protected which makes this redundant. This is only
-  // necessary to work around a problem in bfd.
-  // TODO: Remove this once 'lld' becomes the only linker for offloading.
-  if (JA.isDeviceOffloading(Action::OFK_OpenMP))
-    CmdArgs.push_back("-Bsymbolic");
-
   // Silence warnings when linking C code with a C++ '-stdlib' argument.
   Args.ClaimAllArgs(options::OPT_stdlib_EQ);
+
+  // Additional linker set-up and flags for Fortran. This is required in order
+  // to generate executables. As Fortran runtime depends on the C runtime,
+  // these dependencies need to be listed before the C runtime below (i.e.
+  // AddRuntTimeLibs).
+  if (D.IsFlangMode()) {
+    addFortranRuntimeLibraryPath(ToolChain, Args, CmdArgs);
+    if (Args.hasArg(options::OPT_flang_experimental_exec))
+      addFortranRuntimeLibs(ToolChain, CmdArgs);
+    CmdArgs.push_back("-lm");
+  }
 
   if (!Args.hasArg(options::OPT_nostdlib, options::OPT_r)) {
     if (!Args.hasArg(options::OPT_nodefaultlibs)) {
@@ -638,6 +657,16 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
         WantPthread = true;
 
       AddRunTimeLibs(ToolChain, D, CmdArgs, Args);
+
+      // LLVM support for atomics on 32-bit SPARC V8+ is incomplete, so
+      // forcibly link with libatomic as a workaround.
+      // TODO: Issue #41880 and D118021.
+      if (getToolChain().getTriple().getArch() == llvm::Triple::sparc) {
+        CmdArgs.push_back("--push-state");
+        CmdArgs.push_back("--as-needed");
+        CmdArgs.push_back("-latomic");
+        CmdArgs.push_back("--pop-state");
+      }
 
       if (WantPthread && !isAndroid)
         CmdArgs.push_back("-lpthread");
@@ -707,6 +736,42 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
          ? Args.MakeArgString(AltPath.c_str())
          : Args.MakeArgString(ToolChain.GetLinkerPath());
 
+  // Check if linker has a corresponding LLVM IR assembler. If so, disassemble
+  // bitcode using current disassembler and then use assembler from linker's
+  // release to mask potential bitcode incompatibilities from different LLVM
+  // versions or releases. This fixes things like differences in number of
+  // integer attributes or anything where bitcodes may not match.
+  if (D.isUsingLTO() || ProprietaryToolChain) {
+    StringRef execSR(Exec);
+    std::string as_fn =
+        execSR.substr(0, execSR.find_last_of("/") + 1).str() + "llvm-as";
+    for (auto i : Inputs) {
+      if (llvm::sys::fs::exists(as_fn) && i.isFilename() &&
+          (i.getType() == clang::driver::types::TY_LTO_BC)) {
+        ArgStringList dis_args;
+        dis_args.push_back(C.getArgs().MakeArgString(i.getFilename()));
+        dis_args.push_back("-o");
+        std::string TmpNameDisOutput =
+            C.getDriver().GetTemporaryPath("disassembled", "ll");
+        C.addTempFile(C.getArgs().MakeArgString(TmpNameDisOutput));
+        const char *DisOutputFn = C.getArgs().MakeArgString(TmpNameDisOutput);
+        dis_args.push_back(DisOutputFn);
+        InputInfo DisII(&JA, DisOutputFn);
+        C.addCommand(std::make_unique<Command>(
+            JA, *this, ResponseFileSupport::None(),
+            C.getArgs().MakeArgString(
+                getToolChain().GetProgramPath("llvm-dis")),
+            dis_args, i, DisII));
+        ArgStringList as_args;
+        as_args.push_back(DisOutputFn);
+        as_args.push_back("-o");
+        as_args.push_back(C.getArgs().MakeArgString(i.getFilename()));
+        C.addCommand(std::make_unique<Command>(
+            JA, *this, ResponseFileSupport::None(),
+            C.getArgs().MakeArgString(as_fn), as_args, DisII, i));
+      }
+    }
+  }
 
   C.addCommand(std::make_unique<Command>(JA, *this,
                                          ResponseFileSupport::AtFileCurCP(),
@@ -737,12 +802,12 @@ void tools::gnutools::Assembler::ConstructJob(Compilation &C,
       CmdArgs.push_back("--compress-debug-sections");
     } else {
       StringRef Value = A->getValue();
-      if (Value == "none" || Value == "zlib") {
+      if (Value == "none" || Value == "zlib" || Value == "zstd") {
         CmdArgs.push_back(
             Args.MakeArgString("--compress-debug-sections=" + Twine(Value)));
       } else {
         D.Diag(diag::err_drv_unsupported_option_argument)
-            << A->getOption().getName() << Value;
+            << A->getSpelling() << Value;
       }
     }
   }
@@ -801,6 +866,8 @@ void tools::gnutools::Assembler::ConstructJob(Compilation &C,
     StringRef MArchName = riscv::getRISCVArch(Args, getToolChain().getTriple());
     CmdArgs.push_back("-march");
     CmdArgs.push_back(MArchName.data());
+    if (!Args.hasFlag(options::OPT_mrelax, options::OPT_mno_relax, true))
+      Args.addOptOutFlag(CmdArgs, options::OPT_mrelax, options::OPT_mno_relax);
     break;
   }
   case llvm::Triple::sparc:
@@ -980,6 +1047,17 @@ void tools::gnutools::Assembler::ConstructJob(Compilation &C,
 
   for (const auto &II : Inputs)
     CmdArgs.push_back(II.getFilename());
+
+  if (Arg *A = Args.getLastArg(options::OPT_g_Flag, options::OPT_gN_Group,
+                               options::OPT_gdwarf_2, options::OPT_gdwarf_3,
+                               options::OPT_gdwarf_4, options::OPT_gdwarf_5,
+                               options::OPT_gdwarf))
+    if (!A->getOption().matches(options::OPT_g0)) {
+      Args.AddLastArg(CmdArgs, options::OPT_g_Flag);
+
+      unsigned DwarfVersion = getDwarfVersion(getToolChain(), Args);
+      CmdArgs.push_back(Args.MakeArgString("-gdwarf-" + Twine(DwarfVersion)));
+    }
 
   const char *Exec =
       Args.MakeArgString(getToolChain().GetProgramPath(DefaultAssembler));
@@ -1374,7 +1452,7 @@ static bool findMipsMtiMultilibs(const Multilib::flags_list &Flags,
                   {"/../../../../mips-mti-linux-gnu/lib" + M.gccSuffix()});
             });
   }
-  for (auto Candidate : {&MtiMipsMultilibsV1, &MtiMipsMultilibsV2}) {
+  for (auto *Candidate : {&MtiMipsMultilibsV1, &MtiMipsMultilibsV2}) {
     if (Candidate->select(Flags, Result.SelectedMultilib)) {
       Result.Multilibs = *Candidate;
       return true;
@@ -1467,7 +1545,7 @@ static bool findMipsImgMultilibs(const Multilib::flags_list &Flags,
                   {"/../../../../mips-img-linux-gnu/lib" + M.gccSuffix()});
             });
   }
-  for (auto Candidate : {&ImgMultilibsV1, &ImgMultilibsV2}) {
+  for (auto *Candidate : {&ImgMultilibsV1, &ImgMultilibsV2}) {
     if (Candidate->select(Flags, Result.SelectedMultilib)) {
       Result.Multilibs = *Candidate;
       return true;
@@ -1615,6 +1693,69 @@ static bool findMSP430Multilibs(const Driver &D,
     return true;
 
   return false;
+}
+
+static void findCSKYMultilibs(const Driver &D, const llvm::Triple &TargetTriple,
+                              StringRef Path, const ArgList &Args,
+                              DetectedMultilibs &Result) {
+  FilterNonExistent NonExistent(Path, "/crtbegin.o", D.getVFS());
+
+  tools::csky::FloatABI TheFloatABI = tools::csky::getCSKYFloatABI(D, Args);
+  std::optional<llvm::StringRef> Res =
+      tools::csky::getCSKYArchName(D, Args, TargetTriple);
+
+  if (!Res)
+    return;
+  auto ARCHName = *Res;
+
+  Multilib::flags_list Flags;
+  addMultilibFlag(TheFloatABI == tools::csky::FloatABI::Hard, "hard-fp", Flags);
+  addMultilibFlag(TheFloatABI == tools::csky::FloatABI::SoftFP, "soft-fp",
+                  Flags);
+  addMultilibFlag(TheFloatABI == tools::csky::FloatABI::Soft, "soft", Flags);
+  addMultilibFlag(ARCHName == "ck801", "march=ck801", Flags);
+  addMultilibFlag(ARCHName == "ck802", "march=ck802", Flags);
+  addMultilibFlag(ARCHName == "ck803", "march=ck803", Flags);
+  addMultilibFlag(ARCHName == "ck804", "march=ck804", Flags);
+  addMultilibFlag(ARCHName == "ck805", "march=ck805", Flags);
+  addMultilibFlag(ARCHName == "ck807", "march=ck807", Flags);
+  addMultilibFlag(ARCHName == "ck810", "march=ck810", Flags);
+  addMultilibFlag(ARCHName == "ck810v", "march=ck810v", Flags);
+  addMultilibFlag(ARCHName == "ck860", "march=ck860", Flags);
+  addMultilibFlag(ARCHName == "ck860v", "march=ck860v", Flags);
+
+  bool isBigEndian = false;
+  if (Arg *A = Args.getLastArg(options::OPT_mlittle_endian,
+                               options::OPT_mbig_endian))
+    isBigEndian = !A->getOption().matches(options::OPT_mlittle_endian);
+  addMultilibFlag(isBigEndian, "EB", Flags);
+
+  auto HardFloat = makeMultilib("/hard-fp").flag("+hard-fp");
+  auto SoftFpFloat = makeMultilib("/soft-fp").flag("+soft-fp");
+  auto SoftFloat = makeMultilib("").flag("+soft");
+  auto Arch801 = makeMultilib("/ck801").flag("+march=ck801");
+  auto Arch802 = makeMultilib("/ck802").flag("+march=ck802");
+  auto Arch803 = makeMultilib("/ck803").flag("+march=ck803");
+  // CK804 use the same library as CK803
+  auto Arch804 = makeMultilib("/ck803").flag("+march=ck804");
+  auto Arch805 = makeMultilib("/ck805").flag("+march=ck805");
+  auto Arch807 = makeMultilib("/ck807").flag("+march=ck807");
+  auto Arch810 = makeMultilib("").flag("+march=ck810");
+  auto Arch810v = makeMultilib("/ck810v").flag("+march=ck810v");
+  auto Arch860 = makeMultilib("/ck860").flag("+march=ck860");
+  auto Arch860v = makeMultilib("/ck860v").flag("+march=ck860v");
+  auto BigEndian = makeMultilib("/big").flag("+EB");
+
+  MultilibSet CSKYMultilibs =
+      MultilibSet()
+          .Maybe(BigEndian)
+          .Either({Arch801, Arch802, Arch803, Arch804, Arch805, Arch807,
+                   Arch810, Arch810v, Arch860, Arch860v})
+          .Either(HardFloat, SoftFpFloat, SoftFloat)
+          .FilterOut(NonExistent);
+
+  if (CSKYMultilibs.select(Flags, Result.SelectedMultilib))
+    Result.Multilibs = CSKYMultilibs;
 }
 
 static void findRISCVBareMetalMultilibs(const Driver &D,
@@ -1822,8 +1963,15 @@ bool Generic_GCC::GCCVersion::isOlderThan(int RHSMajor, int RHSMinor,
                                           StringRef RHSPatchSuffix) const {
   if (Major != RHSMajor)
     return Major < RHSMajor;
-  if (Minor != RHSMinor)
+  if (Minor != RHSMinor) {
+    // Note that versions without a specified minor sort higher than those with
+    // a minor.
+    if (RHSMinor == -1)
+      return true;
+    if (Minor == -1)
+      return false;
     return Minor < RHSMinor;
+  }
   if (Patch != RHSPatch) {
     // Note that versions without a specified patch sort higher than those with
     // a patch.
@@ -1907,10 +2055,6 @@ static llvm::StringRef getGCCToolchainDir(const ArgList &Args,
   if (A)
     return A->getValue();
 
-  if (const Arg *X = Args.getLastArg(
-          clang::driver::options::OPT__overlay_platform_toolchain_EQ))
-    return X->getValue();
-
   // If we have a SysRoot, ignore GCC_INSTALL_PREFIX.
   // GCC_INSTALL_PREFIX specifies the gcc installation for the default
   // sysroot and is likely not valid with a different sysroot.
@@ -1943,6 +2087,28 @@ void Generic_GCC::GCCInstallationDetector::init(
   CollectLibDirsAndTriples(TargetTriple, BiarchVariantTriple, CandidateLibDirs,
                            CandidateTripleAliases, CandidateBiarchLibDirs,
                            CandidateBiarchTripleAliases);
+
+  // If --gcc-install-dir= is specified, skip filesystem detection.
+  if (const Arg *A =
+          Args.getLastArg(clang::driver::options::OPT_gcc_install_dir_EQ);
+      A && A->getValue()[0]) {
+    StringRef InstallDir = A->getValue();
+    if (!ScanGCCForMultilibs(TargetTriple, Args, InstallDir, false)) {
+      D.Diag(diag::err_drv_invalid_gcc_install_dir) << InstallDir;
+    } else {
+      (void)InstallDir.consume_back("/");
+      StringRef VersionText = llvm::sys::path::filename(InstallDir);
+      StringRef TripleText =
+          llvm::sys::path::filename(llvm::sys::path::parent_path(InstallDir));
+
+      Version = GCCVersion::Parse(VersionText);
+      GCCTriple.setTriple(TripleText);
+      GCCInstallPath = std::string(InstallDir);
+      GCCParentLibPath = GCCInstallPath + "/../../..";
+      IsValid = true;
+    }
+    return;
+  }
 
   // Compute the set of prefixes for our search.
   SmallVector<std::string, 8> Prefixes;
@@ -1998,7 +2164,7 @@ void Generic_GCC::GCCInstallationDetector::init(
     if (!VFS.exists(Prefix))
       continue;
     for (StringRef Suffix : CandidateLibDirs) {
-      const std::string LibDir = Prefix + Suffix.str();
+      const std::string LibDir = concat(Prefix, Suffix);
       if (!VFS.exists(LibDir))
         continue;
       // Maybe filter out <libdir>/gcc and <libdir>/gcc-cross.
@@ -2047,8 +2213,8 @@ void Generic_GCC::GCCInstallationDetector::print(raw_ostream &OS) const {
 }
 
 bool Generic_GCC::GCCInstallationDetector::getBiarchSibling(Multilib &M) const {
-  if (BiarchSibling.hasValue()) {
-    M = BiarchSibling.getValue();
+  if (BiarchSibling) {
+    M = *BiarchSibling;
     return true;
   }
   return false;
@@ -2064,7 +2230,7 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
     // so we need to find those /usr/gcc/*/lib/gcc libdirs and go with
     // /usr/gcc/<version> as a prefix.
 
-    std::string PrefixDir = SysRoot.str() + "/usr/gcc";
+    std::string PrefixDir = concat(SysRoot, "/usr/gcc");
     std::error_code EC;
     for (llvm::vfs::directory_iterator LI = D.getVFS().dir_begin(PrefixDir, EC),
                                        LE;
@@ -2086,10 +2252,17 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
     return;
   }
 
-  // Non-Solaris is much simpler - most systems just go with "/usr".
-  if (SysRoot.empty() && TargetTriple.getOS() == llvm::Triple::Linux) {
-    // Yet, still look for RHEL/CentOS devtoolsets and gcc-toolsets.
+  // For Linux, if --sysroot is not specified, look for RHEL/CentOS devtoolsets
+  // and gcc-toolsets.
+  if (SysRoot.empty() && TargetTriple.getOS() == llvm::Triple::Linux &&
+      D.getVFS().exists("/opt/rh")) {
+    // TODO: We may want to remove this, since the functionality
+    //   can be achieved using config files.
+    Prefixes.push_back("/opt/rh/gcc-toolset-12/root/usr");
+    Prefixes.push_back("/opt/rh/gcc-toolset-11/root/usr");
     Prefixes.push_back("/opt/rh/gcc-toolset-10/root/usr");
+    Prefixes.push_back("/opt/rh/devtoolset-12/root/usr");
+    Prefixes.push_back("/opt/rh/devtoolset-11/root/usr");
     Prefixes.push_back("/opt/rh/devtoolset-10/root/usr");
     Prefixes.push_back("/opt/rh/devtoolset-9/root/usr");
     Prefixes.push_back("/opt/rh/devtoolset-8/root/usr");
@@ -2099,7 +2272,9 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
     Prefixes.push_back("/opt/rh/devtoolset-3/root/usr");
     Prefixes.push_back("/opt/rh/devtoolset-2/root/usr");
   }
-  Prefixes.push_back(SysRoot.str() + "/usr");
+
+  // Fall back to /usr which is used by most non-Solaris systems.
+  Prefixes.push_back(concat(SysRoot, "/usr"));
 }
 
 /*static*/ void Generic_GCC::GCCInstallationDetector::CollectLibDirsAndTriples(
@@ -2139,6 +2314,10 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
   static const char *const AVRLibDirs[] = {"/lib"};
   static const char *const AVRTriples[] = {"avr"};
 
+  static const char *const CSKYLibDirs[] = {"/lib"};
+  static const char *const CSKYTriples[] = {
+      "csky-linux-gnuabiv2", "csky-linux-uclibcabiv2", "csky-elf-noneabiv2"};
+
   static const char *const X86_64LibDirs[] = {"/lib64", "/lib"};
   static const char *const X86_64Triples[] = {
       "x86_64-linux-gnu",       "x86_64-unknown-linux-gnu",
@@ -2156,6 +2335,10 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
       "i386-redhat-linux6E", "i686-redhat-linux",     "i386-redhat-linux",
       "i586-suse-linux",     "i686-montavista-linux", "i686-gnu",
   };
+
+  static const char *const LoongArch64LibDirs[] = {"/lib64", "/lib"};
+  static const char *const LoongArch64Triples[] = {
+      "loongarch64-linux-gnu", "loongarch64-unknown-linux-gnu"};
 
   static const char *const M68kLibDirs[] = {"/lib"};
   static const char *const M68kTriples[] = {
@@ -2373,6 +2556,10 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
     LibDirs.append(begin(AVRLibDirs), end(AVRLibDirs));
     TripleAliases.append(begin(AVRTriples), end(AVRTriples));
     break;
+  case llvm::Triple::csky:
+    LibDirs.append(begin(CSKYLibDirs), end(CSKYLibDirs));
+    TripleAliases.append(begin(CSKYTriples), end(CSKYTriples));
+    break;
   case llvm::Triple::x86_64:
     if (TargetTriple.isX32()) {
       LibDirs.append(begin(X32LibDirs), end(X32LibDirs));
@@ -2399,6 +2586,11 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
       BiarchLibDirs.append(begin(X32LibDirs), end(X32LibDirs));
       BiarchTripleAliases.append(begin(X32Triples), end(X32Triples));
     }
+    break;
+  // TODO: Handle loongarch32.
+  case llvm::Triple::loongarch64:
+    LibDirs.append(begin(LoongArch64LibDirs), end(LoongArch64LibDirs));
+    TripleAliases.append(begin(LoongArch64Triples), end(LoongArch64Triples));
     break;
   case llvm::Triple::m68k:
     LibDirs.append(begin(M68kLibDirs), end(M68kLibDirs));
@@ -2522,6 +2714,8 @@ bool Generic_GCC::GCCInstallationDetector::ScanGCCForMultilibs(
   if (isArmOrThumbArch(TargetArch) && TargetTriple.isAndroid()) {
     // It should also work without multilibs in a simplified toolchain.
     findAndroidArmMultilibs(D, TargetTriple, Path, Args, Detected);
+  } else if (TargetTriple.isCSKY()) {
+    findCSKYMultilibs(D, TargetTriple, Path, Args, Detected);
   } else if (TargetTriple.isMIPS()) {
     if (!findMIPSMultilibs(D, TargetTriple, Path, Args, Detected))
       return false;
@@ -2612,7 +2806,7 @@ bool Generic_GCC::GCCInstallationDetector::ScanGentooConfigs(
     const llvm::Triple &TargetTriple, const ArgList &Args,
     const SmallVectorImpl<StringRef> &CandidateTriples,
     const SmallVectorImpl<StringRef> &CandidateBiarchTriples) {
-  if (!D.getVFS().exists(D.SysRoot + GentooConfigDir))
+  if (!D.getVFS().exists(concat(D.SysRoot, GentooConfigDir)))
     return false;
 
   for (StringRef CandidateTriple : CandidateTriples) {
@@ -2631,8 +2825,8 @@ bool Generic_GCC::GCCInstallationDetector::ScanGentooGccConfig(
     const llvm::Triple &TargetTriple, const ArgList &Args,
     StringRef CandidateTriple, bool NeedsBiarchSuffix) {
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> File =
-      D.getVFS().getBufferForFile(D.SysRoot + GentooConfigDir + "/config-" +
-                                  CandidateTriple.str());
+      D.getVFS().getBufferForFile(concat(D.SysRoot, GentooConfigDir,
+                                         "/config-" + CandidateTriple.str()));
   if (File) {
     SmallVector<StringRef, 2> Lines;
     File.get()->getBuffer().split(Lines, "\n");
@@ -2643,8 +2837,8 @@ bool Generic_GCC::GCCInstallationDetector::ScanGentooGccConfig(
         continue;
       // Process the config file pointed to by CURRENT.
       llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> ConfigFile =
-          D.getVFS().getBufferForFile(D.SysRoot + GentooConfigDir + "/" +
-                                      Line.str());
+          D.getVFS().getBufferForFile(
+              concat(D.SysRoot, GentooConfigDir, "/" + Line));
       std::pair<StringRef, StringRef> ActiveVersion = Line.rsplit('-');
       // List of paths to scan for libraries.
       SmallVector<StringRef, 4> GentooScanPaths;
@@ -2677,7 +2871,7 @@ bool Generic_GCC::GCCInstallationDetector::ScanGentooGccConfig(
 
       // Scan all paths for GCC libraries.
       for (const auto &GentooScanPath : GentooScanPaths) {
-        std::string GentooPath = D.SysRoot + std::string(GentooScanPath);
+        std::string GentooPath = concat(D.SysRoot, GentooScanPath);
         if (D.getVFS().exists(GentooPath + "/crtbegin.o")) {
           if (!ScanGCCForMultilibs(TargetTriple, Args, GentooPath,
                                    NeedsBiarchSuffix))
@@ -2732,11 +2926,12 @@ Tool *Generic_GCC::buildLinker() const { return new tools::gcc::Linker(*this); }
 void Generic_GCC::printVerboseInfo(raw_ostream &OS) const {
   // Print the information about how we detected the GCC installation.
   GCCInstallation.print(OS);
-  CudaInstallation.print(OS);
-  RocmInstallation.print(OS);
+  CudaInstallation->print(OS);
+  RocmInstallation->print(OS);
 }
 
-bool Generic_GCC::IsUnwindTablesDefault(const ArgList &Args) const {
+ToolChain::UnwindTableLevel
+Generic_GCC::getDefaultUnwindTableLevel(const ArgList &Args) const {
   switch (getArch()) {
   case llvm::Triple::aarch64:
   case llvm::Triple::ppc:
@@ -2745,9 +2940,9 @@ bool Generic_GCC::IsUnwindTablesDefault(const ArgList &Args) const {
   case llvm::Triple::ppc64le:
   case llvm::Triple::x86:
   case llvm::Triple::x86_64:
-    return true;
+    return UnwindTableLevel::Asynchronous;
   default:
-    return false;
+    return UnwindTableLevel::None;
   }
 }
 
@@ -2773,38 +2968,42 @@ bool Generic_GCC::isPICDefaultForced() const {
 
 bool Generic_GCC::IsIntegratedAssemblerDefault() const {
   switch (getTriple().getArch()) {
-  case llvm::Triple::x86:
-  case llvm::Triple::x86_64:
   case llvm::Triple::aarch64:
   case llvm::Triple::aarch64_be:
+  case llvm::Triple::amdgcn:
   case llvm::Triple::arm:
   case llvm::Triple::armeb:
   case llvm::Triple::avr:
   case llvm::Triple::bpfel:
   case llvm::Triple::bpfeb:
-  case llvm::Triple::thumb:
-  case llvm::Triple::thumbeb:
-  case llvm::Triple::ppc:
-  case llvm::Triple::ppcle:
-  case llvm::Triple::ppc64:
-  case llvm::Triple::ppc64le:
-  case llvm::Triple::riscv32:
-  case llvm::Triple::riscv64:
-  case llvm::Triple::systemz:
+  case llvm::Triple::csky:
+  case llvm::Triple::hexagon:
+  case llvm::Triple::lanai:
+  case llvm::Triple::loongarch32:
+  case llvm::Triple::loongarch64:
+  case llvm::Triple::m68k:
   case llvm::Triple::mips:
   case llvm::Triple::mipsel:
   case llvm::Triple::mips64:
   case llvm::Triple::mips64el:
   case llvm::Triple::msp430:
-  case llvm::Triple::m68k:
-    return true;
+  case llvm::Triple::ppc:
+  case llvm::Triple::ppcle:
+  case llvm::Triple::ppc64:
+  case llvm::Triple::ppc64le:
+  case llvm::Triple::r600:
+  case llvm::Triple::riscv32:
+  case llvm::Triple::riscv64:
   case llvm::Triple::sparc:
   case llvm::Triple::sparcel:
   case llvm::Triple::sparcv9:
-    if (getTriple().isOSFreeBSD() || getTriple().isOSOpenBSD() ||
-        getTriple().isOSSolaris())
-      return true;
-    return false;
+  case llvm::Triple::systemz:
+  case llvm::Triple::thumb:
+  case llvm::Triple::thumbeb:
+  case llvm::Triple::ve:
+  case llvm::Triple::x86:
+  case llvm::Triple::x86_64:
+    return true;
   default:
     return false;
   }
@@ -2970,9 +3169,9 @@ Generic_GCC::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
   // If this is a development, non-installed, clang, libcxx will
   // not be found at ../include/c++ but it likely to be found at
   // one of the following two locations:
-  if (AddIncludePath(SysRoot + "/usr/local/include"))
+  if (AddIncludePath(concat(SysRoot, "/usr/local/include")))
     return;
-  if (AddIncludePath(SysRoot + "/usr/include"))
+  if (AddIncludePath(concat(SysRoot, "/usr/include")))
     return;
 }
 

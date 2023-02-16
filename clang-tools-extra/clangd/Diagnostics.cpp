@@ -21,7 +21,6 @@
 #include "clang/Lex/Token.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallString.h"
@@ -32,6 +31,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <optional>
+#include <vector>
 
 namespace clang {
 namespace clangd {
@@ -194,16 +195,16 @@ bool tryMoveToMainFile(Diag &D, FullSourceLoc DiagLoc) {
     return false;
 
   // Add a note that will point to real diagnostic.
-  const auto *FE = SM.getFileEntryForID(SM.getFileID(DiagLoc));
+  auto FE = *SM.getFileEntryRefForID(SM.getFileID(DiagLoc));
   D.Notes.emplace(D.Notes.begin());
   Note &N = D.Notes.front();
-  N.AbsFile = std::string(FE->tryGetRealPathName());
-  N.File = std::string(FE->getName());
+  N.AbsFile = std::string(FE.getFileEntry().tryGetRealPathName());
+  N.File = std::string(FE.getName());
   N.Message = "error occurred here";
   N.Range = D.Range;
 
   // Update diag to point at include inside main file.
-  D.File = SM.getFileEntryForID(SM.getMainFileID())->getName().str();
+  D.File = SM.getFileEntryRefForID(SM.getMainFileID())->getName().str();
   D.Range = std::move(R);
   D.InsideMainFile = true;
   // Update message to mention original file.
@@ -321,6 +322,64 @@ std::string noteMessage(const Diag &Main, const DiagBase &Note,
   OS.flush();
   return capitalize(std::move(Result));
 }
+
+void setTags(clangd::Diag &D) {
+  static const auto *DeprecatedDiags = new llvm::DenseSet<unsigned>{
+      diag::warn_access_decl_deprecated,
+      diag::warn_atl_uuid_deprecated,
+      diag::warn_deprecated,
+      diag::warn_deprecated_altivec_src_compat,
+      diag::warn_deprecated_comma_subscript,
+      diag::warn_deprecated_copy,
+      diag::warn_deprecated_copy_with_dtor,
+      diag::warn_deprecated_copy_with_user_provided_copy,
+      diag::warn_deprecated_copy_with_user_provided_dtor,
+      diag::warn_deprecated_def,
+      diag::warn_deprecated_increment_decrement_volatile,
+      diag::warn_deprecated_message,
+      diag::warn_deprecated_redundant_constexpr_static_def,
+      diag::warn_deprecated_register,
+      diag::warn_deprecated_simple_assign_volatile,
+      diag::warn_deprecated_string_literal_conversion,
+      diag::warn_deprecated_this_capture,
+      diag::warn_deprecated_volatile_param,
+      diag::warn_deprecated_volatile_return,
+      diag::warn_deprecated_volatile_structured_binding,
+      diag::warn_opencl_attr_deprecated_ignored,
+      diag::warn_property_method_deprecated,
+      diag::warn_vector_mode_deprecated,
+  };
+  static const auto *UnusedDiags = new llvm::DenseSet<unsigned>{
+      diag::warn_opencl_attr_deprecated_ignored,
+      diag::warn_pragma_attribute_unused,
+      diag::warn_unused_but_set_parameter,
+      diag::warn_unused_but_set_variable,
+      diag::warn_unused_comparison,
+      diag::warn_unused_const_variable,
+      diag::warn_unused_exception_param,
+      diag::warn_unused_function,
+      diag::warn_unused_label,
+      diag::warn_unused_lambda_capture,
+      diag::warn_unused_local_typedef,
+      diag::warn_unused_member_function,
+      diag::warn_unused_parameter,
+      diag::warn_unused_private_field,
+      diag::warn_unused_property_backing_ivar,
+      diag::warn_unused_template,
+      diag::warn_unused_variable,
+  };
+  if (DeprecatedDiags->contains(D.ID)) {
+    D.Tags.push_back(DiagnosticTag::Deprecated);
+  } else if (UnusedDiags->contains(D.ID)) {
+    D.Tags.push_back(DiagnosticTag::Unnecessary);
+  }
+  if (D.Source == Diag::ClangTidy) {
+    if (llvm::StringRef(D.Name).starts_with("misc-unused-"))
+      D.Tags.push_back(DiagnosticTag::Unnecessary);
+    if (llvm::StringRef(D.Name).starts_with("modernize-"))
+      D.Tags.push_back(DiagnosticTag::Deprecated);
+  }
+}
 } // namespace
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const DiagBase &D) {
@@ -421,6 +480,10 @@ void toLSPDiags(
   }
 
   Main.code = D.Name;
+  if (auto URI = getDiagnosticDocURI(D.Source, D.ID, D.Name)) {
+    Main.codeDescription.emplace();
+    Main.codeDescription->href = std::move(*URI);
+  }
   switch (D.Source) {
   case Diag::Clang:
     Main.source = "clang";
@@ -519,9 +582,7 @@ std::vector<Diag> StoreDiags::take(const clang::tidy::ClangTidyContext *Tidy) {
         Diag.Name = std::string(Name);
       }
       Diag.Source = Diag::Clang;
-      continue;
-    }
-    if (Tidy != nullptr) {
+    } else if (Tidy != nullptr) {
       std::string TidyDiag = Tidy->getCheckName(Diag.ID);
       if (!TidyDiag.empty()) {
         Diag.Name = std::move(TidyDiag);
@@ -539,9 +600,9 @@ std::vector<Diag> StoreDiags::take(const clang::tidy::ClangTidyContext *Tidy) {
           CleanMessage(Note.Message);
         for (auto &Fix : Diag.Fixes)
           CleanMessage(Fix.Message);
-        continue;
       }
     }
+    setTags(Diag);
   }
   // Deduplicate clang-tidy diagnostics -- some clang-tidy checks may emit
   // duplicated messages due to various reasons (e.g. the check doesn't handle
@@ -563,7 +624,7 @@ void StoreDiags::BeginSourceFile(const LangOptions &Opts,
 
 void StoreDiags::EndSourceFile() {
   flushLastDiag();
-  LangOpts = None;
+  LangOpts = std::nullopt;
   OrigSrcMgr = nullptr;
 }
 
@@ -843,6 +904,42 @@ llvm::StringRef normalizeSuppressedCode(llvm::StringRef Code) {
   Code.consume_front("err_");
   Code.consume_front("-W");
   return Code;
+}
+
+std::optional<std::string> getDiagnosticDocURI(Diag::DiagSource Source,
+                                               unsigned ID,
+                                               llvm::StringRef Name) {
+  switch (Source) {
+  case Diag::Unknown:
+    break;
+  case Diag::Clang:
+    // There is a page listing many warning flags, but it provides too little
+    // information to be worth linking.
+    // https://clang.llvm.org/docs/DiagnosticsReference.html
+    break;
+  case Diag::ClangTidy: {
+    StringRef Module, Check;
+    // This won't correctly get the module for clang-analyzer checks, but as we
+    // don't link in the analyzer that shouldn't be an issue.
+    // This would also need updating if anyone decides to create a module with a
+    // '-' in the name.
+    std::tie(Module, Check) = Name.split('-');
+    if (Module.empty() || Check.empty())
+      return std::nullopt;
+    return ("https://clang.llvm.org/extra/clang-tidy/checks/" + Module + "/" +
+            Check + ".html")
+        .str();
+  }
+  case Diag::Clangd:
+    if (Name == "unused-includes")
+      return {"https://clangd.llvm.org/guides/include-cleaner"};
+    break;
+  case Diag::ClangdConfig:
+    // FIXME: we should link to https://clangd.llvm.org/config
+    // However we have no diagnostic codes, which the link should describe!
+    break;
+  }
+  return std::nullopt;
 }
 
 } // namespace clangd

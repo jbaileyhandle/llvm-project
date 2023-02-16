@@ -125,9 +125,9 @@ TEST(TBDv4, ReadFile) {
       Sym->isReexported() ? Reexports.emplace_back(std::move(temp))
                           : Exports.emplace_back(std::move(temp));
   }
-  llvm::sort(Exports.begin(), Exports.end());
-  llvm::sort(Reexports.begin(), Reexports.end());
-  llvm::sort(Undefineds.begin(), Undefineds.end());
+  llvm::sort(Exports);
+  llvm::sort(Reexports);
+  llvm::sort(Undefineds);
 
   static ExportedSymbol ExpectedExportedSymbols[] = {
       {SymbolKind::GlobalSymbol, "_symA", false, false},
@@ -143,12 +143,9 @@ TEST(TBDv4, ReadFile) {
       {SymbolKind::GlobalSymbol, "_symD", false, false},
   };
 
-  EXPECT_EQ(sizeof(ExpectedExportedSymbols) / sizeof(ExportedSymbol),
-            Exports.size());
-  EXPECT_EQ(sizeof(ExpectedReexportedSymbols) / sizeof(ExportedSymbol),
-            Reexports.size());
-  EXPECT_EQ(sizeof(ExpectedUndefinedSymbols) / sizeof(ExportedSymbol),
-            Undefineds.size());
+  EXPECT_EQ(std::size(ExpectedExportedSymbols), Exports.size());
+  EXPECT_EQ(std::size(ExpectedReexportedSymbols), Reexports.size());
+  EXPECT_EQ(std::size(ExpectedUndefinedSymbols), Undefineds.size());
   EXPECT_TRUE(std::equal(Exports.begin(), Exports.end(),
                          std::begin(ExpectedExportedSymbols)));
   EXPECT_TRUE(std::equal(Reexports.begin(), Reexports.end(),
@@ -296,9 +293,9 @@ TEST(TBDv4, ReadMultipleDocuments) {
       Sym->isReexported() ? Reexports.emplace_back(std::move(Temp))
                           : Exports.emplace_back(std::move(Temp));
   }
-  llvm::sort(Exports.begin(), Exports.end());
-  llvm::sort(Reexports.begin(), Reexports.end());
-  llvm::sort(Undefineds.begin(), Undefineds.end());
+  llvm::sort(Exports);
+  llvm::sort(Reexports);
+  llvm::sort(Undefineds);
 
   static ExportedSymbol ExpectedExportedSymbols[] = {
       {SymbolKind::GlobalSymbol, "_symA", false, false},
@@ -313,12 +310,9 @@ TEST(TBDv4, ReadMultipleDocuments) {
       {SymbolKind::GlobalSymbol, "_symD", false, false},
   };
 
-  EXPECT_EQ(sizeof(ExpectedExportedSymbols) / sizeof(ExportedSymbol),
-            Exports.size());
-  EXPECT_EQ(sizeof(ExpectedReexportedSymbols) / sizeof(ExportedSymbol),
-            Reexports.size());
-  EXPECT_EQ(sizeof(ExpectedUndefinedSymbols) / sizeof(ExportedSymbol),
-            Undefineds.size());
+  EXPECT_EQ(std::size(ExpectedExportedSymbols), Exports.size());
+  EXPECT_EQ(std::size(ExpectedReexportedSymbols), Reexports.size());
+  EXPECT_EQ(std::size(ExpectedUndefinedSymbols), Undefineds.size());
   EXPECT_TRUE(std::equal(Exports.begin(), Exports.end(),
                          std::begin(ExpectedExportedSymbols)));
   EXPECT_TRUE(std::equal(Reexports.begin(), Reexports.end(),
@@ -942,13 +936,18 @@ TEST(TBDv4, InterfaceEquality) {
   static const char TBDv4File[] =
       "--- !tapi-tbd\n"
       "tbd-version: 4\n"
-      "targets:  [ i386-macos, x86_64-macos, x86_64-ios ]\n"
+      "targets:  [ i386-macos, x86_64-macos, x86_64-ios, i386-maccatalyst, "
+      "x86_64-maccatalyst ]\n"
       "uuids:\n"
       "  - target: i386-macos\n"
       "    value: 00000000-0000-0000-0000-000000000000\n"
       "  - target: x86_64-macos\n"
       "    value: 11111111-1111-1111-1111-111111111111\n"
       "  - target: x86_64-ios\n"
+      "    value: 11111111-1111-1111-1111-111111111111\n"
+      "  - target: i386-maccatalyst\n"
+      "    value: 00000000-0000-0000-0000-000000000000\n"
+      "  - target: x86_64-maccatalyst\n"
       "    value: 11111111-1111-1111-1111-111111111111\n"
       "flags: [ flat_namespace, installapi ]\n"
       "install-name: Umbrella.framework/Umbrella\n"
@@ -976,6 +975,13 @@ TEST(TBDv4, InterfaceEquality) {
       "    symbols: [_symB]\n"
       "  - targets: [ x86_64-macos, x86_64-ios ]\n"
       "    symbols: [_symAB]\n"
+      "  - targets: [ i386-maccatalyst ]\n"
+      "    weak-symbols: [ _symC ]\n"
+      "  - targets: [ i386-maccatalyst, x86_64-maccatalyst ]\n"
+      "    symbols: [ _symA ]\n"
+      "    objc-classes: [ Class1 ]\n"
+      "  - targets: [ x86_64-maccatalyst ]\n"
+      "    symbols: [ _symAB ]\n"
       "reexports:\n"
       "  - targets: [ i386-macos ]\n"
       "    symbols: [_symC]\n"
@@ -992,22 +998,6 @@ TEST(TBDv4, InterfaceEquality) {
       "    objc-ivars: []\n"
       "    weak-symbols: []\n"
       "    thread-local-symbols: []\n"
-      "tbd-version:     4\n"
-      "targets:         [ i386-maccatalyst, x86_64-maccatalyst ]\n"
-      "uuids:\n"
-      "  - target:          i386-maccatalyst\n"
-      "    value:           00000000-0000-0000-0000-000000000000\n"
-      "  - target:          x86_64-maccatalyst\n"
-      "    value:           11111111-1111-1111-1111-111111111111\n"
-      "install-name:    '/System/Library/Frameworks/A.framework/A'\n"
-      "exports:\n"
-      "  - targets:         [ i386-maccatalyst ]\n"
-      "    weak-symbols:    [ _symC ]\n"
-      "  - targets:         [ i386-maccatalyst, x86_64-maccatalyst ]\n"
-      "    symbols:         [ _symA ]\n"
-      "    objc-classes:    [ Class1 ]\n"
-      "  - targets:         [ x86_64-maccatalyst ]\n"
-      "    symbols:         [ _symAB ]\n"
       "...\n";
 
   Expected<TBDFile> ResultA =

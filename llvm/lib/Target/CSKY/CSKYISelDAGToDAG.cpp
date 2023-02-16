@@ -21,17 +21,17 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "csky-isel"
+#define PASS_NAME "CSKY DAG->DAG Pattern Instruction Selection"
 
 namespace {
 class CSKYDAGToDAGISel : public SelectionDAGISel {
   const CSKYSubtarget *Subtarget;
 
 public:
-  explicit CSKYDAGToDAGISel(CSKYTargetMachine &TM) : SelectionDAGISel(TM) {}
+  static char ID;
 
-  StringRef getPassName() const override {
-    return "CSKY DAG->DAG Pattern Instruction Selection";
-  }
+  explicit CSKYDAGToDAGISel(CSKYTargetMachine &TM, CodeGenOpt::Level OptLevel)
+      : SelectionDAGISel(ID, TM, OptLevel) {}
 
   bool runOnMachineFunction(MachineFunction &MF) override {
     // Reset the subtarget each time through.
@@ -43,6 +43,7 @@ public:
   void Select(SDNode *N) override;
   bool selectAddCarry(SDNode *N);
   bool selectSubCarry(SDNode *N);
+  bool selectBITCAST_TO_LOHI(SDNode *N);
   bool selectInlineAsm(SDNode *N);
 
   SDNode *createGPRPairNode(EVT VT, SDValue V0, SDValue V1);
@@ -53,6 +54,10 @@ public:
 #include "CSKYGenDAGISel.inc"
 };
 } // namespace
+
+char CSKYDAGToDAGISel::ID = 0;
+
+INITIALIZE_PASS(CSKYDAGToDAGISel, DEBUG_TYPE, PASS_NAME, false, false)
 
 void CSKYDAGToDAGISel::Select(SDNode *N) {
   // If we have a custom node, we have already selected
@@ -93,6 +98,9 @@ void CSKYDAGToDAGISel::Select(SDNode *N) {
     IsSelected = true;
     break;
   }
+  case CSKYISD::BITCAST_TO_LOHI:
+    IsSelected = selectBITCAST_TO_LOHI(N);
+    break;
   case ISD::INLINEASM:
   case ISD::INLINEASM_BR:
     IsSelected = selectInlineAsm(N);
@@ -267,6 +275,24 @@ bool CSKYDAGToDAGISel::selectInlineAsm(SDNode *N) {
   return true;
 }
 
+bool CSKYDAGToDAGISel::selectBITCAST_TO_LOHI(SDNode *N) {
+  SDLoc Dl(N);
+  auto VT = N->getValueType(0);
+  auto V = N->getOperand(0);
+
+  if (!Subtarget->hasFPUv2DoubleFloat())
+    return false;
+
+  SDValue V1 = SDValue(CurDAG->getMachineNode(CSKY::FMFVRL_D, Dl, VT, V), 0);
+  SDValue V2 = SDValue(CurDAG->getMachineNode(CSKY::FMFVRH_D, Dl, VT, V), 0);
+
+  ReplaceUses(SDValue(N, 0), V1);
+  ReplaceUses(SDValue(N, 1), V2);
+  CurDAG->RemoveDeadNode(N);
+
+  return true;
+}
+
 bool CSKYDAGToDAGISel::selectAddCarry(SDNode *N) {
   MachineSDNode *NewNode = nullptr;
   auto Type0 = N->getValueType(0);
@@ -372,6 +398,7 @@ bool CSKYDAGToDAGISel::SelectInlineAsmMemoryOperand(
   return true;
 }
 
-FunctionPass *llvm::createCSKYISelDag(CSKYTargetMachine &TM) {
-  return new CSKYDAGToDAGISel(TM);
+FunctionPass *llvm::createCSKYISelDag(CSKYTargetMachine &TM,
+                                      CodeGenOpt::Level OptLevel) {
+  return new CSKYDAGToDAGISel(TM, OptLevel);
 }

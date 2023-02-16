@@ -13,7 +13,6 @@
 #include <assert.h>
 #include <atomic>
 #include <cstring>
-#include <dlfcn.h>
 #include <mutex>
 
 //****************************************************************************
@@ -104,7 +103,13 @@ static thread_local ompt_data_t ompt_target_data = ompt_data_none;
 static thread_local ompt_data_t *ompt_task_data = 0;
 static thread_local ompt_data_t *ompt_target_task_data = 0;
 static thread_local ompt_id_t host_op_id = 0;
+
+// Thread local variables used by the plugin to communicate OMPT information
+// that are then used to populate trace records. This method assumes a
+// synchronous implementation, otherwise it won't work.
 static thread_local uint32_t ompt_num_granted_teams = 0;
+static thread_local uint64_t ompt_tr_start_time = 0;
+static thread_local uint64_t ompt_tr_end_time = 0;
 
 /*****************************************************************************
  * OMPT callbacks
@@ -190,40 +195,49 @@ void OmptInterface::target_data_alloc_begin(int64_t device_id,
                                             void *codeptr) {
   ompt_device_callbacks.ompt_callback_target_data_op_emi(
       ompt_scope_begin, ompt_target_task_data, &ompt_target_data,
-      ompt_target_data_alloc, hst_ptr_begin, device_id, NULL, 0, size, codeptr,
-      opid_create, &ompt_target_region_opid);
+      ompt_target_data_alloc, /*src_addr=*/hst_ptr_begin,
+      /*src_device_num=*/omp_get_initial_device(), /*dest_addr=*/nullptr,
+      /*dest_device_num=*/device_id, size, codeptr, opid_create,
+      &ompt_target_region_opid);
   target_operation_begin();
 }
 
 void OmptInterface::target_data_alloc_end(int64_t device_id,
-                                          void *hst_ptr_begin, size_t size,
+                                          void *hst_ptr_begin,
+                                          void *tgt_ptr_begin, size_t size,
                                           void *codeptr) {
   ompt_device_callbacks.ompt_callback_target_data_op_emi(
       ompt_scope_end, ompt_target_task_data, &ompt_target_data,
-      ompt_target_data_alloc, hst_ptr_begin, device_id, NULL, 0, size, codeptr,
+      ompt_target_data_alloc, /*src_addr=*/hst_ptr_begin,
+      /*src_device_num=*/omp_get_initial_device(),
+      /*dest_addr=*/tgt_ptr_begin, /*dest_device_num=*/device_id, size, codeptr,
       opid_get, &ompt_target_region_opid);
   target_operation_end();
 }
 
 void OmptInterface::target_data_submit_begin(int64_t device_id,
-                                             void *tgt_ptr_begin,
-                                             void *hst_ptr_begin, size_t size,
+                                             void *hst_ptr_begin,
+                                             void *tgt_ptr_begin, size_t size,
                                              void *codeptr) {
   ompt_device_callbacks.ompt_callback_target_data_op_emi(
       ompt_scope_begin, ompt_target_task_data, &ompt_target_data,
-      ompt_target_data_transfer_to_device, hst_ptr_begin, 0, tgt_ptr_begin,
-      device_id, size, codeptr, opid_create, &ompt_target_region_opid);
+      ompt_target_data_transfer_to_device, /*src_addr=*/hst_ptr_begin,
+      /*src_device_num=*/omp_get_initial_device(),
+      /*dest_addr=*/tgt_ptr_begin, /*dest_device_num=*/device_id, size, codeptr,
+      opid_create, &ompt_target_region_opid);
   target_operation_begin();
 }
 
 void OmptInterface::target_data_submit_end(int64_t device_id,
-                                           void *tgt_ptr_begin,
-                                           void *hst_ptr_begin, size_t size,
+                                           void *hst_ptr_begin,
+                                           void *tgt_ptr_begin, size_t size,
                                            void *codeptr) {
   ompt_device_callbacks.ompt_callback_target_data_op_emi(
       ompt_scope_end, ompt_target_task_data, &ompt_target_data,
-      ompt_target_data_transfer_to_device, hst_ptr_begin, 0, tgt_ptr_begin,
-      device_id, size, codeptr, opid_get, &ompt_target_region_opid);
+      ompt_target_data_transfer_to_device, /*src_addr=*/hst_ptr_begin,
+      /*src_device_num=*/omp_get_initial_device(),
+      /*dest_addr=*/tgt_ptr_begin, /*dest_device_num=*/device_id, size, codeptr,
+      opid_get, &ompt_target_region_opid);
   target_operation_end();
 }
 
@@ -232,8 +246,10 @@ void OmptInterface::target_data_delete_begin(int64_t device_id,
                                              void *codeptr) {
   ompt_device_callbacks.ompt_callback_target_data_op_emi(
       ompt_scope_begin, ompt_target_task_data, &ompt_target_data,
-      ompt_target_data_delete, tgt_ptr_begin, device_id, NULL, 0, 0, codeptr,
-      opid_create, &ompt_target_region_opid);
+      ompt_target_data_delete, /*src_addr=*/tgt_ptr_begin,
+      /*src_device_num=*/device_id, /*dest_addr=*/nullptr,
+      /*dest_device_num=*/-1, /*size=*/0, codeptr, opid_create,
+      &ompt_target_region_opid);
   target_operation_begin();
 }
 
@@ -241,8 +257,10 @@ void OmptInterface::target_data_delete_end(int64_t device_id,
                                            void *tgt_ptr_begin, void *codeptr) {
   ompt_device_callbacks.ompt_callback_target_data_op_emi(
       ompt_scope_end, ompt_target_task_data, &ompt_target_data,
-      ompt_target_data_delete, tgt_ptr_begin, device_id, NULL, 0, 0, codeptr,
-      opid_get, &ompt_target_region_opid);
+      ompt_target_data_delete, /*src_addr=*/tgt_ptr_begin,
+      /*src_device_num=*/device_id, /*dest_addr=*/nullptr,
+      /*dest_device_num=*/-1, /*size=*/0, codeptr, opid_get,
+      &ompt_target_region_opid);
   target_operation_end();
 }
 
@@ -252,8 +270,10 @@ void OmptInterface::target_data_retrieve_begin(int64_t device_id,
                                                void *codeptr) {
   ompt_device_callbacks.ompt_callback_target_data_op_emi(
       ompt_scope_begin, ompt_target_task_data, &ompt_target_data,
-      ompt_target_data_transfer_from_device, tgt_ptr_begin, device_id,
-      hst_ptr_begin, 0, size, codeptr, opid_create, &ompt_target_region_opid);
+      ompt_target_data_transfer_from_device, /*src_addr=*/tgt_ptr_begin,
+      /*src_device_num=*/device_id, /*dest_addr=*/hst_ptr_begin,
+      /*dest_device_num=*/omp_get_initial_device(), size, codeptr, opid_create,
+      &ompt_target_region_opid);
   target_operation_begin();
 }
 
@@ -263,14 +283,16 @@ void OmptInterface::target_data_retrieve_end(int64_t device_id,
                                              void *codeptr) {
   ompt_device_callbacks.ompt_callback_target_data_op_emi(
       ompt_scope_end, ompt_target_task_data, &ompt_target_data,
-      ompt_target_data_transfer_from_device, tgt_ptr_begin, device_id,
-      hst_ptr_begin, 0, size, codeptr, opid_get, &ompt_target_region_opid);
+      ompt_target_data_transfer_from_device, /*src_addr=*/tgt_ptr_begin,
+      /*src_device_num=*/device_id, /*dest_addr=*/hst_ptr_begin,
+      /*dest_device_num=*/omp_get_initial_device(), size, codeptr, opid_get,
+      &ompt_target_region_opid);
   target_operation_end();
 }
 
 ompt_record_ompt_t *OmptInterface::target_data_submit_trace_record_gen(
-    int64_t device_id, ompt_target_data_op_t data_op, void *src_ptr,
-    void *dest_ptr, size_t bytes, uint64_t start_time) {
+    ompt_target_data_op_t data_op, void *src_addr, int64_t src_device_num,
+    void *dest_addr, int64_t dest_device_num, size_t bytes) {
   if (!ompt_device_callbacks.is_tracing_enabled() ||
       (!ompt_device_callbacks.is_tracing_type_enabled(
            ompt_callback_target_data_op) &&
@@ -284,10 +306,11 @@ ompt_record_ompt_t *OmptInterface::target_data_submit_trace_record_gen(
 
   // Logically, this record is now private
 
-  set_trace_record_common(data_ptr, ompt_callback_target_data_op, start_time);
+  set_trace_record_common(data_ptr, ompt_callback_target_data_op);
 
-  set_trace_record_target_data_op(&data_ptr->record.target_data_op, device_id,
-                                  data_op, src_ptr, dest_ptr, bytes);
+  set_trace_record_target_data_op(&data_ptr->record.target_data_op, data_op,
+                                  src_addr, src_device_num, dest_addr,
+                                  dest_device_num, bytes);
 
   // The trace record has been created, mark it ready for delivery to the tool
   ompt_trace_record_buffer_mgr.setTRStatus(data_ptr,
@@ -298,17 +321,17 @@ ompt_record_ompt_t *OmptInterface::target_data_submit_trace_record_gen(
 }
 
 void OmptInterface::set_trace_record_target_data_op(
-    ompt_record_target_data_op_t *rec, int64_t device_id,
-    ompt_target_data_op_t data_op, void *src_ptr, void *dest_ptr,
-    size_t bytes) {
+    ompt_record_target_data_op_t *rec, ompt_target_data_op_t data_op,
+    void *src_addr, int64_t src_device_num, void *dest_addr,
+    int64_t dest_device_num, size_t bytes) {
   rec->host_op_id = ompt_target_region_opid;
   rec->optype = data_op;
-  rec->src_addr = src_ptr;
-  rec->src_device_num = device_id;
-  rec->dest_addr = dest_ptr;
-  rec->dest_device_num = device_id;
+  rec->src_addr = src_addr;
+  rec->src_device_num = src_device_num;
+  rec->dest_addr = dest_addr;
+  rec->dest_device_num = dest_device_num;
   rec->bytes = bytes;
-  rec->end_time = get_ns_duration_since_epoch();
+  rec->end_time = ompt_tr_end_time;
   rec->codeptr_ra = _codeptr_ra;
 }
 
@@ -325,8 +348,7 @@ void OmptInterface::target_submit_end(unsigned int num_teams) {
 }
 
 ompt_record_ompt_t *
-OmptInterface::target_submit_trace_record_gen(uint64_t start_time,
-                                              unsigned int num_teams) {
+OmptInterface::target_submit_trace_record_gen(unsigned int num_teams) {
   if (!ompt_device_callbacks.is_tracing_enabled() ||
       (!ompt_device_callbacks.is_tracing_type_enabled(
            ompt_callback_target_submit) &&
@@ -340,7 +362,7 @@ OmptInterface::target_submit_trace_record_gen(uint64_t start_time,
 
   // Logically, this record is now private
 
-  set_trace_record_common(data_ptr, ompt_callback_target_submit, start_time);
+  set_trace_record_common(data_ptr, ompt_callback_target_submit);
 
   set_trace_record_target_kernel(&data_ptr->record.target_kernel, num_teams);
 
@@ -357,7 +379,7 @@ void OmptInterface::set_trace_record_target_kernel(
   rec->host_op_id = ompt_target_region_opid;
   rec->requested_num_teams = num_teams;
   rec->granted_num_teams = ompt_num_granted_teams;
-  rec->end_time = get_ns_duration_since_epoch();
+  rec->end_time = ompt_tr_end_time;
 }
 
 void OmptInterface::target_data_enter_begin(int64_t device_id, void *codeptr) {
@@ -429,15 +451,13 @@ OmptInterface::target_trace_record_gen(int64_t device_id, ompt_target_t kind,
            ompt_callback_target_emi)))
     return nullptr;
 
-  uint64_t start_time = ompt_interface.get_ns_duration_since_epoch();
-
   ompt_record_ompt_t *data_ptr =
       (ompt_record_ompt_t *)ompt_trace_record_buffer_mgr.assignCursor(
           ompt_callback_target);
 
   // Logically, this record is now private
 
-  set_trace_record_common(data_ptr, ompt_callback_target, start_time);
+  set_trace_record_common(data_ptr, ompt_callback_target);
   set_trace_record_target(&data_ptr->record.target, device_id, kind, endpoint,
                           code);
 
@@ -465,10 +485,12 @@ void OmptInterface::set_trace_record_target(ompt_record_target_t *rec,
 }
 
 void OmptInterface::set_trace_record_common(ompt_record_ompt_t *data_ptr,
-                                            ompt_callbacks_t cbt,
-                                            uint64_t start_time) {
+                                            ompt_callbacks_t cbt) {
   data_ptr->type = cbt;
-  data_ptr->time = start_time;
+  if (cbt == ompt_callback_target)
+    data_ptr->time = 0; // Currently, no consumer, so no need to set it
+  else
+    data_ptr->time = ompt_tr_start_time;
   data_ptr->thread_id = 0; // TODO
   data_ptr->target_id = ompt_target_data.value;
 }
@@ -486,7 +508,7 @@ static void LIBOMPTARGET_GET_TARGET_OPID(uint64_t *device_num,
 static int libomptarget_ompt_initialize(ompt_function_lookup_t lookup,
                                         int initial_device_num,
                                         ompt_data_t *tool_data) {
-  DP("enter libomptarget_ompt_initialize!\n");
+  DP("OMPT: enter libomptarget_ompt_initialize!\n");
 
   ompt_enabled = true;
 
@@ -502,7 +524,7 @@ static int libomptarget_ompt_initialize(ompt_function_lookup_t lookup,
 
   ompt_device_callbacks.register_callbacks(lookup);
 
-  DP("exit libomptarget_ompt_initialize!\n");
+  DP("OMPT: exit libomptarget_ompt_initialize!\n");
 
   return 0;
 }
@@ -537,7 +559,8 @@ ompt_device_callbacks_t::lookup(const char *interface_function_name) {
  * constructor
  *****************************************************************************/
 
-__attribute__((constructor(102))) static void ompt_init(void) {
+void ompt_init() {
+  DP("OMPT: Entering ompt_init\n");
   static library_ompt_connector_t libomp_connector("libomp");
   static ompt_start_tool_result_t ompt_result;
 
@@ -546,8 +569,8 @@ __attribute__((constructor(102))) static void ompt_init(void) {
   ompt_result.tool_data.value = 0;
 
   ompt_device_callbacks.init();
-
   libomp_connector.connect(&ompt_result);
+
   DP("OMPT: Exit ompt_init\n");
 }
 #endif
@@ -555,7 +578,8 @@ __attribute__((constructor(102))) static void ompt_init(void) {
 extern "C" {
 
 void libomptarget_ompt_connect(ompt_start_tool_result_t *result) {
-  DP("OMPT: Enter libomptarget_ompt_connect\n");
+  DP("OMPT: Enter libomptarget_ompt_connect: OMPT enabled == %d\n",
+     ompt_enabled);
   if (ompt_enabled && result) {
     libomptarget_rtl_finalizer.register_rtl(result->finalize);
     result->initialize(ompt_device_callbacks_t::lookup, 0, NULL);
@@ -629,5 +653,22 @@ int libomptarget_ompt_advance_buffer_cursor(ompt_device_t *device,
 // ompt_num_granted_teams is already updated
 void libomptarget_ompt_set_granted_teams(uint32_t num_teams) {
   ompt_num_granted_teams = num_teams;
+}
+
+// Assume a synchronous implementation and set thread local variables to track
+// timestamps. The thread local variables can then be used to populate trace
+// records.
+void libomptarget_ompt_set_timestamp(uint64_t start, uint64_t end) {
+  ompt_tr_start_time = start;
+  ompt_tr_end_time = end;
+}
+
+// Device-independent entry point to query for the trace format used.
+// Currently, only OMPT format is supported.
+ompt_record_t libomptarget_ompt_get_record_type(ompt_buffer_t *buffer,
+                                                ompt_buffer_cursor_t current) {
+  // TODO: When different OMPT trace buffer formats supported, this needs to be
+  // fixed.
+  return ompt_record_t::ompt_record_ompt;
 }
 }

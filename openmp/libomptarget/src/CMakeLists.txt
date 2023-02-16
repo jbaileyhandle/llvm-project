@@ -12,23 +12,34 @@
 
 libomptarget_say("Building offloading runtime library libomptarget.")
 
-set(LIBOMPTARGET_SRC_FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/api.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/device.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/interface.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/hostrpc.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/ompt_buffer_mgr.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/ompt_callback.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/rtl.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/interop.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/omptarget.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/rtl.cpp
-)
+add_llvm_library(omptarget
+  SHARED
 
-set(LIBOMPTARGET_SRC_FILES ${LIBOMPTARGET_SRC_FILES} PARENT_SCOPE)
+  api.cpp
+  device.cpp
+  interface.cpp
+  hostrpc.cpp
+  ompt_buffer_mgr.cpp
+  ompt_callback.cpp
+  interop.cpp
+  omptarget.cpp
+  ompt_callback.cpp
+  rtl.cpp
+  LegacyAPI.cpp
 
-# Build libomptarget library with libdl dependency.
-add_library(omptarget SHARED ${LIBOMPTARGET_SRC_FILES})
+  ADDITIONAL_HEADER_DIRS
+  ${LIBOMPTARGET_INCLUDE_DIR}
+  
+  LINK_COMPONENTS
+  Support
+  Object
+
+  LINK_LIBS
+  PRIVATE
+  "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports"
+  #  NO_INSTALL_RPATH
+  )
+
 # Don't override an externally defined RPATH
 if(NOT DEFINED CMAKE_INSTALL_RPATH)
   set_target_properties(omptarget PROPERTIES INSTALL_RPATH "$ORIGIN:$ORIGIN/../lib:$ORIGIN/../../lib" BUILD_RPATH "$ORIGIN")
@@ -44,16 +55,15 @@ if (OPENMP_ENABLE_LIBOMPTARGET_PROFILING)
   target_link_libraries(omptarget PRIVATE LLVMSupport)
 endif()
 
-find_library(LLVM_OFFLOAD_ARCH LLVMOffloadArch HINTS ${LLVM_LIBRARY_DIR} REQUIRED)
-find_library(CLANG_CPP clang-cpp HINTS ${LLVM_LIBRARY_DIR} REQUIRED)
+find_library(LLVM_OFFLOAD_ARCH LLVMOffloadArch HINTS ${LLVM_LIBRARY_DIR} ${LLVM_BINARY_DIR} PATH_SUFFIXES lib REQUIRED)
+
+target_include_directories(omptarget PRIVATE ${LIBOMPTARGET_INCLUDE_DIR})
 
 target_link_libraries(omptarget PRIVATE
   ${CMAKE_DL_LIBS}
   ${LLVM_OFFLOAD_ARCH}
-  ${CLANG_CPP}
-  "-Wl,--no-allow-shlib-undefined"
-  "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports")
+  "-Wl,--no-allow-shlib-undefined")
 
-# Install libomptarget under the lib destination folder.
-install(TARGETS omptarget LIBRARY COMPONENT omptarget
-  DESTINATION "${OPENMP_INSTALL_LIBDIR}")
+# libomptarget.so needs to be aware of where the plugins live as they
+# are now separated in the build directory.
+install(TARGETS omptarget LIBRARY COMPONENT omptarget DESTINATION "${RUN_PACKAGE}${OPENMP_INSTALL_LIBDIR}")

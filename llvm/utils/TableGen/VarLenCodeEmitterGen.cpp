@@ -58,7 +58,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TableGen/Error.h"
-#include "llvm/TableGen/Record.h"
 
 using namespace llvm;
 
@@ -66,48 +65,6 @@ namespace {
 
 class VarLenCodeEmitterGen {
   RecordKeeper &Records;
-
-  struct EncodingSegment {
-    unsigned BitWidth;
-    const Init *Value;
-    StringRef CustomEncoder = "";
-  };
-
-  class VarLenInst {
-    RecordVal *TheDef;
-    size_t NumBits;
-
-    // Set if any of the segment is not fixed value.
-    bool HasDynamicSegment;
-
-    SmallVector<EncodingSegment, 4> Segments;
-
-    void buildRec(const DagInit *DI);
-
-    StringRef getCustomEncoderName(const Init *EI) const {
-      if (const auto *DI = dyn_cast<DagInit>(EI)) {
-        if (DI->getNumArgs() && isa<StringInit>(DI->getArg(0)))
-          return cast<StringInit>(DI->getArg(0))->getValue();
-      }
-      return "";
-    }
-
-  public:
-    VarLenInst() : TheDef(nullptr), NumBits(0U), HasDynamicSegment(false) {}
-
-    explicit VarLenInst(const DagInit *DI, RecordVal *TheDef);
-
-    /// Number of bits
-    size_t size() const { return NumBits; }
-
-    using const_iterator = decltype(Segments)::const_iterator;
-
-    const_iterator begin() const { return Segments.begin(); }
-    const_iterator end() const { return Segments.end(); }
-    size_t getNumSegments() const { return Segments.size(); }
-
-    bool isFixedValueOnly() const { return !HasDynamicSegment; }
-  };
 
   DenseMap<Record *, VarLenInst> VarLenInsts;
 
@@ -126,18 +83,43 @@ public:
 
   void run(raw_ostream &OS);
 };
-
 } // end anonymous namespace
 
-VarLenCodeEmitterGen::VarLenInst::VarLenInst(const DagInit *DI,
-                                             RecordVal *TheDef)
+// Get the name of custom encoder or decoder, if there is any.
+// Returns `{encoder name, decoder name}`.
+static std::pair<StringRef, StringRef> getCustomCoders(ArrayRef<Init *> Args) {
+  std::pair<StringRef, StringRef> Result;
+  for (const auto *Arg : Args) {
+    const auto *DI = dyn_cast<DagInit>(Arg);
+    if (!DI)
+      continue;
+    const Init *Op = DI->getOperator();
+    if (!isa<DefInit>(Op))
+      continue;
+    // syntax: `(<encoder | decoder> "function name")`
+    StringRef OpName = cast<DefInit>(Op)->getDef()->getName();
+    if (OpName != "encoder" && OpName != "decoder")
+      continue;
+    if (!DI->getNumArgs() || !isa<StringInit>(DI->getArg(0)))
+      PrintFatalError("expected '" + OpName +
+                      "' directive to be followed by a custom function name.");
+    StringRef FuncName = cast<StringInit>(DI->getArg(0))->getValue();
+    if (OpName == "encoder")
+      Result.first = FuncName;
+    else
+      Result.second = FuncName;
+  }
+  return Result;
+}
+
+VarLenInst::VarLenInst(const DagInit *DI, const RecordVal *TheDef)
     : TheDef(TheDef), NumBits(0U) {
   buildRec(DI);
   for (const auto &S : Segments)
     NumBits += S.BitWidth;
 }
 
-void VarLenCodeEmitterGen::VarLenInst::buildRec(const DagInit *DI) {
+void VarLenInst::buildRec(const DagInit *DI) {
   assert(TheDef && "The def record is nullptr ?");
 
   std::string Op = DI->getOperator()->getAsString();
@@ -167,7 +149,8 @@ void VarLenCodeEmitterGen::VarLenInst::buildRec(const DagInit *DI) {
       }
     }
   } else if (Op == "operand") {
-    // (operand <operand name>, <# of bits>, [(encoder <custom encoder>)])
+    // (operand <operand name>, <# of bits>,
+    //          [(encoder <custom encoder>)][, (decoder <custom decoder>)])
     if (DI->getNumArgs() < 2)
       PrintFatalError(TheDef->getLoc(),
                       "Expecting at least 2 arguments for `operand`");
@@ -180,14 +163,13 @@ void VarLenCodeEmitterGen::VarLenInst::buildRec(const DagInit *DI) {
     if (NumBitsVal <= 0)
       PrintFatalError(TheDef->getLoc(), "Invalid number of bits for `operand`");
 
-    StringRef CustomEncoder;
-    if (DI->getNumArgs() >= 3)
-      CustomEncoder = getCustomEncoderName(DI->getArg(2));
-    Segments.push_back(
-        {static_cast<unsigned>(NumBitsVal), OperandName, CustomEncoder});
+    auto [CustomEncoder, CustomDecoder] =
+        getCustomCoders(DI->getArgs().slice(2));
+    Segments.push_back({static_cast<unsigned>(NumBitsVal), OperandName,
+                        CustomEncoder, CustomDecoder});
   } else if (Op == "slice") {
     // (slice <operand name>, <high / low bit>, <low / high bit>,
-    //        [(encoder <custom encoder>)])
+    //        [(encoder <custom encoder>)][, (decoder <custom decoder>)])
     if (DI->getNumArgs() < 3)
       PrintFatalError(TheDef->getLoc(),
                       "Expecting at least 3 arguments for `slice`");
@@ -211,18 +193,17 @@ void VarLenCodeEmitterGen::VarLenInst::buildRec(const DagInit *DI) {
       NumBits = static_cast<unsigned>(HiBitVal - LoBitVal + 1);
     }
 
-    StringRef CustomEncoder;
-    if (DI->getNumArgs() >= 4)
-      CustomEncoder = getCustomEncoderName(DI->getArg(3));
+    auto [CustomEncoder, CustomDecoder] =
+        getCustomCoders(DI->getArgs().slice(3));
 
     if (NeedSwap) {
       // Normalization: Hi bit should always be the second argument.
       Init *const NewArgs[] = {OperandName, LoBit, HiBit};
       Segments.push_back({NumBits,
                           DagInit::get(DI->getOperator(), nullptr, NewArgs, {}),
-                          CustomEncoder});
+                          CustomEncoder, CustomDecoder});
     } else {
-      Segments.push_back({NumBits, DI, CustomEncoder});
+      Segments.push_back({NumBits, DI, CustomEncoder, CustomDecoder});
     }
   }
 }
@@ -468,7 +449,7 @@ std::string VarLenCodeEmitterGen::getInstructionCaseForEncoding(
   raw_string_ostream SS(Case);
   // Resize the scratch buffer.
   if (BitWidth && !VLI.isFixedValueOnly())
-    SS.indent(6) << "Scratch = Scratch.zextOrSelf(" << BitWidth << ");\n";
+    SS.indent(6) << "Scratch = Scratch.zext(" << BitWidth << ");\n";
   // Populate based value.
   SS.indent(6) << "Inst = getInstBits(opcode);\n";
 
@@ -493,7 +474,8 @@ std::string VarLenCodeEmitterGen::getInstructionCaseForEncoding(
 
       auto OpIdx = CGI.Operands.ParseOperandName(OperandName);
       unsigned FlatOpIdx = CGI.Operands.getFlattenedOperandNumber(OpIdx);
-      StringRef CustomEncoder = CGI.Operands[OpIdx.first].EncoderMethodName;
+      StringRef CustomEncoder =
+          CGI.Operands[OpIdx.first].EncoderMethodNames[OpIdx.second];
       if (ES.CustomEncoder.size())
         CustomEncoder = ES.CustomEncoder;
 

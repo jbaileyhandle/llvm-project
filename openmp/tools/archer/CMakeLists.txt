@@ -12,11 +12,12 @@ if(LIBOMP_OMPT_SUPPORT)
   include_directories(${LIBOMP_INCLUDE_DIR})
 
   add_library(archer SHARED ompt-tsan.cpp)
+  target_link_libraries(archer ${CMAKE_DL_LIBS})
   add_library(archer_static STATIC ompt-tsan.cpp)
 
   install(TARGETS archer archer_static
-    LIBRARY DESTINATION ${OPENMP_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${OPENMP_INSTALL_LIBDIR})
+    LIBRARY DESTINATION ${RUN_PACKAGE}${OPENMP_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${RUN_PACKAGE}${OPENMP_INSTALL_LIBDIR})
 
   add_subdirectory(tests)
 endif()

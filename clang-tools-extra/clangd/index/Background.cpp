@@ -49,6 +49,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <queue>
 #include <random>
 #include <string>
@@ -92,6 +93,7 @@ BackgroundIndex::BackgroundIndex(
     const ThreadsafeFS &TFS, const GlobalCompilationDatabase &CDB,
     BackgroundIndexStorage::Factory IndexStorageFactory, Options Opts)
     : SwapIndex(std::make_unique<MemIndex>()), TFS(TFS), CDB(CDB),
+      IndexingPriority(Opts.IndexingPriority),
       ContextProvider(std::move(Opts.ContextProvider)),
       IndexedSymbols(IndexContents::All),
       Rebuilder(this, &IndexedSymbols, Opts.ThreadPoolSize),
@@ -122,7 +124,7 @@ BackgroundQueue::Task BackgroundIndex::changedFilesTask(
   BackgroundQueue::Task T([this, ChangedFiles] {
     trace::Span Tracer("BackgroundIndexEnqueue");
 
-    llvm::Optional<WithContext> WithProvidedContext;
+    std::optional<WithContext> WithProvidedContext;
     if (ContextProvider)
       WithProvidedContext.emplace(ContextProvider(/*Path=*/""));
 
@@ -155,7 +157,7 @@ BackgroundQueue::Task BackgroundIndex::indexFileTask(std::string Path) {
   std::string Tag = filenameWithoutExtension(Path).str();
   uint64_t Key = llvm::xxHash64(Path);
   BackgroundQueue::Task T([this, Path(std::move(Path))] {
-    llvm::Optional<WithContext> WithProvidedContext;
+    std::optional<WithContext> WithProvidedContext;
     if (ContextProvider)
       WithProvidedContext.emplace(ContextProvider(Path));
     auto Cmd = CDB.getCompileCommand(Path);
@@ -165,6 +167,7 @@ BackgroundQueue::Task BackgroundIndex::indexFileTask(std::string Path) {
       elog("Indexing {0} failed: {1}", Path, std::move(Error));
   });
   T.QueuePri = IndexFile;
+  T.ThreadPri = IndexingPriority;
   T.Tag = std::move(Tag);
   T.Key = Key;
   return T;
@@ -394,7 +397,7 @@ BackgroundIndex::loadProject(std::vector<std::string> MainFiles) {
   Rebuilder.loadedShard(LoadedShards);
   Rebuilder.doneLoading();
 
-  auto FS = TFS.view(/*CWD=*/llvm::None);
+  auto FS = TFS.view(/*CWD=*/std::nullopt);
   llvm::DenseSet<PathRef> TUsToIndex;
   // We'll accept data from stale shards, but ensure the files get reindexed
   // soon.

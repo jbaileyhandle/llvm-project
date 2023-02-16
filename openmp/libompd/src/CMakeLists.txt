@@ -13,7 +13,7 @@ cmake_minimum_required(VERSION 3.13.4)
 
 add_library (ompd SHARED TargetValue.cpp omp-debug.cpp omp-state.cpp omp-icv.cpp)
 
-add_dependencies(ompd omp) # ensure generated import library is created first
+target_link_libraries(ompd omp) # ensure generated import library is created first
 
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
@@ -56,6 +56,6 @@ if(${LIBOMP_USE_HWLOC})
 endif()
 
 INSTALL( TARGETS ompd
-        LIBRARY DESTINATION ${OPENMP_INSTALL_LIBDIR}
-        ARCHIVE DESTINATION ${OPENMP_INSTALL_LIBDIR}
-        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" )
+        LIBRARY DESTINATION ${RUN_PACKAGE}${OPENMP_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION ${RUN_PACKAGE}${OPENMP_INSTALL_LIBDIR}
+        RUNTIME DESTINATION "${DEVEL_PACKAGE}${CMAKE_INSTALL_BINDIR}" )

@@ -198,10 +198,16 @@ NVPTX
 * `CUDA Documentation <http://docs.nvidia.com/cuda/index.html>`_ includes the PTX
   ISA and Driver API documentation
 
+SPIR-V
+======
+
+* `SPIR-V documentation <https://www.khronos.org/registry/SPIR-V/>`_
+
 Miscellaneous Resources
 =======================
 
-* `Executable File Format library <http://www.nondot.org/sabre/os/articles/ExecutableFileFormats/>`_
+* `Executable File Formats <https://wiki.osdev.org/Category:Executable_Formats>`_
+  has a list of various executable file formats.
 
 * `GCC prefetch project <http://gcc.gnu.org/projects/prefetch.html>`_ page has a
   good survey of the prefetching capabilities of a variety of modern

@@ -7,11 +7,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "flang/Optimizer/Support/FIRContext.h"
-#include "flang/Optimizer/Support/KindMapping.h"
+#include "gtest/gtest.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "llvm/Support/Host.h"
-#include "gtest/gtest.h"
+#include "flang/Optimizer/Support/KindMapping.h"
+#include "llvm/TargetParser/Host.h"
 #include <string>
 
 using namespace fir;

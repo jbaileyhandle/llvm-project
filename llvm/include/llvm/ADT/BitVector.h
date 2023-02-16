@@ -83,7 +83,7 @@ class BitVector {
   using Storage = SmallVector<BitWord>;
 
   Storage Bits;  // Actual bits.
-  unsigned Size; // Size of bitvector in bits.
+  unsigned Size = 0; // Size of bitvector in bits.
 
 public:
   using size_type = unsigned;
@@ -135,7 +135,7 @@ public:
   }
 
   /// BitVector default ctor - Creates an empty bitvector.
-  BitVector() : Size(0) {}
+  BitVector() = default;
 
   /// BitVector ctor - Creates a bitvector of specified number of bits. All
   /// bits are initialized to the specified value.
@@ -155,7 +155,7 @@ public:
   size_type count() const {
     unsigned NumBits = 0;
     for (auto Bit : Bits)
-      NumBits += countPopulation(Bit);
+      NumBits += llvm::popcount(Bit);
     return NumBits;
   }
 
@@ -213,7 +213,7 @@ public:
         Copy &= maskTrailingOnes<BitWord>(LastBit + 1);
       }
       if (Copy != 0)
-        return i * BITWORD_SIZE + countTrailingZeros(Copy);
+        return i * BITWORD_SIZE + llvm::countr_zero(Copy);
     }
     return -1;
   }
@@ -243,7 +243,7 @@ public:
       }
 
       if (Copy != 0)
-        return (CurrentWord + 1) * BITWORD_SIZE - countLeadingZeros(Copy) - 1;
+        return (CurrentWord + 1) * BITWORD_SIZE - llvm::countl_zero(Copy) - 1;
     }
 
     return -1;
@@ -281,7 +281,7 @@ public:
 
       if (Copy != ~BitWord(0)) {
         unsigned Result =
-            (CurrentWord + 1) * BITWORD_SIZE - countLeadingOnes(Copy) - 1;
+            (CurrentWord + 1) * BITWORD_SIZE - llvm::countl_one(Copy) - 1;
         return Result < Size ? Result : -1;
       }
     }
@@ -763,7 +763,7 @@ private:
   }
 
   int next_unset_in_word(int WordIndex, BitWord Word) const {
-    unsigned Result = WordIndex * BITWORD_SIZE + countTrailingOnes(Word);
+    unsigned Result = WordIndex * BITWORD_SIZE + llvm::countr_one(Word);
     return Result < size() ? Result : -1;
   }
 

@@ -15,14 +15,14 @@ define i8 @add8(i8* %p) {
 ; X64-LABEL: add8:
 ; X64:       # %bb.0:
 ; X64-NEXT:    mfence
-; X64-NEXT:    movb (%rdi), %al
+; X64-NEXT:    movzbl (%rdi), %eax
 ; X64-NEXT:    retq
 ;
 ; X86-SSE2-LABEL: add8:
 ; X86-SSE2:       # %bb.0:
 ; X86-SSE2-NEXT:    movl {{[0-9]+}}(%esp), %eax
 ; X86-SSE2-NEXT:    mfence
-; X86-SSE2-NEXT:    movb (%eax), %al
+; X86-SSE2-NEXT:    movzbl (%eax), %eax
 ; X86-SSE2-NEXT:    retl
 ;
 ; X86-SLM-LABEL: add8:
@@ -359,6 +359,8 @@ define void @or32_nouse_monotonic(i32* %p) {
 ; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    nop
+; X86-ATOM-NEXT:    nop
+; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    retl
   atomicrmw or i32* %p, i32 0 monotonic
   ret void
@@ -379,6 +381,8 @@ define void @or32_nouse_acquire(i32* %p) {
 ; X86-ATOM-LABEL: or32_nouse_acquire:
 ; X86-ATOM:       # %bb.0:
 ; X86-ATOM-NEXT:    #MEMBARRIER
+; X86-ATOM-NEXT:    nop
+; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    nop
@@ -410,6 +414,8 @@ define void @or32_nouse_release(i32* %p) {
 ; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    nop
+; X86-ATOM-NEXT:    nop
+; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    retl
   atomicrmw or i32* %p, i32 0 release
   ret void
@@ -429,6 +435,8 @@ define void @or32_nouse_acq_rel(i32* %p) {
 ; X86-ATOM-LABEL: or32_nouse_acq_rel:
 ; X86-ATOM:       # %bb.0:
 ; X86-ATOM-NEXT:    #MEMBARRIER
+; X86-ATOM-NEXT:    nop
+; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    nop
 ; X86-ATOM-NEXT:    nop

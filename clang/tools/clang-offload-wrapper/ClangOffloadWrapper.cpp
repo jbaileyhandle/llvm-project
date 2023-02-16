@@ -16,7 +16,6 @@
 
 #include "clang/Basic/Version.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Constants.h"
@@ -40,6 +39,7 @@
 #include "llvm/Support/VCSRevision.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include <cassert>
 #include <cstdint>
@@ -321,56 +321,6 @@ private:
 
     // Construct function body
     IRBuilder<> Builder(BasicBlock::Create(C, "entry", Func));
-    // Create calls to __tgt_register_image_info for each image
-    auto *NullPtr = llvm::ConstantPointerNull::get(Builder.getInt8PtrTy());
-    auto *Zero = ConstantInt::get(getSizeTTy(), 0u);
-    auto *RegInfoFuncTy =
-        FunctionType::get(Type::getVoidTy(C), getImageInfoPtrTy(), false);
-    FunctionCallee RegInfoFuncC =
-        M.getOrInsertFunction("__tgt_register_image_info", RegInfoFuncTy);
-    unsigned int ImgCount = 0;
-    std::string OffloadArchBase = "__offload_arch";
-    std::string OffloadImageBase = "offload_image_info";
-
-    for (ArrayRef<char> OArch : OffloadArchs) {
-      Constant *OArchV = ConstantDataArray::get(C, OArch);
-      std::string OffloadArchGV(OffloadArchBase), OffloadImageGV(OffloadImageBase);
-      if(ImgCount) {
-        auto Suffix = to_string(ImgCount);
-        OffloadArchGV.append(".").append(Suffix);
-        OffloadImageGV.append(".").append(Suffix);
-      }
-
-      auto *GV =
-          new GlobalVariable(M, OArchV->getType(), /*isConstant*/ true,
-                             GlobalValue::InternalLinkage, OArchV,
-                             OffloadArchGV);
-      GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-
-      // store value of these variables (i.e. offload archs) into a custom
-      // section which will be used by "offload-arch -f". It won't be
-      // removed during binary stripping.
-      GV->setSection(".offload_arch_list");
-
-      auto *RequirementVPtr =
-          ConstantExpr::getGetElementPtr(GV->getValueType(), GV, Zero);
-      RequirementVPtr =
-          ConstantExpr::getBitCast(RequirementVPtr, Type::getInt8PtrTy(C));
-      auto *InfoInit = ConstantStruct::get(
-          getImageInfoTy(), ConstantInt::get(Type::getInt32Ty(C), 1),
-          ConstantInt::get(Type::getInt32Ty(C), ImgCount++),
-          ConstantInt::get(Type::getInt32Ty(C), (uint32_t)OffloadArchs.size()),
-          RequirementVPtr,
-          NullPtr // TODO: capture target-compile-opts from clang driver
-      );
-      auto *ImageInfoGV = new GlobalVariable(
-          M, InfoInit->getType(),
-          /*isConstant*/ true, GlobalValue::InternalLinkage, InfoInit,
-         OffloadImageGV);
-      ImageInfoGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-      Builder.CreateCall(RegInfoFuncC, ImageInfoGV);
-    }
-
     Builder.CreateCall(RegFuncC, BinDesc);
     Builder.CreateRetVoid();
 
@@ -650,7 +600,7 @@ public:
     bool ExecutionFailed = false;
     std::string ErrMsg;
     (void)sys::ExecuteAndWait(ObjcopyPath, Args,
-                              /*Env=*/llvm::None, /*Redirects=*/{},
+                              /*Env=*/std::nullopt, /*Redirects=*/{},
                               /*SecondsToWait=*/0,
                               /*MemoryLimit=*/0, &ErrMsg, &ExecutionFailed);
 
@@ -744,9 +694,8 @@ int main(int argc, const char **argv) {
 
   // Create a wrapper for device binaries and write its bitcode to the file.
   WriteBitcodeToFile(
-      Wrapper.wrapBinaries(
-          makeArrayRef(Images.data(), Images.size()),
-          makeArrayRef(OffloadArchs.data(), OffloadArchs.size())),
+      Wrapper.wrapBinaries(ArrayRef(Images.data(), Images.size()),
+                           ArrayRef(OffloadArchs.data(), OffloadArchs.size())),
       Out.os());
 
   if (Out.os().has_error()) {

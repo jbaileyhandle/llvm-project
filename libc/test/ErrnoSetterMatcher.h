@@ -9,7 +9,7 @@
 #ifndef LLVM_LIBC_TEST_ERRNOSETTERMATCHER_H
 #define LLVM_LIBC_TEST_ERRNOSETTERMATCHER_H
 
-#include "utils/UnitTest/Test.h"
+#include "test/UnitTest/Test.h"
 
 #include <errno.h>
 
@@ -18,7 +18,7 @@ namespace testing {
 
 namespace internal {
 
-extern "C" const char *strerror(int);
+extern "C" char *strerror(int);
 
 template <typename T> class ErrnoSetterMatcher : public Matcher<T> {
   T ExpectedReturn;

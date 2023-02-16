@@ -88,6 +88,7 @@ class LLDB_API SBThread;
 class LLDB_API SBThreadCollection;
 class LLDB_API SBThreadPlan;
 class LLDB_API SBTrace;
+class LLDB_API SBTraceCursor;
 class LLDB_API SBType;
 class LLDB_API SBTypeCategory;
 class LLDB_API SBTypeEnumMember;
@@ -109,6 +110,7 @@ class LLDB_API SBUnixSignals;
 typedef bool (*SBBreakpointHitCallback)(void *baton, SBProcess &process,
                                         SBThread &thread,
                                         lldb::SBBreakpointLocation &location);
+typedef void *ScriptedObject;
 }
 
 #endif // LLDB_API_SBDEFINES_H

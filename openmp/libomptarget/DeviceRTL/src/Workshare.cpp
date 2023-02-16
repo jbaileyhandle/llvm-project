@@ -20,7 +20,7 @@
 #include "Types.h"
 #include "Utils.h"
 
-using namespace _OMP;
+using namespace ompx;
 
 // TODO:
 struct DynamicScheduleTracker {
@@ -43,7 +43,7 @@ struct DynamicScheduleTracker {
 #define NOT_FINISHED 1
 #define LAST_CHUNK 2
 
-#pragma omp declare target
+#pragma omp begin declare target device_type(nohost)
 
 // TODO: This variable is a hack inherited from the old runtime.
 static uint64_t SHARED(Cnt);
@@ -139,6 +139,7 @@ template <typename T, typename ST> struct omptarget_nvptx_LoopSupport {
                        numberOfActiveOMPThreads);
         break;
       }
+      [[fallthrough]];
     } // note: if chunk <=0, use nochunk
     case kmp_sched_static_balanced_chunk: {
       if (chunk > 0) {
@@ -157,6 +158,7 @@ template <typename T, typename ST> struct omptarget_nvptx_LoopSupport {
           ub = oldUb;
         break;
       }
+      [[fallthrough]];
     } // note: if chunk <=0, use nochunk
     case kmp_sched_static_nochunk: {
       ForStaticNoChunk(lastiter, lb, ub, stride, chunk, gtid,
@@ -168,8 +170,9 @@ template <typename T, typename ST> struct omptarget_nvptx_LoopSupport {
         ForStaticChunk(lastiter, lb, ub, stride, chunk, omp_get_team_num(),
                        omp_get_num_teams());
         break;
-      } // note: if chunk <=0, use nochunk
-    }
+      }
+      [[fallthrough]];
+    } // note: if chunk <=0, use nochunk
     case kmp_sched_distr_static_nochunk: {
       ForStaticNoChunk(lastiter, lb, ub, stride, chunk, omp_get_team_num(),
                        omp_get_num_teams());
@@ -326,7 +329,7 @@ template <typename T, typename ST> struct omptarget_nvptx_LoopSupport {
       __kmpc_barrier(loc, threadId);
       if (tid == 0) {
         Cnt = 0;
-        fence::team(__ATOMIC_SEQ_CST);
+        fence::team(atomic::seq_cst);
       }
       __kmpc_barrier(loc, threadId);
     }
@@ -341,9 +344,9 @@ template <typename T, typename ST> struct omptarget_nvptx_LoopSupport {
     uint32_t change = utils::popc(active);
     __kmpc_impl_lanemask_t lane_mask_lt = mapping::lanemaskLT();
     unsigned int rank = utils::popc(active & lane_mask_lt);
-    uint64_t warp_res;
+    uint64_t warp_res = 0;
     if (rank == 0) {
-      warp_res = atomic::add(&Cnt, change, __ATOMIC_SEQ_CST);
+      warp_res = atomic::add(&Cnt, change, atomic::seq_cst);
     }
     warp_res = utils::shuffle(active, warp_res, leader);
     return warp_res + rank;
@@ -443,29 +446,68 @@ template <typename T, typename ST> struct omptarget_nvptx_LoopSupport {
 
 // TODO: This is a stopgap. We probably want to expand the dispatch API to take
 //       an DST pointer which can then be allocated properly without malloc.
-static DynamicScheduleTracker *THREAD_LOCAL(ThreadDSTPtr);
+// static DynamicScheduleTracker *THREAD_LOCAL(ThreadDSTPtr);
+
+//  GPU backends dislike above static thread local mem. This is alternative.
+//  For each team, an array of global ptrs is allocated with size BlockSize,
+//  one per thread.
+//  The per team shared static global "ThreadDSTPtrPtr" is a pointer to the
+//  array of pointers.  Since it is shared, there is one ThreadDSTPtrPtr for
+//  each team. It is initalized by __init_ThreadDSTPtrPtr() which is
+//  called by __kmpc_target_init for threadid 0.
+static volatile int64_t SHARED(ThreadDSTPtrPtr);
 
 // Create a new DST, link the current one, and define the new as current.
 static DynamicScheduleTracker *pushDST() {
+  int32_t tid = mapping::getThreadIdInBlock();
+  if (ThreadDSTPtrPtr == 0) {
+    if (tid == 0)
+      ThreadDSTPtrPtr = static_cast<int64_t>((int64_t)memory::allocGlobal(
+          sizeof(int64_t) * mapping::getBlockSize(), "array of threadDSTPtr "));
+    synchronize::threads(); // so that all threads no longer see the zero
+    DynamicScheduleTracker **ThreadDSTPtrAry =
+        (DynamicScheduleTracker **)ThreadDSTPtrPtr;
+    ThreadDSTPtrAry[tid] = nullptr;
+  }
+  DynamicScheduleTracker **ThreadDSTPtrAry =
+      (DynamicScheduleTracker **)ThreadDSTPtrPtr;
+  DynamicScheduleTracker *ThreadDSTPtr =
+      (DynamicScheduleTracker *)ThreadDSTPtrAry[tid];
   DynamicScheduleTracker *NewDST = static_cast<DynamicScheduleTracker *>(
       memory::allocGlobal(sizeof(DynamicScheduleTracker), "new DST"));
   *NewDST = DynamicScheduleTracker({0});
   NewDST->NextDST = ThreadDSTPtr;
   ThreadDSTPtr = NewDST;
+  ThreadDSTPtrAry[tid] = ThreadDSTPtr;
   return ThreadDSTPtr;
 }
 
 // Return the current DST.
-static DynamicScheduleTracker *peekDST() { return ThreadDSTPtr; }
+static DynamicScheduleTracker *peekDST() {
+  int32_t tid = mapping::getThreadIdInBlock();
+  DynamicScheduleTracker **ThreadDSTPtrAry =
+      (DynamicScheduleTracker **)ThreadDSTPtrPtr;
+  DynamicScheduleTracker *ThreadDSTPtr =
+      (DynamicScheduleTracker *)ThreadDSTPtrAry[tid];
+  return ThreadDSTPtr;
+}
 
 // Pop the current DST and restore the last one.
 static void popDST() {
+  int32_t tid = mapping::getThreadIdInBlock();
+  DynamicScheduleTracker **ThreadDSTPtrAry =
+      (DynamicScheduleTracker **)ThreadDSTPtrPtr;
+  DynamicScheduleTracker *ThreadDSTPtr =
+      (DynamicScheduleTracker *)ThreadDSTPtrAry[tid];
   DynamicScheduleTracker *OldDST = ThreadDSTPtr->NextDST;
   memory::freeGlobal(ThreadDSTPtr, "remove DST");
-  ThreadDSTPtr = OldDST;
+  if (OldDST != nullptr)
+    ThreadDSTPtrAry[tid] = OldDST;
 }
 
 extern "C" {
+
+void __init_ThreadDSTPtrPtr() { ThreadDSTPtrPtr = 0; }
 
 // init
 void __kmpc_dispatch_init_4(IdentTy *loc, int32_t tid, int32_t schedule,
@@ -655,6 +697,31 @@ void __kmpc_for_static_fini(IdentTy *loc, int32_t global_tid) {
 void __kmpc_distribute_static_fini(IdentTy *loc, int32_t global_tid) {
   FunctionTracingRAII();
 }
+
+#ifndef FORTRAN_NO_LONGER_NEEDS
+void __kmpc_for_static_init_4_simple_spmd(int64_t *, int32_t global_tid,
+                                          int32_t schedtype, int32_t *plastiter,
+                                          int32_t *plower, int32_t *pupper,
+                                          int32_t *pstride, int32_t incr,
+                                          int32_t chunk) {
+
+  FunctionTracingRAII();
+  omptarget_nvptx_LoopSupport<int32_t, int32_t>::for_static_init(
+      global_tid, schedtype, plastiter, plower, pupper, pstride, chunk,
+      /*IsSPMDExecutionMode=*/true);
+}
+
+void __kmpc_for_static_init_8_simple_spmd(int64_t *, int32_t global_tid,
+                                          int32_t schedtype, int32_t *plastiter,
+                                          int64_t *plower, int64_t *pupper,
+                                          int64_t *pstride, int64_t incr,
+                                          int64_t chunk) {
+  FunctionTracingRAII();
+  omptarget_nvptx_LoopSupport<int64_t, int64_t>::for_static_init(
+      global_tid, schedtype, plastiter, plower, pupper, pstride, chunk,
+      /*IsSPMDExecutionMode=*/true);
+}
+#endif
 }
 
 #pragma omp end declare target

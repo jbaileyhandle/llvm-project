@@ -7,10 +7,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Tools/mlir-pdll-lsp-server/MlirPdllLspServerMain.h"
-#include "../lsp-server-support/Logging.h"
-#include "../lsp-server-support/Transport.h"
 #include "LSPServer.h"
 #include "PDLLServer.h"
+#include "mlir/Tools/lsp-server-support/Logging.h"
+#include "mlir/Tools/lsp-server-support/Transport.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Program.h"
 
@@ -51,7 +51,15 @@ LogicalResult mlir::MlirPdllLspServerMain(int argc, char **argv) {
       llvm::cl::desc("Pretty-print JSON output"),
       llvm::cl::init(false),
   };
-  llvm::cl::ParseCommandLineOptions(argc, argv, "MLIR LSP Language Server");
+  llvm::cl::list<std::string> extraIncludeDirs(
+      "pdll-extra-dir", llvm::cl::desc("Extra directory of include files"),
+      llvm::cl::value_desc("directory"), llvm::cl::Prefix);
+  llvm::cl::list<std::string> compilationDatabases(
+      "pdll-compilation-database",
+      llvm::cl::desc("Compilation YAML databases containing additional "
+                     "compilation information for .pdll files"));
+
+  llvm::cl::ParseCommandLineOptions(argc, argv, "PDLL LSP Language Server");
 
   if (litTest) {
     inputStyle = JSONStreamStyle::Delimited;
@@ -67,6 +75,7 @@ LogicalResult mlir::MlirPdllLspServerMain(int argc, char **argv) {
   JSONTransport transport(stdin, llvm::outs(), inputStyle, prettyPrint);
 
   // Configure the servers and start the main language server.
-  PDLLServer server;
+  PDLLServer::Options options(compilationDatabases, extraIncludeDirs);
+  PDLLServer server(options);
   return runPdllLSPServer(server, transport);
 }

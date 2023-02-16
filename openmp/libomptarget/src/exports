@@ -2,7 +2,6 @@ VERS1.0 {
   global:
     __tgt_register_requires;
     __tgt_register_lib;
-    __tgt_register_image_info;
     __tgt_unregister_lib;
     __tgt_init_all_rtls;
     __tgt_target_data_begin;
@@ -21,18 +20,20 @@ VERS1.0 {
     __tgt_target_mapper;
     __tgt_target_teams_mapper;
     __tgt_target_data_begin_nowait_mapper;
-    __tgt_target_data_begin_with_deps;
     __tgt_target_data_end_nowait_mapper;
-    __tgt_target_data_end_with_deps;
     __tgt_target_data_update_nowait_mapper;
-    __tgt_target_data_update_with_deps;
     __tgt_target_nowait_mapper;
     __tgt_target_teams_nowait_mapper;
-    __tgt_target_with_deps;
+    __tgt_target_kernel;
+    __tgt_target_kernel_nowait;
+    __tgt_target_nowait_query;
+    __tgt_target_kernel_replay;
     __tgt_mapper_num_components;
     __tgt_push_mapper_component;
     __kmpc_push_target_tripcount;
     __kmpc_push_target_tripcount_mapper;
+    ompx_get_team_procs;
+    omp_get_mapped_ptr;
     omp_get_num_devices;
     omp_get_device_num;
     omp_get_initial_device;
@@ -59,7 +60,6 @@ VERS1.0 {
     hostrpc_varfn_double_allocate;
     hostrpc_varfn_uint64_execute;
     hostrpc_varfn_uint64;
-    hostrpc_invoke;
     llvm_omp_target_alloc_host;
     llvm_omp_target_alloc_shared;
     llvm_omp_target_alloc_device;
@@ -67,6 +67,12 @@ VERS1.0 {
     llvm_omp_target_lock_mem;
     llvm_omp_target_unlock_mem;
     llvm_omp_get_dynamic_shared;
+    llvm_omp_target_free_host;
+    llvm_omp_target_free_shared;
+    llvm_omp_target_free_device;
+    llvm_omp_target_dynamic_shared_alloc;
+    llvm_omp_target_lock_mem;
+    llvm_omp_target_unlock_mem;
     __tgt_set_info_flag;
     __tgt_print_device_info;
     omp_is_coarse_grain_mem_region;
@@ -76,17 +82,17 @@ VERS1.0 {
     libomptarget_ompt_flush_trace;
     libomptarget_ompt_stop_trace;
     libomptarget_ompt_set_granted_teams;
-    libomptarget_ompt_advance_buffer_cursor;    
+    libomptarget_ompt_set_timestamp;
+    libomptarget_ompt_advance_buffer_cursor;
+    libomptarget_ompt_get_record_type;
     omp_get_interop_ptr;
     omp_get_interop_str;
     omp_get_interop_int;
     omp_get_interop_name;
     omp_get_interop_type_desc;
-    omp_get_interop_rc_desc;
     __tgt_interop_init;
     __tgt_interop_use;
     __tgt_interop_destroy;
   local:
     *;
 };
-

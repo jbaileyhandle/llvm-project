@@ -8,9 +8,9 @@
 
 #include "src/__support/FPUtil/FPBits.h"
 #include "src/math/expf.h"
+#include "test/UnitTest/FPMatcher.h"
+#include "test/UnitTest/Test.h"
 #include "utils/MPFRWrapper/MPFRUtils.h"
-#include "utils/UnitTest/FPMatcher.h"
-#include "utils/UnitTest/Test.h"
 #include <math.h>
 
 #include <errno.h>
@@ -90,6 +90,11 @@ TEST(LlvmLibcExpfTest, Borderline) {
 
   x = float(FPBits(0xc2b00008U));
   ASSERT_MPFR_MATCH_ALL_ROUNDING(mpfr::Operation::Exp, x, __llvm_libc::expf(x),
+                                 0.5);
+  EXPECT_MATH_ERRNO(0);
+
+  x = float(FPBits(0xc236bd8cU));
+  EXPECT_MPFR_MATCH_ALL_ROUNDING(mpfr::Operation::Exp, x, __llvm_libc::expf(x),
                                  0.5);
   EXPECT_MATH_ERRNO(0);
 }

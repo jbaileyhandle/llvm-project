@@ -11,11 +11,12 @@
 
 #include "mlir/IR/OpDefinition.h"
 #include "llvm/Support/Compiler.h"
+#include <optional>
 
 namespace mlir {
 
 class AffineExpr;
-class BlockAndValueMapping;
+class IRMapping;
 class UnknownLoc;
 class FileLineColLoc;
 class Type;
@@ -59,6 +60,10 @@ public:
                        Attribute metadata = Attribute());
 
   // Types.
+  FloatType getFloat8E5M2Type();
+  FloatType getFloat8E4M3FNType();
+  FloatType getFloat8E5M2FNUZType();
+  FloatType getFloat8E4M3FNUZType();
   FloatType getBF16Type();
   FloatType getF16Type();
   FloatType getF32Type();
@@ -69,7 +74,10 @@ public:
   IndexType getIndexType();
 
   IntegerType getI1Type();
+  IntegerType getI2Type();
+  IntegerType getI4Type();
   IntegerType getI8Type();
+  IntegerType getI16Type();
   IntegerType getI32Type();
   IntegerType getI64Type();
   IntegerType getIntegerType(unsigned width);
@@ -78,10 +86,17 @@ public:
   TupleType getTupleType(TypeRange elementTypes);
   NoneType getNoneType();
 
-  /// Get or construct an instance of the type 'ty' with provided arguments.
+  /// Get or construct an instance of the type `Ty` with provided arguments.
   template <typename Ty, typename... Args>
-  Ty getType(Args... args) {
-    return Ty::get(context, args...);
+  Ty getType(Args &&...args) {
+    return Ty::get(context, std::forward<Args>(args)...);
+  }
+
+  /// Get or construct an instance of the attribute `Attr` with provided
+  /// arguments.
+  template <typename Attr, typename... Args>
+  Attr getAttr(Args &&...args) {
+    return Attr::get(context, std::forward<Args>(args)...);
   }
 
   // Attributes.
@@ -129,6 +144,15 @@ public:
   DenseIntElementsAttr getI32TensorAttr(ArrayRef<int32_t> values);
   DenseIntElementsAttr getI64TensorAttr(ArrayRef<int64_t> values);
   DenseIntElementsAttr getIndexTensorAttr(ArrayRef<int64_t> values);
+
+  /// Tensor-typed DenseArrayAttr getters.
+  DenseBoolArrayAttr getDenseBoolArrayAttr(ArrayRef<bool> values);
+  DenseI8ArrayAttr getDenseI8ArrayAttr(ArrayRef<int8_t> values);
+  DenseI16ArrayAttr getDenseI16ArrayAttr(ArrayRef<int16_t> values);
+  DenseI32ArrayAttr getDenseI32ArrayAttr(ArrayRef<int32_t> values);
+  DenseI64ArrayAttr getDenseI64ArrayAttr(ArrayRef<int64_t> values);
+  DenseF32ArrayAttr getDenseF32ArrayAttr(ArrayRef<float> values);
+  DenseF64ArrayAttr getDenseF64ArrayAttr(ArrayRef<double> values);
 
   ArrayAttr getAffineMapArrayAttr(ArrayRef<AffineMap> values);
   ArrayAttr getBoolArrayAttr(ArrayRef<bool> values);
@@ -369,7 +393,7 @@ public:
   }
 
   /// Return the block the current insertion point belongs to.  Note that the
-  /// the insertion point is not necessarily the end of the block.
+  /// insertion point is not necessarily the end of the block.
   Block *getInsertionBlock() const { return block; }
 
   /// Returns the current insertion point of the builder.
@@ -387,15 +411,15 @@ public:
   /// 'parent'. `locs` contains the locations of the inserted arguments, and
   /// should match the size of `argTypes`.
   Block *createBlock(Region *parent, Region::iterator insertPt = {},
-                     TypeRange argTypes = llvm::None,
-                     ArrayRef<Location> locs = llvm::None);
+                     TypeRange argTypes = std::nullopt,
+                     ArrayRef<Location> locs = std::nullopt);
 
   /// Add new block with 'argTypes' arguments and set the insertion point to the
   /// end of it. The block is placed before 'insertBefore'. `locs` contains the
   /// locations of the inserted arguments, and should match the size of
   /// `argTypes`.
-  Block *createBlock(Block *insertBefore, TypeRange argTypes = llvm::None,
-                     ArrayRef<Location> locs = llvm::None);
+  Block *createBlock(Block *insertBefore, TypeRange argTypes = std::nullopt,
+                     ArrayRef<Location> locs = std::nullopt);
 
   //===--------------------------------------------------------------------===//
   // Operation Creation
@@ -409,7 +433,8 @@ public:
 
   /// Creates an operation with the given fields.
   Operation *create(Location loc, StringAttr opName, ValueRange operands,
-                    TypeRange types, ArrayRef<NamedAttribute> attributes = {},
+                    TypeRange types = {},
+                    ArrayRef<NamedAttribute> attributes = {},
                     BlockRange successors = {},
                     MutableArrayRef<std::unique_ptr<Region>> regions = {});
 
@@ -417,7 +442,7 @@ private:
   /// Helper for sanity checking preconditions for create* methods below.
   template <typename OpT>
   RegisteredOperationName getCheckRegisteredInfo(MLIRContext *ctx) {
-    Optional<RegisteredOperationName> opName =
+    std::optional<RegisteredOperationName> opName =
         RegisteredOperationName::lookup(OpT::getOperationName(), ctx);
     if (LLVM_UNLIKELY(!opName)) {
       llvm::report_fatal_error(
@@ -465,8 +490,7 @@ public:
 
   /// Overload to create or fold a single result operation.
   template <typename OpTy, typename... Args>
-  typename std::enable_if<OpTy::template hasTrait<OpTrait::OneResult>(),
-                          Value>::type
+  std::enable_if_t<OpTy::template hasTrait<OpTrait::OneResult>(), Value>
   createOrFold(Location location, Args &&...args) {
     SmallVector<Value, 1> results;
     createOrFold<OpTy>(results, location, std::forward<Args>(args)...);
@@ -475,8 +499,7 @@ public:
 
   /// Overload to create or fold a zero result operation.
   template <typename OpTy, typename... Args>
-  typename std::enable_if<OpTy::template hasTrait<OpTrait::ZeroResult>(),
-                          OpTy>::type
+  std::enable_if_t<OpTy::template hasTrait<OpTrait::ZeroResults>(), OpTy>
   createOrFold(Location location, Args &&...args) {
     auto op = create<OpTy>(location, std::forward<Args>(args)...);
     SmallVector<Value, 0> unused;
@@ -497,13 +520,13 @@ public:
   /// ( leaving them alone if no entry is present).  Replaces references to
   /// cloned sub-operations to the corresponding operation that is copied,
   /// and adds those mappings to the map.
-  Operation *clone(Operation &op, BlockAndValueMapping &mapper);
+  Operation *clone(Operation &op, IRMapping &mapper);
   Operation *clone(Operation &op);
 
   /// Creates a deep copy of this operation but keep the operation regions
   /// empty. Operands are remapped using `mapper` (if present), and `mapper` is
   /// updated to contain the results.
-  Operation *cloneWithoutRegions(Operation &op, BlockAndValueMapping &mapper) {
+  Operation *cloneWithoutRegions(Operation &op, IRMapping &mapper) {
     return insert(op.cloneWithoutRegions(mapper));
   }
   Operation *cloneWithoutRegions(Operation &op) {

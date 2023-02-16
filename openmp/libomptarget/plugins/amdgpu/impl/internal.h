@@ -33,17 +33,6 @@
 
 #define MAX_NUM_KERNELS (1024 * 16)
 
-typedef struct impl_implicit_args_s {
-  uint64_t offset_x;
-  uint64_t offset_y;
-  uint64_t offset_z;
-  uint64_t hostcall_ptr;
-  uint64_t unused0;
-  uint64_t unused1;
-  uint64_t unused2;
-} impl_implicit_args_t;
-static_assert(sizeof(impl_implicit_args_t) == 56, "");
-
 // ---------------------- Kernel Start -------------
 typedef struct atl_kernel_info_s {
   uint64_t kernel_object;
@@ -56,6 +45,7 @@ typedef struct atl_kernel_info_s {
   uint32_t kernel_segment_size;
   uint32_t explicit_argument_count;
   uint32_t implicit_argument_count;
+  std::string kind;
 } atl_kernel_info_t;
 
 typedef struct atl_symbol_info_s {

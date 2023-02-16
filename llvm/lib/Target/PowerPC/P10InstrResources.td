@@ -616,7 +616,10 @@ def : InstRW<[P10W_DX_5C, P10W_DISP_ANY, P10DX_Read, P10DX_Read],
     VMUL10EUQ,
     VSUBCUQ,
     VSUBUQM,
+    XSCMPEQQP,
     XSCMPEXPQP,
+    XSCMPGEQP,
+    XSCMPGTQP,
     XSCMPOQP,
     XSCMPUQP,
     XSMAXCQP,
@@ -956,7 +959,7 @@ def : InstRW<[P10W_FX_3C, P10W_DISP_ANY, P10FX_Read],
     WAIT,
     XSABSDP,
     XSABSQP,
-    XSNABSDP,
+    XSNABSDP, XSNABSDPs,
     XSNABSQP,
     XSNEGDP,
     XSNEGQP,
@@ -1010,7 +1013,7 @@ def : InstRW<[P10W_FX_3C, P10W_DISP_ANY, P10FX_Read, P10FX_Read],
     NAND8_rec, NAND_rec,
     NOR, NOR8,
     NOR8_rec, NOR_rec,
-    COPY, OR, OR8,
+    COPY, PRED_COPY, OR, OR8,
     OR8_rec, OR_rec,
     ORC, ORC8,
     ORC8_rec, ORC_rec,
@@ -1372,7 +1375,7 @@ def : InstRW<[P10W_LD_6C, P10W_DISP_EVEN, P10W_DISP_ANY, P10LD_Read, P10LD_Read]
     LDCIX,
     LHZCIX,
     LWZCIX,
-    MTSPR, MTSPR8, MTSR, MTVRSAVE, MTVRSAVEv
+    MTSPR, MTSPR8, MTSR, MTUDSCR, MTVRSAVE, MTVRSAVEv
 )>;
 
 // Expand instructions
@@ -1469,7 +1472,7 @@ def : InstRW<[P10W_LD_6C, P10W_DISP_PAIR, P10W_SX_3C],
 // 13 Cycles Unknown operations, 1 input operands
 def : InstRW<[P10W_MFL_13C, P10W_DISP_EVEN, P10W_DISP_ANY],
       (instrs
-    MFSPR, MFSPR8, MFSR, MFTB8, MFVRSAVE, MFVRSAVEv
+    MFSPR, MFSPR8, MFSR, MFTB8, MFUDSCR, MFVRSAVE, MFVRSAVEv
 )>;
 
 // 10 Cycles SIMD Matrix Multiply Engine operations, 0 input operands
@@ -1623,6 +1626,9 @@ def : InstRW<[P10W_PM_4C, P10W_DISP_ANY],
 // 4 Cycles Permute operations, 1 input operands
 def : InstRW<[P10W_PM_4C, P10W_DISP_ANY, P10PM_Read],
       (instrs
+    BRD,
+    BRH, BRH8,
+    BRW, BRW8,
     LVSL,
     LVSR,
     LXVKQ,
@@ -1709,9 +1715,7 @@ def : InstRW<[P10W_PM_4C, P10W_DISP_ANY, P10PM_Read, P10PM_Read],
     XXGENPCVWM,
     XXMRGHW,
     XXMRGLW,
-    XXPERM,
     XXPERMDI, XXPERMDIs,
-    XXPERMR,
     XXSLDWI, XXSLDWIs,
     XXSPLTW, XXSPLTWs
 )>;
@@ -1751,7 +1755,9 @@ def : InstRW<[P10W_PM_4C, P10W_DISP_ANY, P10PM_Read, P10PM_Read, P10PM_Read],
     VSLDBI,
     VSLDOI,
     VSRDBI,
-    XXINSERTW
+    XXINSERTW,
+    XXPERM,
+    XXPERMR
 )>;
 
 // 2-way crack instructions
@@ -1971,6 +1977,7 @@ def : InstRW<[P10W_SX, P10W_DISP_ANY],
       (instrs
     ATTN,
     CP_ABORT,
+    CRNOT,
     DCBA,
     DCBI,
     DCBZL,

@@ -57,7 +57,7 @@ def main():
     run_list = []
     for l in ti.run_lines:
       if '|' not in l:
-        common.warn('Skipping unparseable RUN line: ' + l)
+        common.warn('Skipping unparsable RUN line: ' + l)
         continue
 
       commands = [cmd.strip() for cmd in l.split('|')]
@@ -98,10 +98,7 @@ def main():
       llc_cmd_args = llc_cmd_args.replace('< %s', '').replace('%s', '').strip()
       if ti.path.endswith('.mir'):
         llc_cmd_args += ' -x mir'
-      check_prefixes = [item for m in common.CHECK_PREFIX_RE.finditer(filecheck_cmd)
-                               for item in m.group(1).split(',')]
-      if not check_prefixes:
-        check_prefixes = ['CHECK']
+      check_prefixes = common.get_check_prefixes(filecheck_cmd)
 
       # FIXME: We should use multiple check prefixes to common check lines. For
       # now, we just ignore all but the last.
@@ -137,8 +134,10 @@ def main():
 
       scrubber, function_re = output_type.get_run_handler(triple)
       builder.process_run_line(function_re, scrubber, raw_tool_output, prefixes, True)
+      builder.processed_prefixes(prefixes)
 
     func_dict = builder.finish_and_get_func_dict()
+    global_vars_seen_dict = {}
 
     is_in_function = False
     is_in_function_start = False
@@ -152,6 +151,7 @@ def main():
                                                       '--include-generated-funcs',
                                                       True)
 
+    generated_prefixes = []
     if include_generated_funcs:
       # Generate the appropriate checks for each function.  We need to emit
       # these in the order according to the generated output so that CHECK-LABEL
@@ -163,13 +163,15 @@ def main():
       common.dump_input_lines(output_lines, ti, prefix_set, ';')
 
       # Now generate all the checks.
-      common.add_checks_at_end(output_lines, run_list, builder.func_order(),
-                               check_indent + ';',
-                               lambda my_output_lines, prefixes, func:
-                               output_type.add_checks(my_output_lines,
-                                                  check_indent + ';',
-                                                  prefixes, func_dict, func,
-                                                  is_filtered=builder.is_filtered()))
+      generated_prefixes = common.add_checks_at_end(
+          output_lines, run_list, builder.func_order(),
+          check_indent + ';',
+          lambda my_output_lines, prefixes, func:
+          output_type.add_checks(my_output_lines,
+                                 check_indent + ';',
+                                 prefixes, func_dict, func,
+                                 global_vars_seen_dict,
+                                 is_filtered=builder.is_filtered()))
     else:
       for input_info in ti.iterlines(output_lines):
         input_line = input_info.line
@@ -184,9 +186,10 @@ def main():
               continue
 
           # Print out the various check lines here.
-          output_type.add_checks(output_lines, check_indent + ';', run_list,
-                             func_dict, func_name,
-                             is_filtered=builder.is_filtered())
+          generated_prefixes.extend(
+              output_type.add_checks(output_lines, check_indent + ';', run_list,
+                                     func_dict, func_name, global_vars_seen_dict,
+                                     is_filtered=builder.is_filtered()))
           is_in_function_start = False
 
         if is_in_function:
@@ -211,8 +214,11 @@ def main():
           continue
         is_in_function = is_in_function_start = True
 
+    if ti.args.gen_unused_prefix_body:
+      output_lines.extend(ti.get_checks_for_unused_prefixes(
+          run_list, generated_prefixes))
+    
     common.debug('Writing %d lines to %s...' % (len(output_lines), ti.path))
-
     with open(ti.path, 'wb') as f:
       f.writelines(['{}\n'.format(l).encode('utf-8') for l in output_lines])
 

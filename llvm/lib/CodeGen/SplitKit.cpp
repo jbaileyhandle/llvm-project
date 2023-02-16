@@ -12,7 +12,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "SplitKit.h"
-#include "llvm/ADT/None.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
@@ -323,7 +322,7 @@ unsigned SplitAnalysis::countLiveBlocks(const LiveInterval *cli) const {
 }
 
 bool SplitAnalysis::isOriginalEndpoint(SlotIndex Idx) const {
-  unsigned OrigReg = VRM.getOriginal(CurLI->reg());
+  Register OrigReg = VRM.getOriginal(CurLI->reg());
   const LiveInterval &Orig = LIS.getInterval(OrigReg);
   assert(!Orig.empty() && "Splitting empty interval?");
   LiveInterval::const_iterator I = Orig.find(Idx);
@@ -347,13 +346,11 @@ void SplitAnalysis::analyze(const LiveInterval *li) {
 //===----------------------------------------------------------------------===//
 
 /// Create a new SplitEditor for editing the LiveInterval analyzed by SA.
-SplitEditor::SplitEditor(SplitAnalysis &SA, AliasAnalysis &AA,
-                         LiveIntervals &LIS, VirtRegMap &VRM,
+SplitEditor::SplitEditor(SplitAnalysis &SA, LiveIntervals &LIS, VirtRegMap &VRM,
                          MachineDominatorTree &MDT,
                          MachineBlockFrequencyInfo &MBFI, VirtRegAuxInfo &VRAI)
-    : SA(SA), AA(AA), LIS(LIS), VRM(VRM),
-      MRI(VRM.getMachineFunction().getRegInfo()), MDT(MDT),
-      TII(*VRM.getMachineFunction().getSubtarget().getInstrInfo()),
+    : SA(SA), LIS(LIS), VRM(VRM), MRI(VRM.getMachineFunction().getRegInfo()),
+      MDT(MDT), TII(*VRM.getMachineFunction().getSubtarget().getInstrInfo()),
       TRI(*VRM.getMachineFunction().getSubtarget().getRegisterInfo()),
       MBFI(MBFI), VRAI(VRAI), RegAssign(Allocator) {}
 
@@ -371,9 +368,7 @@ void SplitEditor::reset(LiveRangeEdit &LRE, ComplementSpillMode SM) {
     LICalc[1].reset(&VRM.getMachineFunction(), LIS.getSlotIndexes(), &MDT,
                     &LIS.getVNInfoAllocator());
 
-  // We don't need an AliasAnalysis since we will only be performing
-  // cheap-as-a-copy remats anyway.
-  Edit->anyRematerializable(nullptr);
+  Edit->anyRematerializable();
 }
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
@@ -522,7 +517,7 @@ void SplitEditor::forceRecompute(unsigned RegIdx, const VNInfo &ParentVNI) {
 SlotIndex SplitEditor::buildSingleSubRegCopy(Register FromReg, Register ToReg,
     MachineBasicBlock &MBB, MachineBasicBlock::iterator InsertBefore,
     unsigned SubIdx, LiveInterval &DestLI, bool Late, SlotIndex Def) {
-  const MCInstrDesc &Desc = TII.get(TargetOpcode::COPY);
+  const MCInstrDesc &Desc = TII.get(TII.getCopyOpcode());
   bool FirstCopy = !Def.isValid();
   MachineInstr *CopyMI = BuildMI(MBB, InsertBefore, DebugLoc(), Desc)
       .addReg(ToReg, RegState::Define | getUndefRegState(FirstCopy)
@@ -539,14 +534,14 @@ SlotIndex SplitEditor::buildSingleSubRegCopy(Register FromReg, Register ToReg,
 }
 
 SlotIndex SplitEditor::buildCopy(Register FromReg, Register ToReg,
-    LaneBitmask LaneMask, MachineBasicBlock &MBB,
-    MachineBasicBlock::iterator InsertBefore, bool Late, unsigned RegIdx) {
-  const MCInstrDesc &Desc = TII.get(TargetOpcode::COPY);
+                                 LaneBitmask LaneMask, MachineBasicBlock &MBB,
+                                 MachineBasicBlock::iterator InsertBefore,
+                                 bool Late, unsigned RegIdx) {
   SlotIndexes &Indexes = *LIS.getSlotIndexes();
   if (LaneMask.all() || LaneMask == MRI.getMaxLaneMaskForVReg(FromReg)) {
     // The full vreg is copied.
     MachineInstr *CopyMI =
-        BuildMI(MBB, InsertBefore, DebugLoc(), Desc, ToReg).addReg(FromReg);
+        TII.buildCopy(MBB, InsertBefore, DebugLoc(), ToReg, FromReg);
     return Indexes.insertMachineInstrInMaps(*CopyMI, Late).getRegSlot();
   }
 
@@ -594,7 +589,7 @@ VNInfo *SplitEditor::defFromParent(unsigned RegIdx, const VNInfo *ParentVNI,
   bool Late = RegIdx != 0;
 
   // Attempt cheap-as-a-copy rematerialization.
-  unsigned Original = VRM.getOriginal(Edit->get(RegIdx));
+  Register Original = VRM.getOriginal(Edit->get(RegIdx));
   LiveInterval &OrigLI = LIS.getInterval(Original);
   VNInfo *OrigVNI = OrigLI.getVNInfoAt(UseIdx);
 
@@ -1352,13 +1347,34 @@ void SplitEditor::rewriteAssigned(bool ExtendRanges) {
         continue;
       // We may want to extend a live range for a partial redef, or for a use
       // tied to an early clobber.
-      Idx = Idx.getPrevSlot();
-      if (!Edit->getParent().liveAt(Idx))
+      if (!Edit->getParent().liveAt(Idx.getPrevSlot()))
         continue;
-    } else
-      Idx = Idx.getRegSlot(true);
+    } else {
+      assert(MO.isUse());
+      bool IsEarlyClobber = false;
+      if (MO.isTied()) {
+        // We want to extend a live range into `e` slot rather than `r` slot if
+        // tied-def is early clobber, because the `e` slot already contained
+        // in the live range of early-clobber tied-def operand, give an example
+        // here:
+        //  0  %0 = ...
+        // 16  early-clobber %0 = Op %0 (tied-def 0), ...
+        // 32  ... = Op %0
+        // Before extend:
+        //   %0 = [0r, 0d) [16e, 32d)
+        // The point we want to extend is 0d to 16e not 16r in this case, but if
+        // we use 16r here we will extend nothing because that already contained
+        // in [16e, 32d).
+        unsigned OpIdx = MO.getOperandNo();
+        unsigned DefOpIdx = MI->findTiedOperandIdx(OpIdx);
+        const MachineOperand &DefOp = MI->getOperand(DefOpIdx);
+        IsEarlyClobber = DefOp.isEarlyClobber();
+      }
 
-    SlotIndex Next = Idx.getNextSlot();
+      Idx = Idx.getRegSlot(IsEarlyClobber);
+    }
+
+    SlotIndex Next = Idx;
     if (LI.hasSubRanges()) {
       // We have to delay extending subranges until we have seen all operands
       // defining the register. This is because a <def,read-undef> operand
@@ -1433,7 +1449,7 @@ void SplitEditor::deleteRematVictims() {
   if (Dead.empty())
     return;
 
-  Edit->eliminateDeadDefs(Dead, None, &AA);
+  Edit->eliminateDeadDefs(Dead, std::nullopt);
 }
 
 void SplitEditor::forceRecomputeVNI(const VNInfo &ParentVNI) {

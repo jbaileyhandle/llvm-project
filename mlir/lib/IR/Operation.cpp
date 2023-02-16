@@ -7,9 +7,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/IR/Operation.h"
-#include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dialect.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
@@ -23,16 +23,6 @@ using namespace mlir;
 // Operation
 //===----------------------------------------------------------------------===//
 
-/// Create a new Operation with the specific fields.
-Operation *Operation::create(Location location, OperationName name,
-                             TypeRange resultTypes, ValueRange operands,
-                             ArrayRef<NamedAttribute> attributes,
-                             BlockRange successors, unsigned numRegions) {
-  return create(location, name, resultTypes, operands,
-                DictionaryAttr::get(location.getContext(), attributes),
-                successors, numRegions);
-}
-
 /// Create a new Operation from operation state.
 Operation *Operation::create(const OperationState &state) {
   return create(state.location, state.name, state.types, state.operands,
@@ -43,11 +33,11 @@ Operation *Operation::create(const OperationState &state) {
 /// Create a new Operation with the specific fields.
 Operation *Operation::create(Location location, OperationName name,
                              TypeRange resultTypes, ValueRange operands,
-                             DictionaryAttr attributes, BlockRange successors,
+                             NamedAttrList &&attributes, BlockRange successors,
                              RegionRange regions) {
   unsigned numRegions = regions.size();
-  Operation *op = create(location, name, resultTypes, operands, attributes,
-                         successors, numRegions);
+  Operation *op = create(location, name, resultTypes, operands,
+                         std::move(attributes), successors, numRegions);
   for (unsigned i = 0; i < numRegions; ++i)
     if (regions[i])
       op->getRegion(i).takeBody(*regions[i]);
@@ -58,7 +48,7 @@ Operation *Operation::create(Location location, OperationName name,
 /// unnecessarily uniquing a list of attributes.
 Operation *Operation::create(Location location, OperationName name,
                              TypeRange resultTypes, ValueRange operands,
-                             DictionaryAttr attributes, BlockRange successors,
+                             NamedAttrList &&attributes, BlockRange successors,
                              unsigned numRegions) {
   assert(llvm::all_of(resultTypes, [](Type t) { return t; }) &&
          "unexpected null result type");
@@ -87,10 +77,13 @@ Operation *Operation::create(Location location, OperationName name,
   char *mallocMem = reinterpret_cast<char *>(malloc(byteSize + prefixByteSize));
   void *rawMem = mallocMem + prefixByteSize;
 
+  // Populate default attributes.
+  name.populateDefaultAttrs(attributes);
+
   // Create the new Operation.
-  Operation *op =
-      ::new (rawMem) Operation(location, name, numResults, numSuccessors,
-                               numRegions, attributes, needsOperandStorage);
+  Operation *op = ::new (rawMem) Operation(
+      location, name, numResults, numSuccessors, numRegions,
+      attributes.getDictionary(location.getContext()), needsOperandStorage);
 
   assert((numSuccessors == 0 || op->mightHaveTrait<OpTrait::IsTerminator>()) &&
          "unexpected successors in a non-terminator operation");
@@ -497,8 +490,7 @@ LogicalResult Operation::fold(ArrayRef<Attribute> operands,
                               SmallVectorImpl<OpFoldResult> &results) {
   // If we have a registered operation definition matching this one, use it to
   // try to constant fold the operation.
-  Optional<RegisteredOperationName> info = getRegisteredInfo();
-  if (info && succeeded(info->foldHook(this, operands, results)))
+  if (succeeded(name.foldHook(this, operands, results)))
     return success();
 
   // Otherwise, fall back on the dialect hook to handle it.
@@ -523,17 +515,54 @@ InFlightDiagnostic Operation::emitOpError(const Twine &message) {
 // Operation Cloning
 //===----------------------------------------------------------------------===//
 
+Operation::CloneOptions::CloneOptions()
+    : cloneRegionsFlag(false), cloneOperandsFlag(false) {}
+
+Operation::CloneOptions::CloneOptions(bool cloneRegions, bool cloneOperands)
+    : cloneRegionsFlag(cloneRegions), cloneOperandsFlag(cloneOperands) {}
+
+Operation::CloneOptions Operation::CloneOptions::all() {
+  return CloneOptions().cloneRegions().cloneOperands();
+}
+
+Operation::CloneOptions &Operation::CloneOptions::cloneRegions(bool enable) {
+  cloneRegionsFlag = enable;
+  return *this;
+}
+
+Operation::CloneOptions &Operation::CloneOptions::cloneOperands(bool enable) {
+  cloneOperandsFlag = enable;
+  return *this;
+}
+
 /// Create a deep copy of this operation but keep the operation regions empty.
 /// Operands are remapped using `mapper` (if present), and `mapper` is updated
-/// to contain the results.
-Operation *Operation::cloneWithoutRegions(BlockAndValueMapping &mapper) {
+/// to contain the results. The `mapResults` flag specifies whether the results
+/// of the cloned operation should be added to the map.
+Operation *Operation::cloneWithoutRegions(IRMapping &mapper) {
+  return clone(mapper, CloneOptions::all().cloneRegions(false));
+}
+
+Operation *Operation::cloneWithoutRegions() {
+  IRMapping mapper;
+  return cloneWithoutRegions(mapper);
+}
+
+/// Create a deep copy of this operation, remapping any operands that use
+/// values outside of the operation using the map that is provided (leaving
+/// them alone if no entry is present).  Replaces references to cloned
+/// sub-operations to the corresponding operation that is copied, and adds
+/// those mappings to the map.
+Operation *Operation::clone(IRMapping &mapper, CloneOptions options) {
   SmallVector<Value, 8> operands;
   SmallVector<Block *, 2> successors;
 
   // Remap the operands.
-  operands.reserve(getNumOperands());
-  for (auto opValue : getOperands())
-    operands.push_back(mapper.lookupOrDefault(opValue));
+  if (options.shouldCloneOperands()) {
+    operands.reserve(getNumOperands());
+    for (auto opValue : getOperands())
+      operands.push_back(mapper.lookupOrDefault(opValue));
+  }
 
   // Remap the successors.
   successors.reserve(getNumSuccessors());
@@ -543,6 +572,13 @@ Operation *Operation::cloneWithoutRegions(BlockAndValueMapping &mapper) {
   // Create the new operation.
   auto *newOp = create(getLoc(), getName(), getResultTypes(), operands, attrs,
                        successors, getNumRegions());
+  mapper.map(this, newOp);
+
+  // Clone the regions.
+  if (options.shouldCloneRegions()) {
+    for (unsigned i = 0; i != numRegions; ++i)
+      getRegion(i).cloneInto(&newOp->getRegion(i), mapper);
+  }
 
   // Remember the mapping of any results.
   for (unsigned i = 0, e = getNumResults(); i != e; ++i)
@@ -551,29 +587,9 @@ Operation *Operation::cloneWithoutRegions(BlockAndValueMapping &mapper) {
   return newOp;
 }
 
-Operation *Operation::cloneWithoutRegions() {
-  BlockAndValueMapping mapper;
-  return cloneWithoutRegions(mapper);
-}
-
-/// Create a deep copy of this operation, remapping any operands that use
-/// values outside of the operation using the map that is provided (leaving
-/// them alone if no entry is present).  Replaces references to cloned
-/// sub-operations to the corresponding operation that is copied, and adds
-/// those mappings to the map.
-Operation *Operation::clone(BlockAndValueMapping &mapper) {
-  auto *newOp = cloneWithoutRegions(mapper);
-
-  // Clone the regions.
-  for (unsigned i = 0; i != numRegions; ++i)
-    getRegion(i).cloneInto(&newOp->getRegion(i), mapper);
-
-  return newOp;
-}
-
-Operation *Operation::clone() {
-  BlockAndValueMapping mapper;
-  return clone(mapper);
+Operation *Operation::clone(CloneOptions options) {
+  IRMapping mapper;
+  return clone(mapper, options);
 }
 
 //===----------------------------------------------------------------------===//
@@ -600,16 +616,13 @@ void OpState::print(Operation *op, OpAsmPrinter &p, StringRef defaultDialect) {
   }
 }
 
-/// Print an operation name, eliding the dialect prefix if necessary.
+/// Print an operation name, eliding the dialect prefix if necessary and doesn't
+/// lead to ambiguities.
 void OpState::printOpName(Operation *op, OpAsmPrinter &p,
                           StringRef defaultDialect) {
   StringRef name = op->getName().getStringRef();
-  if (name.startswith((defaultDialect + ".").str()))
+  if (name.startswith((defaultDialect + ".").str()) && name.count('.') == 1)
     name = name.drop_front(defaultDialect.size() + 1);
-  // TODO: remove this special case (and update test/IR/parser.mlir)
-  else if ((defaultDialect.empty() || defaultDialect == "builtin") &&
-           name.startswith("func."))
-    name = name.drop_front(5);
   p.getStream() << name;
 }
 
@@ -755,7 +768,7 @@ LogicalResult OpTrait::impl::verifySameTypeOperands(Operation *op) {
   return success();
 }
 
-LogicalResult OpTrait::impl::verifyZeroRegion(Operation *op) {
+LogicalResult OpTrait::impl::verifyZeroRegions(Operation *op) {
   if (op->getNumRegions() != 0)
     return op->emitOpError() << "requires zero regions";
   return success();
@@ -781,7 +794,7 @@ LogicalResult OpTrait::impl::verifyAtLeastNRegions(Operation *op,
   return success();
 }
 
-LogicalResult OpTrait::impl::verifyZeroResult(Operation *op) {
+LogicalResult OpTrait::impl::verifyZeroResults(Operation *op) {
   if (op->getNumResults() != 0)
     return op->emitOpError() << "requires zero results";
   return success();
@@ -878,17 +891,30 @@ LogicalResult OpTrait::impl::verifySameOperandsAndResultType(Operation *op) {
 
   auto type = op->getResult(0).getType();
   auto elementType = getElementTypeOrSelf(type);
+  Attribute encoding = nullptr;
+  if (auto rankedType = dyn_cast<RankedTensorType>(type))
+    encoding = rankedType.getEncoding();
   for (auto resultType : llvm::drop_begin(op->getResultTypes())) {
     if (getElementTypeOrSelf(resultType) != elementType ||
         failed(verifyCompatibleShape(resultType, type)))
       return op->emitOpError()
              << "requires the same type for all operands and results";
+    if (encoding)
+      if (auto rankedType = dyn_cast<RankedTensorType>(resultType);
+          encoding != rankedType.getEncoding())
+        return op->emitOpError()
+               << "requires the same encoding for all operands and results";
   }
   for (auto opType : op->getOperandTypes()) {
     if (getElementTypeOrSelf(opType) != elementType ||
         failed(verifyCompatibleShape(opType, type)))
       return op->emitOpError()
              << "requires the same type for all operands and results";
+    if (encoding)
+      if (auto rankedType = dyn_cast<RankedTensorType>(opType);
+          encoding != rankedType.getEncoding())
+        return op->emitOpError()
+               << "requires the same encoding for all operands and results";
   }
   return success();
 }
@@ -911,7 +937,7 @@ static LogicalResult verifyTerminatorSuccessors(Operation *op) {
   return success();
 }
 
-LogicalResult OpTrait::impl::verifyZeroSuccessor(Operation *op) {
+LogicalResult OpTrait::impl::verifyZeroSuccessors(Operation *op) {
   if (op->getNumSuccessors() != 0) {
     return op->emitOpError("requires 0 successors but found ")
            << op->getNumSuccessors();
@@ -976,26 +1002,19 @@ LogicalResult OpTrait::impl::verifyValueSizeAttr(Operation *op,
                                                  StringRef attrName,
                                                  StringRef valueGroupName,
                                                  size_t expectedCount) {
-  auto sizeAttr = op->getAttrOfType<DenseIntElementsAttr>(attrName);
+  auto sizeAttr = op->getAttrOfType<DenseI32ArrayAttr>(attrName);
   if (!sizeAttr)
-    return op->emitOpError("requires 1D i32 elements attribute '")
+    return op->emitOpError("requires dense i32 array attribute '")
            << attrName << "'";
 
-  auto sizeAttrType = sizeAttr.getType();
-  if (sizeAttrType.getRank() != 1 ||
-      !sizeAttrType.getElementType().isInteger(32))
-    return op->emitOpError("requires 1D i32 elements attribute '")
-           << attrName << "'";
-
-  if (llvm::any_of(sizeAttr.getValues<APInt>(), [](const APInt &element) {
-        return !element.isNonNegative();
-      }))
+  ArrayRef<int32_t> sizes = sizeAttr.asArrayRef();
+  if (llvm::any_of(sizes, [](int32_t element) { return element < 0; }))
     return op->emitOpError("'")
            << attrName << "' attribute cannot have negative elements";
 
-  size_t totalCount = std::accumulate(
-      sizeAttr.begin(), sizeAttr.end(), 0,
-      [](unsigned all, const APInt &one) { return all + one.getZExtValue(); });
+  size_t totalCount =
+      std::accumulate(sizes.begin(), sizes.end(), 0,
+                      [](unsigned all, int32_t one) { return all + one; });
 
   if (totalCount != expectedCount)
     return op->emitOpError()
@@ -1146,14 +1165,14 @@ impl::foldCastInterfaceOp(Operation *op, ArrayRef<Attribute> attrOperands,
 LogicalResult impl::verifyCastInterfaceOp(
     Operation *op, function_ref<bool(TypeRange, TypeRange)> areCastCompatible) {
   auto resultTypes = op->getResultTypes();
-  if (llvm::empty(resultTypes))
+  if (resultTypes.empty())
     return op->emitOpError()
            << "expected at least one result for cast operation";
 
   auto operandTypes = op->getOperandTypes();
   if (!areCastCompatible(operandTypes, resultTypes)) {
     InFlightDiagnostic diag = op->emitOpError("operand type");
-    if (llvm::empty(operandTypes))
+    if (operandTypes.empty())
       diag << "s []";
     else if (llvm::size(operandTypes) == 1)
       diag << " " << *operandTypes.begin();

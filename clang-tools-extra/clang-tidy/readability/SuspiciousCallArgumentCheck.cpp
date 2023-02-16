@@ -11,14 +11,13 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Type.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
+#include <optional>
 #include <sstream>
 
 using namespace clang::ast_matchers;
 namespace optutils = clang::tidy::utils::options;
 
-namespace clang {
-namespace tidy {
-namespace readability {
+namespace clang::tidy::readability {
 
 namespace {
 struct DefaultHeuristicConfiguration {
@@ -90,7 +89,7 @@ struct AllHeuristicsBoundsWellConfigured {
                                   1>::Value;
 };
 
-static_assert(AllHeuristicsBoundsWellConfigured::Value, "");
+static_assert(AllHeuristicsBoundsWellConfigured::Value);
 } // namespace
 
 static constexpr llvm::StringLiteral DefaultAbbreviations = "addr=address;"
@@ -526,12 +525,12 @@ SuspiciousCallArgumentCheck::SuspiciousCallArgumentCheck(
                        GetBoundOpt(H, BoundKind::SimilarAbove)));
   }
 
-  for (const std::string &Abbreviation : optutils::parseStringList(
+  for (StringRef Abbreviation : optutils::parseStringList(
            Options.get("Abbreviations", DefaultAbbreviations))) {
-    auto KeyAndValue = StringRef{Abbreviation}.split("=");
+    auto KeyAndValue = Abbreviation.split("=");
     assert(!KeyAndValue.first.empty() && !KeyAndValue.second.empty());
     AbbreviationDictionary.insert(
-        std::make_pair(KeyAndValue.first.str(), KeyAndValue.second.str()));
+        std::make_pair(KeyAndValue.first, KeyAndValue.second.str()));
   }
 }
 
@@ -552,7 +551,7 @@ void SuspiciousCallArgumentCheck::storeOptions(
     SmallString<32> Key = HeuristicToString[Idx];
     Key.append(BK == BoundKind::DissimilarBelow ? "DissimilarBelow"
                                                 : "SimilarAbove");
-    Options.store(Opts, Key, getBound(H, BK).getValue());
+    Options.store(Opts, Key, *getBound(H, BK));
   };
 
   for (std::size_t Idx = 0; Idx < HeuristicCount; ++Idx) {
@@ -573,20 +572,21 @@ void SuspiciousCallArgumentCheck::storeOptions(
       Abbreviations.emplace_back(EqualSignJoined.str());
   }
   Options.store(Opts, "Abbreviations",
-                optutils::serializeStringList(Abbreviations));
+                optutils::serializeStringList(std::vector<StringRef>(
+                    Abbreviations.begin(), Abbreviations.end())));
 }
 
 bool SuspiciousCallArgumentCheck::isHeuristicEnabled(Heuristic H) const {
   return llvm::is_contained(AppliedHeuristics, H);
 }
 
-Optional<int8_t> SuspiciousCallArgumentCheck::getBound(Heuristic H,
-                                                       BoundKind BK) const {
+std::optional<int8_t>
+SuspiciousCallArgumentCheck::getBound(Heuristic H, BoundKind BK) const {
   auto Idx = static_cast<std::size_t>(H);
   assert(Idx < HeuristicCount);
 
   if (!Defaults[Idx].hasBounds())
-    return None;
+    return std::nullopt;
 
   switch (BK) {
   case BoundKind::DissimilarBelow:
@@ -781,8 +781,8 @@ bool SuspiciousCallArgumentCheck::areNamesSimilar(StringRef Arg,
                                                   StringRef Param, Heuristic H,
                                                   BoundKind BK) const {
   int8_t Threshold = -1;
-  if (Optional<int8_t> GotBound = getBound(H, BK))
-    Threshold = GotBound.getValue();
+  if (std::optional<int8_t> GotBound = getBound(H, BK))
+    Threshold = *GotBound;
 
   switch (H) {
   case Heuristic::Equality:
@@ -805,6 +805,4 @@ bool SuspiciousCallArgumentCheck::areNamesSimilar(StringRef Arg,
   llvm_unreachable("Unhandled heuristic kind");
 }
 
-} // namespace readability
-} // namespace tidy
-} // namespace clang
+} // namespace clang::tidy::readability

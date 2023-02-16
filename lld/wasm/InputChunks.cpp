@@ -51,7 +51,7 @@ bool relocIs64(uint8_t relocType) {
 }
 
 std::string toString(const wasm::InputChunk *c) {
-  return (toString(c->file) + ":(" + c->getName() + ")").str();
+  return (toString(c->file) + ":(" + c->name + ")").str();
 }
 
 namespace wasm {
@@ -196,14 +196,14 @@ uint64_t InputChunk::getTombstone() const {
 }
 
 void InputFunction::setFunctionIndex(uint32_t index) {
-  LLVM_DEBUG(dbgs() << "InputFunction::setFunctionIndex: " << getName()
-                    << " -> " << index << "\n");
+  LLVM_DEBUG(dbgs() << "InputFunction::setFunctionIndex: " << name << " -> "
+                    << index << "\n");
   assert(!hasFunctionIndex());
   functionIndex = index;
 }
 
 void InputFunction::setTableIndex(uint32_t index) {
-  LLVM_DEBUG(dbgs() << "InputFunction::setTableIndex: " << getName() << " -> "
+  LLVM_DEBUG(dbgs() << "InputFunction::setTableIndex: " << name << " -> "
                     << index << "\n");
   assert(!hasTableIndex());
   tableIndex = index;
@@ -271,7 +271,7 @@ void InputFunction::calculateSize() {
   if (!file || !config->compressRelocations)
     return;
 
-  LLVM_DEBUG(dbgs() << "calculateSize: " << getName() << "\n");
+  LLVM_DEBUG(dbgs() << "calculateSize: " << name << "\n");
 
   const uint8_t *secStart = file->codeSection->Content.data();
   const uint8_t *funcStart = secStart + getInputSectionOffset();
@@ -318,7 +318,7 @@ void InputFunction::writeCompressed(uint8_t *buf) const {
   decodeULEB128(funcStart, &count);
   funcStart += count;
 
-  LLVM_DEBUG(dbgs() << "write func: " << getName() << "\n");
+  LLVM_DEBUG(dbgs() << "write func: " << name << "\n");
   buf += encodeULEB128(compressedFuncSize, buf);
   const uint8_t *lastRelocEnd = funcStart;
   for (const WasmRelocation &rel : relocations) {
@@ -339,7 +339,7 @@ void InputFunction::writeCompressed(uint8_t *buf) const {
 
 uint64_t InputChunk::getChunkOffset(uint64_t offset) const {
   if (const auto *ms = dyn_cast<MergeInputChunk>(this)) {
-    LLVM_DEBUG(dbgs() << "getChunkOffset(merged): " << getName() << "\n");
+    LLVM_DEBUG(dbgs() << "getChunkOffset(merged): " << name << "\n");
     LLVM_DEBUG(dbgs() << "offset: " << offset << "\n");
     LLVM_DEBUG(dbgs() << "parentOffset: " << ms->getParentOffset(offset)
                       << "\n");
@@ -361,10 +361,10 @@ uint64_t InputChunk::getVA(uint64_t offset) const {
 // This is only called when generating shared libraries (PIC) where address are
 // not known at static link time.
 void InputChunk::generateRelocationCode(raw_ostream &os) const {
-  LLVM_DEBUG(dbgs() << "generating runtime relocations: " << getName()
+  LLVM_DEBUG(dbgs() << "generating runtime relocations: " << name
                     << " count=" << relocations.size() << "\n");
 
-  bool is64 = config->is64.getValueOr(false);
+  bool is64 = config->is64.value_or(false);
   unsigned opcode_ptr_const = is64 ? WASM_OPCODE_I64_CONST
                                    : WASM_OPCODE_I32_CONST;
   unsigned opcode_ptr_add = is64 ? WASM_OPCODE_I64_ADD
@@ -384,14 +384,17 @@ void InputChunk::generateRelocationCode(raw_ostream &os) const {
                       << " addend=" << rel.Addend << " index=" << rel.Index
                       << " output offset=" << offset << "\n");
 
-    // Calculate the address at which to apply the relocations
+    // Calculate the address at which to apply the relocation
     writeU8(os, opcode_ptr_const, "CONST");
     writeSleb128(os, offset, "offset");
 
     // In PIC mode we need to add the __memory_base
     if (config->isPic) {
       writeU8(os, WASM_OPCODE_GLOBAL_GET, "GLOBAL_GET");
-      writeUleb128(os, WasmSym::memoryBase->getGlobalIndex(), "memory_base");
+      if (isTLS())
+        writeUleb128(os, WasmSym::tlsBase->getGlobalIndex(), "tls_base");
+      else
+        writeUleb128(os, WasmSym::memoryBase->getGlobalIndex(), "memory_base");
       writeU8(os, opcode_ptr_add, "ADD");
     }
 
@@ -418,6 +421,8 @@ void InputChunk::generateRelocationCode(raw_ostream &os) const {
       if (rel.Type == R_WASM_TABLE_INDEX_I32 ||
           rel.Type == R_WASM_TABLE_INDEX_I64)
         baseSymbol = WasmSym::tableBase;
+      else if (sym->isTLS())
+        baseSymbol = WasmSym::tlsBase;
       writeU8(os, WASM_OPCODE_GLOBAL_GET, "GLOBAL_GET");
       writeUleb128(os, baseSymbol->getGlobalIndex(), "base");
       writeU8(os, opcode_reloc_const, "CONST");

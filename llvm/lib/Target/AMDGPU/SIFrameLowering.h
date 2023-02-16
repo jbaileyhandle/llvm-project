@@ -10,7 +10,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_SIFRAMELOWERING_H
 
 #include "AMDGPUFrameLowering.h"
-#include "SIMachineFunctionInfo.h"
+#include "SIRegisterInfo.h"
 
 namespace llvm {
 
@@ -34,6 +34,17 @@ public:
                             RegScavenger *RS = nullptr) const override;
   void determineCalleeSavesSGPR(MachineFunction &MF, BitVector &SavedRegs,
                                 RegScavenger *RS = nullptr) const;
+  void determinePrologEpilogSGPRSaves(MachineFunction &MF, BitVector &SavedRegs,
+                                      bool NeedExecCopyReservedReg) const;
+  void emitCSRSpillStores(MachineFunction &MF, MachineBasicBlock &MBB,
+                          MachineBasicBlock::iterator MBBI, DebugLoc &DL,
+                          LivePhysRegs &LiveRegs, Register FrameReg,
+                          Register FramePtrRegScratchCopy,
+                          const bool NeedsFrameMoves) const;
+  void emitCSRSpillRestores(MachineFunction &MF, MachineBasicBlock &MBB,
+                            MachineBasicBlock::iterator MBBI, DebugLoc &DL,
+                            LivePhysRegs &LiveRegs, Register FrameReg,
+                            Register FramePtrRegScratchCopy) const;
   bool
   assignCalleeSavedSpillSlots(MachineFunction &MF,
                               const TargetRegisterInfo *TRI,
@@ -47,6 +58,9 @@ public:
   void processFunctionBeforeFrameFinalized(
     MachineFunction &MF,
     RegScavenger *RS = nullptr) const override;
+
+  void processFunctionBeforeFrameIndicesReplaced(
+      MachineFunction &MF, RegScavenger *RS = nullptr) const override;
 
   MachineBasicBlock::iterator
   eliminateCallFramePseudoInstr(MachineFunction &MF,
@@ -111,7 +125,7 @@ public:
   MachineInstr *buildCFIForSGPRToVGPRSpill(
       MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
       const DebugLoc &DL, Register SGPR,
-      ArrayRef<SIMachineFunctionInfo::SpilledReg> VGPRSpills) const;
+      ArrayRef<SIRegisterInfo::SpilledReg> VGPRSpills) const;
   /// Create a CFI index describing a spill of a SGPR to VMEM and
   /// build a MachineInstr around it.
   MachineInstr *buildCFIForSGPRToVMEMSpill(MachineBasicBlock &MBB,
@@ -124,6 +138,10 @@ public:
                                            MachineBasicBlock::iterator MBBI,
                                            const DebugLoc &DL, unsigned VGPR,
                                            int64_t Offset) const;
+  MachineInstr *buildCFIForRegToSGPRPairSpill(MachineBasicBlock &MBB,
+                                              MachineBasicBlock::iterator MBBI,
+                                              const DebugLoc &DL, Register Reg,
+                                              Register SGPRPair) const;
 };
 
 } // end namespace llvm

@@ -7,10 +7,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Tooling/Inclusions/StandardLibrary.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclarationName.h"
-#include "clang/Frontend/ASTUnit.h"
-#include "clang/Tooling/Tooling.h"
+#include "clang/Testing/TestAST.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ScopedPrinter.h"
@@ -18,16 +18,16 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
+using ::testing::Contains;
 using ::testing::ElementsAre;
 
 namespace clang {
 namespace tooling {
 namespace {
 
-const NamedDecl &lookup(ASTUnit &AST, llvm::StringRef Name) {
-  auto &Ctx = AST.getASTContext();
-  TranslationUnitDecl *TU = Ctx.getTranslationUnitDecl();
-  auto Result = TU->lookup(DeclarationName(&Ctx.Idents.get(Name)));
+const NamedDecl &lookup(TestAST &AST, llvm::StringRef Name) {
+  TranslationUnitDecl *TU = AST.context().getTranslationUnitDecl();
+  auto Result = TU->lookup(DeclarationName(&AST.context().Idents.get(Name)));
   assert(!Result.empty() && "Lookup failed");
   assert(Result.isSingleResult() && "Lookup returned multiple results");
   return *Result.front();
@@ -36,21 +36,84 @@ const NamedDecl &lookup(ASTUnit &AST, llvm::StringRef Name) {
 TEST(StdlibTest, All) {
   auto VectorH = stdlib::Header::named("<vector>");
   EXPECT_TRUE(VectorH);
+  EXPECT_EQ(VectorH->name(), "<vector>");
   EXPECT_EQ(llvm::to_string(*VectorH), "<vector>");
   EXPECT_FALSE(stdlib::Header::named("HeadersTests.cpp"));
 
+  EXPECT_TRUE(stdlib::Header::named("<vector>", stdlib::Lang::CXX));
+  EXPECT_FALSE(stdlib::Header::named("<vector>", stdlib::Lang::C));
+
   auto Vector = stdlib::Symbol::named("std::", "vector");
   EXPECT_TRUE(Vector);
+  EXPECT_EQ(Vector->scope(), "std::");
+  EXPECT_EQ(Vector->name(), "vector");
+  EXPECT_EQ(Vector->qualifiedName(), "std::vector");
   EXPECT_EQ(llvm::to_string(*Vector), "std::vector");
   EXPECT_FALSE(stdlib::Symbol::named("std::", "dongle"));
   EXPECT_FALSE(stdlib::Symbol::named("clang::", "ASTContext"));
 
+  EXPECT_TRUE(stdlib::Symbol::named("std::", "vector", stdlib::Lang::CXX));
+  EXPECT_FALSE(stdlib::Symbol::named("std::", "vector", stdlib::Lang::C));
+
   EXPECT_EQ(Vector->header(), *VectorH);
   EXPECT_THAT(Vector->headers(), ElementsAre(*VectorH));
+
+  EXPECT_THAT(stdlib::Symbol::named("std::", "basic_iostream")->headers(),
+              ElementsAre(stdlib::Header::named("<istream>"),
+                          stdlib::Header::named("<iostream>"),
+                          stdlib::Header::named("<iosfwd>")));
+  EXPECT_THAT(stdlib::Symbol::named("std::", "size_t")->headers(),
+              ElementsAre(stdlib::Header::named("<cstddef>"),
+                          stdlib::Header::named("<cstdlib>"),
+                          stdlib::Header::named("<cstring>"),
+                          stdlib::Header::named("<cwchar>"),
+                          stdlib::Header::named("<cuchar>"),
+                          stdlib::Header::named("<ctime>"),
+                          stdlib::Header::named("<cstdio>")));
+  EXPECT_EQ(stdlib::Symbol::named("std::", "size_t")->header(),
+            stdlib::Header::named("<cstddef>"));
+
+  EXPECT_THAT(stdlib::Header::all(), Contains(*VectorH));
+  EXPECT_THAT(stdlib::Symbol::all(), Contains(*Vector));
+  EXPECT_TRUE(stdlib::Header::named("<stdint.h>", stdlib::Lang::CXX));
+  EXPECT_FALSE(stdlib::Header::named("<ios646.h>", stdlib::Lang::CXX));
+}
+
+TEST(StdlibTest, Experimental) {
+  EXPECT_FALSE(
+      stdlib::Header::named("<experimental/filesystem>", stdlib::Lang::C));
+  EXPECT_TRUE(
+      stdlib::Header::named("<experimental/filesystem>", stdlib::Lang::CXX));
+
+  auto Symbol = stdlib::Symbol::named("std::experimental::filesystem::",
+                                      "system_complete");
+  EXPECT_TRUE(Symbol);
+  EXPECT_EQ(Symbol->scope(), "std::experimental::filesystem::");
+  EXPECT_EQ(Symbol->name(), "system_complete");
+  EXPECT_EQ(Symbol->header(),
+            stdlib::Header::named("<experimental/filesystem>"));
+  EXPECT_EQ(Symbol->qualifiedName(),
+            "std::experimental::filesystem::system_complete");
+}
+
+TEST(StdlibTest, CCompat) {
+  EXPECT_THAT(
+      stdlib::Symbol::named("", "int16_t", stdlib::Lang::CXX)->headers(),
+      ElementsAre(stdlib::Header::named("<cstdint>"),
+                  stdlib::Header::named("<stdint.h>")));
+  EXPECT_THAT(
+      stdlib::Symbol::named("std::", "int16_t", stdlib::Lang::CXX)->headers(),
+      ElementsAre(stdlib::Header::named("<cstdint>")));
+
+  EXPECT_TRUE(stdlib::Header::named("<stdint.h>", stdlib::Lang::C));
+  EXPECT_THAT(
+      stdlib::Symbol::named("", "int16_t", stdlib::Lang::C)->headers(),
+      ElementsAre(stdlib::Header::named("<stdint.h>", stdlib::Lang::C)));
+  EXPECT_FALSE(stdlib::Symbol::named("std::", "int16_t", stdlib::Lang::C));
 }
 
 TEST(StdlibTest, Recognizer) {
-  std::unique_ptr<ASTUnit> AST = buildASTFromCode(R"cpp(
+  TestAST AST(R"cpp(
     namespace std {
     inline namespace inl {
 
@@ -83,27 +146,29 @@ TEST(StdlibTest, Recognizer) {
     div_t div;
   )cpp");
 
-  auto &VectorNonstd = lookup(*AST, "vector");
-  auto *Vec =
-      cast<VarDecl>(lookup(*AST, "vec")).getType()->getAsCXXRecordDecl();
+  auto &VectorNonstd = lookup(AST, "vector");
+  auto *Vec = cast<VarDecl>(lookup(AST, "vec")).getType()->getAsCXXRecordDecl();
   auto *Nest =
-      cast<VarDecl>(lookup(*AST, "nest")).getType()->getAsCXXRecordDecl();
+      cast<VarDecl>(lookup(AST, "nest")).getType()->getAsCXXRecordDecl();
   auto *Clock =
-      cast<VarDecl>(lookup(*AST, "clock")).getType()->getAsCXXRecordDecl();
-  auto *Sec =
-      cast<VarDecl>(lookup(*AST, "sec")).getType()->getAsCXXRecordDecl();
+      cast<VarDecl>(lookup(AST, "clock")).getType()->getAsCXXRecordDecl();
+  auto *Sec = cast<VarDecl>(lookup(AST, "sec")).getType()->getAsCXXRecordDecl();
   auto *CDivT =
-      cast<VarDecl>(lookup(*AST, "div")).getType()->getAsCXXRecordDecl();
+      cast<VarDecl>(lookup(AST, "div")).getType()->getAsCXXRecordDecl();
 
   stdlib::Recognizer Recognizer;
 
-  EXPECT_EQ(Recognizer(&VectorNonstd), llvm::None);
+  EXPECT_EQ(Recognizer(&VectorNonstd), std::nullopt);
   EXPECT_EQ(Recognizer(Vec), stdlib::Symbol::named("std::", "vector"));
+  EXPECT_EQ(Recognizer(Vec),
+            stdlib::Symbol::named("std::", "vector", stdlib::Lang::CXX));
   EXPECT_EQ(Recognizer(Nest), stdlib::Symbol::named("std::", "vector"));
   EXPECT_EQ(Recognizer(Clock),
             stdlib::Symbol::named("std::chrono::", "system_clock"));
-  EXPECT_EQ(Recognizer(CDivT), stdlib::Symbol::named("", "div_t"));
-  EXPECT_EQ(Recognizer(Sec), llvm::None);
+  auto DivT = stdlib::Symbol::named("", "div_t", stdlib::Lang::CXX);
+  EXPECT_TRUE(DivT);
+  EXPECT_EQ(Recognizer(CDivT), DivT);
+  EXPECT_EQ(Recognizer(Sec), std::nullopt);
 }
 
 } // namespace

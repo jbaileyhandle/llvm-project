@@ -13,6 +13,7 @@
 #include "lldb/Host/OptionParser.h"
 #include "lldb/Interpreter/CommandCompletions.h"
 #include "lldb/Interpreter/CommandInterpreter.h"
+#include "lldb/Interpreter/CommandOptionArgumentTable.h"
 #include "lldb/Interpreter/CommandReturnObject.h"
 #include "lldb/Interpreter/OptionValueProperties.h"
 
@@ -86,7 +87,7 @@ insert-before or insert-after.");
 
   class CommandOptions : public Options {
   public:
-    CommandOptions() {}
+    CommandOptions() = default;
 
     ~CommandOptions() override = default;
 
@@ -119,7 +120,7 @@ insert-before or insert-after.");
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_settings_set_options);
+      return llvm::ArrayRef(g_settings_set_options);
     }
 
     // Instance variables to hold the values for command options.
@@ -153,7 +154,7 @@ insert-before or insert-after.");
       return;
 
     // Complete option name
-    if (arg[0] != '-')
+    if (arg[0] == '-')
       return;
 
     // Complete setting value
@@ -329,7 +330,7 @@ public:
 
   class CommandOptions : public Options {
   public:
-    CommandOptions() {}
+    CommandOptions() = default;
 
     ~CommandOptions() override = default;
 
@@ -358,7 +359,7 @@ public:
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_settings_write_options);
+      return llvm::ArrayRef(g_settings_write_options);
     }
 
     // Instance variables to hold the values for command options.
@@ -427,7 +428,7 @@ public:
 
   class CommandOptions : public Options {
   public:
-    CommandOptions() {}
+    CommandOptions() = default;
 
     ~CommandOptions() override = default;
 
@@ -452,7 +453,7 @@ public:
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_settings_read_options);
+      return llvm::ArrayRef(g_settings_read_options);
     }
 
     // Instance variables to hold the values for command options.
@@ -1082,7 +1083,7 @@ public:
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_settings_clear_options);
+      return llvm::ArrayRef(g_settings_clear_options);
     }
 
     bool m_clear_all = false;

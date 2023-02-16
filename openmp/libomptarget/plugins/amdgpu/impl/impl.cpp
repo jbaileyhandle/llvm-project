@@ -12,36 +12,81 @@
  * Data
  */
 
-bool already_locked(void *ptr, hsa_status_t *err_p, void **agentBaseAddress) {
-  bool already_locked = false;
-  hsa_status_t err = HSA_STATUS_SUCCESS;
-  hsa_amd_pointer_info_t info;
-  info.size = sizeof(hsa_amd_pointer_info_t);
-  err = hsa_amd_pointer_info(ptr, &info, nullptr, nullptr, nullptr);
-
-  if (err != HSA_STATUS_SUCCESS)
-    DP("Error when getting pointer info\n");
-  else
-    already_locked = (info.type == HSA_EXT_POINTER_TYPE_LOCKED);
-
-  if (already_locked && agentBaseAddress != nullptr)
-    *agentBaseAddress = info.agentBaseAddress;
-
-  if (err_p)
-    *err_p = err;
-  return already_locked;
-}
-
-hsa_status_t wait_for_signal(hsa_signal_t signal, hsa_signal_value_t init,
-                             hsa_signal_value_t success) {
+template <const uint64_t active_timeout = 0>
+hsa_status_t active_wait_for_signal(hsa_signal_t signal,
+                                    hsa_signal_value_t init,
+                                    hsa_signal_value_t success) {
   hsa_signal_value_t got = init;
+  if (active_timeout) {
+    got = hsa_signal_wait_scacquire(signal, HSA_SIGNAL_CONDITION_NE, init,
+                                    active_timeout, HSA_WAIT_STATE_ACTIVE);
+    if (got == success)
+      return HSA_STATUS_SUCCESS;
+    DP("active_timeout %ld exceeded: switching to HSA_WAIT_STATE_BLOCKED.\n",
+       active_timeout);
+  }
   while (got == init)
     got = hsa_signal_wait_scacquire(signal, HSA_SIGNAL_CONDITION_NE, init,
                                     UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+
   if (got != success)
     return HSA_STATUS_ERROR;
 
   return HSA_STATUS_SUCCESS;
+}
+
+hsa_status_t is_locked(void *ptr, void **agentBaseAddress) {
+  hsa_status_t err = HSA_STATUS_SUCCESS;
+  hsa_amd_pointer_info_t info;
+  info.size = sizeof(hsa_amd_pointer_info_t);
+  err = hsa_amd_pointer_info(ptr, &info, /*alloc=*/nullptr,
+                             /*num_agents_accessible=*/nullptr,
+                             /*accessible=*/nullptr);
+  if (err != HSA_STATUS_SUCCESS) {
+    DP("Error when getting pointer info\n");
+    return err;
+  }
+
+  if (info.type == HSA_EXT_POINTER_TYPE_LOCKED) {
+    // When user passes in a basePtr+offset we need to fix the
+    // locked pointer to include the offset: ROCr always returns
+    // the base locked address, not the shifted one.
+    if ((char *)info.hostBaseAddress <= (char *)ptr &&
+        (char *)ptr < (char *)info.hostBaseAddress + info.sizeInBytes)
+      *agentBaseAddress =
+          (void *)((uint64_t)info.agentBaseAddress + (uint64_t)ptr -
+                   (uint64_t)info.hostBaseAddress);
+    else // address is already device-agent accessible, no need to compute
+         // offset
+      *agentBaseAddress = ptr;
+
+  } else
+    *agentBaseAddress = nullptr;
+
+  return HSA_STATUS_SUCCESS;
+}
+
+// 0 = wait in HSA_WAIT_STATE_BLOCKED till complete
+hsa_status_t wait_for_signal(hsa_signal_t signal, hsa_signal_value_t init,
+                             hsa_signal_value_t success) {
+  return active_wait_for_signal<0>(signal, init, success);
+}
+// switch to STATE_BLOCKED after 1 sec
+hsa_status_t wait_for_signal_kernel(hsa_signal_t signal,
+                                    hsa_signal_value_t init,
+                                    hsa_signal_value_t success) {
+  return active_wait_for_signal<1000000>(signal, init, success);
+}
+// switch to STATE_BLOCKED after 3 secs
+hsa_status_t wait_for_signal_data(hsa_signal_t signal, hsa_signal_value_t init,
+                                  hsa_signal_value_t success) {
+  return active_wait_for_signal<3000000>(signal, init, success);
+}
+// Never switch to STATE_BLOCKED, stay in STATE_ACTIVE, not used yet
+hsa_status_t wait_for_signal_active(hsa_signal_t signal,
+                                    hsa_signal_value_t init,
+                                    hsa_signal_value_t success) {
+  return active_wait_for_signal<UINT64_MAX>(signal, init, success);
 }
 
 // host pointer (either src or dest) must be locked via hsa_amd_memory_lock
@@ -71,19 +116,23 @@ static hsa_status_t locking_async_memcpy(enum CopyDirection direction,
                                          hsa_agent_t agent, void *src,
                                          void *lockingPtr, size_t size,
                                          bool *user_locked) {
-  hsa_status_t err;
-
   void *lockedPtr = nullptr;
-  if (!already_locked(lockingPtr, &err, &lockedPtr)) {
+  hsa_status_t err = is_locked(lockingPtr, &lockedPtr);
+  bool HostPtrIsLocked = true;
+  if (err != HSA_STATUS_SUCCESS)
+    return err;
+  if (!lockedPtr) { // not locked
+    HostPtrIsLocked = false;
+    hsa_agent_t agents[1] = {agent};
+    err = hsa_amd_memory_lock(lockingPtr, size, agents, /*num_agent=*/1,
+                              (void **)&lockedPtr);
     if (err != HSA_STATUS_SUCCESS)
       return err;
-    *user_locked = false;
-    err =
-        hsa_amd_memory_lock(lockingPtr, size, nullptr, 0, (void **)&lockedPtr);
-    if (err != HSA_STATUS_SUCCESS)
-      return err;
-  } else
+    DP("locking_async_memcpy: lockingPtr=%p lockedPtr=%p Size = %lu\n",
+       lockingPtr, lockedPtr, size);
+  } else {
     *user_locked = true;
+  }
 
   switch (direction) {
   case H2D:
@@ -92,12 +141,11 @@ static hsa_status_t locking_async_memcpy(enum CopyDirection direction,
   case D2H:
     err = invoke_hsa_copy(signal, lockedPtr, agent, src, size);
     break;
-  default:
-    err = HSA_STATUS_ERROR; // fall into unlock before returning
   }
 
-  if (err != HSA_STATUS_SUCCESS) {
+  if (err != HSA_STATUS_SUCCESS && !HostPtrIsLocked) {
     // do not leak locked host pointers, but discard potential error message
+    // because the initial error was in the copy function
     hsa_amd_memory_unlock(lockingPtr);
     return err;
   }

@@ -28,7 +28,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
-#include "llvm/Support/TargetParser.h"
+#include "llvm/TargetParser/TargetParser.h"
 #include "llvm/Support/YAMLParser.h"
 
 #include <cassert>
@@ -86,7 +86,7 @@ void AMDFlang::ConstructJob(Compilation &C, const JobAction &JA,
   const InputInfo &Input = Inputs[0];
   types::ID InputType = Input.getType();
   // Check file type sanity
-  assert(types::isFortran(InputType) && "Can only accept Fortran");
+  assert(types::isAcceptedByFlang(InputType) && "Can only accept Fortran");
 
   if (Args.hasArg(options::OPT_fsyntax_only)) {
     // For -fsyntax-only produce temp files only
@@ -374,8 +374,8 @@ void AMDFlang::ConstructJob(Compilation &C, const JobAction &JA,
     CommonCmdArgs.push_back("-x");
     CommonCmdArgs.push_back("120");
 
-    if (!GDwarfArg) // -g without -gdwarf-X produces default (DWARFv4)
-      CommonCmdArgs.push_back("0x1000000");
+    if (!GDwarfArg) // -g without -gdwarf-X produces default (DWARFv5)
+      CommonCmdArgs.push_back("0x2000000");
     else if (GDwarfArg->getOption().matches(options::OPT_gdwarf_2)) // -gdwarf-2
       CommonCmdArgs.push_back("0x200");
     else if (GDwarfArg->getOption().matches(options::OPT_gdwarf_3)) // -gdwarf-3
@@ -998,6 +998,13 @@ void AMDFlang::ConstructJob(Compilation &C, const JobAction &JA,
 
   // Remove "noinline" attriblute
   LowerCmdArgs.push_back("-x"); LowerCmdArgs.push_back("183"); LowerCmdArgs.push_back("0x10");
+
+  // Move option 234 flang reductions up to -fopenmp-target-fast
+  // instructing flang2 to use 32 teams for reduction tuning via opt 234.
+  if (Args.hasFlag(options::OPT_fopenmp_target_fast,
+      options::OPT_fno_openmp_target_fast, false)) {
+    LowerCmdArgs.push_back("-x"); LowerCmdArgs.push_back("234"); LowerCmdArgs.push_back("32");
+  }
 
   // Set a -x flag for second part of Fortran frontend
   for (Arg *A : Args.filtered(options::OPT_Mx_EQ)) {

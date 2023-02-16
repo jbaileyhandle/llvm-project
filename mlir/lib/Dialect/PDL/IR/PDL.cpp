@@ -13,6 +13,7 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include <optional>
 
 using namespace mlir;
 using namespace mlir::pdl;
@@ -48,7 +49,7 @@ static bool hasBindingUse(Operation *op) {
 /// is used by a "binding" operation. On failure, emits an error.
 static LogicalResult verifyHasBindingUse(Operation *op) {
   // If the parent is not a pattern, there is nothing to do.
-  if (!isa<PatternOp>(op->getParentOp()))
+  if (!llvm::isa_and_nonnull<PatternOp>(op->getParentOp()))
     return success();
   if (hasBindingUse(op))
     return success();
@@ -74,11 +75,11 @@ static void visit(Operation *op, DenseSet<Operation *> &visited) {
   // Traverse the operands / parent.
   TypeSwitch<Operation *>(op)
       .Case<OperationOp>([&visited](auto operation) {
-        for (Value operand : operation.operands())
+        for (Value operand : operation.getOperandValues())
           visit(operand.getDefiningOp(), visited);
       })
       .Case<ResultOp, ResultsOp>([&visited](auto result) {
-        visit(result.parent().getDefiningOp(), visited);
+        visit(result.getParent().getDefiningOp(), visited);
       });
 
   // Traverse the users.
@@ -111,8 +112,8 @@ LogicalResult ApplyNativeRewriteOp::verify() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult AttributeOp::verify() {
-  Value attrType = type();
-  Optional<Attribute> attrValue = value();
+  Value attrType = getValueType();
+  std::optional<Attribute> attrValue = getValue();
 
   if (!attrValue) {
     if (isa<RewriteOp>((*this)->getParentOp()))
@@ -148,7 +149,7 @@ static ParseResult parseOperationOpAttributes(
   Builder &builder = p.getBuilder();
   SmallVector<Attribute, 4> attrNames;
   if (succeeded(p.parseOptionalLBrace())) {
-    do {
+    auto parseOperands = [&]() {
       StringAttr nameAttr;
       OpAsmParser::UnresolvedOperand operand;
       if (p.parseAttribute(nameAttr) || p.parseEqual() ||
@@ -156,8 +157,9 @@ static ParseResult parseOperationOpAttributes(
         return failure();
       attrNames.push_back(nameAttr);
       attrOperands.push_back(operand);
-    } while (succeeded(p.parseOptionalComma()));
-    if (p.parseRBrace())
+      return success();
+    };
+    if (p.parseCommaSeparatedList(parseOperands) || p.parseRBrace())
       return failure();
   }
   attrNamesAttr = builder.getArrayAttr(attrNames);
@@ -188,15 +190,45 @@ static LogicalResult verifyResultTypesAreInferrable(OperationOp op,
     if (!replOpUser || use.getOperandNumber() == 0)
       return false;
     // Make sure the replaced operation was defined before this one.
-    Operation *replacedOp = replOpUser.operation().getDefiningOp();
+    Operation *replacedOp = replOpUser.getOpValue().getDefiningOp();
     return replacedOp->getBlock() != rewriterBlock ||
            replacedOp->isBeforeInBlock(op);
   };
 
   // Check to see if the uses of the operation itself can be used to infer
   // types.
-  if (llvm::any_of(op.op().getUses(), canInferTypeFromUse))
+  if (llvm::any_of(op.getOp().getUses(), canInferTypeFromUse))
     return success();
+
+  // Handle the case where the operation has no explicit result types.
+  if (resultTypes.empty()) {
+    // If we don't know the concrete operation, don't attempt any verification.
+    // We can't make assumptions if we don't know the concrete operation.
+    std::optional<StringRef> rawOpName = op.getOpName();
+    if (!rawOpName)
+      return success();
+    std::optional<RegisteredOperationName> opName =
+        RegisteredOperationName::lookup(*rawOpName, op.getContext());
+    if (!opName)
+      return success();
+
+    // If no explicit result types were provided, check to see if the operation
+    // expected at least one result. This doesn't cover all cases, but this
+    // should cover many cases in which the user intended to infer the results
+    // of an operation, but it isn't actually possible.
+    bool expectedAtLeastOneResult =
+        !opName->hasTrait<OpTrait::ZeroResults>() &&
+        !opName->hasTrait<OpTrait::VariadicResults>();
+    if (expectedAtLeastOneResult) {
+      return op
+          .emitOpError("must have inferable or constrained result types when "
+                       "nested within `pdl.rewrite`")
+          .attachNote()
+          .append("operation is created in a non-inferrable context, but '",
+                  *opName, "' does not implement InferTypeOpInterface");
+    }
+    return success();
+  }
 
   // Otherwise, make sure each of the types can be inferred.
   for (const auto &it : llvm::enumerate(resultTypes)) {
@@ -215,10 +247,12 @@ static LogicalResult verifyResultTypesAreInferrable(OperationOp op,
              isa<OperandOp, OperandsOp, OperationOp>(user);
     };
     if (TypeOp typeOp = dyn_cast<TypeOp>(resultTypeOp)) {
-      if (typeOp.type() || llvm::any_of(typeOp->getUsers(), constrainsInput))
+      if (typeOp.getConstantType() ||
+          llvm::any_of(typeOp->getUsers(), constrainsInput))
         continue;
     } else if (TypesOp typeOp = dyn_cast<TypesOp>(resultTypeOp)) {
-      if (typeOp.types() || llvm::any_of(typeOp->getUsers(), constrainsInput))
+      if (typeOp.getConstantTypes() ||
+          llvm::any_of(typeOp->getUsers(), constrainsInput))
         continue;
     }
 
@@ -232,12 +266,12 @@ static LogicalResult verifyResultTypesAreInferrable(OperationOp op,
 }
 
 LogicalResult OperationOp::verify() {
-  bool isWithinRewrite = isa<RewriteOp>((*this)->getParentOp());
-  if (isWithinRewrite && !name())
+  bool isWithinRewrite = isa_and_nonnull<RewriteOp>((*this)->getParentOp());
+  if (isWithinRewrite && !getOpName())
     return emitOpError("must have an operation name when nested within "
                        "a `pdl.rewrite`");
-  ArrayAttr attributeNames = attributeNamesAttr();
-  auto attributeValues = attributes();
+  ArrayAttr attributeNames = getAttributeValueNamesAttr();
+  auto attributeValues = getAttributeValues();
   if (attributeNames.size() != attributeValues.size()) {
     return emitOpError()
            << "expected the same number of attribute values and attribute "
@@ -248,8 +282,8 @@ LogicalResult OperationOp::verify() {
 
   // If the operation is within a rewrite body and doesn't have type inference,
   // ensure that the result types can be resolved.
-  if (isWithinRewrite && !hasTypeInference()) {
-    if (failed(verifyResultTypesAreInferrable(*this, types())))
+  if (isWithinRewrite && !mightHaveTypeInference()) {
+    if (failed(verifyResultTypesAreInferrable(*this, getTypeValues())))
       return failure();
   }
 
@@ -257,12 +291,18 @@ LogicalResult OperationOp::verify() {
 }
 
 bool OperationOp::hasTypeInference() {
-  Optional<StringRef> opName = name();
-  if (!opName)
-    return false;
+  if (std::optional<StringRef> rawOpName = getOpName()) {
+    OperationName opName(*rawOpName, getContext());
+    return opName.hasInterface<InferTypeOpInterface>();
+  }
+  return false;
+}
 
-  if (auto rInfo = RegisteredOperationName::lookup(*opName, getContext()))
-    return rInfo->hasInterface<InferTypeOpInterface>();
+bool OperationOp::mightHaveTypeInference() {
+  if (std::optional<StringRef> rawOpName = getOpName()) {
+    OperationName opName(*rawOpName, getContext());
+    return opName.mightHaveInterface<InferTypeOpInterface>();
+  }
   return false;
 }
 
@@ -342,7 +382,8 @@ LogicalResult PatternOp::verifyRegions() {
 }
 
 void PatternOp::build(OpBuilder &builder, OperationState &state,
-                      Optional<uint16_t> benefit, Optional<StringRef> name) {
+                      std::optional<uint16_t> benefit,
+                      std::optional<StringRef> name) {
   build(builder, state, builder.getI16IntegerAttr(benefit ? *benefit : 0),
         name ? builder.getStringAttr(*name) : StringAttr());
   state.regions[0]->emplaceBlock();
@@ -350,7 +391,7 @@ void PatternOp::build(OpBuilder &builder, OperationState &state,
 
 /// Returns the rewrite operation of this pattern.
 RewriteOp PatternOp::getRewriter() {
-  return cast<RewriteOp>(body().front().getTerminator());
+  return cast<RewriteOp>(getBodyRegion().front().getTerminator());
 }
 
 /// The default dialect is `pdl`.
@@ -359,11 +400,44 @@ StringRef PatternOp::getDefaultDialect() {
 }
 
 //===----------------------------------------------------------------------===//
+// pdl::RangeOp
+//===----------------------------------------------------------------------===//
+
+static ParseResult parseRangeType(OpAsmParser &p, TypeRange argumentTypes,
+                                  Type &resultType) {
+  // If arguments were provided, infer the result type from the argument list.
+  if (!argumentTypes.empty()) {
+    resultType = RangeType::get(getRangeElementTypeOrSelf(argumentTypes[0]));
+    return success();
+  }
+  // Otherwise, parse the type as a trailing type.
+  return p.parseColonType(resultType);
+}
+
+static void printRangeType(OpAsmPrinter &p, RangeOp op, TypeRange argumentTypes,
+                           Type resultType) {
+  if (argumentTypes.empty())
+    p << ": " << resultType;
+}
+
+LogicalResult RangeOp::verify() {
+  Type elementType = getType().getElementType();
+  for (Type operandType : getOperandTypes()) {
+    Type operandElementType = getRangeElementTypeOrSelf(operandType);
+    if (operandElementType != elementType) {
+      return emitOpError("expected operand to have element type ")
+             << elementType << ", but got " << operandElementType;
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // pdl::ReplaceOp
 //===----------------------------------------------------------------------===//
 
 LogicalResult ReplaceOp::verify() {
-  if (replOperation() && !replValues().empty())
+  if (getReplOperation() && !getReplValues().empty())
     return emitOpError() << "expected no replacement values to be provided"
                             " when the replacement operation is present";
   return success();
@@ -391,7 +465,7 @@ static void printResultsValueType(OpAsmPrinter &p, ResultsOp op,
 }
 
 LogicalResult ResultsOp::verify() {
-  if (!index() && getType().isa<pdl::ValueType>()) {
+  if (!getIndex() && getType().isa<pdl::ValueType>()) {
     return emitOpError() << "expected `pdl.range<value>` result type when "
                             "no index is specified, but got: "
                          << getType();
@@ -404,10 +478,10 @@ LogicalResult ResultsOp::verify() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult RewriteOp::verifyRegions() {
-  Region &rewriteRegion = body();
+  Region &rewriteRegion = getBodyRegion();
 
   // Handle the case where the rewrite is external.
-  if (name()) {
+  if (getName()) {
     if (!rewriteRegion.empty()) {
       return emitOpError()
              << "expected rewrite region to be empty when rewrite is external";
@@ -422,7 +496,7 @@ LogicalResult RewriteOp::verifyRegions() {
   }
 
   // Check that no additional arguments were provided.
-  if (!externalArgs().empty()) {
+  if (!getExternalArgs().empty()) {
     return emitOpError() << "expected no external arguments when the "
                             "rewrite is specified inline";
   }
@@ -440,7 +514,7 @@ StringRef RewriteOp::getDefaultDialect() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult TypeOp::verify() {
-  if (!typeAttr())
+  if (!getConstantTypeAttr())
     return verifyHasBindingUse(*this);
   return success();
 }
@@ -450,7 +524,7 @@ LogicalResult TypeOp::verify() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult TypesOp::verify() {
-  if (!typesAttr())
+  if (!getConstantTypesAttr())
     return verifyHasBindingUse(*this);
   return success();
 }

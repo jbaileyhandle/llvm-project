@@ -1,6 +1,6 @@
 // REQUIRES: amdgpu-registered-target
-// RUN: %clang -cl-std=CL2.0 -emit-llvm -fno-discard-value-names -g -gheterogeneous-dwarf -O0 -S -nogpulib -target amdgcn-amd-amdhsa -mcpu=fiji -o - %s | FileCheck %s
-// RUN: %clang -cl-std=CL2.0 -emit-llvm -fno-discard-value-names -g -gheterogeneous-dwarf -O0 -S -nogpulib -target amdgcn-amd-amdhsa-opencl -mcpu=fiji -o - %s | FileCheck %s
+// RUN: %clang -Xclang -no-opaque-pointers -cl-std=CL2.0 -emit-llvm -fno-discard-value-names -g -gheterogeneous-dwarf -O0 -S -nogpulib -target amdgcn-amd-amdhsa -mcpu=fiji -o - %s | FileCheck %s
+// RUN: %clang -Xclang -no-opaque-pointers -cl-std=CL2.0 -emit-llvm -fno-discard-value-names -g -gheterogeneous-dwarf -O0 -S -nogpulib -target amdgcn-amd-amdhsa-opencl -mcpu=fiji -o - %s | FileCheck %s
 
 // CHECK-DAG: @FileVar0 = hidden addrspace(1) global i32 addrspace(1)* null, align 8, !dbg.def ![[FILEVAR0_F:[0-9]+]]
 // CHECK-DAG: ![[FILEVAR0_GV:[0-9]+]] = distinct !DIGlobalVariable(name: "FileVar0", scope: !{{[0-9]+}}, file: !{{[0-9]+}}, line: {{[0-9]+}}, type: !{{[0-9]+}}, isLocal: false, isDefinition: true)
@@ -38,10 +38,10 @@ global int *global FileVar5;
 // CHECK-DAG: ![[FILEVAR6_LT:[0-9]+]] = distinct !DILifetime(object: ![[FILEVAR6_GV]], location: !DIExpr(DIOpArg(0, i32 addrspace(4)* addrspace(1)*), DIOpDeref(i32 addrspace(4)*)), argObjects: {![[FILEVAR6_F]]})
 // CHECK-DAG: ![[FILEVAR6_F]] = distinct !DIFragment()
 constant int *global FileVar6;
-// CHECK_DAG: @FileVar7 = hidden addrspace(1) global i32 addrspace(3)* addrspacecast (i32* null to i32 addrspace(3)*), align 4, !dbg.def ![[FILEVAR7_F:[0-9]+]]
-// CHECK_DAG: ![[FILEVAR7_GV:[0-9]+]] = distinct !DIGlobalVariable(name: "FileVar7", scope: !{{[0-9]+}}, file: !{{[0-9]+}}, line: {{[0-9]+}}, type: !{{[0-9]+}}, isLocal: false, isDefinition: true)
-// CHECK_DAG: ![[FILEVAR7_LT:[0-9]+]] = distinct !DILifetime(object: ![[FILEVAR7_GV]], location: !DIExpr(DIOpArg(0, i32 addrspace(3)* addrspace(1)*), DIOpDeref(i32 addrspace(3)*)), argObjects: {![[FILEVAR7_F]]})
-// CHECK_DAG: ![[FILEVAR7_F]] = distinct !DIFragment()
+// CHECK-DAG: @FileVar7 = hidden addrspace(1) global i32 addrspace(3)* addrspacecast (i32* null to i32 addrspace(3)*), align 4, !dbg.def ![[FILEVAR7_F:[0-9]+]]
+// CHECK-DAG: ![[FILEVAR7_GV:[0-9]+]] = distinct !DIGlobalVariable(name: "FileVar7", scope: !{{[0-9]+}}, file: !{{[0-9]+}}, line: {{[0-9]+}}, type: !{{[0-9]+}}, isLocal: false, isDefinition: true)
+// CHECK-DAG: ![[FILEVAR7_LT:[0-9]+]] = distinct !DILifetime(object: ![[FILEVAR7_GV]], location: !DIExpr(DIOpArg(0, i32 addrspace(3)* addrspace(1)*), DIOpDeref(i32 addrspace(3)*)), argObjects: {![[FILEVAR7_F]]})
+// CHECK-DAG: ![[FILEVAR7_F]] = distinct !DIFragment()
 local int *global FileVar7;
 // CHECK-DAG: @FileVar8 = hidden addrspace(1) global i32 addrspace(5)* addrspacecast (i32* null to i32 addrspace(5)*), align 4, !dbg.def ![[FILEVAR8_F:[0-9]+]]
 // CHECK-DAG: ![[FILEVAR8_GV:[0-9]+]] = distinct !DIGlobalVariable(name: "FileVar8", scope: !{{[0-9]+}}, file: !{{[0-9]+}}, line: {{[0-9]+}}, type: !{{[0-9]+}}, isLocal: false, isDefinition: true)
@@ -64,10 +64,10 @@ global int *constant FileVar10 = 0;
 // CHECK-DAG: ![[FILEVAR11_LT:[0-9]+]] = distinct !DILifetime(object: ![[FILEVAR11_GV]], location: !DIExpr(DIOpArg(0, i32 addrspace(4)* addrspace(4)*), DIOpDeref(i32 addrspace(4)*)), argObjects: {![[FILEVAR11_F]]})
 // CHECK-DAG: ![[FILEVAR11_F]] = distinct !DIFragment()
 constant int *constant FileVar11 = 0;
-// CHECK_DAG: @FileVar12 = hidden addrspace(4) constant i32 addrspace(3)* addrspacecast (i32* null to i32 addrspace(3)*), align 4, !dbg.def ![[FILEVAR12_F:[0-9]+]]
-// CHECK_DAG: ![[FILEVAR12_GV:[0-9]+]] = distinct !DIGlobalVariable(name: "FileVar12", scope: !{{[0-9]+}}, file: !{{[0-9]+}}, line: {{[0-9]+}}, type: !{{[0-9]+}}, isLocal: false, isDefinition: true)
-// CHECK_DAG: ![[FILEVAR12_LT:[0-9]+]] = distinct !DILifetime(object: ![[FILEVAR12_GV]], location: !DIExpr(DIOpArg(0, i32 addrspace(3)* addrspace(4)*), DIOpDeref(i32 addrspace(3)*)), argObjects: {![[FILEVAR12_F]]})
-// CHECK_DAG: ![[FILEVAR12_F]] = distinct !DIFragment()
+// CHECK-DAG: @FileVar12 = hidden addrspace(4) constant i32 addrspace(3)* addrspacecast (i32* null to i32 addrspace(3)*), align 4, !dbg.def ![[FILEVAR12_F:[0-9]+]]
+// CHECK-DAG: ![[FILEVAR12_GV:[0-9]+]] = distinct !DIGlobalVariable(name: "FileVar12", scope: !{{[0-9]+}}, file: !{{[0-9]+}}, line: {{[0-9]+}}, type: !{{[0-9]+}}, isLocal: false, isDefinition: true)
+// CHECK-DAG: ![[FILEVAR12_LT:[0-9]+]] = distinct !DILifetime(object: ![[FILEVAR12_GV]], location: !DIExpr(DIOpArg(0, i32 addrspace(3)* addrspace(4)*), DIOpDeref(i32 addrspace(3)*)), argObjects: {![[FILEVAR12_F]]})
+// CHECK-DAG: ![[FILEVAR12_F]] = distinct !DIFragment()
 local int *constant FileVar12 = 0;
 // CHECK-DAG: @FileVar13 = hidden addrspace(4) constant i32 addrspace(5)* addrspacecast (i32* null to i32 addrspace(5)*), align 4, !dbg.def ![[FILEVAR13_F:[0-9]+]]
 // CHECK-DAG: ![[FILEVAR13_GV:[0-9]+]] = distinct !DIGlobalVariable(name: "FileVar13", scope: !{{[0-9]+}}, file: !{{[0-9]+}}, line: {{[0-9]+}}, type: !{{[0-9]+}}, isLocal: false, isDefinition: true)

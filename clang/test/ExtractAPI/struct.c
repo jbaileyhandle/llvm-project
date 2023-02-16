@@ -1,7 +1,7 @@
 // RUN: rm -rf %t
 // RUN: split-file %s %t
-// RUN: sed -e "s@INPUT_DIR@%/t@g" %t/reference.output.json.in >> \
-// RUN: %t/reference.output.json
+// RUN: sed -e "s@INPUT_DIR@%{/t:regex_replacement}@g" \
+// RUN: %t/reference.output.json.in >> %t/reference.output.json
 // RUN: %clang -extract-api -target arm64-apple-macosx \
 // RUN: %t/input.h -o %t/output.json | FileCheck -allow-empty %s
 
@@ -48,30 +48,35 @@ struct Color {
       "vendor": "apple"
     }
   },
-  "relationhips": [
+  "relationships": [
     {
       "kind": "memberOf",
       "source": "c:@S@Color@FI@Red",
-      "target": "c:@S@Color"
+      "target": "c:@S@Color",
+      "targetFallback": "Color"
     },
     {
       "kind": "memberOf",
       "source": "c:@S@Color@FI@Green",
-      "target": "c:@S@Color"
+      "target": "c:@S@Color",
+      "targetFallback": "Color"
     },
     {
       "kind": "memberOf",
       "source": "c:@S@Color@FI@Blue",
-      "target": "c:@S@Color"
+      "target": "c:@S@Color",
+      "targetFallback": "Color"
     },
     {
       "kind": "memberOf",
       "source": "c:@S@Color@FI@Alpha",
-      "target": "c:@S@Color"
+      "target": "c:@S@Color",
+      "targetFallback": "Color"
     }
   ],
   "symbols": [
     {
+      "accessLevel": "public",
       "declarationFragments": [
         {
           "kind": "keyword",
@@ -112,11 +117,19 @@ struct Color {
         "identifier": "c.struct"
       },
       "location": {
-        "character": 8,
-        "line": 2,
+        "position": {
+          "character": 8,
+          "line": 2
+        },
         "uri": "file://INPUT_DIR/input.h"
       },
       "names": {
+        "navigator": [
+          {
+            "kind": "identifier",
+            "spelling": "Color"
+          }
+        ],
         "subHeading": [
           {
             "kind": "identifier",
@@ -124,9 +137,13 @@ struct Color {
           }
         ],
         "title": "Color"
-      }
+      },
+      "pathComponents": [
+        "Color"
+      ]
     },
     {
+      "accessLevel": "public",
       "declarationFragments": [
         {
           "kind": "typeIdentifier",
@@ -151,11 +168,19 @@ struct Color {
         "identifier": "c.property"
       },
       "location": {
-        "character": 12,
-        "line": 3,
+        "position": {
+          "character": 12,
+          "line": 3
+        },
         "uri": "file://INPUT_DIR/input.h"
       },
       "names": {
+        "navigator": [
+          {
+            "kind": "identifier",
+            "spelling": "Red"
+          }
+        ],
         "subHeading": [
           {
             "kind": "identifier",
@@ -163,9 +188,14 @@ struct Color {
           }
         ],
         "title": "Red"
-      }
+      },
+      "pathComponents": [
+        "Color",
+        "Red"
+      ]
     },
     {
+      "accessLevel": "public",
       "declarationFragments": [
         {
           "kind": "typeIdentifier",
@@ -190,11 +220,19 @@ struct Color {
         "identifier": "c.property"
       },
       "location": {
-        "character": 12,
-        "line": 4,
+        "position": {
+          "character": 12,
+          "line": 4
+        },
         "uri": "file://INPUT_DIR/input.h"
       },
       "names": {
+        "navigator": [
+          {
+            "kind": "identifier",
+            "spelling": "Green"
+          }
+        ],
         "subHeading": [
           {
             "kind": "identifier",
@@ -202,9 +240,14 @@ struct Color {
           }
         ],
         "title": "Green"
-      }
+      },
+      "pathComponents": [
+        "Color",
+        "Green"
+      ]
     },
     {
+      "accessLevel": "public",
       "declarationFragments": [
         {
           "kind": "typeIdentifier",
@@ -229,11 +272,19 @@ struct Color {
         "identifier": "c.property"
       },
       "location": {
-        "character": 12,
-        "line": 5,
+        "position": {
+          "character": 12,
+          "line": 5
+        },
         "uri": "file://INPUT_DIR/input.h"
       },
       "names": {
+        "navigator": [
+          {
+            "kind": "identifier",
+            "spelling": "Blue"
+          }
+        ],
         "subHeading": [
           {
             "kind": "identifier",
@@ -241,9 +292,14 @@ struct Color {
           }
         ],
         "title": "Blue"
-      }
+      },
+      "pathComponents": [
+        "Color",
+        "Blue"
+      ]
     },
     {
+      "accessLevel": "public",
       "declarationFragments": [
         {
           "kind": "typeIdentifier",
@@ -285,11 +341,19 @@ struct Color {
         "identifier": "c.property"
       },
       "location": {
-        "character": 12,
-        "line": 7,
+        "position": {
+          "character": 12,
+          "line": 7
+        },
         "uri": "file://INPUT_DIR/input.h"
       },
       "names": {
+        "navigator": [
+          {
+            "kind": "identifier",
+            "spelling": "Alpha"
+          }
+        ],
         "subHeading": [
           {
             "kind": "identifier",
@@ -297,7 +361,11 @@ struct Color {
           }
         ],
         "title": "Alpha"
-      }
+      },
+      "pathComponents": [
+        "Color",
+        "Alpha"
+      ]
     }
   ]
 }

@@ -93,9 +93,9 @@ bool ExpandPostRA::LowerSubregToReg(MachineInstr *MI) {
   assert(SubIdx != 0 && "Invalid index for insert_subreg");
   Register DstSubReg = TRI->getSubReg(DstReg, SubIdx);
 
-  assert(Register::isPhysicalRegister(DstReg) &&
+  assert(DstReg.isPhysical() &&
          "Insert destination must be in a physical register");
-  assert(Register::isPhysicalRegister(InsReg) &&
+  assert(InsReg.isPhysical() &&
          "Inserted value must be in a physical register");
 
   LLVM_DEBUG(dbgs() << "subreg: CONVERTING: " << *MI);
@@ -211,6 +211,7 @@ bool ExpandPostRA::runOnMachineFunction(MachineFunction &MF) {
         MadeChange |= LowerSubregToReg(&MI);
         break;
       case TargetOpcode::COPY:
+      case TargetOpcode::PRED_COPY:
         MadeChange |= LowerCopy(&MI);
         break;
       case TargetOpcode::DBG_VALUE:

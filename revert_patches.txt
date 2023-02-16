@@ -1,0 +1,19 @@
+ee2a35ac4ab [X86] Add AVX-NE-CONVERT instruc
+b1fdeeec1a5a Revert "[LLD] Enable --no-undefined-version by default."
+Revert "[X86] Support -march=sierraforest, grandridge,
+Revert "[clang] Only use major version in resource dir"
+Reverts: e1b88c8a [clang] Only use major version in resource dir
+Revert "[ELF] Enable --no-undefined-version by default"
+Reapply: Revert "[-Wunsafe-buffer-usage] Initial commit - Transition away from raw buffers."
+Revert "[AMDGPU] Enable OMod on more VOP3 instructions"   # rocrand assert fails
+
+# needs to be incorporated into ASO new driver
+a17ab7aa3be0 [OpenMP] Add support for '--offload-arch=native' to OpenMP offloading
+fada90286008 [CUDA][HIP] Support '--offload-arch=native' for the new driver
+56ebfca4bcc0 [CUDA][HIP] Add support for `--offload-arch=native` to CUDA and refactor
+
+#break nekbone, cxx20 offsetof
+e327b52766ed [C2x] reject type definitions in offsetof
+
+Workaround failures around new upstream changes in attributor.
+7f12efa88  [X86][FP16] Lower half->i16 into vcvttph2[u]w directly

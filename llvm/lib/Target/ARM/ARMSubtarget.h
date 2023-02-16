@@ -20,7 +20,6 @@
 #include "ARMISelLowering.h"
 #include "ARMMachineFunctionInfo.h"
 #include "ARMSelectionDAGInfo.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/CodeGen/GlobalISel/CallLowering.h"
 #include "llvm/CodeGen/GlobalISel/InstructionSelector.h"
@@ -32,6 +31,7 @@
 #include "llvm/MC/MCSchedule.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/Triple.h"
 #include <memory>
 #include <string>
 
@@ -94,10 +94,6 @@ protected:
     RClass
   };
   enum ARMArchEnum {
-    ARMv2,
-    ARMv2a,
-    ARMv3,
-    ARMv3m,
     ARMv4,
     ARMv4t,
     ARMv5,
@@ -123,6 +119,7 @@ protected:
     ARMv86a,
     ARMv87a,
     ARMv88a,
+    ARMv89a,
     ARMv8a,
     ARMv8mBaseline,
     ARMv8mMainline,
@@ -132,6 +129,7 @@ protected:
     ARMv91a,
     ARMv92a,
     ARMv93a,
+    ARMv94a,
   };
 
 public:
@@ -417,6 +415,7 @@ public:
   bool isRWPI() const;
 
   bool useMachineScheduler() const { return UseMISched; }
+  bool useMachinePipeliner() const { return UseMIPipeliner; }
   bool hasMinSize() const { return OptMinSize; }
   bool isThumb1Only() const { return isThumb() && !hasThumb2(); }
   bool isThumb2() const { return isThumb() && hasThumb2(); }
@@ -429,7 +428,8 @@ public:
   }
 
   MCPhysReg getFramePointerReg() const {
-    if (isTargetDarwin() || (!isTargetWindows() && isThumb()))
+    if (isTargetDarwin() ||
+        (!isTargetWindows() && isThumb() && !createAAPCSFrameChain()))
       return ARM::R7;
     return ARM::R11;
   }
@@ -445,6 +445,8 @@ public:
             MF.getTarget().Options.DisableFramePointerElim(MF)) ||
            isThumb1Only();
   }
+
+  bool splitFramePointerPush(const MachineFunction &MF) const;
 
   bool useStride4VFPs() const;
 
@@ -464,6 +466,10 @@ public:
 
   /// Returns true if machine scheduler should be enabled.
   bool enableMachineScheduler() const override;
+
+  /// Returns true if machine pipeliner should be enabled.
+  bool enableMachinePipeliner() const override;
+  bool useDFAforSMS() const override;
 
   /// True for some subtargets at > -O0.
   bool enablePostRAScheduler() const override;

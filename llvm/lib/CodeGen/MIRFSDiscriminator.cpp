@@ -70,7 +70,7 @@ static uint64_t getCallStackHash(const MachineBasicBlock &BB,
 bool MIRAddFSDiscriminators::runOnMachineFunction(MachineFunction &MF) {
   if (!EnableFSDiscriminator)
     return false;
-  if (!MF.getFunction().isDebugInfoForProfiling())
+  if (!MF.getFunction().shouldEmitDebugInfoForProfiling())
     return false;
 
   bool Changed = false;
@@ -135,6 +135,7 @@ bool MIRAddFSDiscriminators::runOnMachineFunction(MachineFunction &MF) {
   if (Changed) {
     createFSDiscriminatorVariable(MF.getFunction().getParent());
     LLVM_DEBUG(dbgs() << "Num of FS Discriminators: " << NumNewD << "\n");
+    (void) NumNewD;
   }
 
   return Changed;

@@ -3,14 +3,19 @@
 
 #pragma omp declare target
 
-using namespace _OMP;
+#include "llvm/Frontend/OpenMP/OMPGridValues.h"
 
-namespace _OMP {
+using namespace ompx::mapping;
+
+namespace ompx::mapping {
 namespace impl {
 
 /// AMDGCN Implementation
 ///
 ///{
+uint32_t __kmpc_impl_smid();
+uint32_t getGenericModeMainThreadId();
+
 #pragma omp begin declare variant match(device = {arch(amdgcn)})
 
 // Partially derived fom hcc_detail/device_functions.h
@@ -65,6 +70,13 @@ static uint32_t __kmpc_impl_smid() {
   return (se_id << HW_ID_CU_ID_SIZE) + cu_id;
 }
 
+static uint32_t getGenericModeMainThreadId() {
+  unsigned Mask =
+      llvm::omp::getAMDGPUGridValues<__AMDGCN_WAVEFRONT_SIZE>().GV_Warp_Size -
+      1;
+  return (__kmpc_get_hardware_num_threads_in_block() - 1) & (~Mask);
+}
+
 #pragma omp end declare variant
 ///}
 
@@ -77,23 +89,28 @@ static uint32_t __kmpc_impl_smid() {
 
 static uint32_t __kmpc_impl_smid() { return 0; }
 
+static uint32_t getGenericModeMainThreadId() {
+  unsigned Mask = mapping::getWarpSize() - 1;
+  return (__kmpc_get_hardware_num_threads_in_block() - 1) & (~Mask);
+}
+
 #pragma omp end declare variant
 ///}
 
 } // namespace impl
-} // namespace _OMP
+} // namespace ompx::mapping
 
 extern "C" {
 
 /// Extra API calls for ROCm
 
 int omp_ext_get_warp_id() {
-  int rc = mapping::getWarpId();
+  int rc = ompx::mapping::getWarpId();
   return rc;
 }
 
 int omp_ext_get_lane_id() {
-  int rc = mapping::getThreadIdInWarp();
+  int rc = ompx::mapping::getThreadIdInWarp();
   return rc;
 }
 
@@ -109,12 +126,15 @@ int omp_ext_is_spmd_mode() {
 
 // The following extra call only works for generic mode
 int omp_ext_get_master_thread_id() {
-  int rc = mapping::isMainThreadInGenericMode();
-  return rc;
+  // thread 0 is main thread in SPMD mode
+  if (ompx::mapping::isSPMDMode())
+    return 0;
+
+  return impl::getGenericModeMainThreadId();
 }
 
 unsigned long long omp_ext_get_active_threads_mask() {
-  unsigned long long rc = mapping::activemask();
+  unsigned long long rc = ompx::mapping::activemask();
   return rc;
 }
 

@@ -115,6 +115,10 @@ HANDLE_TARGET_OPCODE(DBG_KILL)
 /// used to copy between subregisters of virtual registers.
   HANDLE_TARGET_OPCODE(COPY)
 
+/// PRED_COPY - Target-independent register copy with a predication.
+/// Some targets require it for special handling certain register copies.
+  HANDLE_TARGET_OPCODE(PRED_COPY)
+
 /// BUNDLE - This instruction represents an instruction bundle. Instructions
 /// which immediately follow a BUNDLE instruction which are marked with
 /// 'InsideBundle' flag are inside the bundle.
@@ -183,6 +187,8 @@ HANDLE_TARGET_OPCODE(FAULTING_OP)
 /// second operand is an immediate denoting the opcode of the original
 /// instruction.  The rest of the operands are the operands of the
 /// original instruction.
+/// PATCHABLE_OP can be used as second operand to only insert a nop of
+/// required size.
 HANDLE_TARGET_OPCODE(PATCHABLE_OP)
 
 /// This is a marker instruction which gets translated into a nop sled, useful
@@ -225,6 +231,10 @@ HANDLE_TARGET_OPCODE(PATCHABLE_EVENT_CALL)
 HANDLE_TARGET_OPCODE(PATCHABLE_TYPED_EVENT_CALL)
 
 HANDLE_TARGET_OPCODE(ICALL_BRANCH_FUNNEL)
+
+// This is a fence with the singlethread scope. It represents a compiler memory
+// barrier, but does not correspond to any generated instruction.
+HANDLE_TARGET_OPCODE(MEMBARRIER)
 
 /// The following generic opcodes are not supposed to appear after ISel.
 /// This is something we might want to relax, but for now, this is convenient
@@ -289,6 +299,10 @@ HANDLE_TARGET_OPCODE(G_FRAME_INDEX)
 
 /// Generic reference to global value.
 HANDLE_TARGET_OPCODE(G_GLOBAL_VALUE)
+
+/// Generic instruction to materialize the address of an object in the constant
+/// pool.
+HANDLE_TARGET_OPCODE(G_CONSTANT_POOL)
 
 /// Generic instruction to extract blocks of bits from the register given
 /// (typically a sub-register COPY after instruction selection).
@@ -390,6 +404,16 @@ HANDLE_TARGET_OPCODE(G_ATOMICRMW_UMAX)
 HANDLE_TARGET_OPCODE(G_ATOMICRMW_UMIN)
 HANDLE_TARGET_OPCODE(G_ATOMICRMW_FADD)
 HANDLE_TARGET_OPCODE(G_ATOMICRMW_FSUB)
+HANDLE_TARGET_OPCODE(G_ATOMICRMW_FMAX)
+HANDLE_TARGET_OPCODE(G_ATOMICRMW_FMIN)
+HANDLE_TARGET_OPCODE(G_ATOMICRMW_UINC_WRAP)
+HANDLE_TARGET_OPCODE(G_ATOMICRMW_UDEC_WRAP)
+
+// Marker for start of Generic AtomicRMW opcodes
+HANDLE_TARGET_OPCODE_MARKER(GENERIC_ATOMICRMW_OP_START, G_ATOMICRMW_XCHG)
+
+// Marker for end of Generic AtomicRMW opcodes
+HANDLE_TARGET_OPCODE_MARKER(GENERIC_ATOMICRMW_OP_END, G_ATOMICRMW_UDEC_WRAP)
 
 // Generic atomic fence
 HANDLE_TARGET_OPCODE(G_FENCE)
@@ -399,6 +423,9 @@ HANDLE_TARGET_OPCODE(G_BRCOND)
 
 /// Generic indirect branch instruction.
 HANDLE_TARGET_OPCODE(G_BRINDIRECT)
+
+/// Begin an invoke region marker.
+HANDLE_TARGET_OPCODE(G_INVOKE_REGION_START)
 
 /// Generic intrinsic use (without side effects).
 HANDLE_TARGET_OPCODE(G_INTRINSIC)
@@ -625,6 +652,9 @@ HANDLE_TARGET_OPCODE(G_FABS)
 /// floating point. X and the result must have the same type.  FCOPYSIGN(f32,
 /// f64) is allowed.
 HANDLE_TARGET_OPCODE(G_FCOPYSIGN)
+
+/// Generic test for floating-point class.
+HANDLE_TARGET_OPCODE(G_IS_FPCLASS)
 
 /// Generic FP canonicalize value.
 HANDLE_TARGET_OPCODE(G_FCANONICALIZE)

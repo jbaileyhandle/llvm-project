@@ -20,9 +20,7 @@
 
 using namespace clang::ast_matchers;
 
-namespace clang {
-namespace tidy {
-namespace abseil {
+namespace clang::tidy::abseil {
 
 using ::clang::transformer::addInclude;
 using ::clang::transformer::applyFirst;
@@ -40,10 +38,9 @@ static const char DefaultStringLikeClasses[] = "::std::basic_string;"
 static const char DefaultAbseilStringsMatchHeader[] = "absl/strings/match.h";
 
 static transformer::RewriteRuleWith<std::string>
-makeRewriteRule(const std::vector<std::string> &StringLikeClassNames,
+makeRewriteRule(ArrayRef<StringRef> StringLikeClassNames,
                 StringRef AbseilStringsMatchHeader) {
-  auto StringLikeClass = cxxRecordDecl(hasAnyName(SmallVector<StringRef, 4>(
-      StringLikeClassNames.begin(), StringLikeClassNames.end())));
+  auto StringLikeClass = cxxRecordDecl(hasAnyName(StringLikeClassNames));
   auto StringType =
       hasUnqualifiedDesugaredType(recordType(hasDeclaration(StringLikeClass)));
   auto CharStarType =
@@ -108,6 +105,4 @@ void StringFindStrContainsCheck::storeOptions(
                 AbseilStringsMatchHeaderOption);
 }
 
-} // namespace abseil
-} // namespace tidy
-} // namespace clang
+} // namespace clang::tidy::abseil

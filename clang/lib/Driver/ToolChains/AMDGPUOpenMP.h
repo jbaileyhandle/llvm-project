@@ -131,11 +131,17 @@ public:
 
   SanitizerMask getSupportedSanitizers() const override;
 
+  StringRef getAsanRTLPath() const {
+    return RocmInstallation->getAsanRTLPath();
+  }
+
   VersionTuple
   computeMSVCVersion(const Driver *D,
                      const llvm::opt::ArgList &Args) const override;
 
   unsigned GetDefaultDwarfVersion() const override { return 5; }
+  llvm::SmallVector<BitCodeLibraryInfo, 12>
+  getDeviceLibs(const llvm::opt::ArgList &Args) const override;
 
   const ToolChain &HostTC;
 

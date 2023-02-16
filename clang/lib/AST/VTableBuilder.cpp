@@ -670,8 +670,9 @@ CharUnits VCallAndVBaseOffsetBuilder::getCurrentOffsetOffset() const {
   // Under the relative ABI, the offset widths are 32-bit ints instead of
   // pointer widths.
   CharUnits OffsetWidth = Context.toCharUnitsFromBits(
-      VTables.isRelativeLayout() ? 32
-                                 : Context.getTargetInfo().getPointerWidth(0));
+      VTables.isRelativeLayout()
+          ? 32
+          : Context.getTargetInfo().getPointerWidth(LangAS::Default));
   CharUnits OffsetOffset = OffsetWidth * OffsetIndex;
 
   return OffsetOffset;
@@ -3114,8 +3115,7 @@ static void dumpMicrosoftThunkAdjustment(const ThunkInfo &TI, raw_ostream &Out,
     if (!ContinueFirstLine)
       Out << LinePrefix;
     Out << "[return adjustment (to type '"
-        << TI.Method->getReturnType().getCanonicalType().getAsString()
-        << "'): ";
+        << TI.Method->getReturnType().getCanonicalType() << "'): ";
     if (R.Virtual.Microsoft.VBPtrOffset)
       Out << "vbptr at offset " << R.Virtual.Microsoft.VBPtrOffset << ", ";
     if (R.Virtual.Microsoft.VBIndex)

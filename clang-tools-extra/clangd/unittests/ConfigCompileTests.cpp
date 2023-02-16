@@ -13,13 +13,12 @@
 #include "Feature.h"
 #include "TestFS.h"
 #include "clang/Basic/DiagnosticSema.h"
-#include "llvm/ADT/None.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include <optional>
 #include <string>
 
 namespace clang {
@@ -263,6 +262,24 @@ TEST_F(ConfigCompileTests, DiagnosticsIncludeCleaner) {
   EXPECT_TRUE(compileAndApply());
   EXPECT_EQ(Conf.Diagnostics.UnusedIncludes,
             Config::UnusedIncludesPolicy::Strict);
+
+  Frag = {};
+  EXPECT_TRUE(Conf.Diagnostics.Includes.IgnoreHeader.empty())
+      << Conf.Diagnostics.Includes.IgnoreHeader.size();
+  Frag.Diagnostics.Includes.IgnoreHeader.push_back(
+      Located<std::string>("foo.h"));
+  Frag.Diagnostics.Includes.IgnoreHeader.push_back(
+      Located<std::string>(".*inc"));
+  EXPECT_TRUE(compileAndApply());
+  auto HeaderFilter = [this](llvm::StringRef Path) {
+    for (auto &Filter : Conf.Diagnostics.Includes.IgnoreHeader) {
+      if (Filter(Path))
+        return true;
+    }
+    return false;
+  };
+  EXPECT_TRUE(HeaderFilter("foo.h"));
+  EXPECT_FALSE(HeaderFilter("bar.h"));
 }
 
 TEST_F(ConfigCompileTests, DiagnosticSuppression) {
@@ -418,7 +435,7 @@ TEST_F(ConfigCompileTests, ExternalBlockDisablesBackgroundIndex) {
 
 TEST_F(ConfigCompileTests, ExternalBlockMountPoint) {
   auto GetFrag = [](llvm::StringRef Directory,
-                    llvm::Optional<const char *> MountPoint) {
+                    std::optional<const char *> MountPoint) {
     Fragment Frag;
     Frag.Source.Directory = Directory.str();
     Fragment::IndexBlock::ExternalBlock External;
@@ -453,7 +470,7 @@ TEST_F(ConfigCompileTests, ExternalBlockMountPoint) {
   EXPECT_THAT(Conf.Index.External.MountPoint, FooPath);
 
   // None defaults to ".".
-  Frag = GetFrag(FooPath, llvm::None);
+  Frag = GetFrag(FooPath, std::nullopt);
   compileAndApply();
   ASSERT_THAT(Diags.Diagnostics, IsEmpty());
   ASSERT_EQ(Conf.Index.External.Kind, Config::ExternalIndexSpec::File);
@@ -517,6 +534,14 @@ TEST_F(ConfigCompileTests, AllScopes) {
   Frag.Completion.AllScopes = true;
   EXPECT_TRUE(compileAndApply());
   EXPECT_TRUE(Conf.Completion.AllScopes);
+}
+
+TEST_F(ConfigCompileTests, Style) {
+  Frag = {};
+  Frag.Style.FullyQualifiedNamespaces.push_back(std::string("foo"));
+  Frag.Style.FullyQualifiedNamespaces.push_back(std::string("bar"));
+  EXPECT_TRUE(compileAndApply());
+  EXPECT_THAT(Conf.Style.FullyQualifiedNamespaces, ElementsAre("foo", "bar"));
 }
 } // namespace
 } // namespace config

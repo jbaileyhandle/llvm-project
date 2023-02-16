@@ -46,9 +46,9 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/Host.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Signals.h"
+#include "llvm/TargetParser/Host.h"
 
 #include "ClangDiagnostic.h"
 #include "ClangExpressionParser.h"
@@ -86,7 +86,6 @@
 #include "lldb/Utility/LLDBAssert.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
-#include "lldb/Utility/ReproducerProvider.h"
 #include "lldb/Utility/Stream.h"
 #include "lldb/Utility/StreamString.h"
 #include "lldb/Utility/StringList.h"
@@ -96,6 +95,7 @@
 
 #include <cctype>
 #include <memory>
+#include <optional>
 
 using namespace clang;
 using namespace llvm;
@@ -391,18 +391,6 @@ ClangExpressionParser::ClangExpressionParser(
   // 1. Create a new compiler instance.
   m_compiler = std::make_unique<CompilerInstance>();
 
-  // When capturing a reproducer, hook up the file collector with clang to
-  // collector modules and headers.
-  if (repro::Generator *g = repro::Reproducer::Instance().GetGenerator()) {
-    repro::FileProvider &fp = g->GetOrCreate<repro::FileProvider>();
-    m_compiler->setModuleDepCollector(
-        std::make_shared<ModuleDependencyCollectorAdaptor>(
-            fp.GetFileCollector()));
-    DependencyOutputOptions &opts = m_compiler->getDependencyOutputOpts();
-    opts.IncludeSystemHeaders = true;
-    opts.IncludeModuleFiles = true;
-  }
-
   // Make sure clang uses the same VFS as LLDB.
   m_compiler->createFileManager(FileSystem::Instance().GetVirtualFileSystem());
 
@@ -512,8 +500,6 @@ ClangExpressionParser::ClangExpressionParser(
   auto target_info = TargetInfo::CreateTargetInfo(
       m_compiler->getDiagnostics(), m_compiler->getInvocation().TargetOpts);
   if (log) {
-    LLDB_LOGF(log, "Using SIMD alignment: %d",
-              target_info->getSimdDefaultAlign());
     LLDB_LOGF(log, "Target datalayout string: '%s'",
               target_info->getDataLayoutString());
     LLDB_LOGF(log, "Target ABI: '%s'", target_info->getABI().str().c_str());
@@ -559,7 +545,7 @@ ClangExpressionParser::ClangExpressionParser(
   case lldb::eLanguageTypeC_plus_plus_14:
     lang_opts.CPlusPlus11 = true;
     m_compiler->getHeaderSearchOpts().UseLibcxx = true;
-    LLVM_FALLTHROUGH;
+    [[fallthrough]];
   case lldb::eLanguageTypeC_plus_plus_03:
     lang_opts.CPlusPlus = true;
     if (process_sp)
@@ -714,7 +700,7 @@ ClangExpressionParser::ClangExpressionParser(
   m_compiler->createASTContext();
   clang::ASTContext &ast_context = m_compiler->getASTContext();
 
-  m_ast_context = std::make_unique<TypeSystemClang>(
+  m_ast_context = std::make_shared<TypeSystemClang>(
       "Expression ASTContext for '" + m_filename + "'", ast_context);
 
   std::string module_name("$__lldb_module");
@@ -722,8 +708,9 @@ ClangExpressionParser::ClangExpressionParser(
   m_llvm_context = std::make_unique<LLVMContext>();
   m_code_generator.reset(CreateLLVMCodeGen(
       m_compiler->getDiagnostics(), module_name,
-      m_compiler->getHeaderSearchOpts(), m_compiler->getPreprocessorOpts(),
-      m_compiler->getCodeGenOpts(), *m_llvm_context));
+      &m_compiler->getVirtualFileSystem(), m_compiler->getHeaderSearchOpts(),
+      m_compiler->getPreprocessorOpts(), m_compiler->getCodeGenOpts(),
+      *m_llvm_context));
 }
 
 ClangExpressionParser::~ClangExpressionParser() = default;
@@ -886,9 +873,9 @@ private:
   /// non-deterministic order, so this function should have no side effects.
   /// To make this easier to enforce, this function and all its parameters
   /// should always be const-qualified.
-  /// \return Returns llvm::None if no completion should be provided for the
+  /// \return Returns std::nullopt if no completion should be provided for the
   ///         given CodeCompletionResult.
-  llvm::Optional<CompletionWithPriority>
+  std::optional<CompletionWithPriority>
   getCompletionForResult(const CodeCompletionResult &R) const {
     std::string ToInsert;
     std::string Description;
@@ -933,9 +920,9 @@ private:
     // We also filter some internal lldb identifiers here. The user
     // shouldn't see these.
     if (llvm::StringRef(ToInsert).startswith("$__lldb_"))
-      return llvm::None;
+      return std::nullopt;
     if (ToInsert.empty())
-      return llvm::None;
+      return std::nullopt;
     // Merge the suggested Token into the existing command line to comply
     // with the kind of result the lldb API expects.
     std::string CompletionSuggestion =
@@ -977,7 +964,7 @@ public:
         continue;
 
       CodeCompletionResult &R = Results[I];
-      llvm::Optional<CompletionWithPriority> CompletionAndPriority =
+      std::optional<CompletionWithPriority> CompletionAndPriority =
           getCompletionForResult(R);
       if (!CompletionAndPriority)
         continue;

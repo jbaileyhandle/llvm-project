@@ -14,7 +14,6 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/FileSystem.h"
-#include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Testing/Support/Error.h"
@@ -41,8 +40,8 @@ static std::string LibPath(const std::string Name = "TestPlugin") {
 
 TEST(PluginsTests, LoadPlugin) {
 #if !defined(LLVM_ENABLE_PLUGINS)
-  // Disable the test if plugins are disabled.
-  return;
+  // Skip the test if plugins are disabled.
+  GTEST_SKIP();
 #endif
 
   auto PluginPath = LibPath();
@@ -67,8 +66,8 @@ TEST(PluginsTests, LoadPlugin) {
 // -fpass-plugin=DoublerPlugin.
 TEST(PluginsTests, LoadMultiplePlugins) {
 #if !defined(LLVM_ENABLE_PLUGINS)
-  // Disable the test if plugins are disabled.
-  return;
+  // Skip the test if plugins are disabled.
+  GTEST_SKIP();
 #endif
 
   auto DoublerPluginPath = LibPath("DoublerPlugin");

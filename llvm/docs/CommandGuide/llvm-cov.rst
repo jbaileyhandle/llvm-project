@@ -128,7 +128,7 @@ OPTIONS
  Do not output any ``.gcov`` files. Summary information is still
  displayed.
 
-.. option:: -o=<DIR|FILE>, --object-directory=<DIR>, --object-file=<FILE>
+.. option:: -o <DIR|FILE>, --object-directory=<DIR>, --object-file=<FILE>
 
  Find objects in DIR or based on FILE's path. If you specify a particular
  object file, the coverage data files are expected to have the same base name
@@ -150,7 +150,7 @@ OPTIONS
  Only dump files with relative paths or absolute paths with the prefix specified
  by ``-s``.
 
-.. option:: -s=<string>
+.. option:: -s <string>
 
  Source prefix to elide.
 
@@ -271,13 +271,6 @@ OPTIONS
  the file should start with `allowlist_fun:`, immediately followed by the name
  of the function to accept. This name can be a wildcard expression.
 
-.. option:: -name-whitelist=<FILE>
-
- Show code coverage only for functions listed in the given file. Each line in
- the file should start with `whitelist_fun:`, immediately followed by the name
- of the function to accept. This name can be a wildcard expression. This option
- will be deprecated for `-name-allowlist=<FILE>` in future releases.
-
 .. option:: -name-regex=<PATTERN>
 
  Show code coverage only for functions that match the given regular expression.
@@ -356,6 +349,17 @@ OPTIONS
  coverage >= high, red when coverage < low, and yellow otherwise. Both high and
  low should be between 0-100 and high > low.
 
+.. option:: -debuginfod
+
+Use debuginfod to look up coverage mapping for binary IDs present in the profile
+but not in any object given on the command line. Defaults to true if debuginfod
+is compiled in and configured via the DEBUGINFOD_URLS environment variable.
+
+.. option:: -debug-file-directory=<dir>
+
+Provides local directories to search for objects corresponding to binary IDs in
+the profile (as with debuginfod). Defaults to system build ID directories.
+
 .. program:: llvm-cov report
 
 .. _llvm-cov-report:
@@ -424,6 +428,18 @@ OPTIONS
  Directory used as a base for relative coverage mapping paths. Only applicable
  when binaries have been compiled with one of `-fcoverage-prefix-map`
  `-fcoverage-compilation-dir`, or `-ffile-compilation-dir`.
+
+.. option:: -debuginfod
+
+Attempt to look up coverage mapping from objects using debuginfod. This is
+attempted by default for binary IDs present in the profile but not provided on
+the command line, so long as debuginfod is compiled in and configured via
+DEBUGINFOD_URLS.
+
+.. option:: -debug-file-directory=<dir>
+
+Provides a directory to search for objects corresponding to binary IDs in the
+profile.
 
 .. program:: llvm-cov export
 
@@ -499,3 +515,15 @@ OPTIONS
  Directory used as a base for relative coverage mapping paths. Only applicable
  when binaries have been compiled with one of `-fcoverage-prefix-map`
  `-fcoverage-compilation-dir`, or `-ffile-compilation-dir`.
+
+.. option:: -debuginfod
+
+Attempt to look up coverage mapping from objects using debuginfod. This is
+attempted by default for binary IDs present in the profile but not provided on
+the command line, so long as debuginfod is compiled in and configured via
+DEBUGINFOD_URLS.
+
+.. option:: -debug-file-directory=<dir>
+
+Provides a directory to search for objects corresponding to binary IDs in the
+profile.

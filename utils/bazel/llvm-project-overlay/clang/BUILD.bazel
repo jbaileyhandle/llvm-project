@@ -2,14 +2,24 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
 load("//llvm:tblgen.bzl", "gentbl")
 load("//llvm:binary_alias.bzl", "binary_alias")
 load("//llvm:cc_plugin_library.bzl", "cc_plugin_library")
+load(
+    "//:vars.bzl",
+    "LLVM_VERSION",
+    "LLVM_VERSION_MAJOR",
+    "LLVM_VERSION_MINOR",
+    "LLVM_VERSION_PATCH",
+)
 
 package(
     default_visibility = ["//visibility:public"],
-    licenses = ["notice"],
+    features = ["layering_check"],
 )
+
+licenses(["notice"])
 
 exports_files([
     "tools/clang-format/clang-format.el",
@@ -31,6 +41,7 @@ cc_binary(
     ],
     stamp = 0,
     deps = [
+        ":support",
         "//llvm:Support",
         "//llvm:TableGen",
         "//llvm:config",
@@ -233,6 +244,19 @@ gentbl(
 )
 
 gentbl(
+    name = "basic_riscv_vector_builtin_sema_gen",
+    tbl_outs = [(
+        "-gen-riscv-vector-builtin-sema",
+        "include/clang/Basic/riscv_vector_builtin_sema.inc",
+    )],
+    tblgen = ":clang-tblgen",
+    td_file = "include/clang/Basic/riscv_vector.td",
+    td_srcs = [
+        "include/clang/Basic/riscv_vector.td",
+    ],
+)
+
+gentbl(
     name = "basic_arm_cde_gen",
     tbl_outs = [(
         "-gen-arm-cde-builtin-def",
@@ -343,11 +367,17 @@ genrule(
     name = "basic_version_gen",
     outs = ["include/clang/Basic/Version.inc"],
     cmd = (
-        "echo '#define CLANG_VERSION 14.0.0' >> $@\n" +
-        "echo '#define CLANG_VERSION_MAJOR 14' >> $@\n" +
-        "echo '#define CLANG_VERSION_MINOR 0' >> $@\n" +
-        "echo '#define CLANG_VERSION_PATCHLEVEL 0' >> $@\n" +
-        "echo '#define CLANG_VERSION_STRING \"14.0.0\"' >> $@\n"
+        "echo '#define CLANG_VERSION {vers}' >> $@\n" +
+        "echo '#define CLANG_VERSION_MAJOR {major}' >> $@\n" +
+        "echo '#define CLANG_VERSION_MAJOR_STRING \"{major}\"' >> $@\n" +
+        "echo '#define CLANG_VERSION_MINOR {minor}' >> $@\n" +
+        "echo '#define CLANG_VERSION_PATCHLEVEL {patch}' >> $@\n" +
+        "echo '#define CLANG_VERSION_STRING \"{vers}\"' >> $@\n"
+    ).format(
+        major = LLVM_VERSION_MAJOR,
+        minor = LLVM_VERSION_MINOR,
+        patch = LLVM_VERSION_PATCH,
+        vers = LLVM_VERSION,
     ),
 )
 
@@ -372,7 +402,7 @@ genrule(
     # are passed through bazel, it's easier to drop generated files next to
     # the other includes.
     outs = ["include/VCSVersion.inc"],
-    cmd = "echo '#define CLANG_REVISION \"git\"' > $@",
+    cmd = "echo '#undef CLANG_REVISION' > $@",
 )
 
 # A hacky library to expose some internal headers of the `basic` library to its
@@ -458,6 +488,7 @@ cc_library(
         "//llvm:MC",
         "//llvm:Support",
         "//llvm:Target",
+        "//llvm:TargetParser",
         "//llvm:config",
     ],
 )
@@ -476,6 +507,7 @@ cc_library(
         ":basic",
         ":config",
         "//llvm:Support",
+        "//llvm:TargetParser",
     ],
 )
 
@@ -750,6 +782,7 @@ cc_library(
         "//llvm:Core",
         "//llvm:FrontendOpenMP",
         "//llvm:Support",
+        "//llvm:TargetParser",
     ],
 )
 
@@ -780,6 +813,8 @@ cc_library(
 cc_library(
     name = "analysis",
     srcs = glob([
+        "lib/Analysis/FlowSensitive/Models/*.cpp",
+        "lib/Analysis/FlowSensitive/*.cpp",
         "lib/Analysis/*.cpp",
         "lib/Analysis/*.h",
     ]),
@@ -862,18 +897,22 @@ cc_library(
         ":basic_arm_cde_sema_gen",
         ":basic_arm_sve_builtins_gen",
         ":basic_arm_sve_sema_rangechecks_gen",
+        ":basic_riscv_vector_builtin_sema_gen",
         ":edit",
         ":lex",
         ":libsema_openclbuiltins_inc_gen",
         ":sema_attr_gen",
+        ":support",
         ":type_nodes_gen",
         "//llvm:AllTargetsAsmParsers",
         "//llvm:AllTargetsCodeGens",
         "//llvm:Core",
+        "//llvm:FrontendHLSL",
         "//llvm:FrontendOpenMP",
         "//llvm:MC",
         "//llvm:MCParser",
         "//llvm:Support",
+        "//llvm:TargetParser",
     ],
 )
 
@@ -978,6 +1017,7 @@ cc_library(
 
 cc_library(
     name = "testing",
+    testonly = 1,
     srcs = glob([
         "lib/Testing/*.cpp",
     ]),
@@ -985,7 +1025,9 @@ cc_library(
     includes = ["include"],
     deps = [
         ":basic",
+        ":frontend",
         "//llvm:Support",
+        "//third-party/unittest:gtest",
     ],
 )
 
@@ -1031,6 +1073,7 @@ cc_library(
         ":tooling_core",
         "//llvm:Option",
         "//llvm:Support",
+        "//llvm:TargetParser",
     ],
 )
 
@@ -1038,12 +1081,13 @@ cc_library(
     name = "tooling_inclusions",
     srcs = glob([
         "lib/Tooling/Inclusions/**/*.cpp",
+        "lib/Tooling/Inclusions/**/*.inc",
     ]),
     hdrs = glob([
         "include/clang/Tooling/Inclusions/**/*.h",
-        "include/clang/Tooling/Inclusions/**/*.inc",
     ]),
     deps = [
+        ":ast",
         ":basic",
         ":lex",
         ":rewrite",
@@ -1112,11 +1156,13 @@ cc_library(
     deps = [
         ":basic",
         ":codegen",
+        ":driver",
         ":frontend",
         ":lex",
         ":serialization",
         ":tooling",
         "//llvm:Support",
+        "//llvm:TargetParser",
     ],
 )
 
@@ -1152,12 +1198,14 @@ cc_library(
     srcs = glob(["lib/CrossTU/*.cpp"]),
     hdrs = glob(["include/clang/CrossTU/*.h"]),
     deps = [
+        ":analysis",
         ":ast",
         ":basic",
         ":frontend",
         ":index",
         "//llvm:Option",
         "//llvm:Support",
+        "//llvm:TargetParser",
     ],
 )
 
@@ -1172,6 +1220,9 @@ cc_library(
     hdrs = [
         "lib/Format/FormatTokenLexer.h",
         "lib/Format/Macros.h",
+        "lib/Format/UnwrappedLineParser.h",
+        "lib/Format/FormatTokenSource.h",
+        "lib/Format/QualifierAlignmentFixer.h",
     ] + glob([
         "include/clang/Format/*.h",
     ]),
@@ -1339,11 +1390,14 @@ cc_library(
         ":parse",
         ":static_analyzer_checkers_gen",
         "//llvm:BinaryFormat",
+        "//llvm:Instrumentation",
         "//llvm:MC",
+        "//llvm:Object",
         "//llvm:Option",
         "//llvm:ProfileData",
         "//llvm:Support",
         "//llvm:Target",
+        "//llvm:TargetParser",
         "//llvm:WindowsDriver",
         "//llvm:config",
     ],
@@ -1448,14 +1502,29 @@ gentbl(
 # We generate the set of builtin headers under a special subdirectory in the
 # 'bin' section of the bazel output so that they can be used as data
 # dependencies. It requires listing explicitly all the generated inputs here.
-builtin_headers = glob(["lib/Headers/**/*.h"]) + [
+builtin_headers = glob(
+    ["lib/Headers/**/*.h"],
+    exclude = [
+        # FIXME: They are not handled in CMake side.
+        "lib/Headers/openmp_wrappers/stdlib.h",
+        "lib/Headers/openmp_wrappers/time.h",
+        "lib/Headers/ppc_wrappers/nmmintrin.h",
+    ],
+) + [
     "lib/Headers/arm_cde.h",
     "lib/Headers/arm_fp16.h",
     "lib/Headers/arm_mve.h",
     "lib/Headers/arm_neon.h",
     "lib/Headers/arm_sve.h",
     "lib/Headers/arm_bf16.h",
+    "lib/Headers/module.modulemap",
     "lib/Headers/riscv_vector.h",
+    "lib/Headers/cuda_wrappers/algorithm",
+    "lib/Headers/cuda_wrappers/complex",
+    "lib/Headers/cuda_wrappers/new",
+    "lib/Headers/openmp_wrappers/cmath",
+    "lib/Headers/openmp_wrappers/complex",
+    "lib/Headers/openmp_wrappers/new",
 ]
 
 genrule(
@@ -1508,8 +1577,10 @@ cc_library(
         "//llvm:MC",
         "//llvm:Option",
         "//llvm:ProfileData",
+        "//llvm:Remarks",
         "//llvm:Support",
         "//llvm:Target",
+        "//llvm:TargetParser",
         "//llvm:config",
     ],
 )
@@ -1565,6 +1636,7 @@ cc_library(
         "//llvm:OrcJIT",
         "//llvm:Support",
         "//llvm:Target",
+        "//llvm:TargetParser",
     ],
 )
 
@@ -1591,6 +1663,7 @@ cc_library(
         ":type_nodes_gen",
         "//llvm:AllTargetsAsmParsers",
         "//llvm:Analysis",
+        "//llvm:BinaryFormat",
         "//llvm:BitReader",
         "//llvm:BitWriter",
         "//llvm:BitstreamReader",
@@ -1600,8 +1673,10 @@ cc_library(
         "//llvm:Coverage",
         "//llvm:DebugInfoDWARF",
         "//llvm:Demangle",
+        "//llvm:FrontendHLSL",
         "//llvm:FrontendOpenMP",
         "//llvm:IPO",
+        "//llvm:IRPrinter",
         "//llvm:IRReader",
         "//llvm:InstCombine",
         "//llvm:Instrumentation",
@@ -1615,6 +1690,7 @@ cc_library(
         "//llvm:Scalar",
         "//llvm:Support",
         "//llvm:Target",
+        "//llvm:TargetParser",
         "//llvm:TransformUtils",
     ],
 )
@@ -1669,6 +1745,20 @@ gentbl(
 )
 
 cc_library(
+    name = "support",
+    srcs = glob([
+        "lib/Support/*.cpp",
+    ]),
+    hdrs = glob([
+        "include/clang/Support/*.h",
+    ]),
+    includes = ["include"],
+    deps = [
+        "//llvm:Support",
+    ],
+)
+
+cc_library(
     name = "serialization",
     srcs = [
         "include/clang/Serialization/AttrPCHRead.inc",
@@ -1697,6 +1787,7 @@ cc_library(
         "//llvm:BitstreamWriter",
         "//llvm:FrontendOpenMP",
         "//llvm:Support",
+        "//llvm:TargetParser",
     ],
 )
 
@@ -1745,6 +1836,7 @@ cc_library(
         ":static_analyzer_checkers",
         ":static_analyzer_core",
         "//llvm:Support",
+        "//llvm:TargetParser",
     ],
 )
 
@@ -1763,6 +1855,7 @@ cc_library(
         ":codegen",
         ":config",
         ":driver",
+        ":extract_api",
         ":frontend",
         ":index",
         ":lex",
@@ -1795,6 +1888,7 @@ cc_plugin_library(
         ":codegen",
         ":config",
         ":driver",
+        ":extract_api",
         ":frontend",
         ":index",
         ":lex",
@@ -1902,7 +1996,17 @@ cc_binary(
         ":parse",
         "//llvm:Core",
         "//llvm:Support",
+        "//llvm:TargetParser",
     ],
+)
+
+expand_template(
+    name = "clang_main",
+    out = "clang-driver.cpp",
+    substitutions = {
+        "@TOOL_NAME@": "clang",
+    },
+    template = "//llvm:cmake/modules/llvm-driver-template.cpp.in",
 )
 
 cc_library(
@@ -1910,7 +2014,7 @@ cc_library(
     srcs = glob([
         "tools/driver/*.cpp",
         "tools/driver/*.h",
-    ]),
+    ]) + ["clang-driver.cpp"],
     copts = [
         # Disable stack frame size checks in the driver because
         # clang::ensureStackAddressSpace allocates a large array on the stack.
@@ -1943,6 +2047,7 @@ cc_library(
         "//llvm:Option",
         "//llvm:Support",
         "//llvm:Target",
+        "//llvm:TargetParser",
         "//llvm:config",
     ],
 )
@@ -2046,24 +2151,13 @@ cc_binary(
     stamp = 0,
     deps = [
         ":basic",
+        ":driver",
         ":tooling",
         "//llvm:BitWriter",
         "//llvm:Core",
         "//llvm:Object",
         "//llvm:Support",
-    ],
-)
-
-cc_binary(
-    name = "clang-offload-wrapper",
-    srcs = glob(["tools/clang-offload-wrapper/*.cpp"]),
-    stamp = 0,
-    deps = [
-        ":basic",
-        "//llvm:BitWriter",
-        "//llvm:Support",
-        "//llvm:TransformUtils",
-        "//llvm:ir_headers",
+        "//llvm:TargetParser",
     ],
 )
 
@@ -2137,10 +2231,12 @@ cc_binary(
     srcs = glob(["tools/clang-scan-deps/*.cpp"]),
     stamp = 0,
     deps = [
+        ":driver",
         ":frontend",
         ":tooling",
         ":tooling_dependency_scanning",
         "//llvm:Support",
+        "//llvm:TargetParser",
     ],
 )
 
@@ -2157,7 +2253,9 @@ cc_library(
         ":basic",
         ":frontend",
         ":index",
+        ":lex",
         "//llvm:Option",
         "//llvm:Support",
+        "//llvm:TargetParser",
     ],
 )

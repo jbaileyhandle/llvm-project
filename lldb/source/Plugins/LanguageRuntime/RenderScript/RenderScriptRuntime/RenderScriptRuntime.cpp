@@ -577,7 +577,7 @@ struct RenderScriptRuntime::Element {
       array_size;        // Number of items in array, only needed for structs
   ConstString type_name; // Name of type, only needed for structs
 
-  static ConstString 
+  static ConstString
   GetFallbackStructName(); // Print this as the type name of a struct Element
                            // If we can't resolve the actual struct name
 
@@ -879,7 +879,7 @@ RSReduceBreakpointResolver::SearchCallback(lldb_private::SearchFilter &filter,
           LLDB_LOGF(log, "%s: %s reduction breakpoint on %s in %s",
                     __FUNCTION__, new_bp ? "new" : "existing",
                     kernel_name.GetCString(),
-                    address.GetModule()->GetFileSpec().GetCString());
+                    address.GetModule()->GetFileSpec().GetPath().c_str());
         }
       }
     }
@@ -2346,7 +2346,7 @@ void RenderScriptRuntime::SetElementSize(Element &elem) {
 // Given an allocation, this function copies the allocation contents from
 // device into a buffer on the heap. Returning a shared pointer to the buffer
 // containing the data.
-std::shared_ptr<uint8_t>
+std::shared_ptr<uint8_t []>
 RenderScriptRuntime::GetAllocationData(AllocationDetails *alloc,
                                        StackFrame *frame_ptr) {
   Log *log = GetLog(LLDBLog::Language);
@@ -2368,7 +2368,7 @@ RenderScriptRuntime::GetAllocationData(AllocationDetails *alloc,
 
   // Allocate a buffer to copy data into
   const uint32_t size = *alloc->size.get();
-  std::shared_ptr<uint8_t> buffer(new uint8_t[size]);
+  std::shared_ptr<uint8_t []> buffer(new uint8_t[size]);
   if (!buffer) {
     LLDB_LOGF(log, "%s - couldn't allocate a %" PRIu32 " byte buffer",
               __FUNCTION__, size);
@@ -2442,7 +2442,7 @@ bool RenderScriptRuntime::LoadAllocation(Stream &strm, const uint32_t alloc_id,
   auto data_sp = FileSystem::Instance().CreateDataBuffer(file.GetPath());
 
   // Cast start of buffer to FileHeader and use pointer to read metadata
-  void *file_buf = data_sp->GetBytes();
+  const void *file_buf = data_sp->GetBytes();
   if (file_buf == nullptr ||
       data_sp->GetByteSize() < (sizeof(AllocationDetails::FileHeader) +
                                 sizeof(AllocationDetails::ElementHeader))) {
@@ -2451,7 +2451,7 @@ bool RenderScriptRuntime::LoadAllocation(Stream &strm, const uint32_t alloc_id,
     return false;
   }
   const AllocationDetails::FileHeader *file_header =
-      static_cast<AllocationDetails::FileHeader *>(file_buf);
+      static_cast<const AllocationDetails::FileHeader *>(file_buf);
 
   // Check file starts with ascii characters "RSAD"
   if (memcmp(file_header->ident, "RSAD", 4)) {
@@ -2463,8 +2463,9 @@ bool RenderScriptRuntime::LoadAllocation(Stream &strm, const uint32_t alloc_id,
 
   // Look at the type of the root element in the header
   AllocationDetails::ElementHeader root_el_hdr;
-  memcpy(&root_el_hdr, static_cast<uint8_t *>(file_buf) +
-                           sizeof(AllocationDetails::FileHeader),
+  memcpy(&root_el_hdr,
+         static_cast<const uint8_t *>(file_buf) +
+             sizeof(AllocationDetails::FileHeader),
          sizeof(AllocationDetails::ElementHeader));
 
   LLDB_LOGF(log, "%s - header type %" PRIu32 ", element size %" PRIu32,
@@ -2515,7 +2516,7 @@ bool RenderScriptRuntime::LoadAllocation(Stream &strm, const uint32_t alloc_id,
   }
 
   // Advance buffer past header
-  file_buf = static_cast<uint8_t *>(file_buf) + file_header->hdr_size;
+  file_buf = static_cast<const uint8_t *>(file_buf) + file_header->hdr_size;
 
   // Calculate size of allocation data in file
   size_t size = data_sp->GetByteSize() - file_header->hdr_size;
@@ -2556,7 +2557,7 @@ bool RenderScriptRuntime::LoadAllocation(Stream &strm, const uint32_t alloc_id,
 // saved to the file as the ElementHeader struct followed by offsets to the
 // structs of all the element's children.
 size_t RenderScriptRuntime::PopulateElementHeaders(
-    const std::shared_ptr<uint8_t> header_buffer, size_t offset,
+    const std::shared_ptr<uint8_t []> header_buffer, size_t offset,
     const Element &elem) {
   // File struct for an element header with all the relevant details copied
   // from elem. We assume members are valid already.
@@ -2660,7 +2661,7 @@ bool RenderScriptRuntime::SaveAllocation(Stream &strm, const uint32_t alloc_id,
   }
 
   // Read allocation into buffer of heap memory
-  const std::shared_ptr<uint8_t> buffer = GetAllocationData(alloc, frame_ptr);
+  const std::shared_ptr<uint8_t []> buffer = GetAllocationData(alloc, frame_ptr);
   if (!buffer) {
     strm.Printf("Error: Couldn't read allocation data into buffer");
     strm.EOL();
@@ -2694,7 +2695,7 @@ bool RenderScriptRuntime::SaveAllocation(Stream &strm, const uint32_t alloc_id,
   }
 
   // Create the headers describing the element type of the allocation.
-  std::shared_ptr<uint8_t> element_header_buffer(
+  std::shared_ptr<uint8_t []> element_header_buffer(
       new uint8_t[element_header_size]);
   if (element_header_buffer == nullptr) {
     strm.Printf("Internal Error: Couldn't allocate %" PRIu64
@@ -2983,7 +2984,8 @@ bool RSModuleDescriptor::ParseRSInfo() {
     const llvm::StringRef raw_rs_info((const char *)buffer->GetBytes());
     raw_rs_info.split(info_lines, '\n');
     LLDB_LOGF(log, "'.rs.info symbol for '%s':\n%s",
-              m_module->GetFileSpec().GetCString(), raw_rs_info.str().c_str());
+              m_module->GetFileSpec().GetPath().c_str(),
+              raw_rs_info.str().c_str());
   }
 
   enum {
@@ -3212,7 +3214,7 @@ bool RenderScriptRuntime::DumpAllocation(Stream &strm, StackFrame *frame_ptr,
             __FUNCTION__, data_size);
 
   // Allocate a buffer to copy data into
-  std::shared_ptr<uint8_t> buffer = GetAllocationData(alloc, frame_ptr);
+  std::shared_ptr<uint8_t []> buffer = GetAllocationData(alloc, frame_ptr);
   if (!buffer) {
     strm.Printf("Error: Couldn't read allocation data");
     strm.EOL();
@@ -4066,7 +4068,10 @@ public:
             "<reduction_kernel_type,...>]",
             eCommandRequiresProcess | eCommandProcessMustBeLaunched |
                 eCommandProcessMustBePaused),
-        m_options(){};
+        m_options() {
+    CommandArgumentData name_arg{eArgTypeName, eArgRepeatPlain};
+    m_arguments.push_back({name_arg});
+  };
 
   class CommandOptions : public Options {
   public:
@@ -4108,7 +4113,7 @@ public:
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_renderscript_reduction_bp_set_options);
+      return llvm::ArrayRef(g_renderscript_reduction_bp_set_options);
     }
 
     bool ParseReductionTypes(llvm::StringRef option_val,
@@ -4159,7 +4164,7 @@ public:
     int m_kernel_types = RSReduceBreakpointResolver::eKernelTypeAll;
     llvm::StringRef m_reduce_name;
     RSCoordinate m_coord;
-    bool m_have_coord;
+    bool m_have_coord = false;
   };
 
   Options *GetOptions() override { return &m_options; }
@@ -4215,7 +4220,10 @@ public:
             "renderscript kernel breakpoint set <kernel_name> [-c x,y,z]",
             eCommandRequiresProcess | eCommandProcessMustBeLaunched |
                 eCommandProcessMustBePaused),
-        m_options() {}
+        m_options() {
+    CommandArgumentData name_arg{eArgTypeName, eArgRepeatPlain};
+    m_arguments.push_back({name_arg});
+  }
 
   ~CommandObjectRenderScriptRuntimeKernelBreakpointSet() override = default;
 
@@ -4257,11 +4265,11 @@ public:
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_renderscript_kernel_bp_set_options);
+      return llvm::ArrayRef(g_renderscript_kernel_bp_set_options);
     }
 
     RSCoordinate m_coord;
-    bool m_have_coord;
+    bool m_have_coord = false;
   };
 
   bool DoExecute(Args &command, CommandReturnObject &result) override {
@@ -4310,7 +4318,10 @@ public:
             "but does not remove currently set breakpoints.",
             "renderscript kernel breakpoint all <enable/disable>",
             eCommandRequiresProcess | eCommandProcessMustBeLaunched |
-                eCommandProcessMustBePaused) {}
+                eCommandProcessMustBePaused) {
+    CommandArgumentData enable_arg{eArgTypeNone, eArgRepeatPlain};
+    m_arguments.push_back({enable_arg});
+  }
 
   ~CommandObjectRenderScriptRuntimeKernelBreakpointAll() override = default;
 
@@ -4492,7 +4503,10 @@ public:
                             "renderscript allocation dump <ID>",
                             eCommandRequiresProcess |
                                 eCommandProcessMustBeLaunched),
-        m_options() {}
+        m_options() {
+    CommandArgumentData id_arg{eArgTypeUnsignedInteger, eArgRepeatPlain};
+    m_arguments.push_back({id_arg});
+  }
 
   ~CommandObjectRenderScriptRuntimeAllocationDump() override = default;
 
@@ -4531,7 +4545,7 @@ public:
     }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_renderscript_runtime_alloc_dump_options);
+      return llvm::ArrayRef(g_renderscript_runtime_alloc_dump_options);
     }
 
     FileSpec m_outfile;
@@ -4649,7 +4663,7 @@ public:
     void OptionParsingStarting(ExecutionContext *exe_ctx) override { m_id = 0; }
 
     llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_renderscript_runtime_alloc_list_options);
+      return llvm::ArrayRef(g_renderscript_runtime_alloc_list_options);
     }
 
     uint32_t m_id = 0;
@@ -4678,7 +4692,12 @@ public:
             interpreter, "renderscript allocation load",
             "Loads renderscript allocation contents from a file.",
             "renderscript allocation load <ID> <filename>",
-            eCommandRequiresProcess | eCommandProcessMustBeLaunched) {}
+            eCommandRequiresProcess | eCommandProcessMustBeLaunched) {
+    CommandArgumentData id_arg{eArgTypeUnsignedInteger, eArgRepeatPlain};
+    CommandArgumentData name_arg{eArgTypeFilename, eArgRepeatPlain};
+    m_arguments.push_back({id_arg});
+    m_arguments.push_back({name_arg});
+  }
 
   ~CommandObjectRenderScriptRuntimeAllocationLoad() override = default;
 
@@ -4725,7 +4744,12 @@ public:
                             "Write renderscript allocation contents to a file.",
                             "renderscript allocation save <ID> <filename>",
                             eCommandRequiresProcess |
-                                eCommandProcessMustBeLaunched) {}
+                                eCommandProcessMustBeLaunched) {
+    CommandArgumentData id_arg{eArgTypeUnsignedInteger, eArgRepeatPlain};
+    CommandArgumentData name_arg{eArgTypeFilename, eArgRepeatPlain};
+    m_arguments.push_back({id_arg});
+    m_arguments.push_back({name_arg});
+  }
 
   ~CommandObjectRenderScriptRuntimeAllocationSave() override = default;
 

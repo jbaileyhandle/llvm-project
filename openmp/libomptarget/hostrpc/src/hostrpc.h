@@ -38,6 +38,8 @@ SOFTWARE.
 #define EXTERN extern
 #endif
 
+#define NOINLINE __attribute__((noinline))
+
 #include <stdint.h>
 #include <stdio.h>
 
@@ -99,6 +101,7 @@ enum hostcall_service_id {
   HOSTRPC_SERVICE_VARFNDOUBLE,
   HOSTRPC_SERVICE_FPRINTF,
   HOSTRPC_SERVICE_FTNASSIGN,
+  HOSTRPC_SERVICE_SANITIZER
 };
 typedef enum hostcall_service_id hostcall_service_id_t;
 

@@ -262,12 +262,12 @@ bool SSAIfConv::InstrDependenciesAllowIfConv(MachineInstr *I) {
     Register Reg = MO.getReg();
 
     // Remember clobbered regunits.
-    if (MO.isDef() && Register::isPhysicalRegister(Reg))
+    if (MO.isDef() && Reg.isPhysical())
       for (MCRegUnitIterator Units(Reg.asMCReg(), TRI); Units.isValid();
            ++Units)
         ClobberedRegUnits.set(*Units);
 
-    if (!MO.readsReg() || !Register::isVirtualRegister(Reg))
+    if (!MO.readsReg() || !Reg.isVirtual())
       continue;
     MachineInstr *DefMI = MRI->getVRegDef(Reg);
     if (!DefMI || DefMI->getParent() != Head)
@@ -321,9 +321,15 @@ bool SSAIfConv::canPredicateInstrs(MachineBasicBlock *MBB) {
       return false;
     }
 
-    // Check that instruction is predicable and that it is not already
-    // predicated.
-    if (!TII->isPredicable(*I) || TII->isPredicated(*I)) {
+    // Check that instruction is predicable
+    if (!TII->isPredicable(*I)) {
+      LLVM_DEBUG(dbgs() << "Isn't predicable: " << *I);
+      return false;
+    }
+
+    // Check that instruction is not already predicated.
+    if (TII->isPredicated(*I) && !TII->canPredicatePredicatedInstr(*I)) {
+      LLVM_DEBUG(dbgs() << "Is already predicated: " << *I);
       return false;
     }
 
@@ -381,7 +387,7 @@ bool SSAIfConv::findInsertionPoint() {
       if (!MO.isReg())
         continue;
       Register Reg = MO.getReg();
-      if (!Register::isPhysicalRegister(Reg))
+      if (!Reg.isPhysical())
         continue;
       // I clobbers Reg, so it isn't live before I.
       if (MO.isDef())
@@ -576,7 +582,7 @@ static bool hasSameValue(const MachineRegisterInfo &MRI,
 
   // If the instruction could modify memory, or there may be some intervening
   // store between the two, we can't consider them to be equal.
-  if (TDef->mayLoadOrStore() && !TDef->isDereferenceableInvariantLoad(nullptr))
+  if (TDef->mayLoadOrStore() && !TDef->isDereferenceableInvariantLoad())
     return false;
 
   // We also can't guarantee that they are the same if, for example, the
@@ -618,8 +624,7 @@ void SSAIfConv::replacePHIInstrs() {
     if (hasSameValue(*MRI, TII, PI.TReg, PI.FReg)) {
       // We do not need the select instruction if both incoming values are
       // equal, but we do need a COPY.
-      BuildMI(*Head, FirstTerm, HeadDL, TII->get(TargetOpcode::COPY), DstReg)
-          .addReg(PI.TReg);
+      TII->buildCopy(*Head, FirstTerm, HeadDL, DstReg, PI.TReg);
     } else {
       TII->insertSelect(*Head, FirstTerm, HeadDL, DstReg, Cond, PI.TReg,
                         PI.FReg);
@@ -808,7 +813,7 @@ void updateDomTree(MachineDominatorTree *DomTree, const SSAIfConv &IfConv,
   // TBB and FBB should not dominate any blocks.
   // Tail children should be transferred to Head.
   MachineDomTreeNode *HeadNode = DomTree->getNode(IfConv.Head);
-  for (auto B : Removed) {
+  for (auto *B : Removed) {
     MachineDomTreeNode *Node = DomTree->getNode(B);
     assert(Node != HeadNode && "Cannot erase the head node");
     while (Node->getNumChildren()) {
@@ -826,7 +831,7 @@ void updateLoops(MachineLoopInfo *Loops,
     return;
   // If-conversion doesn't change loop structure, and it doesn't mess with back
   // edges, so updating LoopInfo is simply removing the dead blocks.
-  for (auto B : Removed)
+  for (auto *B : Removed)
     Loops->removeBlock(B);
 }
 } // namespace
@@ -868,7 +873,7 @@ bool EarlyIfConverter::shouldConvertIf() {
     return true;
 
   if (!MinInstr)
-    MinInstr = Traces->getEnsemble(MachineTraceMetrics::TS_MinInstrCount);
+    MinInstr = Traces->getEnsemble(MachineTraceStrategy::TS_MinInstrCount);
 
   MachineTraceMetrics::Trace TBBTrace = MinInstr->getTrace(IfConv.getTPred());
   MachineTraceMetrics::Trace FBBTrace = MinInstr->getTrace(IfConv.getFPred());
@@ -1065,7 +1070,7 @@ bool EarlyIfConverter::runOnMachineFunction(MachineFunction &MF) {
   // if-conversion in a single pass. The tryConvertIf() function may erase
   // blocks, but only blocks dominated by the head block. This makes it safe to
   // update the dominator tree while the post-order iterator is still active.
-  for (auto DomNode : post_order(DomTree))
+  for (auto *DomNode : post_order(DomTree))
     if (tryConvertIf(DomNode->getBlock()))
       Changed = true;
 
@@ -1198,7 +1203,7 @@ bool EarlyIfPredicator::runOnMachineFunction(MachineFunction &MF) {
   // if-conversion in a single pass. The tryConvertIf() function may erase
   // blocks, but only blocks dominated by the head block. This makes it safe to
   // update the dominator tree while the post-order iterator is still active.
-  for (auto DomNode : post_order(DomTree))
+  for (auto *DomNode : post_order(DomTree))
     if (tryConvertIf(DomNode->getBlock()))
       Changed = true;
 

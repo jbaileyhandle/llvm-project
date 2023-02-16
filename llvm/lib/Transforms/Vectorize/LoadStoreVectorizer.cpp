@@ -186,8 +186,11 @@ private:
                       SmallPtrSet<Instruction *, 16> *InstructionsProcessed);
 
   /// Check if this load/store access is misaligned accesses.
+  /// Returns a \p RelativeSpeed of an operation if allowed suitable to
+  /// compare to another result for the same \p AddressSpace and potentially
+  /// different \p Alignment and \p SzInBytes.
   bool accessIsMisaligned(unsigned SzInBytes, unsigned AddressSpace,
-                          Align Alignment);
+                          Align Alignment, unsigned &RelativeSpeed);
 };
 
 class LoadStoreVectorizerLegacyPass : public FunctionPass {
@@ -496,7 +499,7 @@ bool Vectorizer::lookThroughComplexAddresses(Value *PtrA, Value *PtrB,
   if (PtrDelta.urem(Stride) != 0)
     return false;
   unsigned IdxBitWidth = OpA->getType()->getScalarSizeInBits();
-  APInt IdxDiff = PtrDelta.udiv(Stride).zextOrSelf(IdxBitWidth);
+  APInt IdxDiff = PtrDelta.udiv(Stride).zext(IdxBitWidth);
 
   // Only look through a ZExt/SExt.
   if (!isa<SExtInst>(OpA) && !isa<ZExtInst>(OpA))
@@ -1078,8 +1081,14 @@ bool Vectorizer::vectorizeStoreChain(
   InstructionsProcessed->insert(Chain.begin(), Chain.end());
 
   // If the store is going to be misaligned, don't vectorize it.
-  if (accessIsMisaligned(SzInBytes, AS, Alignment)) {
+  unsigned RelativeSpeed;
+  if (accessIsMisaligned(SzInBytes, AS, Alignment, RelativeSpeed)) {
     if (S0->getPointerAddressSpace() != DL.getAllocaAddrSpace()) {
+      unsigned SpeedBefore;
+      accessIsMisaligned(EltSzInBytes, AS, Alignment, SpeedBefore);
+      if (SpeedBefore > RelativeSpeed)
+        return false;
+
       auto Chains = splitOddVectorElts(Chain, Sz);
       bool Vectorized = false;
       Vectorized |= vectorizeStoreChain(Chains.first, InstructionsProcessed);
@@ -1231,8 +1240,14 @@ bool Vectorizer::vectorizeLoadChain(
   InstructionsProcessed->insert(Chain.begin(), Chain.end());
 
   // If the load is going to be misaligned, don't vectorize it.
-  if (accessIsMisaligned(SzInBytes, AS, Alignment)) {
+  unsigned RelativeSpeed;
+  if (accessIsMisaligned(SzInBytes, AS, Alignment, RelativeSpeed)) {
     if (L0->getPointerAddressSpace() != DL.getAllocaAddrSpace()) {
+      unsigned SpeedBefore;
+      accessIsMisaligned(EltSzInBytes, AS, Alignment, SpeedBefore);
+      if (SpeedBefore > RelativeSpeed)
+        return false;
+
       auto Chains = splitOddVectorElts(Chain, Sz);
       bool Vectorized = false;
       Vectorized |= vectorizeLoadChain(Chains.first, InstructionsProcessed);
@@ -1297,10 +1312,16 @@ bool Vectorizer::vectorizeLoadChain(
     CV->replaceAllUsesWith(V);
   }
 
-  // Bitcast might not be an Instruction, if the value being loaded is a
-  // constant. In that case, no need to reorder anything.
-  if (Instruction *BitcastInst = dyn_cast<Instruction>(Bitcast))
-    reorder(BitcastInst);
+  // Since we might have opaque pointers we might end up using the pointer
+  // operand of the first load (wrt. memory loaded) for the vector load. Since
+  // this first load might not be the first in the block we potentially need to
+  // reorder the pointer operand (and its operands). If we have a bitcast though
+  // it might be before the load and should be the reorder start instruction.
+  // "Might" because for opaque pointers the "bitcast" is just the first loads
+  // pointer operand, as oppposed to something we inserted at the right position
+  // ourselves.
+  Instruction *BCInst = dyn_cast<Instruction>(Bitcast);
+  reorder((BCInst && BCInst != L0->getPointerOperand()) ? BCInst : LI);
 
   eraseInstructions(Chain);
 
@@ -1310,15 +1331,15 @@ bool Vectorizer::vectorizeLoadChain(
 }
 
 bool Vectorizer::accessIsMisaligned(unsigned SzInBytes, unsigned AddressSpace,
-                                    Align Alignment) {
+                                    Align Alignment, unsigned &RelativeSpeed) {
+  RelativeSpeed = 0;
   if (Alignment.value() % SzInBytes == 0)
     return false;
 
-  bool Fast = false;
   bool Allows = TTI.allowsMisalignedMemoryAccesses(F.getParent()->getContext(),
                                                    SzInBytes * 8, AddressSpace,
-                                                   Alignment, &Fast);
+                                                   Alignment, &RelativeSpeed);
   LLVM_DEBUG(dbgs() << "LSV: Target said misaligned is allowed? " << Allows
-                    << " and fast? " << Fast << "\n";);
-  return !Allows || !Fast;
+                    << " with relative speed = " << RelativeSpeed << '\n';);
+  return !Allows || !RelativeSpeed;
 }

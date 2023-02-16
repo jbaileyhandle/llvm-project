@@ -1,5 +1,7 @@
 // RUN: mlir-opt -split-input-file -verify-diagnostics %s | mlir-opt | FileCheck %s
 // RUN: mlir-opt -split-input-file -verify-diagnostics -mlir-print-op-generic %s | FileCheck %s --check-prefix=GENERIC
+// RUN: mlir-opt -split-input-file -verify-diagnostics %s -mlir-print-debuginfo | mlir-opt -mlir-print-debuginfo | FileCheck %s --check-prefix=LOCINFO
+// RUN: mlir-translate -mlir-to-llvmir -split-input-file -verify-diagnostics %s | FileCheck %s --check-prefix=CHECK-LLVM
 
 module {
   // GENERIC: "llvm.func"
@@ -7,7 +9,7 @@ module {
   // GENERIC-SAME: sym_name = "foo"
   // GENERIC-SAME: () -> ()
   // CHECK: llvm.func @foo()
-  "llvm.func"() ({
+  "llvm.func" () ({
   }) {sym_name = "foo", function_type = !llvm.func<void ()>} : () -> ()
 
   // GENERIC: "llvm.func"
@@ -87,13 +89,14 @@ module {
     llvm.return
   }
 
-  // CHECK: llvm.func @byvalattr(%{{.*}}: !llvm.ptr<i32> {llvm.byval})
-  llvm.func @byvalattr(%arg0: !llvm.ptr<i32> {llvm.byval}) {
+  // CHECK: llvm.func @byvalattr(%{{.*}}: !llvm.ptr<i32> {llvm.byval = i32})
+  llvm.func @byvalattr(%arg0: !llvm.ptr<i32> {llvm.byval = i32}) {
     llvm.return
   }
 
-  // CHECK: llvm.func @sretattr(%{{.*}}: !llvm.ptr<i32> {llvm.sret})
-  llvm.func @sretattr(%arg0: !llvm.ptr<i32> {llvm.sret}) {
+  // CHECK: llvm.func @sretattr(%{{.*}}: !llvm.ptr<i32> {llvm.sret = i32})
+  // LOCINFO: llvm.func @sretattr(%{{.*}}: !llvm.ptr<i32> {llvm.sret = i32} loc("some_source_loc"))
+  llvm.func @sretattr(%arg0: !llvm.ptr<i32> {llvm.sret = i32} loc("some_source_loc")) {
     llvm.return
   }
 
@@ -101,6 +104,24 @@ module {
   llvm.func @nestattr(%arg0: !llvm.ptr<i32> {llvm.nest}) {
     llvm.return
   }
+
+  // CHECK: llvm.func @llvm_noalias_decl(!llvm.ptr<f32> {llvm.noalias})
+  llvm.func @llvm_noalias_decl(!llvm.ptr<f32> {llvm.noalias})
+  // CHECK: llvm.func @byrefattr_decl(!llvm.ptr<i32> {llvm.byref = i32})
+  llvm.func @byrefattr_decl(!llvm.ptr<i32> {llvm.byref = i32})
+  // CHECK: llvm.func @byvalattr_decl(!llvm.ptr<i32> {llvm.byval = i32})
+  llvm.func @byvalattr_decl(!llvm.ptr<i32> {llvm.byval = i32})
+  // CHECK: llvm.func @sretattr_decl(!llvm.ptr<i32> {llvm.sret = i32})
+  llvm.func @sretattr_decl(!llvm.ptr<i32> {llvm.sret = i32})
+  // CHECK: llvm.func @nestattr_decl(!llvm.ptr<i32> {llvm.nest})
+  llvm.func @nestattr_decl(!llvm.ptr<i32> {llvm.nest})
+  // CHECK: llvm.func @noundefattr_decl(i32 {llvm.noundef})
+  llvm.func @noundefattr_decl(i32 {llvm.noundef})
+  // CHECK: llvm.func @llvm_align_decl(!llvm.ptr<f32> {llvm.align = 4 : i64})
+  llvm.func @llvm_align_decl(!llvm.ptr<f32> {llvm.align = 4})
+  // CHECK: llvm.func @inallocaattr_decl(!llvm.ptr<i32> {llvm.inalloca = i32})
+  llvm.func @inallocaattr_decl(!llvm.ptr<i32> {llvm.inalloca = i32})
+
 
   // CHECK: llvm.func @variadic(...)
   llvm.func @variadic(...)
@@ -119,6 +140,11 @@ module {
 
   // CHECK: llvm.func weak
   llvm.func weak @weak_linkage() {
+    llvm.return
+  }
+
+  // CHECK-LLVM: define ptx_kernel void @calling_conv
+  llvm.func ptx_kernelcc @calling_conv() {
     llvm.return
   }
 
@@ -141,6 +167,32 @@ module {
   llvm.func @res_struct_attr(%arg0 : !llvm.struct<(i32)>)
       -> (!llvm.struct<(i32)> {llvm.struct_attrs = [{llvm.noalias}]}) {
     llvm.return %arg0 : !llvm.struct<(i32)>
+  }
+
+  // CHECK: llvm.func @cconv1
+  llvm.func ccc @cconv1() {
+    llvm.return
+  }
+
+  // CHECK: llvm.func weak @cconv2
+  llvm.func weak ccc @cconv2() {
+    llvm.return
+  }
+
+  // CHECK: llvm.func weak fastcc @cconv3
+  llvm.func weak fastcc @cconv3() {
+    llvm.return
+  }
+
+  // CHECK-LABEL: llvm.func @variadic_def
+  llvm.func @variadic_def(...) {
+    llvm.return
+  }
+
+  // CHECK-LABEL: llvm.func @memory_attr
+  // CHECK-SAME: attributes {memory = #llvm.memory_effects<other = none, argMem = read, inaccessibleMem = readwrite>} {
+  llvm.func @memory_attr() attributes {memory = #llvm.memory_effects<other = none, argMem = read, inaccessibleMem = readwrite>} {
+    llvm.return
   }
 }
 
@@ -216,22 +268,6 @@ module {
 // -----
 
 module {
-  // expected-error@+1 {{only external functions can be variadic}}
-  llvm.func @variadic_def(...) {
-    llvm.return
-  }
-}
-
-// -----
-
-module {
-  // expected-error@+1 {{cannot attach result attributes to functions with a void return}}
-  llvm.func @variadic_def() -> (!llvm.void {llvm.noalias})
-}
-
-// -----
-
-module {
   // expected-error@+1 {{variadic arguments must be in the end of the argument list}}
   llvm.func @variadic_inside(%arg0: i32, ..., %arg1: i32)
 }
@@ -248,4 +284,20 @@ module {
 module {
   // expected-error@+1 {{functions cannot have 'common' linkage}}
   llvm.func common @common_linkage_func()
+}
+
+// -----
+
+module {
+  // expected-error@+1 {{custom op 'llvm.func' expected valid '@'-identifier for symbol name}}
+  llvm.func cc_12 @unknown_calling_convention()
+}
+
+// -----
+
+module {
+  "llvm.func"() ({
+  // expected-error @below {{invalid Calling Conventions specification: cc_12}}
+  // expected-error @below {{failed to parse CConvAttr parameter 'CallingConv' which is to be a `CConv`}}
+  }) {sym_name = "generic_unknown_calling_convention", CConv = #llvm.cconv<cc_12>, function_type = !llvm.func<i64 (i64, i64)>} : () -> ()
 }

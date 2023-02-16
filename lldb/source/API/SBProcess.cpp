@@ -802,8 +802,13 @@ size_t SBProcess::ReadMemory(addr_t addr, void *dst, size_t dst_len,
                              SBError &sb_error) {
   LLDB_INSTRUMENT_VA(this, addr, dst, dst_len, sb_error);
 
-  size_t bytes_read = 0;
+  if (!dst) {
+    sb_error.SetErrorStringWithFormat(
+        "no buffer provided to read %zu bytes into", dst_len);
+    return 0;
+  }
 
+  size_t bytes_read = 0;
   ProcessSP process_sp(GetSP());
 
 
@@ -967,7 +972,12 @@ SBProcess::GetNumSupportedHardwareWatchpoints(lldb::SBError &sb_error) const {
   if (process_sp) {
     std::lock_guard<std::recursive_mutex> guard(
         process_sp->GetTarget().GetAPIMutex());
-    sb_error.SetError(process_sp->GetWatchpointSupportInfo(num));
+    std::optional<uint32_t> actual_num = process_sp->GetWatchpointSlotCount();
+    if (actual_num) {
+      num = *actual_num;
+    } else {
+      sb_error.SetErrorString("Unable to determine number of watchpoints");
+    }
   } else {
     sb_error.SetErrorString("SBProcess is invalid");
   }
@@ -1138,6 +1148,13 @@ bool SBProcess::IsInstrumentationRuntimePresent(
 
 lldb::SBError SBProcess::SaveCore(const char *file_name) {
   LLDB_INSTRUMENT_VA(this, file_name);
+  return SaveCore(file_name, "", SaveCoreStyle::eSaveCoreFull);
+}
+
+lldb::SBError SBProcess::SaveCore(const char *file_name,
+                                  const char *flavor,
+                                  SaveCoreStyle core_style) {
+  LLDB_INSTRUMENT_VA(this, file_name, flavor, core_style);
 
   lldb::SBError error;
   ProcessSP process_sp(GetSP());
@@ -1155,8 +1172,9 @@ lldb::SBError SBProcess::SaveCore(const char *file_name) {
   }
 
   FileSpec core_file(file_name);
-  SaveCoreStyle core_style = SaveCoreStyle::eSaveCoreFull;
-  error.ref() = PluginManager::SaveCore(process_sp, core_file, core_style, "");
+  error.ref() = PluginManager::SaveCore(process_sp, core_file, core_style,
+                                        flavor);
+
   return error;
 }
 
@@ -1253,4 +1271,10 @@ lldb::SBError SBProcess::DeallocateMemory(lldb::addr_t ptr) {
     sb_error.SetErrorString("SBProcess is invalid");
   }
   return sb_error;
+}
+
+ScriptedObject SBProcess::GetScriptedImplementation() {
+  LLDB_INSTRUMENT_VA(this);
+  ProcessSP process_sp(GetSP());
+  return (process_sp) ? process_sp->GetImplementation() : nullptr;
 }

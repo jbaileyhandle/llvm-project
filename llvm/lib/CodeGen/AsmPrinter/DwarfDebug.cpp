@@ -18,7 +18,6 @@
 #include "DwarfUnit.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/DIE.h"
@@ -53,9 +52,11 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
+#include <optional>
 #include <string>
 
 using namespace llvm;
@@ -355,7 +356,7 @@ DwarfDebug::DwarfDebug(AsmPrinter *A)
     DebuggerTuning = Asm->TM.Options.DebuggerTuning;
   else if (IsDarwin)
     DebuggerTuning = DebuggerKind::LLDB;
-  else if (TT.isPS4())
+  else if (TT.isPS())
     DebuggerTuning = DebuggerKind::SCE;
   else if (TT.isOSAIX())
     DebuggerTuning = DebuggerKind::DBX;
@@ -428,8 +429,7 @@ DwarfDebug::DwarfDebug(AsmPrinter *A)
   // https://sourceware.org/bugzilla/show_bug.cgi?id=11616
   UseGNUTLSOpcode = tuneForGDB() || DwarfVersion < 3;
 
-  // GDB does not fully support the DWARF 4 representation for bitfields.
-  UseDWARF2Bitfields = (DwarfVersion < 4) || tuneForGDB();
+  UseDWARF2Bitfields = DwarfVersion < 4;
 
   // The DWARF v5 string offsets table has - possibly shared - contributions
   // from each compile and type unit each preceded by a header. The string
@@ -597,6 +597,9 @@ struct FwdRegParamInfo {
 
 /// Register worklist for finding call site values.
 using FwdRegWorklist = MapVector<unsigned, SmallVector<FwdRegParamInfo, 2>>;
+/// Container for the set of registers known to be clobbered on the path to a
+/// call site.
+using ClobberedRegSet = SmallSet<Register, 16>;
 
 /// Append the expression \p Addition to \p Original and return the result.
 static const DIExpression *combineDIExpressions(const DIExpression *Original,
@@ -668,7 +671,8 @@ static void addToFwdRegWorklist(FwdRegWorklist &Worklist, unsigned Reg,
 /// Interpret values loaded into registers by \p CurMI.
 static void interpretValues(const MachineInstr *CurMI,
                             FwdRegWorklist &ForwardedRegWorklist,
-                            ParamSet &Params) {
+                            ParamSet &Params,
+                            ClobberedRegSet &ClobberedRegUnits) {
 
   const MachineFunction *MF = CurMI->getMF();
   const DIExpression *EmptyExpr =
@@ -700,17 +704,19 @@ static void interpretValues(const MachineInstr *CurMI,
 
   // If the MI is an instruction defining one or more parameters' forwarding
   // registers, add those defines.
+  ClobberedRegSet NewClobberedRegUnits;
   auto getForwardingRegsDefinedByMI = [&](const MachineInstr &MI,
                                           SmallSetVector<unsigned, 4> &Defs) {
     if (MI.isDebugInstr())
       return;
 
     for (const MachineOperand &MO : MI.operands()) {
-      if (MO.isReg() && MO.isDef() &&
-          Register::isPhysicalRegister(MO.getReg())) {
+      if (MO.isReg() && MO.isDef() && MO.getReg().isPhysical()) {
         for (auto &FwdReg : ForwardedRegWorklist)
           if (TRI.regsOverlap(FwdReg.first, MO.getReg()))
             Defs.insert(FwdReg.first);
+        for (MCRegUnitIterator Units(MO.getReg(), &TRI); Units.isValid(); ++Units)
+          NewClobberedRegUnits.insert(*Units);
       }
     }
   };
@@ -719,8 +725,22 @@ static void interpretValues(const MachineInstr *CurMI,
   SmallSetVector<unsigned, 4> FwdRegDefs;
 
   getForwardingRegsDefinedByMI(*CurMI, FwdRegDefs);
-  if (FwdRegDefs.empty())
+  if (FwdRegDefs.empty()) {
+    // Any definitions by this instruction will clobber earlier reg movements.
+    ClobberedRegUnits.insert(NewClobberedRegUnits.begin(),
+                             NewClobberedRegUnits.end());
     return;
+  }
+
+  // It's possible that we find a copy from a non-volatile register to the param
+  // register, which is clobbered in the meantime. Test for clobbered reg unit
+  // overlaps before completing.
+  auto IsRegClobberedInMeantime = [&](Register Reg) -> bool {
+    for (auto &RegUnit : ClobberedRegUnits)
+      if (TRI.hasRegUnit(Reg, RegUnit))
+        return true;
+    return false;
+  };
 
   for (auto ParamFwdReg : FwdRegDefs) {
     if (auto ParamValue = TII.describeLoadedValue(*CurMI, ParamFwdReg)) {
@@ -733,7 +753,8 @@ static void interpretValues(const MachineInstr *CurMI,
         Register SP = TLI.getStackPointerRegisterToSaveRestore();
         Register FP = TRI.getFrameRegister(*MF);
         bool IsSPorFP = (RegLoc == SP) || (RegLoc == FP);
-        if (TRI.isCalleeSavedPhysReg(RegLoc, *MF) || IsSPorFP) {
+        if (!IsRegClobberedInMeantime(RegLoc) &&
+            (TRI.isCalleeSavedPhysReg(RegLoc, *MF) || IsSPorFP)) {
           MachineLocation MLoc(RegLoc, /*Indirect=*/IsSPorFP);
           finishCallSiteParams(MLoc, ParamValue->second,
                                ForwardedRegWorklist[ParamFwdReg], Params);
@@ -755,6 +776,10 @@ static void interpretValues(const MachineInstr *CurMI,
   for (auto ParamFwdReg : FwdRegDefs)
     ForwardedRegWorklist.erase(ParamFwdReg);
 
+  // Any definitions by this instruction will clobber earlier reg movements.
+  ClobberedRegUnits.insert(NewClobberedRegUnits.begin(),
+                           NewClobberedRegUnits.end());
+
   // Now that we are done handling this instruction, add items from the
   // temporary worklist to the real one.
   for (auto &New : TmpWorklistItems)
@@ -764,7 +789,8 @@ static void interpretValues(const MachineInstr *CurMI,
 
 static bool interpretNextInstr(const MachineInstr *CurMI,
                                FwdRegWorklist &ForwardedRegWorklist,
-                               ParamSet &Params) {
+                               ParamSet &Params,
+                               ClobberedRegSet &ClobberedRegUnits) {
   // Skip bundle headers.
   if (CurMI->isBundle())
     return true;
@@ -782,7 +808,7 @@ static bool interpretNextInstr(const MachineInstr *CurMI,
   if (CurMI->getNumOperands() == 0)
     return true;
 
-  interpretValues(CurMI, ForwardedRegWorklist, Params);
+  interpretValues(CurMI, ForwardedRegWorklist, Params, ClobberedRegUnits);
 
   return true;
 }
@@ -819,7 +845,7 @@ static void collectCallSiteParameters(const MachineInstr *CallMI,
   }
 
   // Do not emit CSInfo for undef forwarding registers.
-  for (auto &MO : CallMI->uses())
+  for (const auto &MO : CallMI->uses())
     if (MO.isReg() && MO.isUndef())
       ForwardedRegWorklist.erase(MO.getReg());
 
@@ -834,6 +860,7 @@ static void collectCallSiteParameters(const MachineInstr *CallMI,
   bool ShouldTryEmitEntryVals = MBB->getIterator() == MF->begin();
 
   // Search for a loading value in forwarding registers inside call delay slot.
+  ClobberedRegSet ClobberedRegUnits;
   if (CallMI->hasDelaySlot()) {
     auto Suc = std::next(CallMI->getIterator());
     // Only one-instruction delay slot is supported.
@@ -842,14 +869,14 @@ static void collectCallSiteParameters(const MachineInstr *CallMI,
     assert(std::next(Suc) == BundleEnd &&
            "More than one instruction in call delay slot");
     // Try to interpret value loaded by instruction.
-    if (!interpretNextInstr(&*Suc, ForwardedRegWorklist, Params))
+    if (!interpretNextInstr(&*Suc, ForwardedRegWorklist, Params, ClobberedRegUnits))
       return;
   }
 
   // Search for a loading value in forwarding registers.
   for (; I != MBB->rend(); ++I) {
     // Try to interpret values loaded by instruction.
-    if (!interpretNextInstr(&*I, ForwardedRegWorklist, Params))
+    if (!interpretNextInstr(&*I, ForwardedRegWorklist, Params, ClobberedRegUnits))
       return;
   }
 
@@ -929,8 +956,7 @@ void DwarfDebug::constructCallSiteEntryDIEs(const DISubprogram &SP,
       // the callee.
       const MachineOperand &CalleeOp = TII->getCalleeOperand(MI);
       if (!CalleeOp.isGlobal() &&
-          (!CalleeOp.isReg() ||
-           !Register::isPhysicalRegister(CalleeOp.getReg())))
+          (!CalleeOp.isReg() || !CalleeOp.getReg().isPhysical()))
         continue;
 
       unsigned CallReg = 0;
@@ -1537,62 +1563,11 @@ void DwarfDebug::ensureAbstractEntityIsCreatedIfScoped(DwarfCompileUnit &CU,
     CU.createAbstractEntity(Node, Scope);
 }
 
-// Collect variable information from MF.
-void DwarfDebug::collectVariableInfoFromMF(
-    DwarfCompileUnit &TheCU, DenseSet<InlinedEntity> &Processed) {
-  SmallDenseMap<InlinedEntity, DbgVariable *> MFVars;
-  LLVM_DEBUG(dbgs() << "DwarfDebug: collecting variables from MF\n");
-  for (const auto &MBB : *Asm->MF) {
-    for (const auto &MI : MBB) {
-      if (!MI.isDebugDef()) {
-        continue;
-      }
-
-      LLVM_DEBUG(dbgs() << "Processing instruction: " << MI);
-
-      // FIXME(KZHURAVL): This is fine at -O0. Need to handle DIFragment and
-      // DIGlobalVariable at other optimization levels.
-      const DILifetime *LT = MI.getDebugLifetime();
-      const DILocalVariable *LV = dyn_cast<DILocalVariable>(LT->getObject());
-      assert(LV && "DILifetime's object is not DILocalVariable");
-
-      InlinedEntity Var(LV, nullptr);
-      Processed.insert(Var);
-      LexicalScope *Scope = MI.getDebugLoc().get() ?
-          LScopes.findLexicalScope(MI.getDebugLoc().get()) :
-          LScopes.findLexicalScope(LV->getScope());
-
-      // If variable scope is not found then skip this variable.
-      if (!Scope) {
-        LLVM_DEBUG(dbgs() << "Dropping debug info for " << LV->getName()
-                          << ", no variable scope found\n");
-        continue;
-      }
-
-      ensureAbstractEntityIsCreatedIfScoped(TheCU, Var.first, Scope->getScopeNode());
-      auto RegVar = std::make_unique<NewDbgVariable>(
-                        cast<DILocalVariable>(Var.first), Var.second);
-      RegVar->initializeLifetime(LT);
-      LLVM_DEBUG(dbgs() << "Created DbgVariable for " << LV->getName()
-                        << "\n");
-
-      if (DbgVariable *DbgVar = MFVars.lookup(Var))
-        DbgVar->addMMIEntry(*RegVar);
-      else if (InfoHolder.addScopeVariable(Scope, RegVar.get())) {
-        MFVars.insert({Var, RegVar.get()});
-        ConcreteEntities.push_back(std::move(RegVar));
-      }
-    }
-  }
-}
-
 // Collect variable information from the side table maintained by MF.
 void DwarfDebug::collectVariableInfoFromMFTable(
     DwarfCompileUnit &TheCU, DenseSet<InlinedEntity> &Processed) {
-  if (isHeterogeneousDebug(*Asm->MF->getFunction().getParent())) {
-    collectVariableInfoFromMF(TheCU, Processed);
+  if (isHeterogeneousDebug(*Asm->MF->getFunction().getParent()))
     return;
-  }
 
   SmallDenseMap<InlinedEntity, DbgVariable *> MFVars;
   LLVM_DEBUG(dbgs() << "DwarfDebug: collecting variables from MF side table\n");
@@ -1897,9 +1872,13 @@ DbgEntity *DwarfDebug::createConcreteEntity(DwarfCompileUnit &TheCU,
                                             const MCSymbol *Sym) {
   ensureAbstractEntityIsCreatedIfScoped(TheCU, Node, Scope.getScopeNode());
   if (isa<const DILocalVariable>(Node)) {
-    ConcreteEntities.push_back(
-        std::make_unique<OldDbgVariable>(cast<const DILocalVariable>(Node),
-                                       Location));
+    if (isHeterogeneousDebug(*Asm->MF->getFunction().getParent())) {
+      ConcreteEntities.push_back(std::make_unique<NewDbgVariable>(
+          cast<const DILocalVariable>(Node), Location));
+    } else {
+      ConcreteEntities.push_back(std::make_unique<OldDbgVariable>(
+          cast<const DILocalVariable>(Node), Location));
+    }
     InfoHolder.addScopeVariable(&Scope,
         cast<DbgVariable>(ConcreteEntities.back().get()));
   } else if (isa<const DILabel>(Node)) {
@@ -1964,7 +1943,7 @@ void DwarfDebug::collectEntityInfo(DwarfCompileUnit &TheCU,
       }
     }
 
-    // Do not emit location lists if .debug_loc secton is disabled.
+    // Do not emit location lists if .debug_loc section is disabled.
     if (!useLocSection())
       continue;
 
@@ -1992,6 +1971,68 @@ void DwarfDebug::collectEntityInfo(DwarfCompileUnit &TheCU,
     // Finalize the entry by lowering it into a DWARF bytestream.
     for (auto &Entry : Entries)
       Entry.finalize(*Asm, List, BT, TheCU);
+  }
+
+  for (const auto &I : DbgDefKills) {
+    const DILifetime *LT = I.first;
+    auto &Entries = I.second;
+    assert(!Entries.empty());
+    auto &MI = *Entries.back().getBegin();
+    LLVM_DEBUG(dbgs() << "Processing instruction: " << MI);
+
+    // FIXME(KZHURAVL): This is fine at -O0. Need to handle DIFragment and
+    // DIGlobalVariable at other optimization levels.
+    const DILocalVariable *LocalVar =
+        dyn_cast<DILocalVariable>(LT->getObject());
+    assert(LocalVar && "DILifetime's object is not DILocalVariable");
+
+    LexicalScope *Scope = MI.getDebugLoc().get()
+                              ? LScopes.findLexicalScope(MI.getDebugLoc().get())
+                              : LScopes.findLexicalScope(LocalVar->getScope());
+
+    // If variable scope is not found then skip this variable.
+    if (!Scope) {
+      LLVM_DEBUG(dbgs() << "Dropping debug info for " << LocalVar->getName()
+                        << ", no variable scope found\n");
+      continue;
+    }
+    InlinedEntity Var(LocalVar, nullptr);
+    Processed.insert(Var);
+    DbgVariable *RegVar = cast<DbgVariable>(
+        createConcreteEntity(TheCU, *Scope, LocalVar, nullptr));
+
+    // FIXME: I'm not certain this is how we want to handle this, but the idea
+    // is to try to avoid loclist when we have DEFs in the prologue which are
+    // live out of the function. Should this also confirm there are no non-meta
+    // instructions preceding the DEF?
+    if (Entries.size() == 1 && Entries[0].isLiveThroughFunction()) {
+      RegVar->initializeDbgDefProxy(*LT, MI.getDebugReferrer());
+      LLVM_DEBUG(dbgs() << "Created DbgVariable for " << LocalVar->getName()
+                        << "\n");
+      continue;
+    }
+
+    // Do not emit location lists if .debug_loc secton is disabled.
+    if (!useLocSection())
+      continue;
+
+    // Handle multiple DBG_VALUE instructions describing one variable.
+    DebugLocStream::ListBuilder List(DebugLocs, TheCU, *Asm, *RegVar,
+                                     *Entries.front().getBegin());
+    for (auto &Entry : Entries) {
+      auto &MI = *Entry.getBegin();
+      // FIXME: Handle when this spans multiple sections
+      const MCSymbol *Begin = getLabelAfterInsn(Entry.getBegin());
+      const MCSymbol *End = getLabelAfterInsn(Entry.getEnd());
+      DebugLocStream::EntryBuilder LocStreamEntry(List, Begin, End);
+      BufferByteStreamer Streamer = LocStreamEntry.getStreamer();
+      const TargetRegisterInfo &TRI =
+          *Asm->MF->getSubtarget().getRegisterInfo();
+      DebugLocDwarfExprAST ExprAST(*Asm, TRI, TheCU, Streamer,
+                                   *MI.getDebugLifetime(),
+                                   MI.getDebugReferrer());
+      ExprAST.finalize();
+    }
   }
 
   // For each InlinedEntity collected from DBG_LABEL instructions, convert to
@@ -2095,6 +2136,17 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
   if (MI->isMetaInstruction() || MI->getFlag(MachineInstr::FrameSetup))
     return;
   const DebugLoc &DL = MI->getDebugLoc();
+  unsigned Flags = 0;
+
+  if (MI->getFlag(MachineInstr::FrameDestroy) && DL) {
+    const MachineBasicBlock *MBB = MI->getParent();
+    if (MBB && (MBB != EpilogBeginBlock)) {
+      // First time FrameDestroy has been seen in this basic block
+      EpilogBeginBlock = MBB;
+      Flags |= DWARF2_FLAG_EPILOGUE_BEGIN;
+    }
+  }
+
   // When we emit a line-0 record, we don't update PrevInstLoc; so look at
   // the last line number actually emitted, to see if it was line 0.
   unsigned LastAsmLine =
@@ -2106,10 +2158,10 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
       return;
     // We have an explicit location, same as the previous location.
     // But we might be coming back to it after a line 0 record.
-    if (LastAsmLine == 0 && DL.getLine() != 0) {
+    if ((LastAsmLine == 0 && DL.getLine() != 0) || Flags) {
       // Reinstate the source location but not marked as a statement.
       const MDNode *Scope = DL.getScope();
-      recordSourceLine(DL.getLine(), DL.getCol(), Scope, /*Flags=*/0);
+      recordSourceLine(DL.getLine(), DL.getCol(), Scope, Flags);
     }
     return;
   }
@@ -2150,7 +2202,6 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
   // (The new location might be an explicit line 0, which we do emit.)
   if (DL.getLine() == 0 && LastAsmLine == 0)
     return;
-  unsigned Flags = 0;
   if (DL == PrologEndLoc) {
     Flags |= DWARF2_FLAG_PROLOGUE_END | DWARF2_FLAG_IS_STMT;
     PrologEndLoc = DebugLoc();
@@ -2315,6 +2366,9 @@ void DwarfDebug::endFunctionImpl(const MachineFunction *MF) {
   if (!TheCU.getCUNode()->getDebugInfoForProfiling() &&
       TheCU.getCUNode()->getEmissionKind() == DICompileUnit::LineTablesOnly &&
       LScopes.getAbstractScopesList().empty() && !IsDarwin) {
+    for (const auto &R : Asm->MBBSectionRanges)
+      addArangeLabel(SymbolCU(&TheCU, R.second.BeginLabel));
+
     assert(InfoHolder.getScopeVariables().empty());
     PrevLabel = nullptr;
     CurFn = nullptr;
@@ -2326,7 +2380,7 @@ void DwarfDebug::endFunctionImpl(const MachineFunction *MF) {
 #endif
   // Construct abstract scopes.
   for (LexicalScope *AScope : LScopes.getAbstractScopesList()) {
-    auto *SP = cast<DISubprogram>(AScope->getScopeNode());
+    const auto *SP = cast<DISubprogram>(AScope->getScopeNode());
     for (const DINode *DN : SP->getRetainedNodes()) {
       if (!Processed.insert(InlinedEntity(DN, nullptr)).second)
         continue;
@@ -2403,7 +2457,7 @@ void DwarfDebug::emitStringOffsetsTableHeader() {
 template <typename AccelTableT>
 void DwarfDebug::emitAccel(AccelTableT &Accel, MCSection *Section,
                            StringRef TableName) {
-  Asm->OutStreamer->SwitchSection(Section);
+  Asm->OutStreamer->switchSection(Section);
 
   // Emit the full data.
   emitAppleAccelTable(Asm, Accel, TableName, Section->getBeginSymbol());
@@ -2522,12 +2576,12 @@ void DwarfDebug::emitDebugPubSections() {
     bool GnuStyle = TheU->getCUNode()->getNameTableKind() ==
                     DICompileUnit::DebugNameTableKind::GNU;
 
-    Asm->OutStreamer->SwitchSection(
+    Asm->OutStreamer->switchSection(
         GnuStyle ? Asm->getObjFileLowering().getDwarfGnuPubNamesSection()
                  : Asm->getObjFileLowering().getDwarfPubNamesSection());
     emitDebugPubSection(GnuStyle, "Names", TheU, TheU->getGlobalNames());
 
-    Asm->OutStreamer->SwitchSection(
+    Asm->OutStreamer->switchSection(
         GnuStyle ? Asm->getObjFileLowering().getDwarfGnuPubTypesSection()
                  : Asm->getObjFileLowering().getDwarfPubTypesSection());
     emitDebugPubSection(GnuStyle, "Types", TheU, TheU->getGlobalTypes());
@@ -2618,7 +2672,7 @@ void DwarfDebug::emitDebugLocEntry(ByteStreamer &Streamer,
 
   using Encoding = DWARFExpression::Operation::Encoding;
   uint64_t Offset = 0;
-  for (auto &Op : Expr) {
+  for (const auto &Op : Expr) {
     assert(Op.getCode() != dwarf::DW_OP_const_type &&
            "3 operand ops not yet supported");
     Streamer.emitInt8(Op.getCode(), Comment != End ? *(Comment++) : "");
@@ -2937,7 +2991,7 @@ void DwarfDebug::emitDebugLocImpl(MCSection *Sec) {
   if (DebugLocs.getLists().empty())
     return;
 
-  Asm->OutStreamer->SwitchSection(Sec);
+  Asm->OutStreamer->switchSection(Sec);
 
   MCSymbol *TableEnd = nullptr;
   if (getDwarfVersion() >= 5)
@@ -2974,7 +3028,7 @@ void DwarfDebug::emitDebugLocDWO() {
   }
 
   for (const auto &List : DebugLocs.getLists()) {
-    Asm->OutStreamer->SwitchSection(
+    Asm->OutStreamer->switchSection(
         Asm->getObjFileLowering().getDwarfLocDWOSection());
     Asm->OutStreamer->emitLabel(List.Label);
 
@@ -3047,8 +3101,8 @@ void DwarfDebug::emitDebugARanges() {
 
     // Sort the symbols by offset within the section.
     llvm::stable_sort(List, [&](const SymbolCU &A, const SymbolCU &B) {
-      unsigned IA = A.Sym ? Asm->OutStreamer->GetSymbolOrder(A.Sym) : 0;
-      unsigned IB = B.Sym ? Asm->OutStreamer->GetSymbolOrder(B.Sym) : 0;
+      unsigned IA = A.Sym ? Asm->OutStreamer->getSymbolOrder(A.Sym) : 0;
+      unsigned IB = B.Sym ? Asm->OutStreamer->getSymbolOrder(B.Sym) : 0;
 
       // Symbols with no order assigned should be placed at the end.
       // (e.g. section end labels)
@@ -3081,7 +3135,7 @@ void DwarfDebug::emitDebugARanges() {
   }
 
   // Start the dwarf aranges section.
-  Asm->OutStreamer->SwitchSection(
+  Asm->OutStreamer->switchSection(
       Asm->getObjFileLowering().getDwarfARangesSection());
 
   unsigned PtrSize = Asm->MAI->getCodePointerSize();
@@ -3139,15 +3193,22 @@ void DwarfDebug::emitDebugARanges() {
     for (const ArangeSpan &Span : List) {
       Asm->emitLabelReference(Span.Start, PtrSize);
 
-      // Calculate the size as being from the span start to it's end.
-      if (Span.End) {
+      // Calculate the size as being from the span start to its end.
+      //
+      // If the size is zero, then round it up to one byte. The DWARF
+      // specification requires that entries in this table have nonzero
+      // lengths.
+      auto SizeRef = SymSize.find(Span.Start);
+      if ((SizeRef == SymSize.end() || SizeRef->second != 0) && Span.End) {
         Asm->emitLabelDifference(Span.End, Span.Start, PtrSize);
       } else {
         // For symbols without an end marker (e.g. common), we
         // write a single arange entry containing just that one symbol.
-        uint64_t Size = SymSize[Span.Start];
-        if (Size == 0)
+        uint64_t Size;
+        if (SizeRef == SymSize.end() || SizeRef->second == 0)
           Size = 1;
+        else
+          Size = SizeRef->second;
 
         Asm->OutStreamer->emitIntValue(Size, PtrSize);
       }
@@ -3181,7 +3242,7 @@ void DwarfDebug::emitDebugRangesImpl(const DwarfFile &Holder, MCSection *Section
     return !Pair.second->getCUNode()->isDebugDirectivesOnly();
   }));
 
-  Asm->OutStreamer->SwitchSection(Section);
+  Asm->OutStreamer->switchSection(Section);
 
   MCSymbol *TableEnd = nullptr;
   if (getDwarfVersion() >= 5)
@@ -3333,7 +3394,7 @@ void DwarfDebug::emitDebugMacinfoImpl(MCSection *Section) {
     DIMacroNodeArray Macros = CUNode->getMacros();
     if (Macros.empty())
       continue;
-    Asm->OutStreamer->SwitchSection(Section);
+    Asm->OutStreamer->switchSection(Section);
     Asm->OutStreamer->emitLabel(U.getMacroLabelBegin());
     if (UseDebugMacroSection)
       emitMacroHeader(Asm, *this, U, getDwarfVersion());
@@ -3541,22 +3602,6 @@ void DwarfDebug::addDwarfTypeUnitType(DwarfCompileUnit &CU,
   CU.addDIETypeSignature(RefDie, Signature);
 }
 
-DwarfDebug::NonTypeUnitContext::NonTypeUnitContext(DwarfDebug *DD)
-    : DD(DD),
-      TypeUnitsUnderConstruction(std::move(DD->TypeUnitsUnderConstruction)), AddrPoolUsed(DD->AddrPool.hasBeenUsed()) {
-  DD->TypeUnitsUnderConstruction.clear();
-  DD->AddrPool.resetUsedFlag();
-}
-
-DwarfDebug::NonTypeUnitContext::~NonTypeUnitContext() {
-  DD->TypeUnitsUnderConstruction = std::move(TypeUnitsUnderConstruction);
-  DD->AddrPool.resetUsedFlag(AddrPoolUsed);
-}
-
-DwarfDebug::NonTypeUnitContext DwarfDebug::enterNonTypeUnitContext() {
-  return NonTypeUnitContext(this);
-}
-
 // Add the Name along with its companion DIE to the appropriate accelerator
 // table (for AccelTableKind::Dwarf it's always AccelDebugNames, for
 // AccelTableKind::Apple, we use the table we got as an argument). If
@@ -3636,19 +3681,20 @@ void DwarfDebug::insertSectionLabel(const MCSymbol *S) {
       AddrPool.getIndex(S);
 }
 
-Optional<MD5::MD5Result> DwarfDebug::getMD5AsBytes(const DIFile *File) const {
+std::optional<MD5::MD5Result>
+DwarfDebug::getMD5AsBytes(const DIFile *File) const {
   assert(File);
   if (getDwarfVersion() < 5)
-    return None;
-  Optional<DIFile::ChecksumInfo<StringRef>> Checksum = File->getChecksum();
+    return std::nullopt;
+  std::optional<DIFile::ChecksumInfo<StringRef>> Checksum = File->getChecksum();
   if (!Checksum || Checksum->Kind != DIFile::CSK_MD5)
-    return None;
+    return std::nullopt;
 
   // Convert the string checksum to an MD5Result for the streamer.
   // The verifier validates the checksum so we assume it's okay.
   // An MD5 checksum is 16 bytes.
   std::string ChecksumString = fromHex(Checksum->Value);
   MD5::MD5Result CKMem;
-  std::copy(ChecksumString.begin(), ChecksumString.end(), CKMem.Bytes.data());
+  std::copy(ChecksumString.begin(), ChecksumString.end(), CKMem.data());
   return CKMem;
 }

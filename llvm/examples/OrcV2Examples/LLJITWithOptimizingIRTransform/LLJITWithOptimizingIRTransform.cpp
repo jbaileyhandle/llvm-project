@@ -74,7 +74,6 @@ class MyOptimizationTransform {
 public:
   MyOptimizationTransform() : PM(std::make_unique<legacy::PassManager>()) {
     PM->add(createTailCallEliminationPass());
-    PM->add(createFunctionInliningPass());
     PM->add(createIndVarSimplifyPass());
     PM->add(createCFGSimplificationPass());
   }
@@ -112,8 +111,8 @@ int main(int argc, char *argv[]) {
   ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(MainMod, "MainMod"))));
 
   // (4) Look up the JIT'd function and call it.
-  auto EntrySym = ExitOnErr(J->lookup("entry"));
-  auto *Entry = (int (*)())EntrySym.getAddress();
+  auto EntryAddr = ExitOnErr(J->lookup("entry"));
+  auto *Entry = EntryAddr.toPtr<int()>();
 
   int Result = Entry();
   outs() << "--- Result ---\n"

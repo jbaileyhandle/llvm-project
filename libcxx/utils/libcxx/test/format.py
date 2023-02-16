@@ -67,6 +67,15 @@ def parseScript(test, preamble):
                                                    initial_value=additionalCompileFlags)
     ]
 
+    # Add conditional parsers for ADDITIONAL_COMPILE_FLAGS. This should be replaced by first
+    # class support for conditional keywords in Lit, which would allow evaluating arbitrary
+    # Lit boolean expressions instead.
+    for feature in test.config.available_features:
+        parser = lit.TestRunner.IntegratedTestKeywordParser('ADDITIONAL_COMPILE_FLAGS({}):'.format(feature),
+                                                            lit.TestRunner.ParserKind.LIST,
+                                                            initial_value=additionalCompileFlags)
+        parsers.append(parser)
+
     scriptInTest = lit.TestRunner.parseIntegratedTestScript(test, additional_parsers=parsers,
                                                             require_script=not preamble)
     if isinstance(scriptInTest, lit.Test.Result):
@@ -256,11 +265,6 @@ class CxxStandardLibraryTest(lit.formats.TestFormat):
             return self._executeShTest(test, litConfig, steps)
         else:
             return lit.Test.Result(lit.Test.UNRESOLVED, "Unknown test suffix for '{}'".format(filename))
-
-    # Utility function to add compile flags in lit.local.cfg files.
-    def addCompileFlags(self, config, *flags):
-        string = ' '.join(flags)
-        config.substitutions = [(s, x + ' ' + string) if s == '%{compile_flags}' else (s, x) for (s, x) in config.substitutions]
 
     def _executeShTest(self, test, litConfig, steps):
         if test.config.unsupported:

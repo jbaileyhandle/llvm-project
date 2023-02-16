@@ -229,7 +229,8 @@ static bool isVarString(const clang::Expr *argX, const clang::Type *argXTy,
   // Ensure the VarDecl has an inititalizer
   if (const auto *DRE = dyn_cast<DeclRefExpr>(argX))
     if (const auto *VD = dyn_cast<VarDecl>(DRE->getDecl()))
-      if (!VD->getInit())
+      if (!VD->getInit() ||
+          !llvm::isa<StringLiteral>(VD->getInit()->IgnoreImplicit()))
         return true;
   return false;
 }
@@ -499,7 +500,7 @@ RValue CodeGenFunction::EmitHostrpcVargsFn(const CallExpr *E,
         // update BufferPtrByteAddr for next string memcpy
         llvm::Value *PtrAsInt = BufferPtrByteAddr.getPointer();
         BufferPtrByteAddr = Address(
-            Builder.CreateGEP(PtrAsInt->getType()->getScalarType()->getPointerElementType(),
+            Builder.CreateGEP(Int8Ty,
 		    PtrAsInt, ArrayRef<llvm::Value*>(varStrLength)),
             Int8Ty, CharUnits::fromQuantity(1));
       } else {

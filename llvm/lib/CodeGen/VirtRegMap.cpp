@@ -145,7 +145,7 @@ void VirtRegMap::assignVirt2StackSlot(Register virtReg, int SS) {
 void VirtRegMap::print(raw_ostream &OS, const Module*) const {
   OS << "********** REGISTER MAP **********\n";
   for (unsigned i = 0, e = MRI->getNumVirtRegs(); i != e; ++i) {
-    unsigned Reg = Register::index2VirtReg(i);
+    Register Reg = Register::index2VirtReg(i);
     if (Virt2PhysMap[Reg] != (unsigned)VirtRegMap::NO_PHYS_REG) {
       OS << '[' << printReg(Reg, TRI) << " -> "
          << printReg(Virt2PhysMap[Reg], TRI) << "] "
@@ -154,7 +154,7 @@ void VirtRegMap::print(raw_ostream &OS, const Module*) const {
   }
 
   for (unsigned i = 0, e = MRI->getNumVirtRegs(); i != e; ++i) {
-    unsigned Reg = Register::index2VirtReg(i);
+    Register Reg = Register::index2VirtReg(i);
     if (Virt2StackSlotMap[Reg] != VirtRegMap::NO_STACK_SLOT) {
       OS << '[' << printReg(Reg, TRI) << " -> fi#" << Virt2StackSlotMap[Reg]
          << "] " << TRI->getRegClassName(MRI->getRegClass(Reg)) << "\n";
@@ -404,6 +404,16 @@ bool VirtRegRewriter::readsUndefSubreg(const MachineOperand &MO) const {
   return true;
 }
 
+// Returns true when all the implicit operands of the copy instruction \p MI are
+// reserved registers.
+static bool isCopyWithReservedImplicitOpnds(const MachineInstr &MI,
+                                            const MachineRegisterInfo &MRI) {
+  for (unsigned I = 2, E = MI.getNumOperands(); I != E; ++I) {
+    if (!MRI.isReserved(MI.getOperand(I).getReg()))
+      return false;
+  }
+  return true;
+}
 void VirtRegRewriter::handleIdentityCopy(MachineInstr &MI) {
   if (!MI.isIdentityCopy())
     return;
@@ -424,8 +434,11 @@ void VirtRegRewriter::handleIdentityCopy(MachineInstr &MI) {
   //    %al = COPY %al, implicit-def %eax
   // give us additional liveness information: The target (super-)register
   // must not be valid before this point. Replace the COPY with a KILL
-  // instruction to maintain this information.
-  if (MI.getOperand(1).isUndef() || MI.getNumOperands() > 2) {
+  // instruction to maintain this information. Do not insert KILL when the
+  // implicit operands are all reserved registers.
+  if (MI.getOperand(1).isUndef() ||
+      ((MI.getNumOperands() > 2) &&
+       !isCopyWithReservedImplicitOpnds(MI, *MRI))) {
     MI.setDesc(TII->get(TargetOpcode::KILL));
     LLVM_DEBUG(dbgs() << "  replace by: " << MI);
     return;
@@ -475,7 +488,7 @@ void VirtRegRewriter::expandCopyBundle(MachineInstr &MI) const {
     // clobbering.
     for (int E = MIs.size(), PrevE = E; E > 1; PrevE = E) {
       for (int I = E; I--; )
-        if (!anyRegsAlias(MIs[I], makeArrayRef(MIs).take_front(E), TRI)) {
+        if (!anyRegsAlias(MIs[I], ArrayRef(MIs).take_front(E), TRI)) {
           if (I + 1 != E)
             std::swap(MIs[I], MIs[E - 1]);
           --E;

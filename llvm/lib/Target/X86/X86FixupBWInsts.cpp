@@ -193,6 +193,7 @@ bool FixupBWInstPass::getSuperRegDestIfDead(MachineInstr *OrigMI,
   const X86RegisterInfo *TRI = &TII->getRegisterInfo();
   Register OrigDestReg = OrigMI->getOperand(0).getReg();
   SuperDestReg = getX86SubSuperRegister(OrigDestReg, 32);
+  assert(SuperDestReg.isValid() && "Invalid Operand");
 
   const auto SubRegIdx = TRI->getSubRegIndex(SuperDestReg, OrigDestReg);
 
@@ -213,9 +214,9 @@ bool FixupBWInstPass::getSuperRegDestIfDead(MachineInstr *OrigMI,
     // If the original destination register was the low 8-bit subregister and
     // we also need to check the 16-bit subregister and the high 8-bit
     // subregister.
+    MCRegister HighReg = getX86SubSuperRegister(SuperDestReg, 8, /*High=*/true);
     if (!LiveRegs.contains(getX86SubSuperRegister(OrigDestReg, 16)) &&
-        !LiveRegs.contains(getX86SubSuperRegister(SuperDestReg, 8,
-                                                  /*High=*/true)))
+        (!HighReg.isValid() || !LiveRegs.contains(HighReg)))
       return true;
     // Otherwise, we have a little more checking to do.
   }
@@ -327,6 +328,7 @@ MachineInstr *FixupBWInstPass::tryReplaceCopy(MachineInstr *MI) const {
     return nullptr;
 
   Register NewSrcReg = getX86SubSuperRegister(OldSrc.getReg(), 32);
+  assert(NewSrcReg.isValid() && "Invalid Operand");
 
   // This is only correct if we access the same subregister index: otherwise,
   // we could try to replace "movb %ah, %al" with "movl %eax, %eax".
@@ -393,12 +395,12 @@ MachineInstr *FixupBWInstPass::tryReplaceInstr(MachineInstr *MI,
   switch (MI->getOpcode()) {
 
   case X86::MOV8rm:
-    // Only replace 8 bit loads with the zero extending versions if
-    // in an inner most loop and not optimizing for size. This takes
-    // an extra byte to encode, and provides limited performance upside.
-    if (MachineLoop *ML = MLI->getLoopFor(&MBB))
-      if (ML->begin() == ML->end() && !OptForSize)
-        return tryReplaceLoad(X86::MOVZX32rm8, MI);
+    // Replace 8-bit loads with the zero-extending version if not optimizing
+    // for size. The extending op is cheaper across a wide range of uarch and
+    // it avoids a potentially expensive partial register stall. It takes an
+    // extra byte to encode, however, so don't do this when optimizing for size.
+    if (!OptForSize)
+      return tryReplaceLoad(X86::MOVZX32rm8, MI);
     break;
 
   case X86::MOV16rm:

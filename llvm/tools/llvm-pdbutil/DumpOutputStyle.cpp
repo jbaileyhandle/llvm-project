@@ -8,8 +8,6 @@
 
 #include "DumpOutputStyle.h"
 
-#include "FormatUtil.h"
-#include "InputFile.h"
 #include "MinimalSymbolDumper.h"
 #include "MinimalTypeDumper.h"
 #include "StreamUtil.h"
@@ -38,10 +36,13 @@
 #include "llvm/DebugInfo/MSF/MappedBlockStream.h"
 #include "llvm/DebugInfo/PDB/Native/DbiModuleDescriptor.h"
 #include "llvm/DebugInfo/PDB/Native/DbiStream.h"
+#include "llvm/DebugInfo/PDB/Native/FormatUtil.h"
 #include "llvm/DebugInfo/PDB/Native/GlobalsStream.h"
 #include "llvm/DebugInfo/PDB/Native/ISectionContribVisitor.h"
 #include "llvm/DebugInfo/PDB/Native/InfoStream.h"
+#include "llvm/DebugInfo/PDB/Native/InputFile.h"
 #include "llvm/DebugInfo/PDB/Native/ModuleDebugStream.h"
+#include "llvm/DebugInfo/PDB/Native/NativeSession.h"
 #include "llvm/DebugInfo/PDB/Native/PDBFile.h"
 #include "llvm/DebugInfo/PDB/Native/PublicsStream.h"
 #include "llvm/DebugInfo/PDB/Native/RawError.h"
@@ -61,7 +62,7 @@ using namespace llvm::msf;
 using namespace llvm::pdb;
 
 DumpOutputStyle::DumpOutputStyle(InputFile &File)
-    : File(File), P(2, false, outs()) {
+    : File(File), P(2, false, outs(), opts::Filters) {
   if (opts::dump::DumpTypeRefStats)
     RefTracker.reset(new TypeReferenceTracker(File));
 }
@@ -342,36 +343,6 @@ static void printModuleDetailStats(LinePrinter &P, StringRef Label,
   }
 }
 
-static bool isMyCode(const SymbolGroup &Group) {
-  if (Group.getFile().isObj())
-    return true;
-
-  StringRef Name = Group.name();
-  if (Name.startswith("Import:"))
-    return false;
-  if (Name.endswith_insensitive(".dll"))
-    return false;
-  if (Name.equals_insensitive("* linker *"))
-    return false;
-  if (Name.startswith_insensitive("f:\\binaries\\Intermediate\\vctools"))
-    return false;
-  if (Name.startswith_insensitive("f:\\dd\\vctools\\crt"))
-    return false;
-  return true;
-}
-
-static bool shouldDumpSymbolGroup(uint32_t Idx, const SymbolGroup &Group) {
-  if (opts::dump::JustMyCode && !isMyCode(Group))
-    return false;
-
-  // If the arg was not specified on the command line, always dump all modules.
-  if (opts::dump::DumpModi.getNumOccurrences() == 0)
-    return true;
-
-  // Otherwise, only dump if this is the same module specified.
-  return (opts::dump::DumpModi == Idx);
-}
-
 Error DumpOutputStyle::dumpStreamSummary() {
   printHeader(P, "Streams");
 
@@ -408,96 +379,6 @@ Error DumpOutputStyle::dumpStreamSummary() {
   return Error::success();
 }
 
-static Expected<ModuleDebugStreamRef> getModuleDebugStream(PDBFile &File,
-                                                           uint32_t Index) {
-  Expected<DbiStream &> DbiOrErr = File.getPDBDbiStream();
-  if (!DbiOrErr)
-    return DbiOrErr.takeError();
-  DbiStream &Dbi = *DbiOrErr;
-  const auto &Modules = Dbi.modules();
-  auto Modi = Modules.getModuleDescriptor(Index);
-
-  uint16_t ModiStream = Modi.getModuleStreamIndex();
-  if (ModiStream == kInvalidStreamIndex)
-    return make_error<RawError>(raw_error_code::no_stream,
-                                "Module stream not present");
-
-  auto ModStreamData = File.createIndexedStream(ModiStream);
-
-  ModuleDebugStreamRef ModS(Modi, std::move(ModStreamData));
-  if (auto EC = ModS.reload())
-    return make_error<RawError>(raw_error_code::corrupt_file,
-                                "Invalid module stream");
-
-  return std::move(ModS);
-}
-
-template <typename CallbackT>
-static Error
-iterateOneModule(InputFile &File, const Optional<PrintScope> &HeaderScope,
-                 const SymbolGroup &SG, uint32_t Modi, CallbackT Callback) {
-  if (HeaderScope) {
-    HeaderScope->P.formatLine(
-        "Mod {0:4} | `{1}`: ",
-        fmt_align(Modi, AlignStyle::Right, HeaderScope->LabelWidth), SG.name());
-  }
-
-  AutoIndent Indent(HeaderScope);
-  return Callback(Modi, SG);
-}
-
-template <typename CallbackT>
-static Error iterateSymbolGroups(InputFile &Input,
-                                 const Optional<PrintScope> &HeaderScope,
-                                 CallbackT Callback) {
-  AutoIndent Indent(HeaderScope);
-
-  if (opts::dump::DumpModi.getNumOccurrences() > 0) {
-    assert(opts::dump::DumpModi.getNumOccurrences() == 1);
-    uint32_t Modi = opts::dump::DumpModi;
-    SymbolGroup SG(&Input, Modi);
-    return iterateOneModule(Input, withLabelWidth(HeaderScope, NumDigits(Modi)),
-                            SG, Modi, Callback);
-  }
-
-  uint32_t I = 0;
-
-  for (const auto &SG : Input.symbol_groups()) {
-    if (shouldDumpSymbolGroup(I, SG))
-      if (auto Err =
-              iterateOneModule(Input, withLabelWidth(HeaderScope, NumDigits(I)),
-                               SG, I, Callback))
-        return Err;
-
-    ++I;
-  }
-  return Error::success();
-}
-
-template <typename SubsectionT>
-static Error iterateModuleSubsections(
-    InputFile &File, const Optional<PrintScope> &HeaderScope,
-    llvm::function_ref<Error(uint32_t, const SymbolGroup &, SubsectionT &)>
-        Callback) {
-
-  return iterateSymbolGroups(
-      File, HeaderScope, [&](uint32_t Modi, const SymbolGroup &SG) -> Error {
-        for (const auto &SS : SG.getDebugSubsections()) {
-          SubsectionT Subsection;
-
-          if (SS.kind() != Subsection.kind())
-            continue;
-
-          BinaryStreamReader Reader(SS.getRecordData());
-          if (auto Err = Subsection.initialize(Reader))
-            continue;
-          if (auto Err = Callback(Modi, SG, Subsection))
-            return Err;
-        }
-        return Error::success();
-      });
-}
-
 static Expected<std::pair<std::unique_ptr<MappedBlockStream>,
                           ArrayRef<llvm::object::coff_section>>>
 loadSectionHeaders(PDBFile &File, DbgHeaderType Type) {
@@ -531,10 +412,10 @@ loadSectionHeaders(PDBFile &File, DbgHeaderType Type) {
   return std::make_pair(std::move(Stream), Headers);
 }
 
-static std::vector<std::string> getSectionNames(PDBFile &File) {
+static Expected<std::vector<std::string>> getSectionNames(PDBFile &File) {
   auto ExpectedHeaders = loadSectionHeaders(File, DbgHeaderType::SectionHdr);
   if (!ExpectedHeaders)
-    return {};
+    return ExpectedHeaders.takeError();
 
   std::unique_ptr<MappedBlockStream> Stream;
   ArrayRef<object::coff_section> Headers;
@@ -604,7 +485,10 @@ Error DumpOutputStyle::dumpModules() {
       [&](uint32_t Modi, const SymbolGroup &Strings) -> Error {
         auto Desc = Modules.getModuleDescriptor(Modi);
         if (opts::dump::DumpSectionContribs) {
-          std::vector<std::string> Sections = getSectionNames(getPdb());
+          auto SectionsOrErr = getSectionNames(getPdb());
+          if (!SectionsOrErr)
+            return SectionsOrErr.takeError();
+          ArrayRef<std::string> Sections = *SectionsOrErr;
           dumpSectionContrib(P, Desc.getSectionContrib(), Sections, 0);
         }
         P.formatLine("Obj: `{0}`: ", Desc.getObjFileName());
@@ -668,10 +552,7 @@ Error DumpOutputStyle::dumpSymbolStats() {
 
   StatCollection SymStats;
   StatCollection ChunkStats;
-
-  Optional<PrintScope> Scope;
-  if (File.isPdb())
-    Scope.emplace(P, 2);
+  PrintScope Scope(P, 2);
 
   if (Error Err = iterateSymbolGroups(
           File, Scope, [&](uint32_t Modi, const SymbolGroup &SG) -> Error {
@@ -721,7 +602,8 @@ Error DumpOutputStyle::dumpTypeStats() {
   StatCollection TypeStats;
   LazyRandomTypeCollection &Types =
       opts::dump::DumpTypeStats ? File.types() : File.ids();
-  for (Optional<TypeIndex> TI = Types.getFirst(); TI; TI = Types.getNext(*TI)) {
+  for (std::optional<TypeIndex> TI = Types.getFirst(); TI;
+       TI = Types.getNext(*TI)) {
     CVType Type = Types.getType(*TI);
     TypeStats.update(uint32_t(Type.kind()), Type.length());
   }
@@ -811,7 +693,7 @@ Error DumpOutputStyle::dumpUdtStats() {
       Kind = kNoneUdtKind;
     else if (UDT.Type.isSimple())
       Kind = kSimpleUdtKind;
-    else if (Optional<CVType> T = TpiTypes.tryGetType(UDT.Type)) {
+    else if (std::optional<CVType> T = TpiTypes.tryGetType(UDT.Type)) {
       Kind = T->kind();
       RecordSize = T->length();
     } else
@@ -1369,7 +1251,7 @@ static void dumpPartialTypeStream(LinePrinter &Printer,
       if (TI.isSimple()) {
         Printer.formatLine("{0} | {1}", fmt_align(I, AlignStyle::Right, Width),
                            Types.getTypeName(TI));
-      } else if (Optional<CVType> Type = Types.tryGetType(TI)) {
+      } else if (std::optional<CVType> Type = Types.tryGetType(TI)) {
         if (auto EC = codeview::visitTypeRecord(*Type, TI, V))
           Printer.formatLine("An error occurred dumping type record {0}: {1}",
                              TI, toString(std::move(EC)));
@@ -1604,8 +1486,19 @@ Error DumpOutputStyle::dumpModuleSymsForPdb() {
         Pipeline.addCallbackToPipeline(Dumper);
         CVSymbolVisitor Visitor(Pipeline);
         auto SS = ModS.getSymbolsSubstream();
-        if (auto EC =
-                Visitor.visitSymbolStream(ModS.getSymbolArray(), SS.Offset)) {
+        if (opts::Filters.SymbolOffset) {
+          CVSymbolVisitor::FilterOptions Filter;
+          Filter.SymbolOffset = opts::Filters.SymbolOffset;
+          Filter.ParentRecursiveDepth = opts::Filters.ParentRecurseDepth;
+          Filter.ChildRecursiveDepth = opts::Filters.ChildrenRecurseDepth;
+          if (auto EC = Visitor.visitSymbolStreamFiltered(ModS.getSymbolArray(),
+                                                          Filter)) {
+            P.formatLine("Error while processing symbol records.  {0}",
+                         toString(std::move(EC)));
+            return EC;
+          }
+        } else if (auto EC = Visitor.visitSymbolStream(ModS.getSymbolArray(),
+                                                       SS.Offset)) {
           P.formatLine("Error while processing symbol records.  {0}",
                        toString(std::move(EC)));
           return EC;
@@ -1625,7 +1518,8 @@ Error DumpOutputStyle::dumpTypeRefStats() {
   size_t TotalBytes = 0;
   size_t RefBytes = 0;
   auto &Types = File.types();
-  for (Optional<TypeIndex> TI = Types.getFirst(); TI; TI = Types.getNext(*TI)) {
+  for (std::optional<TypeIndex> TI = Types.getFirst(); TI;
+       TI = Types.getNext(*TI)) {
     CVType Type = File.types().getType(*TI);
     TotalBytes += Type.length();
     if (RefTracker->isTypeReferenced(*TI)) {
@@ -1959,8 +1853,11 @@ Error DumpOutputStyle::dumpSectionContribs() {
     ArrayRef<std::string> Names;
   };
 
-  std::vector<std::string> Names = getSectionNames(getPdb());
-  Visitor V(P, makeArrayRef(Names));
+  auto NamesOrErr = getSectionNames(getPdb());
+  if (!NamesOrErr)
+    return NamesOrErr.takeError();
+  ArrayRef<std::string> Names = *NamesOrErr;
+  Visitor V(P, Names);
   Dbi.visitSectionContributions(V);
   return Error::success();
 }

@@ -20,15 +20,15 @@
 #include "lldb/Utility/StructuredData.h"
 #include "lldb/Utility/XcodeSDK.h"
 #include "lldb/lldb-forward.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/VersionTuple.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -47,6 +47,18 @@ public:
   using PlatformPOSIX::PlatformPOSIX;
 
   ~PlatformDarwin() override;
+
+  static lldb::PlatformSP CreateInstance(bool force, const ArchSpec *arch);
+
+  static void DebuggerInitialize(lldb_private::Debugger &debugger);
+  
+  static void Initialize();
+
+  static void Terminate();
+
+  static llvm::StringRef GetPluginNameStatic() { return "darwin"; }
+
+  static llvm::StringRef GetDescriptionStatic();
 
   Status PutFile(const FileSpec &source, const FileSpec &destination,
                  uint32_t uid = UINT32_MAX, uint32_t gid = UINT32_MAX) override;
@@ -75,7 +87,7 @@ public:
 
   void
   ARMGetSupportedArchitectures(std::vector<ArchSpec> &archs,
-                               llvm::Optional<llvm::Triple::OSType> os = {});
+                               std::optional<llvm::Triple::OSType> os = {});
 
   void x86GetSupportedArchitectures(std::vector<ArchSpec> &archs);
 
@@ -96,6 +108,8 @@ public:
   FileSpec LocateExecutable(const char *basename) override;
 
   Status LaunchProcess(ProcessLaunchInfo &launch_info) override;
+  
+  Args GetExtraStartupCommands() override;
 
   static std::tuple<llvm::VersionTuple, llvm::StringRef>
   ParseVersionBuildDir(llvm::StringRef str);
@@ -140,14 +154,13 @@ protected:
   ///     \b nullptr if process has no crash information annotations.
   StructuredData::ArraySP ExtractCrashInfoAnnotations(Process &process);
 
+  /// Extract the `Application Specific Information` messages from a crash
+  /// report.
+  StructuredData::DictionarySP ExtractAppSpecificInfo(Process &process);
+
   void ReadLibdispatchOffsetsAddress(Process *process);
 
   void ReadLibdispatchOffsets(Process *process);
-
-  virtual Status GetSharedModuleWithLocalCache(
-      const ModuleSpec &module_spec, lldb::ModuleSP &module_sp,
-      const FileSpecList *module_search_paths_ptr,
-      llvm::SmallVectorImpl<lldb::ModuleSP> *old_modules, bool *did_create_ptr);
 
   virtual bool CheckLocalSharedCache() const { return IsHost(); }
 

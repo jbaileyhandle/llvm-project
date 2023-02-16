@@ -27,7 +27,8 @@ def ThunderX2T99Model : SchedMachineModel {
 
   list<Predicate> UnsupportedFeatures = !listconcat(SVEUnsupported.F,
                                                     PAUnsupported.F,
-                                                    SMEUnsupported.F);
+                                                    SMEUnsupported.F,
+                                                    [HasMTE]);
   // FIXME: Remove when all errors have been fixed.
   let FullInstRWOverlapCheck = 0;
 }
@@ -435,6 +436,7 @@ def : InstRW<[WriteI],
                        "CSNEG(W|X)r")>;
 
 def : InstRW<[WriteI], (instrs COPY)>;
+def : InstRW<[WriteI], (instrs PRED_COPY)>;
 
 // ALU, extend and/or shift
 def : WriteRes<WriteISReg,   [THX2T99I012]> {

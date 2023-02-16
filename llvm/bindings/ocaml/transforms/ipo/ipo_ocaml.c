@@ -20,20 +20,8 @@
 #include "caml/misc.h"
 
 /* [`Module] Llvm.PassManager.t -> unit */
-value llvm_add_argument_promotion(LLVMPassManagerRef PM) {
-  LLVMAddArgumentPromotionPass(PM);
-  return Val_unit;
-}
-
-/* [`Module] Llvm.PassManager.t -> unit */
 value llvm_add_constant_merge(LLVMPassManagerRef PM) {
   LLVMAddConstantMergePass(PM);
-  return Val_unit;
-}
-
-/* [`Module] Llvm.PassManager.t -> unit */
-value llvm_add_merge_functions(LLVMPassManagerRef PM) {
-  LLVMAddMergeFunctionsPass(PM);
   return Val_unit;
 }
 
@@ -50,12 +38,6 @@ value llvm_add_function_attrs(LLVMPassManagerRef PM) {
 }
 
 /* [`Module] Llvm.PassManager.t -> unit */
-value llvm_add_function_inlining(LLVMPassManagerRef PM) {
-  LLVMAddFunctionInliningPass(PM);
-  return Val_unit;
-}
-
-/* [`Module] Llvm.PassManager.t -> unit */
 value llvm_add_always_inliner(LLVMPassManagerRef PM) {
   LLVMAddAlwaysInlinerPass(PM);
   return Val_unit;
@@ -64,41 +46,5 @@ value llvm_add_always_inliner(LLVMPassManagerRef PM) {
 /* [`Module] Llvm.PassManager.t -> unit */
 value llvm_add_global_dce(LLVMPassManagerRef PM) {
   LLVMAddGlobalDCEPass(PM);
-  return Val_unit;
-}
-
-/* [`Module] Llvm.PassManager.t -> unit */
-value llvm_add_global_optimizer(LLVMPassManagerRef PM) {
-  LLVMAddGlobalOptimizerPass(PM);
-  return Val_unit;
-}
-
-/* [`Module] Llvm.PassManager.t -> unit */
-value llvm_add_prune_eh(LLVMPassManagerRef PM) {
-  LLVMAddPruneEHPass(PM);
-  return Val_unit;
-}
-
-/* [`Module] Llvm.PassManager.t -> unit */
-value llvm_add_ipsccp(LLVMPassManagerRef PM) {
-  LLVMAddIPSCCPPass(PM);
-  return Val_unit;
-}
-
-/* [`Module] Llvm.PassManager.t -> all_but_main:bool -> unit */
-value llvm_add_internalize(LLVMPassManagerRef PM, value AllButMain) {
-  LLVMAddInternalizePass(PM, Bool_val(AllButMain));
-  return Val_unit;
-}
-
-/* [`Module] Llvm.PassManager.t -> unit */
-value llvm_add_strip_dead_prototypes(LLVMPassManagerRef PM) {
-  LLVMAddStripDeadPrototypesPass(PM);
-  return Val_unit;
-}
-
-/* [`Module] Llvm.PassManager.t -> unit */
-value llvm_add_strip_symbols(LLVMPassManagerRef PM) {
-  LLVMAddStripSymbolsPass(PM);
   return Val_unit;
 }

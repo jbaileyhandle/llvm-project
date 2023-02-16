@@ -19,17 +19,17 @@
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
 #include "clang/Index/USRGeneration.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/YAMLParser.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <tuple>
 
@@ -220,14 +220,9 @@ createCrossTUIndexString(const llvm::StringMap<std::string> &Index) {
   return Result.str();
 }
 
-bool containsConst(const VarDecl *VD, const ASTContext &ACtx) {
+bool shouldImport(const VarDecl *VD, const ASTContext &ACtx) {
   CanQualType CT = ACtx.getCanonicalType(VD->getType());
-  if (!CT.isConstQualified()) {
-    const RecordType *RTy = CT->getAs<RecordType>();
-    if (!RTy || !RTy->hasConstFields())
-      return false;
-  }
-  return true;
+  return CT.isConstQualified() && VD->getType().isTrivialType(ACtx);
 }
 
 static bool hasBodyOrInit(const FunctionDecl *D, const FunctionDecl *&DefD) {
@@ -246,7 +241,7 @@ CrossTranslationUnitContext::CrossTranslationUnitContext(CompilerInstance &CI)
 
 CrossTranslationUnitContext::~CrossTranslationUnitContext() {}
 
-llvm::Optional<std::string>
+std::optional<std::string>
 CrossTranslationUnitContext::getLookupName(const NamedDecl *ND) {
   SmallString<128> DeclUSR;
   bool Ret = index::generateUSRForDecl(ND, DeclUSR);
@@ -272,7 +267,7 @@ CrossTranslationUnitContext::findDefInDeclContext(const DeclContext *DC,
     const T *ResultDecl;
     if (!ND || !hasBodyOrInit(ND, ResultDecl))
       continue;
-    llvm::Optional<std::string> ResultLookupName = getLookupName(ResultDecl);
+    std::optional<std::string> ResultLookupName = getLookupName(ResultDecl);
     if (!ResultLookupName || *ResultLookupName != LookupName)
       continue;
     return ResultDecl;
@@ -288,7 +283,7 @@ llvm::Expected<const T *> CrossTranslationUnitContext::getCrossTUDefinitionImpl(
   assert(!hasBodyOrInit(D) &&
          "D has a body or init in current translation unit!");
   ++NumGetCTUCalled;
-  const llvm::Optional<std::string> LookupName = getLookupName(D);
+  const std::optional<std::string> LookupName = getLookupName(D);
   if (!LookupName)
     return llvm::make_error<IndexError>(
         index_error_code::failed_to_generate_usr);
@@ -463,7 +458,7 @@ CrossTranslationUnitContext::ASTUnitStorage::getASTUnitForFunction(
       return llvm::make_error<IndexError>(index_error_code::missing_definition);
     }
 
-    // Search in the index for the filename where the definition of FuncitonName
+    // Search in the index for the filename where the definition of FunctionName
     // resides.
     if (llvm::Expected<ASTUnit *> FoundForFile =
             getASTUnitForFile(NameFileMap[FunctionName], DisplayCTUProgress)) {
@@ -740,20 +735,19 @@ CrossTranslationUnitContext::importDefinitionImpl(const T *D, ASTUnit *Unit) {
 
   auto ToDeclOrError = Importer.Import(D);
   if (!ToDeclOrError) {
-    handleAllErrors(ToDeclOrError.takeError(),
-                    [&](const ImportError &IE) {
-                      switch (IE.Error) {
-                      case ImportError::NameConflict:
-                        ++NumNameConflicts;
-                         break;
-                      case ImportError::UnsupportedConstruct:
-                        ++NumUnsupportedNodeFound;
-                        break;
-                      case ImportError::Unknown:
-                        llvm_unreachable("Unknown import error happened.");
-                        break;
-                      }
-                    });
+    handleAllErrors(ToDeclOrError.takeError(), [&](const ASTImportError &IE) {
+      switch (IE.Error) {
+      case ASTImportError::NameConflict:
+        ++NumNameConflicts;
+        break;
+      case ASTImportError::UnsupportedConstruct:
+        ++NumUnsupportedNodeFound;
+        break;
+      case ASTImportError::Unknown:
+        llvm_unreachable("Unknown import error happened.");
+        break;
+      }
+    });
     return llvm::make_error<IndexError>(index_error_code::failed_import);
   }
   auto *ToDecl = cast<T>(*ToDeclOrError);
@@ -799,11 +793,24 @@ CrossTranslationUnitContext::getOrCreateASTImporter(ASTUnit *Unit) {
   return *NewImporter;
 }
 
-llvm::Optional<clang::MacroExpansionContext>
+std::optional<clang::MacroExpansionContext>
 CrossTranslationUnitContext::getMacroExpansionContextForSourceLocation(
     const clang::SourceLocation &ToLoc) const {
   // FIXME: Implement: Record such a context for every imported ASTUnit; lookup.
-  return llvm::None;
+  return std::nullopt;
+}
+
+bool CrossTranslationUnitContext::isImportedAsNew(const Decl *ToDecl) const {
+  if (!ImporterSharedSt)
+    return false;
+  return ImporterSharedSt->isNewDecl(const_cast<Decl *>(ToDecl));
+}
+
+bool CrossTranslationUnitContext::hasError(const Decl *ToDecl) const {
+  if (!ImporterSharedSt)
+    return false;
+  return static_cast<bool>(
+      ImporterSharedSt->getImportDeclErrorIfAny(const_cast<Decl *>(ToDecl)));
 }
 
 } // namespace cross_tu

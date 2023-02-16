@@ -37,6 +37,7 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Type.h"
+#include <optional>
 
 using namespace clang;
 using namespace CodeGen;
@@ -90,6 +91,7 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
   case Decl::Export:
   case Decl::ObjCPropertyImpl:
   case Decl::FileScopeAsm:
+  case Decl::TopLevelStmt:
   case Decl::Friend:
   case Decl::FriendTemplate:
   case Decl::Block:
@@ -100,6 +102,7 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
   case Decl::ObjCTypeParam:
   case Decl::Binding:
   case Decl::UnresolvedUsingIfExists:
+  case Decl::HLSLBuffer:
     llvm_unreachable("Declaration should not be in declstmts!");
   case Decl::Record:    // struct/union/class X;
   case Decl::CXXRecord: // struct/union/class X; [C++]
@@ -118,6 +121,7 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
   case Decl::Label:        // __label__ x;
   case Decl::Import:
   case Decl::MSGuid:    // __declspec(uuid("..."))
+  case Decl::UnnamedGlobalConstant:
   case Decl::TemplateParamObject:
   case Decl::OMPThreadPrivate:
   case Decl::OMPAllocate:
@@ -125,6 +129,7 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
   case Decl::OMPRequires:
   case Decl::Empty:
   case Decl::Concept:
+  case Decl::ImplicitConceptSpecialization:
   case Decl::LifetimeExtendedTemporary:
   case Decl::RequiresExprBody:
     // None of these decls require codegen support.
@@ -341,6 +346,8 @@ CodeGenFunction::AddInitializerToStaticVarDecl(const VarDecl &D,
   if (!Init) {
     if (!getLangOpts().CPlusPlus)
       CGM.ErrorUnsupported(D.getInit(), "constant l-value expression");
+    else if (D.hasFlexibleArrayInit(getContext()))
+      CGM.ErrorUnsupported(D.getInit(), "flexible array initializer");
     else if (HaveInsertPoint()) {
       // Since we have a static initializer, this global variable can't
       // be constant.
@@ -350,6 +357,14 @@ CodeGenFunction::AddInitializerToStaticVarDecl(const VarDecl &D,
     }
     return GV;
   }
+
+#ifndef NDEBUG
+  CharUnits VarSize = CGM.getContext().getTypeSizeInChars(D.getType()) +
+                      D.getFlexibleArrayInitChars(getContext());
+  CharUnits CstSize = CharUnits::fromQuantity(
+      CGM.getDataLayout().getTypeAllocSize(Init->getType()));
+  assert(VarSize == CstSize && "Emitted constant has unexpected size");
+#endif
 
   // The initializer may differ in type from the global. Rewrite
   // the global to match the initializer.  (We have to do this
@@ -468,7 +483,7 @@ void CodeGenFunction::EmitStaticVarDecl(const VarDecl &D,
   LocalDeclMap.find(&D)->second = Address(castedAddr, elemTy, alignment);
   CGM.setStaticLocalDeclAddress(&D, castedAddr);
 
-  CGM.getSanitizerMetadata()->reportGlobalToASan(var, D);
+  CGM.getSanitizerMetadata()->reportGlobal(var, D);
 
   // Emit global variable debug descriptor for static vars.
   CGDebugInfo *DI = getDebugInfo();
@@ -750,7 +765,7 @@ void CodeGenFunction::EmitNullabilityCheck(LValue LHS, llvm::Value *RHS,
   if (!SanOpts.has(SanitizerKind::NullabilityAssign))
     return;
 
-  auto Nullability = LHS.getType()->getNullability(getContext());
+  auto Nullability = LHS.getType()->getNullability();
   if (!Nullability || *Nullability != NullabilityKind::NonNull)
     return;
 
@@ -834,7 +849,7 @@ void CodeGenFunction::EmitScalarInit(const Expr *init, const ValueDecl *D,
     // If D is pseudo-strong, treat it like __unsafe_unretained here. This means
     // that we omit the retain, and causes non-autoreleased return values to be
     // immediately released.
-    LLVM_FALLTHROUGH;
+    [[fallthrough]];
   }
 
   case Qualifiers::OCL_ExplicitNone:
@@ -2448,6 +2463,7 @@ namespace {
 /// for the specified parameter and set up LocalDeclMap.
 void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
                                    unsigned ArgNo) {
+  bool NoDebugInfo = false;
   // FIXME: Why isn't ImplicitParamDecl a ParmVarDecl?
   assert((isa<ParmVarDecl>(D) || isa<ImplicitParamDecl>(D)) &&
          "Invalid argument to EmitParmDecl");
@@ -2467,24 +2483,47 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
       setBlockContextParameter(IPD, ArgNo, V);
       return;
     }
+    // Suppressing debug info for ThreadPrivateVar parameters, else it hides
+    // debug info of TLS variables.
+    NoDebugInfo =
+        (IPD->getParameterKind() == ImplicitParamDecl::ThreadPrivateVar);
   }
 
   Address DeclPtr = Address::invalid();
-  Address AllocaPtr = Address::invalid();
-  Address DebugAddr = Address::invalid();
+  Address DebugPtr = Address::invalid();
   bool DoStore = false;
   bool IsScalar = hasScalarEvaluationKind(Ty);
+  bool UseIndirectDebugAddress = false;
+
   // If we already have a pointer to the argument, reuse the input pointer.
   if (Arg.isIndirect()) {
     // If we have a prettier pointer type at this point, bitcast to that.
-    DeclPtr = DebugAddr = Arg.getIndirectAddress();
+    DeclPtr = Arg.getIndirectAddress();
+    if (auto DebugAddr = Arg.getDebugAddr())
+      DebugPtr = *DebugAddr;
+    else
+      DebugPtr = DeclPtr;
     DeclPtr = Builder.CreateElementBitCast(DeclPtr, ConvertTypeForMem(Ty),
                                            D.getName());
     // Indirect argument is in alloca address space, which may be different
     // from the default address space.
     auto AllocaAS = CGM.getASTAllocaAddressSpace();
     auto *V = DeclPtr.getPointer();
-    AllocaPtr = DeclPtr;
+
+    DebugPtr = DeclPtr;
+
+    // For truly ABI indirect arguments -- those that are not `byval` -- store
+    // the address of the argument on the stack to preserve debug information.
+    ABIArgInfo ArgInfo = CurFnInfo->arguments()[ArgNo - 1].info;
+    if (ArgInfo.isIndirect())
+      UseIndirectDebugAddress = !ArgInfo.getIndirectByVal();
+    if (UseIndirectDebugAddress) {
+      auto PtrTy = getContext().getPointerType(Ty);
+      DebugPtr = CreateMemTemp(PtrTy, getContext().getTypeAlignInChars(PtrTy),
+                                D.getName() + ".indirect_addr");
+      EmitStoreOfScalar(V, DebugPtr, /* Volatile */ false, PtrTy);
+    }
+
     auto SrcLangAS = getLangOpts().OpenCL ? LangAS::opencl_private : AllocaAS;
     auto DestLangAS =
         getLangOpts().OpenCL ? LangAS::opencl_private : LangAS::Default;
@@ -2519,12 +2558,11 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
             ? CGM.getOpenMPRuntime().getAddressOfLocalVariable(*this, &D)
             : Address::invalid();
     if (getLangOpts().OpenMP && OpenMPLocalAddr.isValid()) {
-      DeclPtr = DebugAddr = OpenMPLocalAddr;
-      AllocaPtr = DeclPtr;
+      DeclPtr = DebugPtr = OpenMPLocalAddr;
     } else {
       // Otherwise, create a temporary to hold the value.
       DeclPtr = CreateMemTemp(Ty, getContext().getDeclAlign(&D),
-                              D.getName() + ".addr", &DebugAddr);
+                              D.getName() + ".addr", &DebugPtr);
     }
     DoStore = true;
   }
@@ -2598,9 +2636,10 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
 
   // Emit debug info for param declarations in non-thunk functions.
   if (CGDebugInfo *DI = getDebugInfo()) {
-    if (CGM.getCodeGenOpts().hasReducedDebugInfo() && !CurFuncIsThunk) {
+    if (CGM.getCodeGenOpts().hasReducedDebugInfo() && !CurFuncIsThunk &&
+        !NoDebugInfo) {
       llvm::DILocalVariable *DILocalVar = DI->EmitDeclareOfArgVariable(
-          &D, DebugAddr.getPointer(), ArgNo, Builder);
+          &D, DebugPtr.getPointer(), ArgNo, Builder, UseIndirectDebugAddress);
       if (const auto *Var = dyn_cast_or_null<ParmVarDecl>(&D))
         DI->getParamDbgMappings().insert({Var, DILocalVar});
     }
@@ -2613,7 +2652,7 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
   // function satisfy their nullability preconditions. This makes it necessary
   // to emit null checks for args in the function body itself.
   if (requiresReturnValueNullabilityCheck()) {
-    auto Nullability = Ty->getNullability(getContext());
+    auto Nullability = Ty->getNullability();
     if (Nullability && *Nullability == NullabilityKind::NonNull) {
       SanitizerScope SanScope(this);
       RetValNullabilityPrecondition =
@@ -2694,4 +2733,23 @@ void CodeGenModule::EmitOMPAllocateDecl(const OMPAllocateDecl *D) {
     DummyGV->replaceAllUsesWith(NewPtrForOldDecl);
     DummyGV->eraseFromParent();
   }
+}
+
+std::optional<CharUnits>
+CodeGenModule::getOMPAllocateAlignment(const VarDecl *VD) {
+  if (const auto *AA = VD->getAttr<OMPAllocateDeclAttr>()) {
+    if (Expr *Alignment = AA->getAlignment()) {
+      unsigned UserAlign =
+          Alignment->EvaluateKnownConstInt(getContext()).getExtValue();
+      CharUnits NaturalAlign =
+          getNaturalTypeAlignment(VD->getType().getNonReferenceType());
+
+      // OpenMP5.1 pg 185 lines 7-10
+      //   Each item in the align modifier list must be aligned to the maximum
+      //   of the specified alignment and the type's natural alignment.
+      return CharUnits::fromQuantity(
+          std::max<unsigned>(UserAlign, NaturalAlign.getQuantity()));
+    }
+  }
+  return std::nullopt;
 }

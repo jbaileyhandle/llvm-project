@@ -26,35 +26,28 @@ Non-comprehensive list of changes in this release
 ELF Improvements
 ----------------
 
-* ``-z pack-relative-relocs`` is now available to support ``DT_RELR`` for glibc 2.36+.
-  (`D120701 <https://reviews.llvm.org/D120701>`_)
+* ``ELFCOMPRESS_ZSTD`` compressed input sections are now supported.
+  (`D129406 <https://reviews.llvm.org/D129406>`_)
+* ``--compress-debug-sections=zstd`` is now available to compress debug
+  sections with zstd (``ELFCOMPRESS_ZSTD``).
+  (`D133548 <https://reviews.llvm.org/D133548>`_)
+* ``--no-warnings``/``-w`` is now available to suppress warnings.
+  (`D136569 <https://reviews.llvm.org/D136569>`_)
+* ``DT_RISCV_VARIANT_CC`` is now produced if at least one ``R_RISCV_JUMP_SLOT``
+  relocation references a symbol with the ``STO_RISCV_VARIANT_CC`` bit.
+  (`D107951 <https://reviews.llvm.org/D107951>`_)
 
 Breaking changes
 ----------------
 
-* The GNU ld incompatible ``--no-define-common`` has been removed.
-* The obscure ``-dc``/``-dp`` options have been removed.
-* ``-d`` is now ignored.
-* If a prevailing COMDAT group defines STB_WEAK symbol, having a STB_GLOBAL symbol in a non-prevailing group is now rejected with a diagnostic.
-  (`D120626 <https://reviews.llvm.org/D120626>`_)
-
 COFF Improvements
 -----------------
-
-* Added autodetection of MSVC toolchain, a la clang-cl.  Also added /winsysroot
-  support for explicit specification of MSVC toolchain location.
-  (`D118070 <https://reviews.llvm.org/D118070>`_)
-* ...
 
 MinGW Improvements
 ------------------
 
-* ...
-
 MachO Improvements
 ------------------
-
-* Item 1.
 
 WebAssembly Improvements
 ------------------------

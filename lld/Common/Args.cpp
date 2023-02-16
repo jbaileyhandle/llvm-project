@@ -11,8 +11,10 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/Path.h"
+#include "llvm/TargetParser/TargetParser.h"
 
 using namespace llvm;
 using namespace lld;
@@ -20,6 +22,21 @@ using namespace lld;
 // TODO(sbc): Remove this once CGOptLevel can be set completely based on bitcode
 // function metadata.
 CodeGenOpt::Level lld::args::getCGOptLevel(int optLevelLTO) {
+  // TODO(slinder1): Workaround for HeterogeneousDWARF to support `-fgpu-rdc
+  // -O0 -g`. Remove this when we support higher optimization levels.
+  if (llvm::AMDGPU::parseArchAMDGCN(llvm::codegen::getCPUStr())) {
+    switch (optLevelLTO) {
+    case 0:
+      return CodeGenOpt::None;
+    case 1:
+      return CodeGenOpt::Less;
+    case 2:
+      return CodeGenOpt::Default;
+    case 3:
+      return CodeGenOpt::Aggressive;
+    }
+    llvm_unreachable("Invalid optimization level");
+  }
   if (optLevelLTO == 3)
     return CodeGenOpt::Aggressive;
   assert(optLevelLTO < 3);
@@ -54,8 +71,9 @@ int64_t lld::args::getHex(opt::InputArgList &args, unsigned key,
   return ::getInteger(args, key, Default, 16);
 }
 
-std::vector<StringRef> lld::args::getStrings(opt::InputArgList &args, int id) {
-  std::vector<StringRef> v;
+SmallVector<StringRef, 0> lld::args::getStrings(opt::InputArgList &args,
+                                                int id) {
+  SmallVector<StringRef, 0> v;
   for (auto *arg : args.filtered(id))
     v.push_back(arg->getValue());
   return v;

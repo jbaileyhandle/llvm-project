@@ -193,11 +193,11 @@ typedef struct T12 {
 T12 t12;
 __attribute__((cmse_nonsecure_entry)) T12 f12(void) { return t12; }
 // CHECK:    define {{.*}} @f12()
-// CHECK-LE-OPT:  %[[V0:.*]] = load i24, i24* bitcast (%struct.T12* @t12
+// CHECK-LE-OPT:  %[[V0:.*]] = load i24, ptr @t12
 // CHECK-LE-OPT:  %[[R:.*]] = zext i24 %[[V0]] to i32
 // CHECK-LE-NOPT: %[[R:.*]] = and i32 %{{.*}}, 16777215
 
-// CHECK-BE-OPT:  %[[V0:.*]] = load i24, i24* bitcast (%struct.T12* @t12
+// CHECK-BE-OPT:  %[[V0:.*]] = load i24, ptr @t12
 // CHECK-BE-OPT:  %[[V1:.*]] = zext i24 %[[V0]] to i32
 // CHECK-BE-OPT:  %[[R:.*]] = shl nuw i32 %[[V1]], 8
 // CHECK:         ret i32 %[[R]]
@@ -212,11 +212,11 @@ typedef struct __attribute__((packed)) T13 {
 T13 t13;
 __attribute__((cmse_nonsecure_entry)) T13 f13(void) { return t13; }
 // CHECK:         define {{.*}} @f13()
-// CHECK-LE-OPT:  %[[V0:.*]] = load i24, i24* bitcast (%struct.T13* @t13
+// CHECK-LE-OPT:  %[[V0:.*]] = load i24, ptr @t13
 // CHECK-LE-OPT:  %[[R:.*]] = zext i24 %[[V0]] to i32
 // CHECK-LE-NOPT: %[[R:.*]] = and i32 %{{.*}}, 16777215
 
-// CHECK-BE-OPT:  %[[V0:.*]] = load i24, i24* bitcast (%struct.T13* @t13
+// CHECK-BE-OPT:  %[[V0:.*]] = load i24, ptr @t13
 // CHECK-BE-OPT:  %[[V1:.*]] = zext i24 %[[V0]] to i32
 // CHECK-BE-OPT:  %[[R:.*]] = shl nuw i32 %[[V1]], 8
 // CHECK:         ret i32 %[[R]]
@@ -228,11 +228,12 @@ typedef struct __attribute__((packed)) T14 {
 
 T14 t14;
 __attribute__((cmse_nonsecure_entry)) T14 f14(void) { return t14; }
-// CHECK: define {{.*}} @f14()
-// CHECK: [[R:%.*]] = load
-// CHECK-LE-NOPT-NEXT: [[AND:%.+]] = and i32 [[R]], -1
-// CHECK-BE-NOPT-NEXT: [[AND:%.+]] = and i32 [[R]], -1
-// CHECK_NEXT: ret i32 [[AND]]
+// CHECK:         define {{.*}} @f14()
+// CHECK:         [[R:%.*]] = load
+// CHECK-LE-OPT:  ret i32 [[R]]
+// CHECK-LE-NOPT: [[AND:%.+]] = and i32 [[R]], -1
+// CHECK-LE-NOPT: ret i32 [[AND]]
+// CHECK-BE-OPT:  ret i32 [[R]]
 
 // LE: 1111..11 1111..11 11111111 11111111 0xfffff3f3/-3085
 // BE: 11..1111 11..1111 11111111 11111111 0xcfcfffff/-808452097

@@ -20,6 +20,7 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SetOperations.h"
 #include "llvm/ADT/SmallString.h"
+#include <optional>
 
 using namespace mlir;
 using namespace mlir::bufferization;
@@ -78,9 +79,9 @@ void BufferPlacementAllocs::build(Operation *op) {
     // Get allocation result.
     Value allocValue = allocateResultEffects[0].getValue();
     // Find the associated dealloc value and register the allocation entry.
-    llvm::Optional<Operation *> dealloc = memref::findDealloc(allocValue);
+    std::optional<Operation *> dealloc = memref::findDealloc(allocValue);
     // If the allocation has > 1 dealloc associated with it, skip handling it.
-    if (!dealloc.hasValue())
+    if (!dealloc)
       return;
     allocs.push_back(std::make_tuple(allocValue, *dealloc));
   });
@@ -131,7 +132,7 @@ bool BufferPlacementTransformationBase::isLoop(Operation *op) {
 
   // Start with all entry regions and test whether they induce a loop.
   SmallVector<RegionSuccessor, 2> successorRegions;
-  regionInterface.getSuccessorRegions(/*index=*/llvm::None, successorRegions);
+  regionInterface.getSuccessorRegions(/*index=*/std::nullopt, successorRegions);
   for (RegionSuccessor &regionEntry : successorRegions) {
     if (recurse(regionEntry.getSuccessor()))
       return true;
@@ -158,11 +159,10 @@ bufferization::getGlobalFor(arith::ConstantOp constantOp, uint64_t alignment) {
     auto globalOp = dyn_cast<memref::GlobalOp>(&op);
     if (!globalOp)
       continue;
-    if (!globalOp.initial_value().hasValue())
+    if (!globalOp.getInitialValue().has_value())
       continue;
-    uint64_t opAlignment =
-        globalOp.alignment().hasValue() ? globalOp.alignment().getValue() : 0;
-    Attribute initialValue = globalOp.initial_value().getValue();
+    uint64_t opAlignment = globalOp.getAlignment().value_or(0);
+    Attribute initialValue = globalOp.getInitialValue().value();
     if (opAlignment == alignment && initialValue == constantOp.getValue())
       return globalOp;
   }

@@ -49,11 +49,11 @@ public:
   bool Update() override {
     m_impl.Clear();
 
-    TypeSystem *type_system = m_backend.GetCompilerType().GetTypeSystem();
+    auto type_system = m_backend.GetCompilerType().GetTypeSystem();
     if (!type_system)
       return false;
 
-    TypeSystemClang *ast = ScratchTypeSystemClang::GetForTarget(
+    auto ast = ScratchTypeSystemClang::GetForTarget(
         *m_backend.GetExecutionContextRef().GetTargetSP());
     if (!ast)
       return false;
@@ -282,9 +282,17 @@ protected:
     };
 
     void Clear() {
+      switch (m_mode) {
+      case Mode::Inlined:
+        m_inlined.Clear();
+        break;
+      case Mode::Outsourced:
+        m_outsourced.Clear();
+        break;
+      case Mode::Invalid:
+        break;
+      }
       m_mode = Mode::Invalid;
-      m_inlined.Clear();
-      m_outsourced.Clear();
     }
 
     Impl() {}

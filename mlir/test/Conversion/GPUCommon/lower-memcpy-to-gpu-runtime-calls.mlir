@@ -3,12 +3,14 @@
 module attributes {gpu.container_module} {
 
   // CHECK: func @foo
-  func @foo(%dst : memref<7xf32, 1>, %src : memref<7xf32>) {
+  func.func @foo(%dst : memref<7xf32, 1>, %src : memref<7xf32>) {
     // CHECK: %[[t0:.*]] = llvm.call @mgpuStreamCreate
     %t0 = gpu.wait async
     // CHECK: %[[size_bytes:.*]] = llvm.ptrtoint
+    // CHECK-NOT: llvm.addrspacecast
     // CHECK: %[[src:.*]] = llvm.bitcast
-    // CHECK: %[[dst:.*]] = llvm.bitcast
+    // CHECK: %[[addr_cast:.*]] = llvm.addrspacecast
+    // CHECK: %[[dst:.*]] = llvm.bitcast %[[addr_cast]]
     // CHECK: llvm.call @mgpuMemcpy(%[[dst]], %[[src]], %[[size_bytes]], %[[t0]])
     %t1 = gpu.memcpy async [%t0] %dst, %src : memref<7xf32, 1>, memref<7xf32>
     // CHECK: llvm.call @mgpuStreamSynchronize(%[[t0]])

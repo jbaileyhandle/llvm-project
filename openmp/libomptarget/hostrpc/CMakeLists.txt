@@ -23,6 +23,7 @@ endif()
 
 if( DEVICELIBS_ROOT )
   set(ROCDL_INC_OCKL ${DEVICELIBS_ROOT}/ockl/inc)
+  set(ROCDL_INC_OCLC ${DEVICELIBS_ROOT}/oclc/inc)
   set(ROCDL_INC_OCML ${DEVICELIBS_ROOT}/ocml/inc)
   set(ROCDL_INC_IRIF ${DEVICELIBS_ROOT}/irif/inc)
 else()
@@ -31,7 +32,7 @@ else()
   #set(ROCDL ${CMAKE_CURRENT_SOURCE_DIR}/../../../../rocm-device-libs)
 endif()
 
-set(amdgpu_mcpus gfx700 gfx701 gfx801 gfx803 gfx900 gfx902 gfx906 gfx908 gfx90a gfx1030 gfx1031)
+set(amdgpu_mcpus gfx700 gfx701 gfx801 gfx803 gfx900 gfx902 gfx906 gfx908 gfx90a gfx90c gfx940 gfx1030 gfx1031 gfx1032 gfx1033 gfx1034 gfx1035 gfx1036 gfx1100 gfx1101 gfx1102 gfx1103)
 if (DEFINED LIBOMPTARGET_AMDGCN_GFXLIST)
   set(amdgpu_mcpus ${LIBOMPTARGET_AMDGCN_GFXLIST})
 endif()
@@ -63,6 +64,7 @@ foreach(mcpu ${amdgpu_mcpus})
     -x cl -Xclang -cl-std=CL2.0 -Xclang -finclude-default-header
     -target amdgcn-amd-amdhsa
     -I${ROCDL_INC_OCKL}
+    -I${ROCDL_INC_OCLC}
     -I${ROCDL_INC_OCML}
     -I${ROCDL_INC_IRIF}
     -I${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -90,7 +92,7 @@ foreach(mcpu ${amdgpu_mcpus})
   # extract device bc from the heterogeneous object file
   add_custom_command(
       OUTPUT ${bc_cpp_filename}
-      COMMAND ${CLANG_OFFLOAD_BUNDLER_TOOL} -type=o -targets=openmp-${triple}-${mcpu} -inputs=${obj_filename} -outputs=${bc_cpp_filename} -unbundle
+      COMMAND ${CLANG_OFFLOAD_BUNDLER_TOOL} -type=o -targets=openmp-${triple}-${mcpu} -input=${obj_filename} -output=${bc_cpp_filename} -unbundle
       DEPENDS ${obj_filename} ${clang_driver_runtime_depends})
 
   set(libhostrpc-bc ${CMAKE_BINARY_DIR}/libhostrpc-amdgcn-${mcpu}.bc)
@@ -111,4 +113,5 @@ endforeach()
 
 #set(triple "nvptx-nvidia-cuda")
 # Since libomptarget includes hostrpc, we only need to install hostrpc headers
-install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/hostrpc.h" DESTINATION include)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/hostrpc.h" DESTINATION ${DEVEL_PACKAGE}include)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/disable_dynamic_devmem.ll" DESTINATION ${DEVEL_PACKAGE}lib)

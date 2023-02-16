@@ -175,9 +175,22 @@ class LargeChunkHeader {
                : nullptr;
   }
 
-  void Set(AsanChunk *p) {
+  void Set(AsanChunk *p, DeviceAllocationInfo *da_info = nullptr) {
     if (p) {
       chunk_header = p;
+
+      // remapped_device_page is stored right after chunk_header. We don't
+      // declare it formally in the data structure otherwise some sanity check
+      // will fail for host allocations, where remapped_device_page is really
+      // meaningless.
+      // For device memory, we always have enough space in LargeChunkHeader to
+      // store remapped_device_page because the alignment is always kPageSize_
+      if (da_info) {
+        void **remapped_device_page = reinterpret_cast<void **>(
+            reinterpret_cast<uptr>(&chunk_header) + sizeof(AsanChunk *));
+        *remapped_device_page = da_info->remapped_device_page;
+      }
+
       atomic_store(&magic, kAllocBegMagic, memory_order_release);
       return;
     }
@@ -187,6 +200,14 @@ class LargeChunkHeader {
                                         memory_order_release)) {
       CHECK_EQ(old, kAllocBegMagic);
     }
+  }
+
+  void *GetRemappedDevicePage() const {
+    void **remapped_device_page = reinterpret_cast<void **>(
+      reinterpret_cast<uptr>(&chunk_header) + sizeof(AsanChunk *));
+    return atomic_load(&magic, memory_order_acquire) == kAllocBegMagic
+               ? *remapped_device_page
+               : nullptr;
   }
 };
 
@@ -198,7 +219,13 @@ struct QuarantineCallback {
 
   void Recycle(AsanChunk *m) {
     void *p = get_allocator().GetBlockBegin(m);
+    DeviceAllocationInfo da_info;
     if (p != m) {
+      // For host allocations, GetRemappedDevicePage() doesn't return valid
+      // values for remapped_device_page, but it shouldn't matter because host
+      // memory Deallocate() calls won't use da_info
+      da_info.remapped_device_page =
+        reinterpret_cast<LargeChunkHeader *>(p)->GetRemappedDevicePage();
       // Clear the magic value, as allocator internals may overwrite the
       // contents of deallocated chunk, confusing GetAsanChunk lookup.
       reinterpret_cast<LargeChunkHeader *>(p)->Set(nullptr);
@@ -218,7 +245,7 @@ struct QuarantineCallback {
     thread_stats.real_frees++;
     thread_stats.really_freed += m->UsedSize();
 
-    get_allocator().Deallocate(cache_, p);
+    get_allocator().Deallocate(cache_, p, &da_info);
   }
 
   void *Allocate(uptr size) {
@@ -600,9 +627,9 @@ struct Allocator {
     atomic_store(&m->chunk_state, CHUNK_ALLOCATED, memory_order_release);
     if (alloc_beg != chunk_beg) {
       CHECK_LE(alloc_beg + sizeof(LargeChunkHeader), chunk_beg);
-      reinterpret_cast<LargeChunkHeader *>(alloc_beg)->Set(m);
+      reinterpret_cast<LargeChunkHeader *>(alloc_beg)->Set(m, da_info);
     }
-    ASAN_MALLOC_HOOK(res, size);
+    RunMallocHooks(res, size);
     return res;
   }
 
@@ -683,7 +710,7 @@ struct Allocator {
       return;
     }
 
-    ASAN_FREE_HOOK(ptr);
+    RunFreeHooks(ptr);
 
     // Must mark the chunk as quarantined before any changes to its metadata.
     // Do not quarantine given chunk if we failed to set CHUNK_QUARANTINE flag.
@@ -808,8 +835,8 @@ struct Allocator {
     sptr offset = 0;
     if (!m1 || AsanChunkView(m1).AddrIsAtLeft(addr, 1, &offset)) {
       // The address is in the chunk's left redzone, so maybe it is actually
-      // a right buffer overflow from the other chunk to the left.
-      // Search a bit to the left to see if there is another chunk.
+      // a right buffer overflow from the other chunk before.
+      // Search a bit before to see if there is another chunk.
       AsanChunk *m2 = nullptr;
       for (uptr l = 1; l < GetPageSizeCached(); l++) {
         m2 = GetAsanChunkByAddr(addr - l);
@@ -1099,8 +1126,14 @@ uptr PointsIntoChunk(void *p) {
 }
 
 uptr GetUserBegin(uptr chunk) {
+  // FIXME: All usecases provide chunk address, GetAsanChunkByAddrFastLocked is
+  // not needed.
   __asan::AsanChunk *m = __asan::instance.GetAsanChunkByAddrFastLocked(chunk);
   return m ? m->Beg() : 0;
+}
+
+uptr GetUserAddr(uptr chunk) {
+  return chunk;
 }
 
 LsanMetadata::LsanMetadata(uptr chunk) {
@@ -1158,33 +1191,6 @@ IgnoreObjectResult IgnoreObjectLocked(const void *p) {
   return kIgnoreObjectSuccess;
 }
 
-void GetAdditionalThreadContextPtrs(ThreadContextBase *tctx, void *ptrs) {
-  // Look for the arg pointer of threads that have been created or are running.
-  // This is necessary to prevent false positive leaks due to the AsanThread
-  // holding the only live reference to a heap object.  This can happen because
-  // the `pthread_create()` interceptor doesn't wait for the child thread to
-  // start before returning and thus loosing the the only live reference to the
-  // heap object on the stack.
-
-  __asan::AsanThreadContext *atctx =
-      reinterpret_cast<__asan::AsanThreadContext *>(tctx);
-  __asan::AsanThread *asan_thread = atctx->thread;
-
-  // Note ThreadStatusRunning is required because there is a small window where
-  // the thread status switches to `ThreadStatusRunning` but the `arg` pointer
-  // still isn't on the stack yet.
-  if (atctx->status != ThreadStatusCreated &&
-      atctx->status != ThreadStatusRunning)
-    return;
-
-  uptr thread_arg = reinterpret_cast<uptr>(asan_thread->get_arg());
-  if (!thread_arg)
-    return;
-
-  auto ptrsVec = reinterpret_cast<InternalMmapVector<uptr> *>(ptrs);
-  ptrsVec->push_back(thread_arg);
-}
-
 }  // namespace __lsan
 
 // ---------------------- Interface ---------------- {{{1
@@ -1223,22 +1229,13 @@ int __asan_update_allocation_context(void* addr) {
   return instance.UpdateAllocationStack((uptr)addr, &stack);
 }
 
-#if !SANITIZER_SUPPORTS_WEAK_HOOKS
-// Provide default (no-op) implementation of malloc hooks.
-SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_malloc_hook,
-                             void *ptr, uptr size) {
-  (void)ptr;
-  (void)size;
-}
-
-SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_free_hook, void *ptr) {
-  (void)ptr;
-}
-#endif
-
 #if SANITIZER_AMDGPU
 DECLARE_REAL(hsa_status_t, hsa_amd_agents_allow_access, uint32_t num_agents,
   const hsa_agent_t *agents, const uint32_t *flags, const void *ptr)
+DECLARE_REAL(hsa_status_t, hsa_amd_memory_pool_allocate,
+  hsa_amd_memory_pool_t memory_pool, size_t size, uint32_t flags,
+  void **ptr)
+DECLARE_REAL(hsa_status_t, hsa_amd_memory_pool_free, void *ptr)
 
 namespace __asan {
 
@@ -1249,21 +1246,28 @@ hsa_status_t asan_hsa_amd_memory_pool_allocate(
   hsa_amd_memory_pool_t memory_pool, size_t size, uint32_t flags, void **ptr,
   BufferedStackTrace *stack) {
   AmdgpuAllocationInfo aa_info;
-  aa_info.alloc_func = reinterpret_cast<void *>(asan_hsa_amd_memory_pool_allocate);
+  aa_info.alloc_func =
+    reinterpret_cast<void *>(asan_hsa_amd_memory_pool_allocate);
+  aa_info.remap_first_device_page = true;
   aa_info.memory_pool = memory_pool;
   aa_info.size = size;
   aa_info.flags = flags;
   aa_info.ptr = nullptr;
-  SetErrnoOnNull(*ptr = instance.Allocate(size, kPageSize_, stack, FROM_MALLOC,
-                                          false, &aa_info));
+  SetErrnoOnNull(*ptr = instance.Allocate(size, kPageSize_, stack,
+                                          FROM_MALLOC, false, &aa_info));
   return aa_info.status;
 }
 
 hsa_status_t asan_hsa_amd_memory_pool_free(
   void *ptr,
   BufferedStackTrace *stack) {
-  instance.Deallocate(ptr, 0, 0, stack, FROM_MALLOC);
-  return HSA_STATUS_SUCCESS;
+  void *p = get_allocator().GetBlockBegin(ptr);
+  if (p) {
+    instance.Deallocate(ptr, 0, 0, stack, FROM_MALLOC);
+    return HSA_STATUS_SUCCESS;
+  } else {
+    return REAL(hsa_amd_memory_pool_free)(ptr);
+  }
 }
 
 hsa_status_t asan_hsa_amd_agents_allow_access(
@@ -1274,7 +1278,7 @@ hsa_status_t asan_hsa_amd_agents_allow_access(
   if (p) {
     return REAL(hsa_amd_agents_allow_access)(num_agents, agents, flags, p);
   } else {
-    return HSA_STATUS_ERROR_FATAL;
+    return REAL(hsa_amd_agents_allow_access)(num_agents, agents, flags, ptr);
   }
 }
 }  // namespace __asan

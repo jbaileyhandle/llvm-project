@@ -6,6 +6,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
+
 #ifndef _LIBCPP___RANGES_CONCEPTS_H
 #define _LIBCPP___RANGES_CONCEPTS_H
 
@@ -23,8 +24,12 @@
 #include <__ranges/enable_borrowed_range.h>
 #include <__ranges/enable_view.h>
 #include <__ranges/size.h>
+#include <__type_traits/add_pointer.h>
+#include <__type_traits/is_reference.h>
+#include <__type_traits/remove_cvref.h>
+#include <__type_traits/remove_reference.h>
+#include <__utility/declval.h>
 #include <initializer_list>
-#include <type_traits>
 
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
 #  pragma GCC system_header
@@ -54,7 +59,7 @@ namespace ranges {
   // `iterator_t` defined in <__ranges/access.h>
 
   template <range _Rp>
-  using sentinel_t = decltype(ranges::end(declval<_Rp&>()));
+  using sentinel_t = decltype(ranges::end(std::declval<_Rp&>()));
 
   template <range _Rp>
   using range_difference_t = iter_difference_t<iterator_t<_Rp>>;
@@ -68,14 +73,12 @@ namespace ranges {
   template <range _Rp>
   using range_rvalue_reference_t = iter_rvalue_reference_t<iterator_t<_Rp>>;
 
-#if !defined(_LIBCPP_HAS_NO_INCOMPLETE_RANGES)
-
   // [range.sized]
   template <class _Tp>
   concept sized_range = range<_Tp> && requires(_Tp& __t) { ranges::size(__t); };
 
   template<sized_range _Rp>
-  using range_size_t = decltype(ranges::size(declval<_Rp&>()));
+  using range_size_t = decltype(ranges::size(std::declval<_Rp&>()));
 
   // `disable_sized_range` defined in `<__ranges/size.h>`
 
@@ -134,8 +137,6 @@ namespace ranges {
      (!view<remove_cvref_t<_Tp>> &&
       (is_lvalue_reference_v<_Tp> ||
        (movable<remove_reference_t<_Tp>> && !__is_std_initializer_list<remove_cvref_t<_Tp>>))));
-
-#endif // !defined(_LIBCPP_HAS_NO_INCOMPLETE_RANGES)
 
 } // namespace ranges
 

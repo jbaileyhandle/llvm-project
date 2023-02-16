@@ -41,18 +41,18 @@ define %S @negate(%S* nocapture readonly %this) {
 ; CHECK-LABEL: negate:
 ; CHECK:       # %bb.0: # %entry
 ; CHECK-NEXT:    movq %rdi, %rax
-; CHECK-NEXT:    xorl %r8d, %r8d
+; CHECK-NEXT:    xorl %ecx, %ecx
 ; CHECK-NEXT:    xorl %edx, %edx
 ; CHECK-NEXT:    subq (%rsi), %rdx
 ; CHECK-NEXT:    movl $0, %edi
 ; CHECK-NEXT:    sbbq 8(%rsi), %rdi
-; CHECK-NEXT:    movl $0, %ecx
-; CHECK-NEXT:    sbbq 16(%rsi), %rcx
-; CHECK-NEXT:    sbbq 24(%rsi), %r8
+; CHECK-NEXT:    movl $0, %r8d
+; CHECK-NEXT:    sbbq 16(%rsi), %r8
+; CHECK-NEXT:    sbbq 24(%rsi), %rcx
 ; CHECK-NEXT:    movq %rdx, (%rax)
 ; CHECK-NEXT:    movq %rdi, 8(%rax)
-; CHECK-NEXT:    movq %rcx, 16(%rax)
-; CHECK-NEXT:    movq %r8, 24(%rax)
+; CHECK-NEXT:    movq %r8, 16(%rax)
+; CHECK-NEXT:    movq %rcx, 24(%rax)
 ; CHECK-NEXT:    retq
 entry:
   %0 = getelementptr inbounds %S, %S* %this, i64 0, i32 0, i64 0
@@ -94,25 +94,25 @@ define %S @sub(%S* nocapture readonly %this, %S %arg.b) {
 ; CHECK-LABEL: sub:
 ; CHECK:       # %bb.0: # %entry
 ; CHECK-NEXT:    movq %rdi, %rax
-; CHECK-NEXT:    movq (%rsi), %r10
-; CHECK-NEXT:    movq 8(%rsi), %rdi
-; CHECK-NEXT:    subq %rdx, %r10
+; CHECK-NEXT:    movq (%rsi), %rdi
+; CHECK-NEXT:    movq 8(%rsi), %r10
+; CHECK-NEXT:    subq %rdx, %rdi
 ; CHECK-NEXT:    setae %dl
 ; CHECK-NEXT:    addb $-1, %dl
-; CHECK-NEXT:    adcq $0, %rdi
-; CHECK-NEXT:    setb %dl
-; CHECK-NEXT:    movzbl %dl, %r11d
-; CHECK-NEXT:    notq %rcx
-; CHECK-NEXT:    addq %rdi, %rcx
-; CHECK-NEXT:    adcq 16(%rsi), %r11
+; CHECK-NEXT:    adcq $0, %r10
 ; CHECK-NEXT:    setb %dl
 ; CHECK-NEXT:    movzbl %dl, %edx
+; CHECK-NEXT:    notq %rcx
+; CHECK-NEXT:    addq %r10, %rcx
+; CHECK-NEXT:    adcq 16(%rsi), %rdx
+; CHECK-NEXT:    setb %r10b
+; CHECK-NEXT:    movzbl %r10b, %r10d
 ; CHECK-NEXT:    notq %r8
-; CHECK-NEXT:    addq %r11, %r8
-; CHECK-NEXT:    adcq 24(%rsi), %rdx
+; CHECK-NEXT:    addq %rdx, %r8
+; CHECK-NEXT:    adcq 24(%rsi), %r10
 ; CHECK-NEXT:    notq %r9
-; CHECK-NEXT:    addq %rdx, %r9
-; CHECK-NEXT:    movq %r10, (%rax)
+; CHECK-NEXT:    addq %r10, %r9
+; CHECK-NEXT:    movq %rdi, (%rax)
 ; CHECK-NEXT:    movq %rcx, 8(%rax)
 ; CHECK-NEXT:    movq %r8, 16(%rax)
 ; CHECK-NEXT:    movq %r9, 24(%rax)
@@ -312,16 +312,15 @@ define { i64, i64, i1 } @subcarry_2x64_add_reversed(i64 %x0, i64 %x1, i64 %y0, i
 ; CHECK-LABEL: subcarry_2x64_add_reversed:
 ; CHECK:       # %bb.0:
 ; CHECK-NEXT:    movq %rdi, %rax
-; CHECK-NEXT:    xorl %edi, %edi
+; CHECK-NEXT:    movq %rsi, %rdi
+; CHECK-NEXT:    subq %rcx, %rdi
 ; CHECK-NEXT:    subq %rdx, %rax
-; CHECK-NEXT:    setb %dil
-; CHECK-NEXT:    movq %rsi, %rdx
-; CHECK-NEXT:    subq %rcx, %rdx
-; CHECK-NEXT:    subq %rdi, %rdx
-; CHECK-NEXT:    setb %dil
+; CHECK-NEXT:    sbbq $0, %rdi
+; CHECK-NEXT:    setb %r8b
 ; CHECK-NEXT:    cmpq %rcx, %rsi
-; CHECK-NEXT:    adcb $0, %dil
-; CHECK-NEXT:    movl %edi, %ecx
+; CHECK-NEXT:    adcb $0, %r8b
+; CHECK-NEXT:    movq %rdi, %rdx
+; CHECK-NEXT:    movl %r8d, %ecx
 ; CHECK-NEXT:    retq
   %t0 = call { i64, i1 } @llvm.usub.with.overflow.i64(i64 %x0, i64 %y0)
   %s0 = extractvalue { i64, i1 } %t0, 0
@@ -349,8 +348,7 @@ define { i64, i1 } @subcarry_fake_carry(i64 %a, i64 %b, i1 %carryin) {
 ; CHECK-LABEL: subcarry_fake_carry:
 ; CHECK:       # %bb.0:
 ; CHECK-NEXT:    movq %rdi, %rax
-; CHECK-NEXT:    andb $1, %dl
-; CHECK-NEXT:    addb $-1, %dl
+; CHECK-NEXT:    btl $0, %edx
 ; CHECK-NEXT:    sbbq %rsi, %rax
 ; CHECK-NEXT:    setb %dl
 ; CHECK-NEXT:    retq
@@ -602,23 +600,21 @@ define void @sub_U256_without_i128_or_recursive(%uint256* sret(%uint256) %0, %ui
 ; CHECK-LABEL: sub_U256_without_i128_or_recursive:
 ; CHECK:       # %bb.0:
 ; CHECK-NEXT:    movq %rdi, %rax
-; CHECK-NEXT:    movq (%rsi), %r9
-; CHECK-NEXT:    movq 8(%rsi), %r10
-; CHECK-NEXT:    subq (%rdx), %r9
-; CHECK-NEXT:    sbbq 8(%rdx), %r10
-; CHECK-NEXT:    setb %r8b
-; CHECK-NEXT:    movq 16(%rsi), %rcx
+; CHECK-NEXT:    movq (%rsi), %rcx
+; CHECK-NEXT:    movq 8(%rsi), %rdi
+; CHECK-NEXT:    movq 16(%rsi), %r8
 ; CHECK-NEXT:    movq 24(%rsi), %rsi
-; CHECK-NEXT:    xorl %edi, %edi
-; CHECK-NEXT:    subq 16(%rdx), %rcx
-; CHECK-NEXT:    setb %dil
+; CHECK-NEXT:    xorl %r9d, %r9d
+; CHECK-NEXT:    subq 16(%rdx), %r8
+; CHECK-NEXT:    setb %r9b
 ; CHECK-NEXT:    subq 24(%rdx), %rsi
-; CHECK-NEXT:    movzbl %r8b, %edx
-; CHECK-NEXT:    subq %rdx, %rcx
-; CHECK-NEXT:    sbbq %rdi, %rsi
-; CHECK-NEXT:    movq %r9, (%rax)
-; CHECK-NEXT:    movq %r10, 8(%rax)
-; CHECK-NEXT:    movq %rcx, 16(%rax)
+; CHECK-NEXT:    subq (%rdx), %rcx
+; CHECK-NEXT:    sbbq 8(%rdx), %rdi
+; CHECK-NEXT:    sbbq $0, %r8
+; CHECK-NEXT:    sbbq %r9, %rsi
+; CHECK-NEXT:    movq %rcx, (%rax)
+; CHECK-NEXT:    movq %rdi, 8(%rax)
+; CHECK-NEXT:    movq %r8, 16(%rax)
 ; CHECK-NEXT:    movq %rsi, 24(%rax)
 ; CHECK-NEXT:    retq
   %4 = getelementptr inbounds %uint256, %uint256* %1, i64 0, i32 0, i32 0
@@ -666,15 +662,15 @@ define void @sub_U256_without_i128_or_recursive(%uint256* sret(%uint256) %0, %ui
   ret void
 }
 
+; unsigned less than of two 2x64 integers
+; TODO: This should be optimized to cmp + sbb.
 define i1 @subcarry_ult_2x64(i64 %x0, i64 %x1, i64 %y0, i64 %y1) nounwind {
 ; CHECK-LABEL: subcarry_ult_2x64:
 ; CHECK:       # %bb.0:
-; CHECK-NEXT:    xorl %eax, %eax
-; CHECK-NEXT:    cmpq %rdx, %rdi
-; CHECK-NEXT:    setb %al
 ; CHECK-NEXT:    subq %rcx, %rsi
 ; CHECK-NEXT:    setb %cl
-; CHECK-NEXT:    cmpq %rax, %rsi
+; CHECK-NEXT:    cmpq %rdx, %rdi
+; CHECK-NEXT:    sbbq $0, %rsi
 ; CHECK-NEXT:    setb %al
 ; CHECK-NEXT:    orb %cl, %al
 ; CHECK-NEXT:    retq
@@ -685,4 +681,49 @@ define i1 @subcarry_ult_2x64(i64 %x0, i64 %x1, i64 %y0, i64 %y1) nounwind {
   %b11 = icmp ult i64 %d1, %b0z
   %b1 = or i1 %b10, %b11
   ret i1 %b1
+}
+
+; New version of subcarry_ult_2x64 after the InstCombine change
+; https://github.com/llvm/llvm-project/commit/926e7312b2f20f2f7b0a3d5ddbd29da5625507f3
+; This is also the result of "naive" implementation (x1 < y1) | ((x0 < y0) & (x1 == y1)).
+; C source: https://godbolt.org/z/W1qqvqGbr
+; TODO: This should be optimized to cmp + sbb.
+define i1 @subcarry_ult_2x64_2(i64 %x0, i64 %x1, i64 %y0, i64 %y1) nounwind {
+; CHECK-LABEL: subcarry_ult_2x64_2:
+; CHECK:       # %bb.0: # %entry
+; CHECK-NEXT:    cmpq %rdx, %rdi
+; CHECK-NEXT:    setb %dl
+; CHECK-NEXT:    cmpq %rcx, %rsi
+; CHECK-NEXT:    setb %cl
+; CHECK-NEXT:    sete %al
+; CHECK-NEXT:    andb %dl, %al
+; CHECK-NEXT:    orb %cl, %al
+; CHECK-NEXT:    retq
+entry:
+  %0 = icmp ult i64 %x0, %y0
+  %1 = icmp ult i64 %x1, %y1
+  %2 = icmp eq i64 %x1, %y1
+  %3 = and i1 %0, %2
+  %4 = or i1 %1, %3
+  ret i1 %4
+}
+
+; unsigned less than of 2x64 and i64 integers
+; The IR comes from C source that uses __builtin_subcl but also the naive version (x0 < y) & (x1 == 0).
+; https://godbolt.org/z/W1qqvqGbr
+; TODO: This should be optimized to cmp + sbb.
+define i1 @subcarry_ult_2x64_1x64(i64 %x0, i64 %x1, i64 %y) nounwind {
+; CHECK-LABEL: subcarry_ult_2x64_1x64:
+; CHECK:       # %bb.0: # %entry
+; CHECK-NEXT:    cmpq %rdx, %rdi
+; CHECK-NEXT:    setb %cl
+; CHECK-NEXT:    testq %rsi, %rsi
+; CHECK-NEXT:    sete %al
+; CHECK-NEXT:    andb %cl, %al
+; CHECK-NEXT:    retq
+entry:
+  %0 = icmp ult i64 %x0, %y
+  %1 = icmp eq i64 %x1, 0
+  %2 = and i1 %1, %0
+  ret i1 %2
 }

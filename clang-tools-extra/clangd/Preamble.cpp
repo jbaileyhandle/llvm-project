@@ -11,6 +11,7 @@
 #include "Config.h"
 #include "Headers.h"
 #include "SourceCode.h"
+#include "clang-include-cleaner/Record.h"
 #include "support/Logger.h"
 #include "support/ThreadsafeFS.h"
 #include "support/Trace.h"
@@ -32,7 +33,6 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
-#include "llvm/ADT/None.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
@@ -59,13 +59,18 @@ bool compileCommandsAreEqual(const tooling::CompileCommand &LHS,
                              const tooling::CompileCommand &RHS) {
   // We don't check for Output, it should not matter to clangd.
   return LHS.Directory == RHS.Directory && LHS.Filename == RHS.Filename &&
-         llvm::makeArrayRef(LHS.CommandLine).equals(RHS.CommandLine);
+         llvm::ArrayRef(LHS.CommandLine).equals(RHS.CommandLine);
 }
 
 class CppFilePreambleCallbacks : public PreambleCallbacks {
 public:
-  CppFilePreambleCallbacks(PathRef File, PreambleParsedCallback ParsedCallback)
-      : File(File), ParsedCallback(ParsedCallback) {}
+  CppFilePreambleCallbacks(
+      PathRef File, PreambleParsedCallback ParsedCallback,
+      PreambleBuildStats *Stats, bool ParseForwardingFunctions,
+      std::function<void(CompilerInstance &)> BeforeExecuteCallback)
+      : File(File), ParsedCallback(ParsedCallback), Stats(Stats),
+        ParseForwardingFunctions(ParseForwardingFunctions),
+        BeforeExecuteCallback(std::move(BeforeExecuteCallback)) {}
 
   IncludeStructure takeIncludes() { return std::move(Includes); }
 
@@ -73,6 +78,9 @@ public:
 
   std::vector<PragmaMark> takeMarks() { return std::move(Marks); }
 
+  include_cleaner::PragmaIncludes takePragmaIncludes() {
+    return std::move(Pragmas);
+  }
   CanonicalIncludes takeCanonicalIncludes() { return std::move(CanonIncludes); }
 
   bool isMainFileIncludeGuarded() const { return IsMainFileIncludeGuarded; }
@@ -88,6 +96,25 @@ public:
     IsMainFileIncludeGuarded =
         CI.getPreprocessor().getHeaderSearchInfo().isFileMultipleIncludeGuarded(
             MainFE);
+
+    if (Stats) {
+      const ASTContext &AST = CI.getASTContext();
+      Stats->BuildSize = AST.getASTAllocatedMemory();
+      Stats->BuildSize += AST.getSideTableAllocatedMemory();
+      Stats->BuildSize += AST.Idents.getAllocator().getTotalMemory();
+      Stats->BuildSize += AST.Selectors.getTotalMemory();
+
+      Stats->BuildSize += AST.getSourceManager().getContentCacheSize();
+      Stats->BuildSize += AST.getSourceManager().getDataStructureSizes();
+      Stats->BuildSize +=
+          AST.getSourceManager().getMemoryBufferSizes().malloc_bytes;
+
+      const Preprocessor &PP = CI.getPreprocessor();
+      Stats->BuildSize += PP.getTotalMemory();
+      if (PreprocessingRecord *PRec = PP.getPreprocessingRecord())
+        Stats->BuildSize += PRec->getTotalMemory();
+      Stats->BuildSize += PP.getHeaderSearchInfo().getTotalMemory();
+    }
   }
 
   void BeforeExecute(CompilerInstance &CI) override {
@@ -95,6 +122,11 @@ public:
     LangOpts = &CI.getLangOpts();
     SourceMgr = &CI.getSourceManager();
     Includes.collect(CI);
+    if (Config::current().Diagnostics.UnusedIncludes ==
+        Config::UnusedIncludesPolicy::Experiment)
+      Pragmas.record(CI);
+    if (BeforeExecuteCallback)
+      BeforeExecuteCallback(CI);
   }
 
   std::unique_ptr<PPCallbacks> createPPCallbacks() override {
@@ -111,15 +143,48 @@ public:
     return IWYUHandler.get();
   }
 
+  static bool isLikelyForwardingFunction(FunctionTemplateDecl *FT) {
+    const auto *FD = FT->getTemplatedDecl();
+    const auto NumParams = FD->getNumParams();
+    // Check whether its last parameter is a parameter pack...
+    if (NumParams > 0) {
+      const auto *LastParam = FD->getParamDecl(NumParams - 1);
+      if (const auto *PET = dyn_cast<PackExpansionType>(LastParam->getType())) {
+        // ... of the type T&&... or T...
+        const auto BaseType = PET->getPattern().getNonReferenceType();
+        if (const auto *TTPT =
+                dyn_cast<TemplateTypeParmType>(BaseType.getTypePtr())) {
+          // ... whose template parameter comes from the function directly
+          if (FT->getTemplateParameters()->getDepth() == TTPT->getDepth()) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
   bool shouldSkipFunctionBody(Decl *D) override {
-    // Generally we skip function bodies in preambles for speed.
-    // We can make exceptions for functions that are cheap to parse and
-    // instantiate, widely used, and valuable (e.g. commonly produce errors).
-    if (const auto *FT = llvm::dyn_cast<clang::FunctionTemplateDecl>(D)) {
-      if (const auto *II = FT->getDeclName().getAsIdentifierInfo())
-        // std::make_unique is trivial, and we diagnose bad constructor calls.
-        if (II->isStr("make_unique") && FT->isInStdNamespace())
+    // Usually we don't need to look inside the bodies of header functions
+    // to understand the program. However when forwarding function like
+    // emplace() forward their arguments to some other function, the
+    // interesting overload resolution happens inside the forwarding
+    // function's body. To provide more meaningful diagnostics,
+    // code completion, and parameter hints we should parse (and later
+    // instantiate) the bodies.
+    if (auto *FT = llvm::dyn_cast<clang::FunctionTemplateDecl>(D)) {
+      if (ParseForwardingFunctions) {
+        // Don't skip parsing the body if it looks like a forwarding function
+        if (isLikelyForwardingFunction(FT))
           return false;
+      } else {
+        // By default, only take care of make_unique
+        // std::make_unique is trivial, and we diagnose bad constructor calls.
+        if (const auto *II = FT->getDeclName().getAsIdentifierInfo()) {
+          if (II->isStr("make_unique") && FT->isInStdNamespace())
+            return false;
+        }
+      }
     }
     return true;
   }
@@ -129,12 +194,16 @@ private:
   PreambleParsedCallback ParsedCallback;
   IncludeStructure Includes;
   CanonicalIncludes CanonIncludes;
+  include_cleaner::PragmaIncludes Pragmas;
   MainFileMacros Macros;
   std::vector<PragmaMark> Marks;
   bool IsMainFileIncludeGuarded = false;
   std::unique_ptr<CommentHandler> IWYUHandler = nullptr;
   const clang::LangOptions *LangOpts = nullptr;
   const SourceManager *SourceMgr = nullptr;
+  PreambleBuildStats *Stats;
+  bool ParseForwardingFunctions;
+  std::function<void(CompilerInstance &)> BeforeExecuteCallback;
 };
 
 // Represents directives other than includes, where basic textual information is
@@ -270,11 +339,12 @@ scanPreamble(llvm::StringRef Contents, const tooling::CompileCommand &Cmd) {
       std::move(CI), nullptr, std::move(PreambleContents),
       // Provide an empty FS to prevent preprocessor from performing IO. This
       // also implies missing resolved paths for includes.
-      FS.view(llvm::None), IgnoreDiags);
+      FS.view(std::nullopt), IgnoreDiags);
   if (Clang->getFrontendOpts().Inputs.empty())
     return error("compiler instance had no inputs");
   // We are only interested in main file includes.
   Clang->getPreprocessorOpts().SingleFileParseMode = true;
+  Clang->getPreprocessorOpts().UsePredefines = false;
   PreprocessOnlyAction Action;
   if (!Action.BeginSourceFile(*Clang, Clang->getFrontendOpts().Inputs[0]))
     return error("failed BeginSourceFile");
@@ -456,7 +526,13 @@ buildPreamble(PathRef FileName, CompilerInvocation CI,
   // to read back. We rely on dynamic index for the comments instead.
   CI.getPreprocessorOpts().WriteCommentListToPCH = false;
 
-  CppFilePreambleCallbacks CapturedInfo(FileName, PreambleCallback);
+  CppFilePreambleCallbacks CapturedInfo(
+      FileName, PreambleCallback, Stats,
+      Inputs.Opts.PreambleParseForwardingFunctions,
+      [&ASTListeners](CompilerInstance &CI) {
+        for (const auto &L : ASTListeners)
+          L->beforeExecute(CI);
+      });
   auto VFS = Inputs.TFS->view(Inputs.CompileCommand.Directory);
   llvm::SmallString<32> AbsFileName(FileName);
   VFS->makeAbsolute(AbsFileName);
@@ -476,8 +552,14 @@ buildPreamble(PathRef FileName, CompilerInvocation CI,
   // bodies.
   CI.getFrontendOpts().SkipFunctionBodies = false;
 
+  if (Stats != nullptr) {
+    Stats->TotalBuildTime = PreambleTimer.getTime();
+    Stats->FileSystemTime = TimedFS->getTime();
+    Stats->SerializedSize = BuiltPreamble ? BuiltPreamble->getSize() : 0;
+  }
+
   if (BuiltPreamble) {
-    vlog("Built preamble of size {0} for file {1} version {2} in {3} seconds",
+    log("Built preamble of size {0} for file {1} version {2} in {3} seconds",
          BuiltPreamble->getSize(), FileName, Inputs.Version,
          PreambleTimer.getTime());
     std::vector<Diag> Diags = PreambleDiagnostics.take();
@@ -486,20 +568,23 @@ buildPreamble(PathRef FileName, CompilerInvocation CI,
     Result->CompileCommand = Inputs.CompileCommand;
     Result->Diags = std::move(Diags);
     Result->Includes = CapturedInfo.takeIncludes();
+    Result->Pragmas = CapturedInfo.takePragmaIncludes();
     Result->Macros = CapturedInfo.takeMacros();
     Result->Marks = CapturedInfo.takeMarks();
     Result->CanonIncludes = CapturedInfo.takeCanonicalIncludes();
     Result->StatCache = std::move(StatCache);
     Result->MainIsIncludeGuarded = CapturedInfo.isMainFileIncludeGuarded();
-    if (Stats != nullptr) {
-      Stats->TotalBuildTime = PreambleTimer.getTime();
-      Stats->FileSystemTime = TimedFS->getTime();
-    }
     return Result;
   }
 
   elog("Could not build a preamble for file {0} version {1}: {2}", FileName,
        Inputs.Version, BuiltPreamble.getError().message());
+  for (const Diag &D : PreambleDiagnostics.take()) {
+    if (D.Severity < DiagnosticsEngine::Error)
+      continue;
+    // Not an ideal way to show errors, but better than nothing!
+    elog("  error: {0}", D.Message);
+  }
   return nullptr;
 }
 
@@ -586,10 +671,10 @@ PreamblePatch PreamblePatch::create(llvm::StringRef FileName,
     // We are only interested in newly added includes, record the ones in
     // Baseline for exclusion.
     llvm::DenseMap<std::pair<tok::PPKeywordKind, llvm::StringRef>,
-                   /*Resolved=*/llvm::StringRef>
+                   const Inclusion *>
         ExistingIncludes;
     for (const auto &Inc : Baseline.Includes.MainFileIncludes)
-      ExistingIncludes[{Inc.Directive, Inc.Written}] = Inc.Resolved;
+      ExistingIncludes[{Inc.Directive, Inc.Written}] = &Inc;
     // There might be includes coming from disabled regions, record these for
     // exclusion too. note that we don't have resolved paths for those.
     for (const auto &Inc : BaselineScan->Includes)
@@ -600,8 +685,16 @@ PreamblePatch PreamblePatch::create(llvm::StringRef FileName,
       // Include already present in the baseline preamble. Set resolved path and
       // put into preamble includes.
       if (It != ExistingIncludes.end()) {
-        Inc.Resolved = It->second.str();
-        PP.PreambleIncludes.push_back(Inc);
+        if (It->second) {
+          // If this header is included in an active region of the baseline
+          // preamble, preserve it.
+          auto &PatchedInc = PP.PreambleIncludes.emplace_back();
+          // Copy everything from existing include, apart from the location,
+          // when it's coming from baseline preamble.
+          PatchedInc = *It->second;
+          PatchedInc.HashLine = Inc.HashLine;
+          PatchedInc.HashOffset = Inc.HashOffset;
+        }
         continue;
       }
       // Include is new in the modified preamble. Inject it into the patch and
@@ -611,6 +704,11 @@ PreamblePatch PreamblePatch::create(llvm::StringRef FileName,
       Patch << llvm::formatv(
           "#{0} {1}\n", spellingForIncDirective(Inc.Directive), Inc.Written);
     }
+  } else {
+    // Make sure we have the full set of includes available even when we're not
+    // patching. As these are used by features we provide afterwards like hover,
+    // go-to-def or include-cleaner when preamble is stale.
+    PP.PreambleIncludes = Baseline.Includes.MainFileIncludes;
   }
 
   if (DirectivesChanged) {
@@ -677,7 +775,7 @@ PreamblePatch PreamblePatch::unmodified(const PreambleData &Preamble) {
 SourceLocation translatePreamblePatchLocation(SourceLocation Loc,
                                               const SourceManager &SM) {
   auto DefFile = SM.getFileID(Loc);
-  if (auto *FE = SM.getFileEntryForID(DefFile)) {
+  if (auto FE = SM.getFileEntryRefForID(DefFile)) {
     auto IncludeLoc = SM.getIncludeLoc(DefFile);
     // Preamble patch is included inside the builtin file.
     if (IncludeLoc.isValid() && SM.isWrittenInBuiltinFile(IncludeLoc) &&
@@ -693,5 +791,6 @@ SourceLocation translatePreamblePatchLocation(SourceLocation Loc,
   }
   return Loc;
 }
+
 } // namespace clangd
 } // namespace clang

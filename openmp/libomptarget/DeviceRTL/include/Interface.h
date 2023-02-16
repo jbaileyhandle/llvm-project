@@ -13,6 +13,7 @@
 #define OMPTARGET_DEVICERTL_INTERFACE_H
 
 #include "Types.h"
+#include "Xteamr.h"
 
 /// External API
 ///
@@ -134,7 +135,7 @@ int omp_get_team_num();
 
 int omp_get_initial_device(void);
 
-void *llvm_omp_get_dynamic_shared();
+void *llvm_omp_target_dynamic_shared_alloc();
 
 /// Synchronization
 ///
@@ -153,9 +154,13 @@ int omp_test_lock(omp_lock_t *Lock);
 /// Tasking
 ///
 ///{
+extern "C" {
 int omp_in_final(void);
 
 int omp_get_max_task_priority(void);
+
+void omp_fulfill_event(uint64_t);
+}
 ///}
 
 /// Misc
@@ -165,6 +170,50 @@ double omp_get_wtick(void);
 
 double omp_get_wtime(void);
 ///}
+
+/// OpenMP 5.1 Memory Management routines (from libomp)
+/// OpenMP allocator API is currently unimplemented, including traits.
+/// All allocation routines will directly call the global memory allocation
+/// routine and, consequently, omp_free will call device memory deallocation.
+///
+/// {
+omp_allocator_handle_t omp_init_allocator(omp_memspace_handle_t m, int ntraits,
+                                          omp_alloctrait_t traits[]);
+
+void omp_destroy_allocator(omp_allocator_handle_t allocator);
+
+void omp_set_default_allocator(omp_allocator_handle_t a);
+
+omp_allocator_handle_t omp_get_default_allocator(void);
+
+void *omp_alloc(uint64_t size,
+                omp_allocator_handle_t allocator = omp_null_allocator);
+
+void *omp_aligned_alloc(uint64_t align, uint64_t size,
+                        omp_allocator_handle_t allocator = omp_null_allocator);
+
+void *omp_calloc(uint64_t nmemb, uint64_t size,
+                 omp_allocator_handle_t allocator = omp_null_allocator);
+
+void *omp_aligned_calloc(uint64_t align, uint64_t nmemb, uint64_t size,
+                         omp_allocator_handle_t allocator = omp_null_allocator);
+
+void *omp_realloc(void *ptr, uint64_t size,
+                  omp_allocator_handle_t allocator = omp_null_allocator,
+                  omp_allocator_handle_t free_allocator = omp_null_allocator);
+
+void omp_free(void *ptr, omp_allocator_handle_t allocator = omp_null_allocator);
+/// }
+
+/// CUDA exposes a native malloc/free API, while ROCm does not.
+//// Any re-definitions of malloc/free delete the native CUDA
+//// but they are necessary
+#ifdef __AMDGCN__
+void *malloc(uint64_t Size);
+void free(void *Ptr);
+size_t external_get_local_size(uint32_t dim);
+size_t external_get_num_groups(uint32_t dim);
+#endif
 }
 
 extern "C" {
@@ -211,15 +260,18 @@ uint32_t __kmpc_get_hardware_num_threads_in_block();
 /// External interface to get the warp size.
 uint32_t __kmpc_get_warp_size();
 
+/// External interface to get the block size
+uint32_t __kmpc_get_hardware_num_blocks();
+
 /// Kernel
 ///
 ///{
 int8_t __kmpc_is_spmd_exec_mode();
 
 int32_t __kmpc_target_init(IdentTy *Ident, int8_t Mode,
-                           bool UseGenericStateMachine, bool);
+                           bool UseGenericStateMachine);
 
-void __kmpc_target_deinit(IdentTy *Ident, int8_t Mode, bool);
+void __kmpc_target_deinit(IdentTy *Ident, int8_t Mode);
 
 ///}
 
@@ -241,6 +293,32 @@ int32_t __kmpc_nvptx_teams_reduce_nowait_v2(
     ListGlobalFnTy glredFct);
 ///}
 
+/// Cross team helper functions for special case reductions
+///{
+///   THESE INTERFACES kmpc_xteam_ WILL BE DEPRACATED AND REPLACED WITH BELOW
+///   kmpc_xteamr_
+void __kmpc_xteam_sum_d(double, double *);
+void __kmpc_xteam_sum_f(float, float *);
+void __kmpc_xteam_sum_cd(double _Complex, double _Complex *);
+void __kmpc_xteam_sum_cf(float _Complex, float _Complex *);
+void __kmpc_xteam_sum_i(int, int *);
+void __kmpc_xteam_sum_ui(unsigned int, unsigned int *);
+void __kmpc_xteam_sum_l(long int, long int *);
+void __kmpc_xteam_sum_ul(unsigned long, unsigned long *);
+void __kmpc_xteam_max_d(double, double *);
+void __kmpc_xteam_max_f(float, float *);
+void __kmpc_xteam_max_i(int, int *);
+void __kmpc_xteam_max_ui(unsigned int, unsigned int *);
+void __kmpc_xteam_max_l(long int, long int *);
+void __kmpc_xteam_max_ul(unsigned long, unsigned long *);
+void __kmpc_xteam_min_d(double, double *);
+void __kmpc_xteam_min_f(float, float *);
+void __kmpc_xteam_min_i(int, int *);
+void __kmpc_xteam_min_ui(unsigned int, unsigned int *);
+void __kmpc_xteam_min_l(long int, long int *);
+void __kmpc_xteam_min_ul(unsigned long, unsigned long *);
+///}
+
 /// Synchronization
 ///
 ///{
@@ -251,6 +329,8 @@ void __kmpc_end_ordered(IdentTy *Loc, int32_t TId);
 int32_t __kmpc_cancel_barrier(IdentTy *Loc_ref, int32_t TId);
 
 void __kmpc_barrier(IdentTy *Loc_ref, int32_t TId);
+
+void __kmpc_impl_syncthreads();
 
 void __kmpc_barrier_simple_spmd(IdentTy *Loc_ref, int32_t TId);
 
@@ -265,6 +345,12 @@ int32_t __kmpc_single(IdentTy *Loc, int32_t TId);
 void __kmpc_end_single(IdentTy *Loc, int32_t TId);
 
 void __kmpc_flush(IdentTy *Loc);
+
+void __kmpc_flush_acquire(IdentTy *Loc);
+
+void __kmpc_flush_release(IdentTy *Loc);
+
+void __kmpc_flush_acqrel(IdentTy *Loc);
 
 uint64_t __kmpc_warp_active_thread_mask(void);
 
@@ -302,9 +388,9 @@ uint16_t __kmpc_parallel_level(IdentTy *Loc, uint32_t);
 /// Tasking
 ///
 ///{
-TaskDescriptorTy *__kmpc_omp_task_alloc(IdentTy *, uint32_t, int32_t,
-                                        uint32_t TaskSizeInclPrivateValues,
-                                        uint32_t SharedValuesSize,
+TaskDescriptorTy *__kmpc_omp_task_alloc(IdentTy *, int32_t, int32_t,
+                                        size_t TaskSizeInclPrivateValues,
+                                        size_t SharedValuesSize,
                                         TaskFnTy TaskFn);
 
 int32_t __kmpc_omp_task(IdentTy *Loc, uint32_t TId,
@@ -335,7 +421,10 @@ void __kmpc_taskloop(IdentTy *Loc, uint32_t TId,
                      TaskDescriptorTy *TaskDescriptor, int,
                      uint64_t *LowerBound, uint64_t *UpperBound, int64_t, int,
                      int32_t, uint64_t, void *);
-///}
+
+void *__kmpc_task_allow_completion_event(IdentTy *loc_ref,
+                                                uint32_t gtid,
+                                                TaskDescriptorTy *task);
 
 /// Misc
 ///
@@ -351,6 +440,11 @@ int32_t __kmpc_cancel(IdentTy *Loc, int32_t TId, int32_t CancelVal);
 int32_t __kmpc_shuffle_int32(int32_t val, int16_t delta, int16_t size);
 int64_t __kmpc_shuffle_int64(int64_t val, int16_t delta, int16_t size);
 ///}
+
+/// __init_ThreadDSTPtrPtr is defined in Workshare.cpp to initialize
+/// the static LDS global variable ThreadDSTPtrPtr to 0.
+/// It is called in Kernel.cpp at the end of initializeRuntime().
+void __init_ThreadDSTPtrPtr();
 }
 
 /// Extra API exposed by ROCm

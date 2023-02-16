@@ -1,4 +1,5 @@
 ; RUN: llc -mtriple=x86_64-apple-macosx -verify-machineinstrs -o - %s | FileCheck --check-prefix=CHECK %s
+; RUN: llc -mtriple=x86_64-windows-msvc -verify-machineinstrs -o - %s | FileCheck --check-prefix=WINABI %s
 
 ; TODO: support marker generation with GlobalISel
 target datalayout = "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128"
@@ -33,6 +34,12 @@ define i8* @rv_marker_1_retain() {
 ; CHECK-NEXT:    popq    %rcx
 ; CHECK-NEXT:    retq
 ;
+; WINABI-LABEL: rv_marker_1_retain:
+; WINABI:        callq   foo1
+; WINABI-NEXT:   movq    %rax, %rcx
+; WINABI-NEXT:   callq   objc_retainAutoreleasedReturnValue
+; WINABI-NEXT:   nop
+;
 entry:
   %call = call i8* @foo1() [ "clang.arc.attachedcall"(i8* (i8*)* @objc_retainAutoreleasedReturnValue) ]
   ret i8* %call
@@ -55,17 +62,18 @@ entry:
 
 define void @rv_marker_2_select(i32 %c) {
 ; CHECK-LABEL: rv_marker_2_select:
-; CHECK:        pushq   %rax
-; CHECK-NEXT:   .cfi_def_cfa_offset 16
-; CHECK-NEXT:   cmpl    $1, %edi
-; CHECK-NEXT:   movl    $1, %edi
-; CHECK-NEXT:   adcl    $0, %edi
-; CHECK-NEXT:   callq   _foo0
-; CHECK-NEXT:   movq    %rax, %rdi
-; CHECK-NEXT:   callq   _objc_retainAutoreleasedReturnValue
-; CHECK-NEXT:   movq    %rax, %rdi
-; CHECK-NEXT:   popq    %rax
-; CHECK-NEXT:   jmp _foo2
+; CHECK:         pushq %rax
+; CHECK-NEXT:    .cfi_def_cfa_offset 16
+; CHECK-NEXT:    xorl %eax, %eax
+; CHECK-NEXT:    cmpl $1, %edi
+; CHECK-NEXT:    adcl $1, %eax
+; CHECK-NEXT:    movl %eax, %edi
+; CHECK-NEXT:    callq _foo0
+; CHECK-NEXT:    movq %rax, %rdi
+; CHECK-NEXT:    callq _objc_retainAutoreleasedReturnValue
+; CHECK-NEXT:    movq %rax, %rdi
+; CHECK-NEXT:    popq %rax
+; CHECK-NEXT:    jmp _foo2
 ;
 entry:
   %tobool.not = icmp eq i32 %c, 0

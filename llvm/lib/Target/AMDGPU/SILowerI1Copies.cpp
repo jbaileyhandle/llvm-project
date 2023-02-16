@@ -124,6 +124,7 @@ private:
 ///
 class PhiIncomingAnalysis {
   MachinePostDominatorTree &PDT;
+  const SIInstrInfo *TII;
 
   // For each reachable basic block, whether it is a source in the induced
   // subgraph of the CFG.
@@ -133,7 +134,8 @@ class PhiIncomingAnalysis {
   SmallVector<MachineBasicBlock *, 4> Predecessors;
 
 public:
-  PhiIncomingAnalysis(MachinePostDominatorTree &PDT) : PDT(PDT) {}
+  PhiIncomingAnalysis(MachinePostDominatorTree &PDT, const SIInstrInfo *TII)
+      : PDT(PDT), TII(TII) {}
 
   /// Returns whether \p MBB is a source in the induced subgraph of reachable
   /// blocks.
@@ -166,18 +168,7 @@ public:
 
       // If this block has a divergent terminator and the def block is its
       // post-dominator, the wave may first visit the other successors.
-      bool Divergent = false;
-      for (MachineInstr &MI : MBB->terminators()) {
-        if (MI.getOpcode() == AMDGPU::SI_NON_UNIFORM_BRCOND_PSEUDO ||
-            MI.getOpcode() == AMDGPU::SI_IF ||
-            MI.getOpcode() == AMDGPU::SI_ELSE ||
-            MI.getOpcode() == AMDGPU::SI_LOOP) {
-          Divergent = true;
-          break;
-        }
-      }
-
-      if (Divergent && PDT.dominates(&DefBlock, MBB))
+      if (TII->hasDivergentBranch(MBB) && PDT.dominates(&DefBlock, MBB))
         append_range(Stack, MBB->successors());
     }
 
@@ -501,7 +492,7 @@ bool SILowerI1Copies::lowerCopiesFromI1() {
 
   for (MachineBasicBlock &MBB : *MF) {
     for (MachineInstr &MI : MBB) {
-      if (MI.getOpcode() != AMDGPU::COPY)
+      if (!MI.isCopy())
         continue;
 
       Register DstReg = MI.getOperand(0).getReg();
@@ -541,7 +532,7 @@ bool SILowerI1Copies::lowerCopiesFromI1() {
 bool SILowerI1Copies::lowerPhis() {
   MachineSSAUpdater SSAUpdater(*MF);
   LoopFinder LF(*DT, *PDT);
-  PhiIncomingAnalysis PIA(*PDT);
+  PhiIncomingAnalysis PIA(*PDT, TII);
   SmallVector<MachineInstr *, 4> Vreg1Phis;
   SmallVector<MachineBasicBlock *, 4> IncomingBlocks;
   SmallVector<unsigned, 4> IncomingRegs;
@@ -580,7 +571,7 @@ bool SILowerI1Copies::lowerPhis() {
       MachineBasicBlock *IncomingMBB = MI->getOperand(i + 1).getMBB();
       MachineInstr *IncomingDef = MRI->getUniqueVRegDef(IncomingReg);
 
-      if (IncomingDef->getOpcode() == AMDGPU::COPY) {
+      if (IncomingDef->isCopy()) {
         IncomingReg = IncomingDef->getOperand(1).getReg();
         assert(isLaneMaskReg(IncomingReg) || isVreg1(IncomingReg));
         assert(!IncomingDef->getOperand(1).getSubReg());
@@ -683,8 +674,7 @@ bool SILowerI1Copies::lowerCopiesToI1() {
     LF.initialize(MBB);
 
     for (MachineInstr &MI : MBB) {
-      if (MI.getOpcode() != AMDGPU::IMPLICIT_DEF &&
-          MI.getOpcode() != AMDGPU::COPY)
+      if (MI.getOpcode() != AMDGPU::IMPLICIT_DEF && !MI.isCopy())
         continue;
 
       Register DstReg = MI.getOperand(0).getReg();
@@ -753,7 +743,7 @@ bool SILowerI1Copies::isConstantLaneMask(Register Reg, bool &Val) const {
     if (MI->getOpcode() == AMDGPU::IMPLICIT_DEF)
       return true;
 
-    if (MI->getOpcode() != AMDGPU::COPY)
+    if (!MI->isCopy())
       break;
 
     Reg = MI->getOperand(1).getReg();
@@ -836,9 +826,9 @@ void SILowerI1Copies::buildMergeLaneMasks(MachineBasicBlock &MBB,
 
   if (PrevConstant && CurConstant) {
     if (PrevVal == CurVal) {
-      BuildMI(MBB, I, DL, TII->get(AMDGPU::COPY), DstReg).addReg(CurReg);
+      TII->buildCopy(MBB, I, DL, DstReg, CurReg);
     } else if (CurVal) {
-      BuildMI(MBB, I, DL, TII->get(AMDGPU::COPY), DstReg).addReg(ExecReg);
+      TII->buildCopy(MBB, I, DL, DstReg, ExecReg);
     } else {
       BuildMI(MBB, I, DL, TII->get(XorOp), DstReg)
           .addReg(ExecReg)
@@ -872,11 +862,9 @@ void SILowerI1Copies::buildMergeLaneMasks(MachineBasicBlock &MBB,
   }
 
   if (PrevConstant && !PrevVal) {
-    BuildMI(MBB, I, DL, TII->get(AMDGPU::COPY), DstReg)
-        .addReg(CurMaskedReg);
+    TII->buildCopy(MBB, I, DL, DstReg, CurMaskedReg);
   } else if (CurConstant && !CurVal) {
-    BuildMI(MBB, I, DL, TII->get(AMDGPU::COPY), DstReg)
-        .addReg(PrevMaskedReg);
+    TII->buildCopy(MBB, I, DL, DstReg, PrevMaskedReg);
   } else if (PrevConstant && PrevVal) {
     BuildMI(MBB, I, DL, TII->get(OrN2Op), DstReg)
         .addReg(CurMaskedReg)

@@ -176,6 +176,7 @@ defm : X86WriteResUnsupported<WriteVecMaskedGatherWriteback>;
 
 // Treat misc copies as a move.
 def : InstRW<[WriteMove], (instrs COPY)>;
+def : InstRW<[WriteMove], (instrs PRED_COPY)>;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Idioms that clear a register, like xorps %xmm0, %xmm0.
@@ -307,7 +308,6 @@ defm : X86WriteResPairUnsupported<WriteFMAZ>;
 defm : X86WriteResPairUnsupported<WriteDPPD>;
 defm : X86WriteResPairUnsupported<WriteDPPS>;
 defm : X86WriteResPairUnsupported<WriteDPPSY>;
-defm : X86WriteResPairUnsupported<WriteDPPSZ>;
 defm : X86WriteResPairUnsupported<WriteFBlend>;
 defm : X86WriteResPairUnsupported<WriteFBlendY>;
 defm : X86WriteResPairUnsupported<WriteFBlendZ>;

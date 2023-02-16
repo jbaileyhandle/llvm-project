@@ -79,6 +79,7 @@ static bool hasSourceMods(const MachineInstr &MI) {
 
   switch (MI.getOpcode()) {
   case AMDGPU::COPY:
+  case AMDGPU::PRED_COPY:
   case AMDGPU::G_SELECT:
   case AMDGPU::G_FDIV:
   case AMDGPU::G_FREM:
@@ -150,7 +151,7 @@ static bool isInv2Pi(const APFloat &APF) {
 // additional cost to negate them.
 static bool isConstantCostlierToNegate(MachineInstr &MI, Register Reg,
                                        MachineRegisterInfo &MRI) {
-  Optional<FPValueAndVReg> FPValReg;
+  std::optional<FPValueAndVReg> FPValReg;
   if (mi_match(Reg, MRI, m_GFCstOrSplat(FPValReg))) {
     if (FPValReg->Value.isZero() && !FPValReg->Value.isNegative())
       return true;

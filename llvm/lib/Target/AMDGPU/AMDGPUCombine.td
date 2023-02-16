@@ -9,10 +9,10 @@
 include "llvm/Target/GlobalISel/Combine.td"
 
 // TODO: This really belongs after legalization after scalarization.
-// TODO: GICombineRules should accept subtarget predicates
 
 def fmin_fmax_legacy_matchdata : GIDefMatchData<"AMDGPUPostLegalizerCombinerHelper::FMinFMaxLegacyInfo">;
 
+let Predicates = [HasFminFmaxLegacy] in
 def fcmp_select_to_fmin_fmax_legacy : GICombineRule<
   (defs root:$select, fmin_fmax_legacy_matchdata:$matchinfo),
   (match (wip_match_opcode G_SELECT):$select,
@@ -127,7 +127,8 @@ def AMDGPUPostLegalizerCombinerHelper: GICombinerHelper<
 
 def AMDGPURegBankCombinerHelper : GICombinerHelper<
   "AMDGPUGenRegBankCombinerHelper",
-  [zext_trunc_fold, int_minmax_to_med3, ptr_add_immed_chain,
+  [unmerge_merge, unmerge_cst, unmerge_undef,
+   zext_trunc_fold, int_minmax_to_med3, ptr_add_immed_chain,
    fp_minmax_to_clamp, fp_minmax_to_med3, fmed3_intrinsic_to_clamp]> {
   let DisableRuleOption = "amdgpuregbankcombiner-disable-rule";
   let StateClass = "AMDGPURegBankCombinerHelperState";

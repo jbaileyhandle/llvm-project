@@ -1,5 +1,5 @@
-// RUN: mlir-opt %s -convert-vector-to-llvm | FileCheck %s
-// RUN: mlir-opt %s -convert-vector-to-llvm='reassociate-fp-reductions' | FileCheck %s --check-prefix=REASSOC
+// RUN: mlir-opt %s -convert-vector-to-llvm='use-opaque-pointers=1' | FileCheck %s
+// RUN: mlir-opt %s -convert-vector-to-llvm='reassociate-fp-reductions use-opaque-pointers=1' | FileCheck %s --check-prefix=REASSOC
 
 //
 // CHECK-LABEL: @reduce_add_f32(
@@ -16,7 +16,7 @@
 // REASSOC-SAME: {reassoc = true} : (f32, vector<16xf32>) -> f32
 //      REASSOC: return %[[V]] : f32
 //
-func @reduce_add_f32(%arg0: vector<16xf32>) -> f32 {
+func.func @reduce_add_f32(%arg0: vector<16xf32>) -> f32 {
   %0 = vector.reduction <add>, %arg0 : vector<16xf32> into f32
   return %0 : f32
 }
@@ -36,7 +36,7 @@ func @reduce_add_f32(%arg0: vector<16xf32>) -> f32 {
 // REASSOC-SAME: {reassoc = true} : (f32, vector<16xf32>) -> f32
 //      REASSOC: return %[[V]] : f32
 //
-func @reduce_mul_f32(%arg0: vector<16xf32>) -> f32 {
+func.func @reduce_mul_f32(%arg0: vector<16xf32>) -> f32 {
   %0 = vector.reduction <mul>, %arg0 : vector<16xf32> into f32
   return %0 : f32
 }

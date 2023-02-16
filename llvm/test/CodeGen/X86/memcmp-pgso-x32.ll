@@ -88,9 +88,10 @@ define i32 @length3(i8* %X, i8* %Y) nounwind !prof !14 {
 ; X86-NEXT:    subl %ecx, %eax
 ; X86-NEXT:    jmp .LBB4_2
 ; X86-NEXT:  .LBB4_3: # %res_block
-; X86-NEXT:    setae %al
-; X86-NEXT:    movzbl %al, %eax
-; X86-NEXT:    leal -1(%eax,%eax), %eax
+; X86-NEXT:    xorl %eax, %eax
+; X86-NEXT:    cmpw %si, %dx
+; X86-NEXT:    sbbl %eax, %eax
+; X86-NEXT:    orl $1, %eax
 ; X86-NEXT:  .LBB4_2: # %endblock
 ; X86-NEXT:    popl %esi
 ; X86-NEXT:    retl
@@ -178,9 +179,10 @@ define i32 @length5(i8* %X, i8* %Y) nounwind !prof !14 {
 ; X86-NEXT:    subl %ecx, %eax
 ; X86-NEXT:    jmp .LBB9_2
 ; X86-NEXT:  .LBB9_3: # %res_block
-; X86-NEXT:    setae %al
-; X86-NEXT:    movzbl %al, %eax
-; X86-NEXT:    leal -1(%eax,%eax), %eax
+; X86-NEXT:    xorl %eax, %eax
+; X86-NEXT:    cmpl %esi, %edx
+; X86-NEXT:    sbbl %eax, %eax
+; X86-NEXT:    orl $1, %eax
 ; X86-NEXT:  .LBB9_2: # %endblock
 ; X86-NEXT:    popl %esi
 ; X86-NEXT:    retl
@@ -229,8 +231,8 @@ define i32 @length8(i8* %X, i8* %Y) nounwind !prof !14 {
 ; X86-NEXT:  .LBB11_2: # %res_block
 ; X86-NEXT:    xorl %eax, %eax
 ; X86-NEXT:    cmpl %edx, %ecx
-; X86-NEXT:    setae %al
-; X86-NEXT:    leal -1(%eax,%eax), %eax
+; X86-NEXT:    sbbl %eax, %eax
+; X86-NEXT:    orl $1, %eax
 ; X86-NEXT:  .LBB11_3: # %endblock
 ; X86-NEXT:    popl %esi
 ; X86-NEXT:    retl
@@ -569,15 +571,12 @@ define i1 @length64_eq_const(i8* %X) nounwind !prof !14 {
 define i32 @bcmp_length2(i8* %X, i8* %Y) nounwind !prof !14 {
 ; X86-LABEL: bcmp_length2:
 ; X86:       # %bb.0:
-; X86-NEXT:    movl {{[0-9]+}}(%esp), %eax
 ; X86-NEXT:    movl {{[0-9]+}}(%esp), %ecx
-; X86-NEXT:    movzwl (%ecx), %ecx
+; X86-NEXT:    movl {{[0-9]+}}(%esp), %eax
 ; X86-NEXT:    movzwl (%eax), %edx
-; X86-NEXT:    rolw $8, %cx
-; X86-NEXT:    rolw $8, %dx
-; X86-NEXT:    movzwl %cx, %eax
-; X86-NEXT:    movzwl %dx, %ecx
-; X86-NEXT:    subl %ecx, %eax
+; X86-NEXT:    xorl %eax, %eax
+; X86-NEXT:    cmpw (%ecx), %dx
+; X86-NEXT:    setne %al
 ; X86-NEXT:    retl
   %m = tail call i32 @bcmp(i8* %X, i8* %Y, i32 2) nounwind
   ret i32 %m

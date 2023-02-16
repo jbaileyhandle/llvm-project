@@ -7,15 +7,15 @@
 //===----------------------------------------------------------------------===//
 //
 // TODO: This pass is only necessary because the main inlining pass
-// has no abstracted away the call+callee relationship. When the inlining
+// has not abstracted away the call+callee relationship. When the inlining
 // interface has this support, this pass should be removed.
 //
 //===----------------------------------------------------------------------===//
 
 #include "TestDialect.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/InliningUtils.h"
 #include "llvm/ADT/StringSet.h"
@@ -24,7 +24,9 @@ using namespace mlir;
 using namespace test;
 
 namespace {
-struct Inliner : public PassWrapper<Inliner, OperationPass<FuncOp>> {
+struct Inliner : public PassWrapper<Inliner, OperationPass<func::FuncOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Inliner)
+
   StringRef getArgument() const final { return "test-inline"; }
   StringRef getDescription() const final {
     return "Test inlining region calls";

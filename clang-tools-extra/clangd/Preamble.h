@@ -27,6 +27,7 @@
 #include "Diagnostics.h"
 #include "FS.h"
 #include "Headers.h"
+#include "clang-include-cleaner/Record.h"
 #include "index/CanonicalIncludes.h"
 #include "support/Path.h"
 #include "clang/Frontend/CompilerInvocation.h"
@@ -57,6 +58,8 @@ struct PreambleData {
   // Processes like code completions and go-to-definitions will need #include
   // information, and their compile action skips preamble range.
   IncludeStructure Includes;
+  // Captures #include-mapping information in #included headers.
+  include_cleaner::PragmaIncludes Pragmas;
   // Macros defined in the preamble section of the main file.
   // Users care about headers vs main-file, not preamble vs non-preamble.
   // These should be treated as main-file entities e.g. for code completion.
@@ -83,6 +86,14 @@ struct PreambleBuildStats {
   double TotalBuildTime;
   /// Time spent in filesystem operations during the build, in seconds.
   double FileSystemTime;
+
+  /// Estimate of the memory used while building the preamble.
+  /// This memory has been released when buildPreamble returns.
+  /// For example, this includes the size of the in-memory AST (ASTContext).
+  size_t BuildSize;
+  /// The serialized size of the preamble.
+  /// This storage is needed while the preamble is used (but may be on disk).
+  size_t SerializedSize;
 };
 
 /// Build a preamble for the new inputs unless an old one can be reused.

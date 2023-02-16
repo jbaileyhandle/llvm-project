@@ -19,10 +19,9 @@ using namespace lldb_private;
 // CommandObjectRegexCommand constructor
 CommandObjectRegexCommand::CommandObjectRegexCommand(
     CommandInterpreter &interpreter, llvm::StringRef name, llvm::StringRef help,
-    llvm::StringRef syntax, uint32_t max_matches, uint32_t completion_type_mask,
-    bool is_removable)
+    llvm::StringRef syntax, uint32_t completion_type_mask, bool is_removable)
     : CommandObjectRaw(interpreter, name, help, syntax),
-      m_max_matches(max_matches), m_completion_type_mask(completion_type_mask),
+      m_completion_type_mask(completion_type_mask),
       m_is_removable(is_removable) {}
 
 // Destructor
@@ -71,11 +70,10 @@ bool CommandObjectRegexCommand::DoExecute(llvm::StringRef command,
       // Interpret the new command and return this as the result!
       if (m_interpreter.GetExpandRegexAliases())
         result.GetOutputStream().Printf("%s\n", new_command->c_str());
-      // Pass in true for "no context switching".  The command that called us
-      // should have set up the context appropriately, we shouldn't have to
-      // redo that.
+      // We don't have to pass an override_context here, as the command that 
+      // called us should have set up the context appropriately.
       return m_interpreter.HandleCommand(new_command->c_str(),
-                                         eLazyBoolCalculate, result);
+                                         eLazyBoolNo, result);
     }
   }
   result.SetStatus(eReturnStatusFailed);

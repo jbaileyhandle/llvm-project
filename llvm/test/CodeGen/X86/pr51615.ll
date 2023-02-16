@@ -11,15 +11,14 @@ define void @volatile_load_2_elts() {
 ; AVX-LABEL: volatile_load_2_elts:
 ; AVX:       # %bb.0:
 ; AVX-NEXT:    vmovaps g0(%rip), %xmm0
-; AVX-NEXT:    vmovddup {{.*#+}} xmm0 = xmm0[0,0]
-; AVX-NEXT:    vinsertf128 $1, %xmm0, %ymm0, %ymm1
-; AVX-NEXT:    vpermilpd {{.*#+}} ymm1 = ymm1[0,0,3,2]
-; AVX-NEXT:    vxorpd %xmm2, %xmm2, %xmm2
-; AVX-NEXT:    vblendpd {{.*#+}} ymm1 = ymm2[0,1],ymm1[2],ymm2[3]
-; AVX-NEXT:    vinsertf128 $1, %xmm0, %ymm0, %ymm0
-; AVX-NEXT:    vblendpd {{.*#+}} ymm0 = ymm2[0],ymm0[1],ymm2[2],ymm0[3]
-; AVX-NEXT:    vmovapd %ymm0, (%rax)
-; AVX-NEXT:    vmovapd %ymm1, (%rax)
+; AVX-NEXT:    vmovddup {{.*#+}} xmm1 = xmm0[0,0]
+; AVX-NEXT:    vxorps %xmm2, %xmm2, %xmm2
+; AVX-NEXT:    vblendps {{.*#+}} ymm1 = ymm2[0,1],ymm1[2,3],ymm2[4,5,6,7]
+; AVX-NEXT:    vinsertf128 $1, %xmm1, %ymm1, %ymm1
+; AVX-NEXT:    vperm2f128 {{.*#+}} ymm0 = zero,zero,ymm0[0,1]
+; AVX-NEXT:    vblendps {{.*#+}} ymm0 = ymm2[0,1,2,3],ymm0[4,5],ymm2[6,7]
+; AVX-NEXT:    vmovaps %ymm0, (%rax)
+; AVX-NEXT:    vmovaps %ymm1, (%rax)
 ; AVX-NEXT:    vzeroupper
 ; AVX-NEXT:    retq
 ;
@@ -81,49 +80,27 @@ define void @volatile_load_2_elts_bitcast() {
 }
 
 define void @elts_from_consecutive_loads(<2 x i64>* %arg, i32* %arg12, <8 x i32>* %arg13, float %arg14, i1 %arg15) {
-; AVX-LABEL: elts_from_consecutive_loads:
-; AVX:       # %bb.0: # %bb
-; AVX-NEXT:    vxorps %xmm1, %xmm1, %xmm1
-; AVX-NEXT:    .p2align 4, 0x90
-; AVX-NEXT:  .LBB3_1: # %bb16
-; AVX-NEXT:    # =>This Loop Header: Depth=1
-; AVX-NEXT:    # Child Loop BB3_2 Depth 2
-; AVX-NEXT:    testb $1, %cl
-; AVX-NEXT:    je .LBB3_1
-; AVX-NEXT:    .p2align 4, 0x90
-; AVX-NEXT:  .LBB3_2: # %bb17
-; AVX-NEXT:    # Parent Loop BB3_1 Depth=1
-; AVX-NEXT:    # => This Inner Loop Header: Depth=2
-; AVX-NEXT:    movl (%rdi), %eax
-; AVX-NEXT:    vbroadcastss (%rdi), %ymm2
-; AVX-NEXT:    movl %eax, (%rsi)
-; AVX-NEXT:    vmovaps %ymm2, (%rdx)
-; AVX-NEXT:    vucomiss %xmm1, %xmm0
-; AVX-NEXT:    jne .LBB3_2
-; AVX-NEXT:    jp .LBB3_2
-; AVX-NEXT:    jmp .LBB3_1
-;
-; AVX2-LABEL: elts_from_consecutive_loads:
-; AVX2:       # %bb.0: # %bb
-; AVX2-NEXT:    vxorps %xmm1, %xmm1, %xmm1
-; AVX2-NEXT:    .p2align 4, 0x90
-; AVX2-NEXT:  .LBB3_1: # %bb16
-; AVX2-NEXT:    # =>This Loop Header: Depth=1
-; AVX2-NEXT:    # Child Loop BB3_2 Depth 2
-; AVX2-NEXT:    testb $1, %cl
-; AVX2-NEXT:    je .LBB3_1
-; AVX2-NEXT:    .p2align 4, 0x90
-; AVX2-NEXT:  .LBB3_2: # %bb17
-; AVX2-NEXT:    # Parent Loop BB3_1 Depth=1
-; AVX2-NEXT:    # => This Inner Loop Header: Depth=2
-; AVX2-NEXT:    vmovaps (%rdi), %xmm2
-; AVX2-NEXT:    vmovss %xmm2, (%rsi)
-; AVX2-NEXT:    vbroadcastss %xmm2, %ymm2
-; AVX2-NEXT:    vmovaps %ymm2, (%rdx)
-; AVX2-NEXT:    vucomiss %xmm1, %xmm0
-; AVX2-NEXT:    jne .LBB3_2
-; AVX2-NEXT:    jp .LBB3_2
-; AVX2-NEXT:    jmp .LBB3_1
+; ALL-LABEL: elts_from_consecutive_loads:
+; ALL:       # %bb.0: # %bb
+; ALL-NEXT:    vxorps %xmm1, %xmm1, %xmm1
+; ALL-NEXT:    .p2align 4, 0x90
+; ALL-NEXT:  .LBB3_1: # %bb16
+; ALL-NEXT:    # =>This Loop Header: Depth=1
+; ALL-NEXT:    # Child Loop BB3_2 Depth 2
+; ALL-NEXT:    testb $1, %cl
+; ALL-NEXT:    je .LBB3_1
+; ALL-NEXT:    .p2align 4, 0x90
+; ALL-NEXT:  .LBB3_2: # %bb17
+; ALL-NEXT:    # Parent Loop BB3_1 Depth=1
+; ALL-NEXT:    # => This Inner Loop Header: Depth=2
+; ALL-NEXT:    movl (%rdi), %eax
+; ALL-NEXT:    vbroadcastss (%rdi), %ymm2
+; ALL-NEXT:    movl %eax, (%rsi)
+; ALL-NEXT:    vmovaps %ymm2, (%rdx)
+; ALL-NEXT:    vucomiss %xmm1, %xmm0
+; ALL-NEXT:    jne .LBB3_2
+; ALL-NEXT:    jp .LBB3_2
+; ALL-NEXT:    jmp .LBB3_1
 bb:
   br label %bb16
 

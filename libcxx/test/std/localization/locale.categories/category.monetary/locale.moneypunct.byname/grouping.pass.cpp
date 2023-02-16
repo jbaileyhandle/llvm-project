@@ -11,6 +11,8 @@
 // NetBSD does not support LC_MONETARY at the moment
 // XFAIL: netbsd
 
+// XFAIL: LIBCXX-FREEBSD-FIXME
+
 // REQUIRES: locale.en_US.UTF-8
 // REQUIRES: locale.fr_FR.UTF-8
 // REQUIRES: locale.ru_RU.UTF-8
@@ -87,7 +89,7 @@ int main(int, char**)
     }
 #endif
 
-#ifdef _WIN32
+#if defined( _WIN32) || defined(_AIX)
     std::string us_grouping = "\3";
 #else
     std::string us_grouping = "\3\3";
@@ -130,7 +132,7 @@ int main(int, char**)
     }
 #endif
 
-#ifdef _WIN32
+#if defined( _WIN32) || defined(_AIX)
     std::string ru_grouping = "\3";
 #else
     std::string ru_grouping = "\3\3";

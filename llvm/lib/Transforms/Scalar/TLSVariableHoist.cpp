@@ -40,16 +40,10 @@ using namespace tlshoist;
 
 #define DEBUG_TYPE "tlshoist"
 
-// TODO: Support "strict" model if we need to strictly load TLS address,
-// because "non-optimize" may also do some optimization in other passes.
-static cl::opt<std::string> TLSLoadHoist(
-    "tls-load-hoist",
-    cl::desc(
-        "hoist the TLS loads in PIC model: "
-        "tls-load-hoist=optimize: Eleminate redundant TLS load(s)."
-        "tls-load-hoist=strict: Strictly load TLS address before every use."
-        "tls-load-hoist=non-optimize: Generally load TLS before use(s)."),
-    cl::init("non-optimize"), cl::Hidden);
+static cl::opt<bool> TLSLoadHoist(
+    "tls-load-hoist", cl::init(false), cl::Hidden,
+    cl::desc("hoist the TLS loads in PIC model to eliminate redundant "
+             "TLS address calculation."));
 
 namespace {
 
@@ -193,19 +187,7 @@ Instruction *TLSVariableHoistPass::getDomInst(Instruction *I1,
                                               Instruction *I2) {
   if (!I1)
     return I2;
-  if (DT->dominates(I1, I2))
-    return I1;
-  if (DT->dominates(I2, I1))
-    return I2;
-
-  // If there is no dominance relation, use common dominator.
-  BasicBlock *DomBB =
-      DT->findNearestCommonDominator(I1->getParent(), I2->getParent());
-
-  Instruction *Dom = DomBB->getTerminator();
-  assert(Dom && "Common dominator not found!");
-
-  return Dom;
+  return DT->findNearestCommonDominator(I1, I2);
 }
 
 BasicBlock::iterator TLSVariableHoistPass::findInsertPos(Function &Fn,
@@ -240,7 +222,7 @@ Instruction *TLSVariableHoistPass::genBitCastInst(Function &Fn,
   BasicBlock::iterator Iter = findInsertPos(Fn, GV, PosBB);
   Type *Ty = GV->getType();
   auto *CastInst = new BitCastInst(GV, Ty, "tls_bitcast");
-  PosBB->getInstList().insert(Iter, CastInst);
+  CastInst->insertInto(PosBB, Iter);
   return CastInst;
 }
 
@@ -282,8 +264,7 @@ bool TLSVariableHoistPass::runImpl(Function &Fn, DominatorTree &DT,
   if (Fn.hasOptNone())
     return false;
 
-  if (TLSLoadHoist != "optimize" &&
-      !Fn.getAttributes().hasFnAttr("tls-load-hoist"))
+  if (!TLSLoadHoist && !Fn.getAttributes().hasFnAttr("tls-load-hoist"))
     return false;
 
   this->LI = &LI;

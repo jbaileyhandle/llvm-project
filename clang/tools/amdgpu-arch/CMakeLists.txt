@@ -6,14 +6,19 @@
 # //
 # //===----------------------------------------------------------------------===//
 
+set(LLVM_LINK_COMPONENTS Support)
+
 find_package(hsa-runtime64 QUIET 1.2.0 HINTS ${CMAKE_INSTALL_PREFIX} PATHS /opt/rocm)
-if (NOT ${hsa-runtime64_FOUND})
-  message(STATUS "Not building amdgpu-arch: hsa-runtime64 not found")
-  return()
-endif()
 
 add_clang_tool(amdgpu-arch AMDGPUArch.cpp)
 
-set_target_properties(amdgpu-arch PROPERTIES INSTALL_RPATH_USE_LINK_PATH ON)
-
-clang_target_link_libraries(amdgpu-arch PRIVATE hsa-runtime64::hsa-runtime64)
+# If we find the HSA runtime we link with it directly.
+find_package(hsa-runtime64 QUIET 1.2.0 HINTS ${CMAKE_INSTALL_PREFIX} PATHS /opt/rocm)
+if(hsa-runtime64_FOUND AND NOT (LLVM_BUILD_32_BITS OR CMAKE_SIZEOF_VOID_P EQUAL 4))
+  message(STATUS "Building amdgpu-arch linked against libhsa")
+  set_target_properties(amdgpu-arch PROPERTIES INSTALL_RPATH_USE_LINK_PATH ON)
+  target_link_libraries(amdgpu-arch PRIVATE hsa-runtime64::hsa-runtime64)
+else()
+  message(STATUS "Building amdgpu-arch for dlopened libhsa")
+  target_compile_definitions(amdgpu-arch PRIVATE "DYNAMIC_HSA")
+endif()

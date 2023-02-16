@@ -29,7 +29,7 @@ def CortexA55Model : SchedMachineModel {
   let PostRAScheduler = 1;    // Enable PostRA scheduler pass.
   let CompleteModel = 0;      // Covers instructions applicable to Cortex-A55.
 
-  list<Predicate> UnsupportedFeatures = [HasSVE];
+  list<Predicate> UnsupportedFeatures = [HasSVE, HasMTE];
 
   // FIXME: Remove when all errors have been fixed.
   let FullInstRWOverlapCheck = 0;
@@ -270,6 +270,7 @@ def : InstRW<[WriteAdr, CortexA55WriteVLD1,CortexA55WriteLDP1], (instregex "LDPS
 def : InstRW<[WriteAdr, CortexA55WriteVLD1,CortexA55WriteLDP2], (instregex "LDP(X|D)(pre|post)")>;
 def : InstRW<[WriteAdr, CortexA55WriteVLD1,CortexA55WriteLDP4], (instregex "LDPQ(pre|post)")>;
 def : InstRW<[WriteI], (instrs COPY)>;
+def : InstRW<[WriteI], (instrs PRED_COPY)>;
 //---
 // Vector Loads - 64-bit per cycle
 //---

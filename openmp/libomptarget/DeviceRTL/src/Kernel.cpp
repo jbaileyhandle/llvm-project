@@ -17,15 +17,19 @@
 #include "Synchronization.h"
 #include "Types.h"
 
-using namespace _OMP;
+#include "llvm/Frontend/OpenMP/OMPDeviceConstants.h"
 
-#pragma omp declare target
+using namespace ompx;
+
+#pragma omp begin declare target device_type(nohost)
 
 static void inititializeRuntime(bool IsSPMD) {
   // Order is important here.
   synchronize::init(IsSPMD);
   mapping::init(IsSPMD);
   state::init(IsSPMD);
+  if (__kmpc_get_hardware_thread_id_in_block() == 0)
+    __init_ThreadDSTPtrPtr();
 }
 
 /// Simple generic state machine for worker threads.
@@ -35,10 +39,10 @@ static void genericStateMachine(IdentTy *Ident) {
   uint32_t TId = mapping::getThreadIdInBlock();
 
   do {
-    ParallelRegionFnTy WorkFn = 0;
+    ParallelRegionFnTy WorkFn = nullptr;
 
     // Wait for the signal that we have a new work function.
-    synchronize::threads();
+    synchronize::workersStartBarrier();
 
     // Retrieve the work function from the runtime.
     bool IsActive = __kmpc_kernel_parallel(&WorkFn);
@@ -54,7 +58,7 @@ static void genericStateMachine(IdentTy *Ident) {
       __kmpc_kernel_end_parallel();
     }
 
-    synchronize::threads();
+    synchronize::workersDoneBarrier();
 
   } while (true);
 }
@@ -66,9 +70,17 @@ extern "C" {
 /// \param Ident               Source location identification, can be NULL.
 ///
 int32_t __kmpc_target_init(IdentTy *Ident, int8_t Mode,
-                           bool UseGenericStateMachine, bool) {
+                           bool UseGenericStateMachine) {
   FunctionTracingRAII();
-  const bool IsSPMD = Mode & OMP_TGT_EXEC_MODE_SPMD;
+#ifdef __AMDGCN__
+  if (__kmpc_get_hardware_thread_id_in_block() == 0) {
+    synchronize::omptarget_workers_done = false;
+    synchronize::omptarget_master_ready = false;
+  }
+  synchronize::threadsAligned();
+#endif
+  const bool IsSPMD =
+      Mode & llvm::omp::OMPTgtExecModeFlags::OMP_TGT_EXEC_MODE_SPMD;
   if (IsSPMD) {
     inititializeRuntime(/* IsSPMD */ true);
     synchronize::threadsAligned();
@@ -100,8 +112,20 @@ int32_t __kmpc_target_init(IdentTy *Ident, int8_t Mode,
   // doing any work.  mapping::getBlockSize() does not include any of the main
   // thread's warp, so none of its threads can ever be active worker threads.
   if (UseGenericStateMachine &&
-      mapping::getThreadIdInBlock() < mapping::getBlockSize(IsSPMD))
+      mapping::getThreadIdInBlock() < mapping::getBlockSize(IsSPMD)) {
     genericStateMachine(Ident);
+  } else {
+    // Retrieve the work function just to ensure we always call
+    // __kmpc_kernel_parallel even if a custom state machine is used.
+    // TODO: this is not super pretty. The problem is we create the call to
+    // __kmpc_kernel_parallel in the openmp-opt pass but while we optimize it is
+    // not there yet. Thus, we assume we never reach it from
+    // __kmpc_target_deinit. That allows us to remove the store in there to
+    // ParallelRegionFn, which leads to bad results later on.
+    ParallelRegionFnTy WorkFn = nullptr;
+    __kmpc_kernel_parallel(&WorkFn);
+    ASSERT(WorkFn == nullptr);
+  }
 
   return mapping::getThreadIdInBlock();
 }
@@ -113,16 +137,74 @@ int32_t __kmpc_target_init(IdentTy *Ident, int8_t Mode,
 ///
 /// \param Ident Source location identification, can be NULL.
 ///
-void __kmpc_target_deinit(IdentTy *Ident, int8_t Mode, bool) {
+void __kmpc_target_deinit(IdentTy *Ident, int8_t Mode) {
   FunctionTracingRAII();
-  const bool IsSPMD = Mode & OMP_TGT_EXEC_MODE_SPMD;
+  const bool IsSPMD =
+      Mode & llvm::omp::OMPTgtExecModeFlags::OMP_TGT_EXEC_MODE_SPMD;
   state::assumeInitialState(IsSPMD);
   if (IsSPMD)
     return;
 
   // Signal the workers to exit the state machine and exit the kernel.
   state::ParallelRegionFn = nullptr;
+
+  // make sure workers cannot continue before the initial thread
+  // has reset the Fn pointer for termination
+  synchronize::omptarget_master_ready = true;
+  synchronize::threads();
 }
+
+#ifndef FORTRAN_NO_LONGER_NEEDS
+
+int32_t __kmpc_target_init_v1(int64_t *, int8_t Mode,
+                              int8_t UseGenericStateMachine,
+                              int8_t RequiresFullRuntime) {
+  FunctionTracingRAII();
+  int32_t res = __kmpc_target_init(nullptr, Mode, UseGenericStateMachine);
+  if (Mode & llvm::omp::OMP_TGT_EXEC_MODE_SPMD) {
+
+    uint32_t TId = mapping::getThreadIdInBlock();
+
+    uint32_t NThreadsICV = icv::NThreads;
+    uint32_t NumThreads = mapping::getBlockSize();
+
+    if (NThreadsICV != 0 && NThreadsICV < NumThreads)
+      NumThreads = NThreadsICV;
+
+    synchronize::threadsAligned();
+    if (TId == 0) {
+      // Note that the order here is important. `icv::Level` has to be updated
+      // last or the other updates will cause a thread specific state to be
+      // created.
+      state::ParallelTeamSize = NumThreads;
+      icv::ActiveLevel = 1u;
+      icv::Level = 1u;
+    }
+    synchronize::threadsAligned();
+  }
+  return res;
+}
+
+void __kmpc_target_deinit_v1(int64_t *, int8_t Mode,
+                             int8_t RequiresFullRuntime) {
+  FunctionTracingRAII();
+  uint32_t TId = mapping::getThreadIdInBlock();
+  synchronize::threadsAligned();
+
+  if (TId == 0) {
+    // Reverse order of deinitialization
+    icv::Level = 0u;
+    icv::ActiveLevel = 0u;
+    state::ParallelTeamSize = 1u;
+  }
+  // Synchronize all threads to make sure every thread exits the scope above;
+  // otherwise the following assertions and the assumption in
+  // __kmpc_target_deinit may not hold.
+  synchronize::threadsAligned();
+  __kmpc_target_deinit(nullptr, Mode);
+}
+
+#endif
 
 int8_t __kmpc_is_spmd_exec_mode() {
   FunctionTracingRAII();
