@@ -12,7 +12,6 @@
 #include "clang/Basic/CharInfo.h"
 #include "clang/Basic/CodeGenOptions.h"
 #include "clang/Basic/CommentOptions.h"
-#include "clang/Basic/DebugInfoOptions.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticDriver.h"
 #include "clang/Basic/DiagnosticOptions.h"
@@ -59,6 +58,7 @@
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Config/llvm-config.h"
+#include "llvm/Frontend/Debug/Options.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/Linker/Linker.h"
 #include "llvm/MC/MCTargetOptions.h"
@@ -1405,28 +1405,28 @@ void CompilerInvocation::GenerateCodeGenArgs(
 
   std::optional<StringRef> DebugInfoVal;
   switch (Opts.DebugInfo) {
-  case codegenoptions::DebugLineTablesOnly:
+  case llvm::codegenoptions::DebugLineTablesOnly:
     DebugInfoVal = "line-tables-only";
     break;
-  case codegenoptions::DebugDirectivesOnly:
+  case llvm::codegenoptions::DebugDirectivesOnly:
     DebugInfoVal = "line-directives-only";
     break;
-  case codegenoptions::DebugInfoConstructor:
+  case llvm::codegenoptions::DebugInfoConstructor:
     DebugInfoVal = "constructor";
     break;
-  case codegenoptions::LimitedDebugInfo:
+  case llvm::codegenoptions::LimitedDebugInfo:
     DebugInfoVal = "limited";
     break;
-  case codegenoptions::FullDebugInfo:
+  case llvm::codegenoptions::FullDebugInfo:
     DebugInfoVal = "standalone";
     break;
-  case codegenoptions::UnusedTypeInfo:
+  case llvm::codegenoptions::UnusedTypeInfo:
     DebugInfoVal = "unused-types";
     break;
-  case codegenoptions::NoDebugInfo: // default value
+  case llvm::codegenoptions::NoDebugInfo: // default value
     DebugInfoVal = std::nullopt;
     break;
-  case codegenoptions::LocTrackingOnly: // implied value
+  case llvm::codegenoptions::LocTrackingOnly: // implied value
     DebugInfoVal = std::nullopt;
     break;
   }
@@ -1471,10 +1471,10 @@ void CompilerInvocation::GenerateCodeGenArgs(
     GenerateArg(Args, OPT_gpubnames, SA);
 
   auto TNK = Opts.getDebugSimpleTemplateNames();
-  if (TNK != codegenoptions::DebugTemplateNamesKind::Full) {
-    if (TNK == codegenoptions::DebugTemplateNamesKind::Simple)
+  if (TNK != llvm::codegenoptions::DebugTemplateNamesKind::Full) {
+    if (TNK == llvm::codegenoptions::DebugTemplateNamesKind::Simple)
       GenerateArg(Args, OPT_gsimple_template_names_EQ, "simple", SA);
-    else if (TNK == codegenoptions::DebugTemplateNamesKind::Mangled)
+    else if (TNK == llvm::codegenoptions::DebugTemplateNamesKind::Mangled)
       GenerateArg(Args, OPT_gsimple_template_names_EQ, "mangled", SA);
   }
   // ProfileInstrumentUsePath is marshalled automatically, no need to generate
@@ -1544,8 +1544,8 @@ void CompilerInvocation::GenerateCodeGenArgs(
                 F.Filename, SA);
   }
 
-  GenerateArg(
-      Args, Opts.EmulatedTLS ? OPT_femulated_tls : OPT_fno_emulated_tls, SA);
+  if (Opts.EmulatedTLS)
+    GenerateArg(Args, OPT_femulated_tls, SA);
 
   if (Opts.FPDenormalMode != llvm::DenormalMode::getIEEE())
     GenerateArg(Args, OPT_fdenormal_fp_math_EQ, Opts.FPDenormalMode.str(), SA);
@@ -1567,6 +1567,9 @@ void CompilerInvocation::GenerateCodeGenArgs(
 
   if (Opts.EnableAIXExtendedAltivecABI)
     GenerateArg(Args, OPT_mabi_EQ_vec_extabi, SA);
+
+  if (Opts.XCOFFReadOnlyPointers)
+    GenerateArg(Args, OPT_mxcoff_roptr, SA);
 
   if (!Opts.OptRecordPasses.empty())
     GenerateArg(Args, OPT_opt_record_passes, Opts.OptRecordPasses, SA);
@@ -1675,18 +1678,19 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
   if (Arg *A = Args.getLastArg(OPT_debug_info_kind_EQ)) {
     unsigned Val =
         llvm::StringSwitch<unsigned>(A->getValue())
-            .Case("line-tables-only", codegenoptions::DebugLineTablesOnly)
-            .Case("line-directives-only", codegenoptions::DebugDirectivesOnly)
-            .Case("constructor", codegenoptions::DebugInfoConstructor)
-            .Case("limited", codegenoptions::LimitedDebugInfo)
-            .Case("standalone", codegenoptions::FullDebugInfo)
-            .Case("unused-types", codegenoptions::UnusedTypeInfo)
+            .Case("line-tables-only", llvm::codegenoptions::DebugLineTablesOnly)
+            .Case("line-directives-only",
+                  llvm::codegenoptions::DebugDirectivesOnly)
+            .Case("constructor", llvm::codegenoptions::DebugInfoConstructor)
+            .Case("limited", llvm::codegenoptions::LimitedDebugInfo)
+            .Case("standalone", llvm::codegenoptions::FullDebugInfo)
+            .Case("unused-types", llvm::codegenoptions::UnusedTypeInfo)
             .Default(~0U);
     if (Val == ~0U)
       Diags.Report(diag::err_drv_invalid_value) << A->getAsString(Args)
                                                 << A->getValue();
     else
-      Opts.setDebugInfo(static_cast<codegenoptions::DebugInfoKind>(Val));
+      Opts.setDebugInfo(static_cast<llvm::codegenoptions::DebugInfoKind>(Val));
   }
 
   // If -fuse-ctor-homing is set and limited debug info is already on, then use
@@ -1694,23 +1698,21 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
   if (const Arg *A =
           Args.getLastArg(OPT_fuse_ctor_homing, OPT_fno_use_ctor_homing)) {
     if (A->getOption().matches(OPT_fuse_ctor_homing) &&
-        Opts.getDebugInfo() == codegenoptions::LimitedDebugInfo)
-      Opts.setDebugInfo(codegenoptions::DebugInfoConstructor);
+        Opts.getDebugInfo() == llvm::codegenoptions::LimitedDebugInfo)
+      Opts.setDebugInfo(llvm::codegenoptions::DebugInfoConstructor);
     if (A->getOption().matches(OPT_fno_use_ctor_homing) &&
-        Opts.getDebugInfo() == codegenoptions::DebugInfoConstructor)
-      Opts.setDebugInfo(codegenoptions::LimitedDebugInfo);
+        Opts.getDebugInfo() == llvm::codegenoptions::DebugInfoConstructor)
+      Opts.setDebugInfo(llvm::codegenoptions::LimitedDebugInfo);
   }
 
   for (const auto &Arg : Args.getAllArgValues(OPT_fdebug_prefix_map_EQ)) {
     auto Split = StringRef(Arg).split('=');
-    Opts.DebugPrefixMap.insert(
-        {std::string(Split.first), std::string(Split.second)});
+    Opts.DebugPrefixMap.emplace_back(Split.first, Split.second);
   }
 
   for (const auto &Arg : Args.getAllArgValues(OPT_fcoverage_prefix_map_EQ)) {
     auto Split = StringRef(Arg).split('=');
-    Opts.CoveragePrefixMap.insert(
-        {std::string(Split.first), std::string(Split.second)});
+    Opts.CoveragePrefixMap.emplace_back(Split.first, Split.second);
   }
 
   const llvm::Triple::ArchType DebugEntryValueArchs[] = {
@@ -1753,8 +1755,8 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
           << A->getSpelling() << A->getValue();
     Opts.setDebugSimpleTemplateNames(
         StringRef(A->getValue()) == "simple"
-            ? codegenoptions::DebugTemplateNamesKind::Simple
-            : codegenoptions::DebugTemplateNamesKind::Mangled);
+            ? llvm::codegenoptions::DebugTemplateNamesKind::Simple
+            : llvm::codegenoptions::DebugTemplateNamesKind::Mangled);
   }
 
   if (const Arg *A = Args.getLastArg(OPT_ftime_report, OPT_ftime_report_EQ)) {
@@ -1807,7 +1809,7 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
     Opts.MemoryProfileOutput = MemProfileBasename;
 
   memcpy(Opts.CoverageVersion, "408*", 4);
-  if (Opts.EmitGcovArcs || Opts.EmitGcovNotes) {
+  if (Opts.CoverageNotesFile.size() || Opts.CoverageDataFile.size()) {
     if (Args.hasArg(OPT_coverage_version_EQ)) {
       StringRef CoverageVersion = Args.getLastArgValue(OPT_coverage_version_EQ);
       if (CoverageVersion.size() != 4) {
@@ -1897,15 +1899,10 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
     Opts.LinkBitcodeFiles.push_back(F);
   }
 
-  if (!Args.getLastArg(OPT_femulated_tls) &&
-      !Args.getLastArg(OPT_fno_emulated_tls)) {
-    Opts.EmulatedTLS = T.hasDefaultEmulatedTLS();
-  }
-
   if (Arg *A = Args.getLastArg(OPT_ftlsmodel_EQ)) {
     if (T.isOSAIX()) {
       StringRef Name = A->getValue();
-      if (Name != "global-dynamic")
+      if (Name != "global-dynamic" && Name != "local-exec")
         Diags.Report(diag::err_aix_unsupported_tls_model) << Name;
     }
   }
@@ -1947,14 +1944,23 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
     }
   }
 
-  if (Arg *A =
-          Args.getLastArg(OPT_mabi_EQ_vec_default, OPT_mabi_EQ_vec_extabi)) {
+  if (Arg *A = Args.getLastArg(OPT_mxcoff_roptr)) {
     if (!T.isOSAIX())
       Diags.Report(diag::err_drv_unsupported_opt_for_target)
           << A->getSpelling() << T.str();
 
-    const Option &O = A->getOption();
-    Opts.EnableAIXExtendedAltivecABI = O.matches(OPT_mabi_EQ_vec_extabi);
+    // Since the storage mapping class is specified per csect,
+    // without using data sections, it is less effective to use read-only
+    // pointers. Using read-only pointers may cause other RO variables in the
+    // same csect to become RW when the linker acts upon `-bforceimprw`;
+    // therefore, we require that separate data sections
+    // are used when `-mxcoff-roptr` is in effect. We respect the setting of
+    // data-sections since we have not found reasons to do otherwise that
+    // overcome the user surprise of not respecting the setting.
+    if (!Args.hasFlag(OPT_fdata_sections, OPT_fno_data_sections, false))
+      Diags.Report(diag::err_roptr_requires_data_sections);
+
+    Opts.XCOFFReadOnlyPointers = true;
   }
 
   if (Arg *A = Args.getLastArg(OPT_mabi_EQ_quadword_atomics)) {
@@ -2048,8 +2054,9 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
 
   // If the user requested a flag that requires source locations available in
   // the backend, make sure that the backend tracks source location information.
-  if (NeedLocTracking && Opts.getDebugInfo() == codegenoptions::NoDebugInfo)
-    Opts.setDebugInfo(codegenoptions::LocTrackingOnly);
+  if (NeedLocTracking &&
+      Opts.getDebugInfo() == llvm::codegenoptions::NoDebugInfo)
+    Opts.setDebugInfo(llvm::codegenoptions::LocTrackingOnly);
 
   // Parse -fsanitize-recover= arguments.
   // FIXME: Report unrecoverable sanitizers incorrectly specified here.
@@ -2342,10 +2349,20 @@ clang::CreateAndPopulateDiagOpts(ArrayRef<const char *> Argv) {
   unsigned MissingArgIndex, MissingArgCount;
   InputArgList Args = getDriverOptTable().ParseArgs(
       Argv.slice(1), MissingArgIndex, MissingArgCount);
+
+  bool ShowColors = true;
+  if (std::optional<std::string> NoColor =
+          llvm::sys::Process::GetEnv("NO_COLOR");
+      NoColor && !NoColor->empty()) {
+    // If the user set the NO_COLOR environment variable, we'll honor that
+    // unless the command line overrides it.
+    ShowColors = false;
+  }
+
   // We ignore MissingArgCount and the return value of ParseDiagnosticArgs.
   // Any errors that would be diagnosed here will also be diagnosed later,
   // when the DiagnosticsEngine actually exists.
-  (void)ParseDiagnosticArgs(*DiagOpts, Args);
+  (void)ParseDiagnosticArgs(*DiagOpts, Args, /*Diags=*/nullptr, ShowColors);
   return DiagOpts;
 }
 
@@ -2395,9 +2412,9 @@ bool clang::ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
     DiagMask = DiagnosticLevelMask::All;
   Opts.setVerifyIgnoreUnexpected(DiagMask);
   if (Opts.TabStop == 0 || Opts.TabStop > DiagnosticOptions::MaxTabStop) {
-    Opts.TabStop = DiagnosticOptions::DefaultTabStop;
     Diags->Report(diag::warn_ignoring_ftabstop_value)
         << Opts.TabStop << DiagnosticOptions::DefaultTabStop;
+    Opts.TabStop = DiagnosticOptions::DefaultTabStop;
   }
 
   addDiagnosticArgs(Args, OPT_W_Group, OPT_W_value_Group, Opts.Warnings);
@@ -3395,7 +3412,7 @@ void CompilerInvocation::GenerateLangArgs(const LangOptions &Opts,
   if (Opts.OpenMP && !Opts.OpenMPSimd) {
     GenerateArg(Args, OPT_fopenmp, SA);
 
-    if (Opts.OpenMP != 50)
+    if (Opts.OpenMP != 51)
       GenerateArg(Args, OPT_fopenmp_version_EQ, Twine(Opts.OpenMP), SA);
 
     if (!Opts.OpenMPUseTLS)
@@ -3411,7 +3428,7 @@ void CompilerInvocation::GenerateLangArgs(const LangOptions &Opts,
   if (Opts.OpenMPSimd) {
     GenerateArg(Args, OPT_fopenmp_simd, SA);
 
-    if (Opts.OpenMP != 50)
+    if (Opts.OpenMP != 51)
       GenerateArg(Args, OPT_fopenmp_version_EQ, Twine(Opts.OpenMP), SA);
   }
 
@@ -3424,6 +3441,16 @@ void CompilerInvocation::GenerateLangArgs(const LangOptions &Opts,
     GenerateArg(Args, OPT_fopenmp_target_big_jump_loop, SA);
   else
     GenerateArg(Args, OPT_fno_openmp_target_big_jump_loop, SA);
+
+  if (Opts.OpenMPTargetNoLoop)
+    GenerateArg(Args, OPT_fopenmp_target_no_loop, SA);
+  else
+    GenerateArg(Args, OPT_fno_openmp_target_no_loop, SA);
+
+  if (Opts.OpenMPTargetXteamReduction)
+    GenerateArg(Args, OPT_fopenmp_target_xteam_reduction, SA);
+  else
+    GenerateArg(Args, OPT_fno_openmp_target_xteam_reduction, SA);
 
   if (Opts.OpenMPThreadSubscription)
     GenerateArg(Args, OPT_fopenmp_assume_threads_oversubscription, SA);
@@ -3770,9 +3797,9 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
   Opts.Blocks = Args.hasArg(OPT_fblocks) || (Opts.OpenCL
     && Opts.OpenCLVersion == 200);
 
-  Opts.ConvergentFunctions = Opts.OpenCL || (Opts.CUDA && Opts.CUDAIsDevice) ||
-                             Opts.SYCLIsDevice ||
-                             Args.hasArg(OPT_fconvergent_functions);
+  Opts.ConvergentFunctions = Args.hasArg(OPT_fconvergent_functions) ||
+                             Opts.OpenCL || (Opts.CUDA && Opts.CUDAIsDevice) ||
+                             Opts.SYCLIsDevice;
 
   Opts.NoBuiltin = Args.hasArg(OPT_fno_builtin) || Opts.Freestanding;
   if (!Opts.NoBuiltin)
@@ -3807,7 +3834,7 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
   }
 
   // Check if -fopenmp is specified and set default version to 5.0.
-  Opts.OpenMP = Args.hasArg(OPT_fopenmp) ? 50 : 0;
+  Opts.OpenMP = Args.hasArg(OPT_fopenmp) ? 51 : 0;
   // Check if -fopenmp-simd is specified.
   bool IsSimdSpecified =
       Args.hasFlag(options::OPT_fopenmp_simd, options::OPT_fno_openmp_simd,
@@ -3826,7 +3853,7 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
   if (Opts.OpenMP || Opts.OpenMPSimd) {
     if (int Version = getLastArgIntValue(
             Args, OPT_fopenmp_version_EQ,
-            (IsSimdSpecified || IsTargetSpecified) ? 50 : Opts.OpenMP, Diags))
+            (IsSimdSpecified || IsTargetSpecified) ? 51 : Opts.OpenMP, Diags))
       Opts.OpenMP = Version;
     // Provide diagnostic when a given target is not expected to be an OpenMP
     // device or host.
@@ -3877,7 +3904,15 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   Opts.OpenMPTargetBigJumpLoop =
       Args.hasFlag(options::OPT_fopenmp_target_big_jump_loop,
-                   options::OPT_fno_openmp_target_big_jump_loop, false);
+                   options::OPT_fno_openmp_target_big_jump_loop, true);
+
+  Opts.OpenMPTargetNoLoop =
+      Args.hasFlag(options::OPT_fopenmp_target_no_loop,
+                   options::OPT_fno_openmp_target_no_loop, true);
+
+  Opts.OpenMPTargetXteamReduction =
+      Args.hasFlag(options::OPT_fopenmp_target_xteam_reduction,
+                   options::OPT_fno_openmp_target_xteam_reduction, true);
 
   // Set the value of the debugging flag used in the new offloading device RTL.
   // Set either by a specific value or to a default if not specified.

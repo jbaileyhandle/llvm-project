@@ -1,3 +1,4 @@
+
 //===----- CGOpenMPRuntime.h - Interface to OpenMP Runtimes -----*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -371,9 +372,11 @@ protected:
   llvm::Value *getThreadID(CodeGenFunction &CGF, SourceLocation Loc);
 
   /// Get the function name of an outlined region.
-  //  The name can be customized depending on the target.
-  //
-  virtual StringRef getOutlinedHelperName() const { return ".omp_outlined."; }
+  std::string getOutlinedHelperName(StringRef Name) const;
+  std::string getOutlinedHelperName(CodeGenFunction &CGF) const;
+
+  /// Get the function name of a reduction function.
+  std::string getReductionFuncName(StringRef Name) const;
 
   /// Emits \p Callee function call with arguments \p Args with location \p Loc.
   void emitCall(CodeGenFunction &CGF, SourceLocation Loc,
@@ -508,21 +511,6 @@ protected:
   ///  kmp_int64 st; // stride
   /// };
   QualType KmpDimTy;
-  /// Type struct __tgt_offload_entry{
-  ///   void      *addr;       // Pointer to the offload entry info.
-  ///                          // (function or global)
-  ///   char      *name;       // Name of the function or global.
-  ///   size_t     size;       // Size of the entry info (0 if it a function).
-  ///   int32_t flags;
-  ///   int32_t reserved;
-  /// };
-  //
-  QualType TgtAttributeStructQTy;
-
-  QualType TgtOffloadEntryQTy;
-  /// Entity that registers the offloading constants that were emitted so
-  /// far.
-  llvm::OffloadEntriesInfoManager OffloadEntriesInfoManager;
 
   bool ShouldMarkAsGlobal = true;
   /// List of the emitted declarations.
@@ -563,10 +551,6 @@ protected:
   /// Flag for keeping track of weather a device routine has been emitted.
   /// Device routines are specific to the
   bool HasEmittedDeclareTargetRegion = false;
-
-  /// Loads all the offload entries information from the host IR
-  /// metadata.
-  void loadOffloadInfoMetadata();
 
   /// Start scanning from statement \a S and emit all target regions
   /// found along the way.
@@ -744,26 +728,30 @@ public:
   /// Emits outlined function for the specified OpenMP parallel directive
   /// \a D. This outlined function has type void(*)(kmp_int32 *ThreadID,
   /// kmp_int32 BoundID, struct context_vars*).
+  /// \param CGF Reference to current CodeGenFunction.
   /// \param D OpenMP directive.
   /// \param ThreadIDVar Variable for thread id in the current OpenMP region.
   /// \param InnermostKind Kind of innermost directive (for simple directives it
   /// is a directive itself, for combined - its innermost directive).
   /// \param CodeGen Code generation sequence for the \a D directive.
   virtual llvm::Function *emitParallelOutlinedFunction(
-      const OMPExecutableDirective &D, const VarDecl *ThreadIDVar,
-      OpenMPDirectiveKind InnermostKind, const RegionCodeGenTy &CodeGen);
+      CodeGenFunction &CGF, const OMPExecutableDirective &D,
+      const VarDecl *ThreadIDVar, OpenMPDirectiveKind InnermostKind,
+      const RegionCodeGenTy &CodeGen);
 
   /// Emits outlined function for the specified OpenMP teams directive
   /// \a D. This outlined function has type void(*)(kmp_int32 *ThreadID,
   /// kmp_int32 BoundID, struct context_vars*).
+  /// \param CGF Reference to current CodeGenFunction.
   /// \param D OpenMP directive.
   /// \param ThreadIDVar Variable for thread id in the current OpenMP region.
   /// \param InnermostKind Kind of innermost directive (for simple directives it
   /// is a directive itself, for combined - its innermost directive).
   /// \param CodeGen Code generation sequence for the \a D directive.
   virtual llvm::Function *emitTeamsOutlinedFunction(
-      const OMPExecutableDirective &D, const VarDecl *ThreadIDVar,
-      OpenMPDirectiveKind InnermostKind, const RegionCodeGenTy &CodeGen);
+      CodeGenFunction &CGF, const OMPExecutableDirective &D,
+      const VarDecl *ThreadIDVar, OpenMPDirectiveKind InnermostKind,
+      const RegionCodeGenTy &CodeGen);
 
   /// Emits outlined function for the OpenMP task directive \a D. This
   /// outlined function has type void(*)(kmp_int32 ThreadID, struct task_t*
@@ -1197,18 +1185,17 @@ public:
                                     bool HasCancel = false);
 
   /// Emits reduction function.
+  /// \param ReducerName Name of the function calling the reduction.
   /// \param ArgsElemType Array type containing pointers to reduction variables.
   /// \param Privates List of private copies for original reduction arguments.
   /// \param LHSExprs List of LHS in \a ReductionOps reduction operations.
   /// \param RHSExprs List of RHS in \a ReductionOps reduction operations.
   /// \param ReductionOps List of reduction operations in form 'LHS binop RHS'
   /// or 'operator binop(LHS, RHS)'.
-  llvm::Function *emitReductionFunction(SourceLocation Loc,
-                                        llvm::Type *ArgsElemType,
-                                        ArrayRef<const Expr *> Privates,
-                                        ArrayRef<const Expr *> LHSExprs,
-                                        ArrayRef<const Expr *> RHSExprs,
-                                        ArrayRef<const Expr *> ReductionOps);
+  llvm::Function *emitReductionFunction(
+      StringRef ReducerName, SourceLocation Loc, llvm::Type *ArgsElemType,
+      ArrayRef<const Expr *> Privates, ArrayRef<const Expr *> LHSExprs,
+      ArrayRef<const Expr *> RHSExprs, ArrayRef<const Expr *> ReductionOps);
 
   /// Emits single reduction combiner
   void emitSingleReductionCombiner(CodeGenFunction &CGF,
@@ -1672,11 +1659,26 @@ public:
   virtual bool supportFastFPAtomics() { return false; }
 
   /// Used for AMDGPU architectures where certain fast FP atomics are defined as
-  /// instrinsic functions
+  /// instrinsic functions.
   virtual std::pair<bool, RValue> emitFastFPAtomicCall(CodeGenFunction &CGF,
                                                        LValue X, RValue Update,
                                                        BinaryOperatorKind BO,
                                                        bool IsXBinopExpr) {
+    return std::make_pair(false, RValue::get(nullptr));
+  }
+
+  /// Return whether the current architecture must emit CAS loop runtime call
+  /// for given type and atomic operation
+  virtual bool mustEmitSafeAtomic(CodeGenFunction &CGF, LValue X, RValue Update,
+                                  BinaryOperatorKind BO) {
+    return false;
+  }
+
+  /// Used for AMDGPU architectures where certain atomics must be lowered
+  /// to a CAS loop.
+  virtual std::pair<bool, RValue> emitAtomicCASLoop(CodeGenFunction &CGF,
+                                                    LValue X, RValue Update,
+                                                    BinaryOperatorKind BO) {
     return std::make_pair(false, RValue::get(nullptr));
   }
 };
@@ -1690,30 +1692,30 @@ public:
   /// Emits outlined function for the specified OpenMP parallel directive
   /// \a D. This outlined function has type void(*)(kmp_int32 *ThreadID,
   /// kmp_int32 BoundID, struct context_vars*).
+  /// \param CGF Reference to current CodeGenFunction.
   /// \param D OpenMP directive.
   /// \param ThreadIDVar Variable for thread id in the current OpenMP region.
   /// \param InnermostKind Kind of innermost directive (for simple directives it
   /// is a directive itself, for combined - its innermost directive).
   /// \param CodeGen Code generation sequence for the \a D directive.
-  llvm::Function *
-  emitParallelOutlinedFunction(const OMPExecutableDirective &D,
-                               const VarDecl *ThreadIDVar,
-                               OpenMPDirectiveKind InnermostKind,
-                               const RegionCodeGenTy &CodeGen) override;
+  llvm::Function *emitParallelOutlinedFunction(
+      CodeGenFunction &CGF, const OMPExecutableDirective &D,
+      const VarDecl *ThreadIDVar, OpenMPDirectiveKind InnermostKind,
+      const RegionCodeGenTy &CodeGen) override;
 
   /// Emits outlined function for the specified OpenMP teams directive
   /// \a D. This outlined function has type void(*)(kmp_int32 *ThreadID,
   /// kmp_int32 BoundID, struct context_vars*).
+  /// \param CGF Reference to current CodeGenFunction.
   /// \param D OpenMP directive.
   /// \param ThreadIDVar Variable for thread id in the current OpenMP region.
   /// \param InnermostKind Kind of innermost directive (for simple directives it
   /// is a directive itself, for combined - its innermost directive).
   /// \param CodeGen Code generation sequence for the \a D directive.
-  llvm::Function *
-  emitTeamsOutlinedFunction(const OMPExecutableDirective &D,
-                            const VarDecl *ThreadIDVar,
-                            OpenMPDirectiveKind InnermostKind,
-                            const RegionCodeGenTy &CodeGen) override;
+  llvm::Function *emitTeamsOutlinedFunction(
+      CodeGenFunction &CGF, const OMPExecutableDirective &D,
+      const VarDecl *ThreadIDVar, OpenMPDirectiveKind InnermostKind,
+      const RegionCodeGenTy &CodeGen) override;
 
   /// Emits outlined function for the OpenMP task directive \a D. This
   /// outlined function has type void(*)(kmp_int32 ThreadID, struct task_t*

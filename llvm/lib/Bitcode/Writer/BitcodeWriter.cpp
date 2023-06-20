@@ -687,6 +687,8 @@ static uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_ALLOC_KIND;
   case Attribute::Memory:
     return bitc::ATTR_KIND_MEMORY;
+  case Attribute::NoFPClass:
+    return bitc::ATTR_KIND_NOFPCLASS;
   case Attribute::Naked:
     return bitc::ATTR_KIND_NAKED;
   case Attribute::Nest:
@@ -905,15 +907,8 @@ void ModuleBitcodeWriter::writeTypeTable() {
 
   uint64_t NumBits = VE.computeBitsRequiredForTypeIndicies();
 
-  // Abbrev for TYPE_CODE_POINTER.
-  auto Abbv = std::make_shared<BitCodeAbbrev>();
-  Abbv->Add(BitCodeAbbrevOp(bitc::TYPE_CODE_POINTER));
-  Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, NumBits));
-  Abbv->Add(BitCodeAbbrevOp(0));  // Addrspace = 0
-  unsigned PtrAbbrev = Stream.EmitAbbrev(std::move(Abbv));
-
   // Abbrev for TYPE_CODE_OPAQUE_POINTER.
-  Abbv = std::make_shared<BitCodeAbbrev>();
+  auto Abbv = std::make_shared<BitCodeAbbrev>();
   Abbv->Add(BitCodeAbbrevOp(bitc::TYPE_CODE_OPAQUE_POINTER));
   Abbv->Add(BitCodeAbbrevOp(0)); // Addrspace = 0
   unsigned OpaquePtrAbbrev = Stream.EmitAbbrev(std::move(Abbv));
@@ -999,8 +994,6 @@ void ModuleBitcodeWriter::writeTypeTable() {
         Code = bitc::TYPE_CODE_POINTER;
         TypeVals.push_back(VE.getTypeID(PTy->getNonOpaquePointerElementType()));
         TypeVals.push_back(AddressSpace);
-        if (AddressSpace == 0)
-          AbbrevToUse = PtrAbbrev;
       }
       break;
     }
@@ -1763,6 +1756,7 @@ void ModuleBitcodeWriter::writeDIDerivedType(const DIDerivedType *N,
     Record.push_back(0);
 
   Record.push_back(VE.getMetadataOrNullID(N->getAnnotations().get()));
+  Record.push_back(static_cast<uint64_t>(N->getDWARFMemorySpace()));
 
   Stream.EmitRecord(bitc::METADATA_DERIVED_TYPE, Record, Abbrev);
   Record.clear();
@@ -1838,6 +1832,7 @@ void ModuleBitcodeWriter::writeDIFile(const DIFile *N,
 void ModuleBitcodeWriter::writeDICompileUnit(const DICompileUnit *N,
                                              SmallVectorImpl<uint64_t> &Record,
                                              unsigned Abbrev) {
+  assert(N->isDistinct() && "Expected distinct compile units");
   Record.push_back(/* IsDistinct */ true);
   Record.push_back(N->getSourceLanguage());
   Record.push_back(VE.getMetadataOrNullID(N->getFile()));
@@ -2047,6 +2042,7 @@ void ModuleBitcodeWriter::writeDIGlobalVariable(
   Record.push_back(VE.getMetadataOrNullID(N->getTemplateParams()));
   Record.push_back(N->getAlignInBits());
   Record.push_back(VE.getMetadataOrNullID(N->getAnnotations().get()));
+  Record.push_back(N->getDWARFMemorySpace());
 
   Stream.EmitRecord(bitc::METADATA_GLOBAL_VAR, Record, Abbrev);
   Record.clear();
@@ -2079,6 +2075,7 @@ void ModuleBitcodeWriter::writeDILocalVariable(
   Record.push_back(N->getFlags());
   Record.push_back(N->getAlignInBits());
   Record.push_back(VE.getMetadataOrNullID(N->getAnnotations().get()));
+  Record.push_back(N->getDWARFMemorySpace());
 
   Stream.EmitRecord(bitc::METADATA_LOCAL_VAR, Record, Abbrev);
   Record.clear();
@@ -2109,7 +2106,7 @@ void ModuleBitcodeWriter::writeDIExpression(const DIExpression *N,
                                             SmallVectorImpl<uint64_t> &Record,
                                             unsigned Abbrev) {
   Record.reserve(N->getElements().size() + 1);
-  const uint64_t Version = 4 << 1;
+  const uint64_t Version = 3 << 1;
   Record.push_back((uint64_t)N->isDistinct() | Version);
   Record.append(N->elements_begin(), N->elements_end());
 
@@ -2325,20 +2322,6 @@ void ModuleBitcodeWriter::writeMetadataRecords(
       IndexPos->push_back(Stream.GetCurrentBitNo());
     if (const MDNode *N = dyn_cast<MDNode>(MD)) {
       assert(N->isResolved() && "Expected forward references to be resolved");
-
-#ifndef NDEBUG
-      switch (N->getMetadataID()) {
-#define HANDLE_MDNODE_LEAF_UNIQUED(CLASS)                                      \
-  case Metadata::CLASS##Kind:                                                  \
-    assert(!N->isDistinct() && "Expected non-distinct " #CLASS);               \
-    break;
-#define HANDLE_MDNODE_LEAF_DISTINCT(CLASS)                                     \
-  case Metadata::CLASS##Kind:                                                  \
-    assert(N->isDistinct() && "Expected distinct " #CLASS);                    \
-    break;
-#include "llvm/IR/Metadata.def"
-      }
-#endif
 
       switch (N->getMetadataID()) {
       default:
@@ -2781,12 +2764,6 @@ void ModuleBitcodeWriter::writeConstants(unsigned FirstVal, unsigned LastVal,
         }
         break;
       }
-      case Instruction::Select:
-        Code = bitc::CST_CODE_CE_SELECT;
-        Record.push_back(VE.getValueID(C->getOperand(0)));
-        Record.push_back(VE.getValueID(C->getOperand(1)));
-        Record.push_back(VE.getValueID(C->getOperand(2)));
-        break;
       case Instruction::ExtractElement:
         Code = bitc::CST_CODE_CE_EXTRACTELT;
         Record.push_back(VE.getTypeID(C->getOperand(0)->getType()));
@@ -4358,8 +4335,9 @@ void ModuleBitcodeWriterBase::writePerModuleGlobalValueSummary() {
     NameVals.clear();
   }
 
-  Stream.EmitRecord(bitc::FS_BLOCK_COUNT,
-                    ArrayRef<uint64_t>{Index->getBlockCount()});
+  if (Index->getBlockCount())
+    Stream.EmitRecord(bitc::FS_BLOCK_COUNT,
+                      ArrayRef<uint64_t>{Index->getBlockCount()});
 
   Stream.ExitBlock();
 }
@@ -4689,8 +4667,9 @@ void IndexBitcodeWriter::writeCombinedGlobalValueSummary() {
     }
   }
 
-  Stream.EmitRecord(bitc::FS_BLOCK_COUNT,
-                    ArrayRef<uint64_t>{Index.getBlockCount()});
+  if (Index.getBlockCount())
+    Stream.EmitRecord(bitc::FS_BLOCK_COUNT,
+                      ArrayRef<uint64_t>{Index.getBlockCount()});
 
   Stream.ExitBlock();
 }

@@ -386,6 +386,10 @@ private:
   bool ForceEmitZeroWaitcnts;
   bool ForceEmitWaitcnt[NUM_INST_CNTS];
 
+  // S_ENDPGM instructions before which we should insert a DEALLOC_VGPRS
+  // message.
+  DenseSet<MachineInstr *> ReleaseVGPRInsts;
+
 public:
   static char ID;
 
@@ -398,6 +402,7 @@ public:
   bool shouldFlushVmCnt(MachineLoop *ML, WaitcntBrackets &Brackets);
   bool isPreheaderToFlush(MachineBasicBlock &MBB,
                           WaitcntBrackets &ScoreBrackets);
+  bool isVMEMOrFlatVMEM(const MachineInstr &MI) const;
   bool runOnMachineFunction(MachineFunction &MF) override;
 
   StringRef getPassName() const override {
@@ -1030,6 +1035,15 @@ bool SIInsertWaitcnts::generateWaitcntInstBefore(MachineInstr &MI,
       MI.getOpcode() == AMDGPU::S_SETPC_B64_return ||
       (MI.isReturn() && MI.isCall() && !callWaitsOnFunctionEntry(MI))) {
     Wait = Wait.combined(allZeroWaitcnt());
+  }
+  // Identify S_ENDPGM instructions which may have to wait for outstanding VMEM
+  // stores. In this case it can be useful to send a message to explicitly
+  // release all VGPRs before the stores have completed.
+  else if (MI.getOpcode() == AMDGPU::S_ENDPGM ||
+           MI.getOpcode() == AMDGPU::S_ENDPGM_SAVED) {
+    if (ST->getGeneration() >= AMDGPUSubtarget::GFX11 &&
+        ScoreBrackets.getScoreRange(VS_CNT) != 0)
+      ReleaseVGPRInsts.insert(&MI);
   }
   // Resolve vm waits before gs-done.
   else if ((MI.getOpcode() == AMDGPU::S_SENDMSG ||
@@ -1703,6 +1717,11 @@ bool SIInsertWaitcnts::isPreheaderToFlush(MachineBasicBlock &MBB,
   return UpdateCache(false);
 }
 
+bool SIInsertWaitcnts::isVMEMOrFlatVMEM(const MachineInstr &MI) const {
+  return SIInstrInfo::isVMEM(MI) ||
+         (SIInstrInfo::isFLAT(MI) && mayAccessVMEMThroughFlat(MI));
+}
+
 // Return true if it is better to flush the vmcnt counter in the preheader of
 // the given loop. We currently decide to flush in two situations:
 // 1. The loop contains vmem store(s), no vmem load and at least one use of a
@@ -1721,7 +1740,7 @@ bool SIInsertWaitcnts::shouldFlushVmCnt(MachineLoop *ML,
 
   for (MachineBasicBlock *MBB : ML->blocks()) {
     for (MachineInstr &MI : *MBB) {
-      if (SIInstrInfo::isVMEM(MI)) {
+      if (isVMEMOrFlatVMEM(MI)) {
         if (MI.mayLoad())
           HasVMemLoad = true;
         if (MI.mayStore())
@@ -1749,7 +1768,7 @@ bool SIInsertWaitcnts::shouldFlushVmCnt(MachineLoop *ML,
           }
         }
         // VMem load vgpr def
-        else if (SIInstrInfo::isVMEM(MI) && MI.mayLoad() && Op.isDef())
+        else if (isVMEMOrFlatVMEM(MI) && MI.mayLoad() && Op.isDef())
           for (int RegNo = Interval.first; RegNo < Interval.second; ++RegNo) {
             // If we find a register that is loaded inside the loop, 1. and 2.
             // are invalidated and we can exit.
@@ -1923,6 +1942,15 @@ bool SIInsertWaitcnts::runOnMachineFunction(MachineFunction &MF) {
       }
     }
   }
+
+  // Insert DEALLOC_VGPR messages before previously identified S_ENDPGM
+  // instructions.
+  for (MachineInstr *MI : ReleaseVGPRInsts) {
+    BuildMI(*MI->getParent(), MI, DebugLoc(), TII->get(AMDGPU::S_SENDMSG))
+        .addImm(AMDGPU::SendMsg::ID_DEALLOC_VGPRS_GFX11Plus);
+    Modified = true;
+  }
+  ReleaseVGPRInsts.clear();
 
   return Modified;
 }

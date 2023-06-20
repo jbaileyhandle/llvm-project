@@ -37,6 +37,7 @@ public:
   bool useIntegratedAs() const override { return true; }
   bool isBareMetal() const override { return true; }
   bool isCrossCompiling() const override { return true; }
+  bool HasNativeLLVMSupport() const override { return true; }
   bool isPICDefault() const override { return false; }
   bool isPIEDefault(const llvm::opt::ArgList &Args) const override {
     return false;
@@ -70,6 +71,11 @@ public:
   void AddLinkRuntimeLib(const llvm::opt::ArgList &Args,
                          llvm::opt::ArgStringList &CmdArgs) const;
   std::string computeSysRoot() const override;
+
+private:
+  using OrderedMultilibs =
+      llvm::iterator_range<llvm::SmallVector<Multilib>::const_reverse_iterator>;
+  OrderedMultilibs getOrderedMultilibs() const;
 };
 
 } // namespace toolchains

@@ -22,7 +22,9 @@
     (defined HANDLE_DW_CFA && defined HANDLE_DW_CFA_PRED) ||                   \
     defined HANDLE_DW_APPLE_PROPERTY || defined HANDLE_DW_UT ||                \
     defined HANDLE_DWARF_SECTION || defined HANDLE_DW_IDX ||                   \
-    defined HANDLE_DW_END || defined HANDLE_DW_SECT)
+    defined HANDLE_DW_END || defined HANDLE_DW_SECT ||                         \
+    defined HANDLE_DW_MSPACE || \
+    ( defined HANDLE_DW_ASPACE && defined HANDLE_DW_ASPACE_PRED) )
 #error "Missing macro definition of HANDLE_DW*"
 #endif
 
@@ -134,6 +136,18 @@
 
 #ifndef HANDLE_DW_SECT
 #define HANDLE_DW_SECT(ID, NAME)
+#endif
+
+#ifndef HANDLE_DW_MSPACE
+#define HANDLE_DW_MSPACE(ID, NAME)
+#endif
+
+#ifndef HANDLE_DW_ASPACE
+#define HANDLE_DW_ASPACE(ID, NAME)
+#endif
+
+#ifndef HANDLE_DW_ASPACE_PRED
+#define HANDLE_DW_ASPACE_PRED(ID, NAME, PRED)
 #endif
 
 HANDLE_DW_TAG(0x0000, null, 2, DWARF, DW_KIND_NONE)
@@ -609,6 +623,23 @@ HANDLE_DW_AT(0x3e09, LLVM_augmentation, 0, LLVM)
 HANDLE_DW_AT(0x3e0a, LLVM_lanes, 0, LLVM)
 HANDLE_DW_AT(0x3e0b, LLVM_lane_pc, 0, LLVM)
 HANDLE_DW_AT(0x3e0c, LLVM_vector_size, 0, LLVM)
+HANDLE_DW_AT(0x3e0d, LLVM_memory_space, 0, LLVM)
+HANDLE_DW_AT(0x3e0e, LLVM_address_space, 0, LLVM)
+
+// https://www.llvm.org/docs/AMDGPUDwarfExtensionsForHeterogeneousDebugging.html#a-7-15-memory-space-encodings
+HANDLE_DW_MSPACE(0x0, none)
+HANDLE_DW_MSPACE(0x1, global)
+HANDLE_DW_MSPACE(0x2, constant)
+HANDLE_DW_MSPACE(0x3, group)
+HANDLE_DW_MSPACE(0x4, private)
+
+// https://llvm.org/docs/AMDGPUUsage.html#address-space-identifier
+HANDLE_DW_ASPACE(0x0, none)
+HANDLE_DW_ASPACE_PRED(0x1, AMDGPU_generic, SELECT_AMDGPU)
+HANDLE_DW_ASPACE_PRED(0x2, AMDGPU_region, SELECT_AMDGPU)
+HANDLE_DW_ASPACE_PRED(0x3, AMDGPU_local, SELECT_AMDGPU)
+HANDLE_DW_ASPACE_PRED(0x5, AMDGPU_private_lane, SELECT_AMDGPU)
+HANDLE_DW_ASPACE_PRED(0x6, AMDGPU_private_wave, SELECT_AMDGPU)
 
 // Apple extensions.
 
@@ -1276,3 +1307,6 @@ HANDLE_DW_SECT(8, RNGLISTS)
 #undef HANDLE_DW_IDX
 #undef HANDLE_DW_END
 #undef HANDLE_DW_SECT
+#undef HANDLE_DW_MSPACE
+#undef HANDLE_DW_ASPACE
+#undef HANDLE_DW_ASPACE_PRED

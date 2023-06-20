@@ -332,24 +332,32 @@ define i64 @ctlz_i64(i64 %a) nounwind {
 ; RV64I-NEXT:    srli a1, a0, 32
 ; RV64I-NEXT:    or a0, a0, a1
 ; RV64I-NEXT:    not a0, a0
-; RV64I-NEXT:    lui a1, %hi(.LCPI5_0)
-; RV64I-NEXT:    ld a1, %lo(.LCPI5_0)(a1)
-; RV64I-NEXT:    lui a2, %hi(.LCPI5_1)
-; RV64I-NEXT:    ld a2, %lo(.LCPI5_1)(a2)
-; RV64I-NEXT:    srli a3, a0, 1
-; RV64I-NEXT:    and a1, a3, a1
+; RV64I-NEXT:    srli a1, a0, 1
+; RV64I-NEXT:    lui a2, 349525
+; RV64I-NEXT:    addiw a2, a2, 1365
+; RV64I-NEXT:    slli a3, a2, 32
+; RV64I-NEXT:    add a2, a2, a3
+; RV64I-NEXT:    and a1, a1, a2
 ; RV64I-NEXT:    sub a0, a0, a1
-; RV64I-NEXT:    and a1, a0, a2
+; RV64I-NEXT:    lui a1, 209715
+; RV64I-NEXT:    addiw a1, a1, 819
+; RV64I-NEXT:    slli a2, a1, 32
+; RV64I-NEXT:    add a1, a1, a2
+; RV64I-NEXT:    and a2, a0, a1
 ; RV64I-NEXT:    srli a0, a0, 2
-; RV64I-NEXT:    and a0, a0, a2
-; RV64I-NEXT:    lui a2, %hi(.LCPI5_2)
-; RV64I-NEXT:    ld a2, %lo(.LCPI5_2)(a2)
-; RV64I-NEXT:    add a0, a1, a0
+; RV64I-NEXT:    and a0, a0, a1
+; RV64I-NEXT:    add a0, a2, a0
 ; RV64I-NEXT:    srli a1, a0, 4
 ; RV64I-NEXT:    add a0, a0, a1
-; RV64I-NEXT:    and a0, a0, a2
-; RV64I-NEXT:    lui a1, %hi(.LCPI5_3)
-; RV64I-NEXT:    ld a1, %lo(.LCPI5_3)(a1)
+; RV64I-NEXT:    lui a1, 61681
+; RV64I-NEXT:    addiw a1, a1, -241
+; RV64I-NEXT:    slli a2, a1, 32
+; RV64I-NEXT:    add a1, a1, a2
+; RV64I-NEXT:    and a0, a0, a1
+; RV64I-NEXT:    lui a1, 4112
+; RV64I-NEXT:    addiw a1, a1, 257
+; RV64I-NEXT:    slli a2, a1, 32
+; RV64I-NEXT:    add a1, a1, a2
 ; RV64I-NEXT:    call __muldi3@plt
 ; RV64I-NEXT:    srli a0, a0, 56
 ; RV64I-NEXT:    ld ra, 8(sp) # 8-byte Folded Reload
@@ -627,6 +635,23 @@ define signext i32 @sexth_i32(i32 signext %a) nounwind {
   ret i32 %shr
 }
 
+define signext i32 @no_sexth_i32(i32 signext %a) nounwind {
+; RV64I-LABEL: no_sexth_i32:
+; RV64I:       # %bb.0:
+; RV64I-NEXT:    slli a0, a0, 49
+; RV64I-NEXT:    srai a0, a0, 48
+; RV64I-NEXT:    ret
+;
+; RV64XTHEADBB-LABEL: no_sexth_i32:
+; RV64XTHEADBB:       # %bb.0:
+; RV64XTHEADBB-NEXT:    slli a0, a0, 49
+; RV64XTHEADBB-NEXT:    srai a0, a0, 48
+; RV64XTHEADBB-NEXT:    ret
+  %shl = shl i32 %a, 17
+  %shr = ashr exact i32 %shl, 16
+  ret i32 %shr
+}
+
 define i64 @sexth_i64(i64 %a) nounwind {
 ; RV64I-LABEL: sexth_i64:
 ; RV64I:       # %bb.0:
@@ -639,6 +664,23 @@ define i64 @sexth_i64(i64 %a) nounwind {
 ; RV64XTHEADBB-NEXT:    th.ext a0, a0, 15, 0
 ; RV64XTHEADBB-NEXT:    ret
   %shl = shl i64 %a, 48
+  %shr = ashr exact i64 %shl, 48
+  ret i64 %shr
+}
+
+define i64 @no_sexth_i64(i64 %a) nounwind {
+; RV64I-LABEL: no_sexth_i64:
+; RV64I:       # %bb.0:
+; RV64I-NEXT:    slli a0, a0, 49
+; RV64I-NEXT:    srai a0, a0, 48
+; RV64I-NEXT:    ret
+;
+; RV64XTHEADBB-LABEL: no_sexth_i64:
+; RV64XTHEADBB:       # %bb.0:
+; RV64XTHEADBB-NEXT:    slli a0, a0, 49
+; RV64XTHEADBB-NEXT:    srai a0, a0, 48
+; RV64XTHEADBB-NEXT:    ret
+  %shl = shl i64 %a, 49
   %shr = ashr exact i64 %shl, 48
   ret i64 %shr
 }
@@ -670,6 +712,37 @@ define i64 @zexth_i64(i64 %a) nounwind {
 ; RV64XTHEADBB-NEXT:    th.extu a0, a0, 15, 0
 ; RV64XTHEADBB-NEXT:    ret
   %and = and i64 %a, 65535
+  ret i64 %and
+}
+
+define i64 @zext_bf_i64(i64 %a) nounwind {
+; RV64I-LABEL: zext_bf_i64:
+; RV64I:       # %bb.0:
+; RV64I-NEXT:    slli a0, a0, 47
+; RV64I-NEXT:    srli a0, a0, 48
+; RV64I-NEXT:    ret
+;
+; RV64XTHEADBB-LABEL: zext_bf_i64:
+; RV64XTHEADBB:       # %bb.0:
+; RV64XTHEADBB-NEXT:    th.extu a0, a0, 16, 1
+; RV64XTHEADBB-NEXT:    ret
+  %1 = lshr i64 %a, 1
+  %and = and i64 %1, 65535
+  ret i64 %and
+}
+
+define i64 @zext_i64_srliw(i64 %a) nounwind {
+; RV64I-LABEL: zext_i64_srliw:
+; RV64I:       # %bb.0:
+; RV64I-NEXT:    srliw a0, a0, 16
+; RV64I-NEXT:    ret
+;
+; RV64XTHEADBB-LABEL: zext_i64_srliw:
+; RV64XTHEADBB:       # %bb.0:
+; RV64XTHEADBB-NEXT:    srliw a0, a0, 16
+; RV64XTHEADBB-NEXT:    ret
+  %1 = lshr i64 %a, 16
+  %and = and i64 %1, 65535
   ret i64 %and
 }
 

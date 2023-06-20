@@ -166,76 +166,6 @@ PreservedAnalyses RewriteStatepointsForGC::run(Module &M,
 
 namespace {
 
-class RewriteStatepointsForGCLegacyPass : public ModulePass {
-  RewriteStatepointsForGC Impl;
-
-public:
-  static char ID; // Pass identification, replacement for typeid
-
-  RewriteStatepointsForGCLegacyPass() : ModulePass(ID), Impl() {
-    initializeRewriteStatepointsForGCLegacyPassPass(
-        *PassRegistry::getPassRegistry());
-  }
-
-  bool runOnModule(Module &M) override {
-    bool Changed = false;
-    for (Function &F : M) {
-      // Nothing to do for declarations.
-      if (F.isDeclaration() || F.empty())
-        continue;
-
-      // Policy choice says not to rewrite - the most common reason is that
-      // we're compiling code without a GCStrategy.
-      if (!shouldRewriteStatepointsIn(F))
-        continue;
-
-      TargetTransformInfo &TTI =
-          getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
-      const TargetLibraryInfo &TLI =
-          getAnalysis<TargetLibraryInfoWrapperPass>().getTLI(F);
-      auto &DT = getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
-
-      Changed |= Impl.runOnFunction(F, DT, TTI, TLI);
-    }
-
-    if (!Changed)
-      return false;
-
-    // stripNonValidData asserts that shouldRewriteStatepointsIn
-    // returns true for at least one function in the module.  Since at least
-    // one function changed, we know that the precondition is satisfied.
-    stripNonValidData(M);
-    return true;
-  }
-
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    // We add and rewrite a bunch of instructions, but don't really do much
-    // else.  We could in theory preserve a lot more analyses here.
-    AU.addRequired<DominatorTreeWrapperPass>();
-    AU.addRequired<TargetTransformInfoWrapperPass>();
-    AU.addRequired<TargetLibraryInfoWrapperPass>();
-  }
-};
-
-} // end anonymous namespace
-
-char RewriteStatepointsForGCLegacyPass::ID = 0;
-
-ModulePass *llvm::createRewriteStatepointsForGCLegacyPass() {
-  return new RewriteStatepointsForGCLegacyPass();
-}
-
-INITIALIZE_PASS_BEGIN(RewriteStatepointsForGCLegacyPass,
-                      "rewrite-statepoints-for-gc",
-                      "Make relocations explicit at statepoints", false, false)
-INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
-INITIALIZE_PASS_END(RewriteStatepointsForGCLegacyPass,
-                    "rewrite-statepoints-for-gc",
-                    "Make relocations explicit at statepoints", false, false)
-
-namespace {
-
 struct GCPtrLivenessData {
   /// Values defined in this block.
   MapVector<BasicBlock *, SetVector<Value *>> KillSet;
@@ -695,7 +625,7 @@ static Value *findBaseDefiningValue(Value *I, DefiningValueMapTy &Cache,
 /// Returns the base defining value for this value.
 static Value *findBaseDefiningValueCached(Value *I, DefiningValueMapTy &Cache,
                                           IsKnownBaseMapTy &KnownBases) {
-  if (Cache.find(I) == Cache.end()) {
+  if (!Cache.contains(I)) {
     auto *BDV = findBaseDefiningValue(I, Cache, KnownBases);
     Cache[I] = BDV;
     LLVM_DEBUG(dbgs() << "fBDV-cached: " << I->getName() << " -> "
@@ -703,7 +633,7 @@ static Value *findBaseDefiningValueCached(Value *I, DefiningValueMapTy &Cache,
                       << KnownBases[I] << "\n");
   }
   assert(Cache[I] != nullptr);
-  assert(KnownBases.find(Cache[I]) != KnownBases.end() &&
+  assert(KnownBases.contains(Cache[I]) &&
          "Cached value must be present in known bases map");
   return Cache[I];
 }
@@ -2874,9 +2804,7 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
 
   // Do all the fixups of the original live variables to their relocated selves
   SmallVector<Value *, 128> Live;
-  for (size_t i = 0; i < Records.size(); i++) {
-    PartiallyConstructedSafepointRecord &Info = Records[i];
-
+  for (const PartiallyConstructedSafepointRecord &Info : Records) {
     // We can't simply save the live set from the original insertion.  One of
     // the live values might be the result of a call which needs a safepoint.
     // That Value* no longer exists and we need to use the new gc_result.

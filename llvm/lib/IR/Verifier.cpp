@@ -316,7 +316,7 @@ class Verifier : public InstVisitor<Verifier>, VerifierSupport {
   bool HasDebugInfo = false;
 
   /// The Debug Info Version of the module being verified.
-  Optional<unsigned> DebugInfoVersion;
+  std::optional<unsigned> DebugInfoVersion;
 
   /// The current source language.
   dwarf::SourceLanguage CurrentSourceLang = dwarf::DW_LANG_lo_user;
@@ -838,9 +838,11 @@ void Verifier::visitGlobalVariable(const GlobalVariable &GV) {
   Check(!isa<ScalableVectorType>(GV.getValueType()),
         "Globals cannot contain scalable vectors", &GV);
 
-  if (auto *STy = dyn_cast<StructType>(GV.getValueType()))
-    Check(!STy->containsScalableVectorType(),
+  if (auto *STy = dyn_cast<StructType>(GV.getValueType())) {
+    SmallPtrSet<Type *, 4> Visited;
+    Check(!STy->containsScalableVectorType(&Visited),
           "Globals cannot contain scalable vectors", &GV);
+  }
 
   // Check if it's a target extension type that disallows being used as a
   // global.
@@ -1108,8 +1110,8 @@ void Verifier::visitDISubrange(const DISubrange &N) {
               isa<DIVariable>(CBound) || isa<DIExpression>(CBound),
           "Count must be signed constant or DIVariable or DIExpression", &N);
   auto Count = N.getCount();
-  CheckDI(!Count || !Count.is<ConstantInt *>() ||
-              Count.get<ConstantInt *>()->getSExtValue() >= -1,
+  CheckDI(!Count || !isa<ConstantInt *>(Count) ||
+              cast<ConstantInt *>(Count)->getSExtValue() >= -1,
           "invalid subrange count", &N);
   auto *LBound = N.getRawLowerBound();
   CheckDI(!LBound || isa<ConstantAsMetadata>(LBound) ||
@@ -1216,6 +1218,14 @@ void Verifier::visitDIDerivedType(const DIDerivedType &N) {
                 N.getTag() == dwarf::DW_TAG_reference_type ||
                 N.getTag() == dwarf::DW_TAG_rvalue_reference_type,
             "DWARF address space only applies to pointer or reference types",
+            &N);
+  }
+
+  if (N.getDWARFMemorySpace() != dwarf::DW_MSPACE_LLVM_none) {
+    CheckDI(N.getTag() == dwarf::DW_TAG_pointer_type ||
+                N.getTag() == dwarf::DW_TAG_reference_type ||
+                N.getTag() == dwarf::DW_TAG_rvalue_reference_type,
+            "DWARF memory space only applies to pointer or reference types",
             &N);
   }
 }
@@ -1416,10 +1426,11 @@ void Verifier::visitDISubprogram(const DISubprogram &N) {
     CheckDI(Node, "invalid retained nodes list", &N, RawNode);
     for (Metadata *Op : Node->operands()) {
       CheckDI(Op && (isa<DILocalVariable>(Op) || isa<DILabel>(Op) ||
-                      isa<DILifetime>(Op)),
-               "invalid retained nodes, expected DILocalVariable or DILabel or "
-               "DILifetime",
-               &N, Node, Op);
+                      isa<DILifetime>(Op) ||
+                     isa<DIImportedEntity>(Op)),
+              "invalid retained nodes, expected DILocalVariable, DILabel or "
+              "DIImportedEntity",
+              &N, Node, Op);
     }
   }
   CheckDI(!hasConflictingReferenceFlags(N.getFlags()),
@@ -1436,6 +1447,8 @@ void Verifier::visitDISubprogram(const DISubprogram &N) {
   } else {
     // Subprogram declarations (part of the type hierarchy).
     CheckDI(!Unit, "subprogram declarations must not have a compile unit", &N);
+    CheckDI(!N.getRawDeclaration(),
+            "subprogram declaration must not have a declaration field");
   }
 
   if (auto *RawThrownTypes = N.getRawThrownTypes()) {
@@ -2031,6 +2044,14 @@ void Verifier::verifyParameterAttrs(AttributeSet Attrs, Type *Ty,
               "Attribute 'elementtype' type does not match parameter!", V);
       }
     }
+  }
+
+  if (Attrs.hasAttribute(Attribute::NoFPClass)) {
+    uint64_t Val = Attrs.getAttribute(Attribute::NoFPClass).getValueAsInt();
+    Check(Val != 0, "Attribute 'nofpclass' must have at least one test bit set",
+          V);
+    Check((Val & ~static_cast<unsigned>(fcAllFlags)) == 0,
+          "Invalid value for 'nofpclass' test mask", V);
   }
 }
 
@@ -3896,6 +3917,14 @@ void Verifier::visitGetElementPtrInst(GetElementPtrInst &GEP) {
         "GEP base pointer is not a vector or a vector of pointers", &GEP);
   Check(GEP.getSourceElementType()->isSized(), "GEP into unsized type!", &GEP);
 
+  if (auto *STy = dyn_cast<StructType>(GEP.getSourceElementType())) {
+    SmallPtrSet<Type *, 4> Visited;
+    Check(!STy->containsScalableVectorType(&Visited),
+          "getelementptr cannot target structure that contains scalable vector"
+          "type",
+          &GEP);
+  }
+
   SmallVector<Value *, 16> Idxs(GEP.indices());
   Check(
       all_of(Idxs, [](Value *V) { return V->getType()->isIntOrIntVectorTy(); }),
@@ -3956,7 +3985,8 @@ void Verifier::visitRangeMetadata(Instruction &I, MDNode *Range, Type *Ty) {
     ConstantInt *High =
         mdconst::dyn_extract<ConstantInt>(Range->getOperand(2 * i + 1));
     Check(High, "The upper limit must be an integer!", High);
-    Check(High->getType() == Low->getType() && High->getType() == Ty,
+    Check(High->getType() == Low->getType() &&
+          High->getType() == Ty->getScalarType(),
           "Range types must match instruction type!", &I);
 
     APInt HighV = High->getValue();
@@ -4737,8 +4767,15 @@ void Verifier::visitAnnotationMetadata(MDNode *Annotation) {
   Check(isa<MDTuple>(Annotation), "annotation must be a tuple");
   Check(Annotation->getNumOperands() >= 1,
         "annotation must have at least one operand");
-  for (const MDOperand &Op : Annotation->operands())
-    Check(isa<MDString>(Op.get()), "operands must be strings");
+  for (const MDOperand &Op : Annotation->operands()) {
+    bool TupleOfStrings =
+        isa<MDTuple>(Op.get()) &&
+        all_of(cast<MDTuple>(Op)->operands(), [](auto &Annotation) {
+          return isa<MDString>(Annotation.get());
+        });
+    Check(isa<MDString>(Op.get()) || TupleOfStrings,
+          "operands must be a string or a tuple of strings");
+  }
 }
 
 void Verifier::visitAliasScopeMetadata(const MDNode *MD) {
@@ -5138,7 +5175,7 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
   }
   case Intrinsic::is_fpclass: {
     const ConstantInt *TestMask = cast<ConstantInt>(Call.getOperand(1));
-    Check((TestMask->getZExtValue() & ~fcAllFlags) == 0,
+    Check((TestMask->getZExtValue() & ~static_cast<unsigned>(fcAllFlags)) == 0,
           "unsupported bits for llvm.is.fpclass test mask");
     break;
   }
@@ -5175,9 +5212,6 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
     Check(isa<MetadataAsValue>(Call.getArgOperand(0)),
           "invalid llvm.dbg.declare intrinsic call 1", Call);
     visitDbgIntrinsic("declare", cast<DbgVariableIntrinsic>(Call));
-    break;
-  case Intrinsic::dbg_addr: // llvm.dbg.addr
-    visitDbgIntrinsic("addr", cast<DbgVariableIntrinsic>(Call));
     break;
   case Intrinsic::dbg_value: // llvm.dbg.value
     visitDbgIntrinsic("value", cast<DbgVariableIntrinsic>(Call));
@@ -5520,6 +5554,12 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
           Call);
     break;
   }
+  case Intrinsic::experimental_get_vector_length: {
+    ConstantInt *VF = cast<ConstantInt>(Call.getArgOperand(1));
+    Check(!VF->isNegative() && !VF->isZero(),
+          "get_vector_length: VF must be positive", Call);
+    break;
+  }
   case Intrinsic::masked_load: {
     Check(Call.getType()->isVectorTy(), "masked_load: must return a vector",
           Call);
@@ -5706,15 +5746,28 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
     Type *Op0ElemTy = nullptr;
     Type *Op1ElemTy = nullptr;
     switch (ID) {
-    case Intrinsic::matrix_multiply:
+    case Intrinsic::matrix_multiply: {
       NumRows = cast<ConstantInt>(Call.getArgOperand(2));
+      ConstantInt *N = cast<ConstantInt>(Call.getArgOperand(3));
       NumColumns = cast<ConstantInt>(Call.getArgOperand(4));
+      Check(cast<FixedVectorType>(Call.getArgOperand(0)->getType())
+                    ->getNumElements() ==
+                NumRows->getZExtValue() * N->getZExtValue(),
+            "First argument of a matrix operation does not match specified "
+            "shape!");
+      Check(cast<FixedVectorType>(Call.getArgOperand(1)->getType())
+                    ->getNumElements() ==
+                N->getZExtValue() * NumColumns->getZExtValue(),
+            "Second argument of a matrix operation does not match specified "
+            "shape!");
+
       ResultTy = cast<VectorType>(Call.getType());
       Op0ElemTy =
           cast<VectorType>(Call.getArgOperand(0)->getType())->getElementType();
       Op1ElemTy =
           cast<VectorType>(Call.getArgOperand(1)->getType())->getElementType();
       break;
+    }
     case Intrinsic::matrix_transpose:
       NumRows = cast<ConstantInt>(Call.getArgOperand(1));
       NumColumns = cast<ConstantInt>(Call.getArgOperand(2));
@@ -5898,6 +5951,35 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
           "stream argument to llvm.aarch64.prefetch must be 0 or 1", Call);
     Check(cast<ConstantInt>(Call.getArgOperand(4))->getZExtValue() < 2,
           "isdata argument to llvm.aarch64.prefetch must be 0 or 1", Call);
+    break;
+  }
+  case Intrinsic::callbr_landingpad: {
+    const auto *CBR = dyn_cast<CallBrInst>(Call.getOperand(0));
+    Check(CBR, "intrinstic requires callbr operand", &Call);
+    if (!CBR)
+      break;
+
+    const BasicBlock *LandingPadBB = Call.getParent();
+    const BasicBlock *PredBB = LandingPadBB->getUniquePredecessor();
+    if (!PredBB) {
+      CheckFailed("Intrinsic in block must have 1 unique predecessor", &Call);
+      break;
+    }
+    if (!isa<CallBrInst>(PredBB->getTerminator())) {
+      CheckFailed("Intrinsic must have corresponding callbr in predecessor",
+                  &Call);
+      break;
+    }
+    Check(llvm::any_of(CBR->getIndirectDests(),
+                       [LandingPadBB](const BasicBlock *IndDest) {
+                         return IndDest == LandingPadBB;
+                       }),
+          "Intrinsic's corresponding callbr must have intrinsic's parent basic "
+          "block in indirect destination list",
+          &Call);
+    const Instruction &First = *LandingPadBB->begin();
+    Check(&First == &Call, "No other instructions may proceed intrinsic",
+          &Call);
     break;
   }
   };
@@ -6098,20 +6180,20 @@ void Verifier::visitConstrainedFPIntrinsic(ConstrainedFPIntrinsic &FPI) {
   case Intrinsic::experimental_constrained_fptosi:
   case Intrinsic::experimental_constrained_fptoui: {
     Value *Operand = FPI.getArgOperand(0);
-    uint64_t NumSrcElem = 0;
+    ElementCount SrcEC;
     Check(Operand->getType()->isFPOrFPVectorTy(),
           "Intrinsic first argument must be floating point", &FPI);
     if (auto *OperandT = dyn_cast<VectorType>(Operand->getType())) {
-      NumSrcElem = cast<FixedVectorType>(OperandT)->getNumElements();
+      SrcEC = cast<VectorType>(OperandT)->getElementCount();
     }
 
     Operand = &FPI;
-    Check((NumSrcElem > 0) == Operand->getType()->isVectorTy(),
+    Check(SrcEC.isNonZero() == Operand->getType()->isVectorTy(),
           "Intrinsic first argument and result disagree on vector use", &FPI);
     Check(Operand->getType()->isIntOrIntVectorTy(),
           "Intrinsic result must be an integer", &FPI);
     if (auto *OperandT = dyn_cast<VectorType>(Operand->getType())) {
-      Check(NumSrcElem == cast<FixedVectorType>(OperandT)->getNumElements(),
+      Check(SrcEC == cast<VectorType>(OperandT)->getElementCount(),
             "Intrinsic first argument and result vector lengths must be equal",
             &FPI);
     }
@@ -6121,20 +6203,20 @@ void Verifier::visitConstrainedFPIntrinsic(ConstrainedFPIntrinsic &FPI) {
   case Intrinsic::experimental_constrained_sitofp:
   case Intrinsic::experimental_constrained_uitofp: {
     Value *Operand = FPI.getArgOperand(0);
-    uint64_t NumSrcElem = 0;
+    ElementCount SrcEC;
     Check(Operand->getType()->isIntOrIntVectorTy(),
           "Intrinsic first argument must be integer", &FPI);
     if (auto *OperandT = dyn_cast<VectorType>(Operand->getType())) {
-      NumSrcElem = cast<FixedVectorType>(OperandT)->getNumElements();
+      SrcEC = cast<VectorType>(OperandT)->getElementCount();
     }
 
     Operand = &FPI;
-    Check((NumSrcElem > 0) == Operand->getType()->isVectorTy(),
+    Check(SrcEC.isNonZero() == Operand->getType()->isVectorTy(),
           "Intrinsic first argument and result disagree on vector use", &FPI);
     Check(Operand->getType()->isFPOrFPVectorTy(),
           "Intrinsic result must be a floating point", &FPI);
     if (auto *OperandT = dyn_cast<VectorType>(Operand->getType())) {
-      Check(NumSrcElem == cast<FixedVectorType>(OperandT)->getNumElements(),
+      Check(SrcEC == cast<VectorType>(OperandT)->getElementCount(),
             "Intrinsic first argument and result vector lengths must be equal",
             &FPI);
     }
@@ -6153,8 +6235,8 @@ void Verifier::visitConstrainedFPIntrinsic(ConstrainedFPIntrinsic &FPI) {
     Check(OperandTy->isVectorTy() == ResultTy->isVectorTy(),
           "Intrinsic first argument and result disagree on vector use", &FPI);
     if (OperandTy->isVectorTy()) {
-      Check(cast<FixedVectorType>(OperandTy)->getNumElements() ==
-                cast<FixedVectorType>(ResultTy)->getNumElements(),
+      Check(cast<VectorType>(OperandTy)->getElementCount() ==
+                cast<VectorType>(ResultTy)->getElementCount(),
             "Intrinsic first argument and result vector lengths must be equal",
             &FPI);
     }
@@ -6324,6 +6406,9 @@ void Verifier::verifyFragmentExpression(const DIVariable &V,
   CheckDI(FragSize + FragOffset <= *VarSize,
           "fragment is larger than or outside of variable", Desc, &V);
   CheckDI(FragSize != *VarSize, "fragment covers entire variable", Desc, &V);
+
+  auto MSpace = V.getDWARFMemorySpace();
+  CheckDI(MSpace <= dwarf::DW_MSPACE_LLVM_hi_user, "invalid memory space", &V);
 }
 
 void Verifier::visitDbgDefKillIntrinsic(StringRef Kind,
@@ -6380,7 +6465,17 @@ void Verifier::verifyNotEntryValue(const DbgVariableIntrinsic &I) {
   if (!E || !E->isValid())
     return;
 
-  CheckDI(!E->isEntryValue(), "Entry values are only allowed in MIR", &I);
+  // We allow EntryValues for swift async arguments, as they have an
+  // ABI-guarantee to be turned into a specific register.
+  if (isa<ValueAsMetadata>(I.getRawLocation()))
+    if (auto *ArgLoc = dyn_cast_or_null<Argument>(I.getVariableLocationOp(0));
+        ArgLoc && ArgLoc->hasAttribute(Attribute::SwiftAsync))
+      return;
+
+  CheckDI(!E->isEntryValue(),
+          "Entry values are only allowed in MIR unless they target a "
+          "swiftasync Argument",
+          &I);
 }
 
 void Verifier::verifyCompileUnits() {
@@ -6839,6 +6934,9 @@ static bool isNewFormatTBAATypeNode(llvm::MDNode *Type) {
 }
 
 bool TBAAVerifier::visitTBAAMetadata(Instruction &I, const MDNode *MD) {
+  CheckTBAA(MD->getNumOperands() > 0, "TBAA metadata cannot have 0 operands",
+            &I, MD);
+
   CheckTBAA(isa<LoadInst>(I) || isa<StoreInst>(I) || isa<CallInst>(I) ||
                 isa<VAArgInst>(I) || isa<AtomicRMWInst>(I) ||
                 isa<AtomicCmpXchgInst>(I),

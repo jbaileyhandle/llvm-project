@@ -247,10 +247,10 @@ public:
   DIE *createTypeDIE(const DIScope *Context, DIE &ContextDIE, const DIType *Ty);
 
   /// Find existing DIE or create new DIE for the given type.
-  DIE *getOrCreateTypeDIE(const MDNode *TyNode);
+  virtual DIE *getOrCreateTypeDIE(const MDNode *TyNode);
 
   /// Get context owner's DIE.
-  DIE *getOrCreateContextDIE(const DIScope *Context);
+  virtual DIE *getOrCreateContextDIE(const DIScope *Context);
 
   /// Construct DIEs for types that contain vtables.
   void constructContainingTypeDIEs();
@@ -302,6 +302,9 @@ public:
 
   /// Get context owner's DIE.
   DIE *createTypeDIE(const DICompositeType *Ty);
+
+  /// Adds the DW_AT_memory_space tag to a DIE
+  void addMemorySpaceAttribute(DIE &D, dwarf::MemorySpace MS);
 
 protected:
   ~DwarfUnit();

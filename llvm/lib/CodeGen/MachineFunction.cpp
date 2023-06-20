@@ -119,7 +119,7 @@ void setUnsafeStackSize(const Function &F, MachineFrameInfo &FrameInfo) {
 
   auto *MetadataName = "unsafe-stack-size";
   if (auto &N = Existing->getOperand(0)) {
-    if (cast<MDString>(N.get())->getString() == MetadataName) {
+    if (N.equalsStr(MetadataName)) {
       if (auto &Op = Existing->getOperand(1)) {
         auto Val = mdconst::extract<ConstantInt>(Op)->getZExtValue();
         FrameInfo.setUnsafeStackSize(Val);
@@ -427,8 +427,7 @@ void MachineFunction::deleteMachineInstr(MachineInstr *MI) {
   // be triggered during the implementation of support for the
   // call site info of a new architecture. If the assertion is triggered,
   // back trace will tell where to insert a call to updateCallSiteInfo().
-  assert((!MI->isCandidateForCallSiteEntry() ||
-          CallSitesInfo.find(MI) == CallSitesInfo.end()) &&
+  assert((!MI->isCandidateForCallSiteEntry() || !CallSitesInfo.contains(MI)) &&
          "Call site info was not updated!");
   // Strip it for parts. The operand array and the MI object itself are
   // independently recyclable.
@@ -1083,8 +1082,8 @@ auto MachineFunction::salvageCopySSAImpl(MachineInstr &MI)
   if (State.first.isVirtual()) {
     // Virtual register def -- we can just look up where this happens.
     MachineInstr *Inst = MRI.def_begin(State.first)->getParent();
-    for (auto &MO : Inst->operands()) {
-      if (!MO.isReg() || !MO.isDef() || MO.getReg() != State.first)
+    for (auto &MO : Inst->all_defs()) {
+      if (MO.getReg() != State.first)
         continue;
       return ApplySubregisters({Inst->getDebugInstrNum(), MO.getOperandNo()});
     }
@@ -1101,10 +1100,9 @@ auto MachineFunction::salvageCopySSAImpl(MachineInstr &MI)
   auto RMII = CurInst->getReverseIterator();
   auto PrevInstrs = make_range(RMII, CurInst->getParent()->instr_rend());
   for (auto &ToExamine : PrevInstrs) {
-    for (auto &MO : ToExamine.operands()) {
+    for (auto &MO : ToExamine.all_defs()) {
       // Test for operand that defines something aliasing RegToSeek.
-      if (!MO.isReg() || !MO.isDef() ||
-          !TRI.regsOverlap(RegToSeek, MO.getReg()))
+      if (!TRI.regsOverlap(RegToSeek, MO.getReg()))
         continue;
 
       return ApplySubregisters(
@@ -1394,7 +1392,7 @@ MachineConstantPool::~MachineConstantPool() {
 }
 
 /// Test whether the given two constants can be allocated the same constant pool
-/// entry.
+/// entry referenced by \param A.
 static bool CanShareConstantPoolEntry(const Constant *A, const Constant *B,
                                       const DataLayout &DL) {
   // Handle the trivial case quickly.
@@ -1413,6 +1411,8 @@ static bool CanShareConstantPoolEntry(const Constant *A, const Constant *B,
   uint64_t StoreSize = DL.getTypeStoreSize(A->getType());
   if (StoreSize != DL.getTypeStoreSize(B->getType()) || StoreSize > 128)
     return false;
+
+  bool ContainsUndefOrPoisonA = A->containsUndefOrPoisonElement();
 
   Type *IntTy = IntegerType::get(A->getContext(), StoreSize*8);
 
@@ -1433,7 +1433,14 @@ static bool CanShareConstantPoolEntry(const Constant *A, const Constant *B,
     B = ConstantFoldCastOperand(Instruction::BitCast, const_cast<Constant *>(B),
                                 IntTy, DL);
 
-  return A == B;
+  if (A != B)
+    return false;
+
+  // Constants only safely match if A doesn't contain undef/poison.
+  // As we'll be reusing A, it doesn't matter if B contain undef/poison.
+  // TODO: Handle cases where A and B have the same undef/poison elements.
+  // TODO: Merge A and B with mismatching undef/poison elements.
+  return !ContainsUndefOrPoisonA;
 }
 
 /// Create a new entry in the constant pool or return an existing one.

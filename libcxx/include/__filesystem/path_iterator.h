@@ -27,9 +27,9 @@
 
 _LIBCPP_BEGIN_NAMESPACE_FILESYSTEM
 
-_LIBCPP_AVAILABILITY_FILESYSTEM_PUSH
+_LIBCPP_AVAILABILITY_FILESYSTEM_LIBRARY_PUSH
 
-class _LIBCPP_TYPE_VIS path::iterator {
+class _LIBCPP_EXPORTED_FROM_ABI path::iterator {
 public:
   enum _ParserState : unsigned char {
     _Singular,
@@ -56,10 +56,10 @@ public:
       : __stashed_elem_(), __path_ptr_(nullptr), __entry_(),
         __state_(_Singular) {}
 
-  iterator(const iterator&) = default;
-  ~iterator() = default;
+  _LIBCPP_HIDE_FROM_ABI iterator(const iterator&) = default;
+  _LIBCPP_HIDE_FROM_ABI ~iterator() = default;
 
-  iterator& operator=(const iterator&) = default;
+  _LIBCPP_HIDE_FROM_ABI iterator& operator=(const iterator&) = default;
 
   _LIBCPP_INLINE_VISIBILITY
   reference operator*() const { return __stashed_elem_; }
@@ -125,7 +125,7 @@ inline _LIBCPP_INLINE_VISIBILITY bool operator!=(const path::iterator& __lhs,
   return !(__lhs == __rhs);
 }
 
-_LIBCPP_AVAILABILITY_FILESYSTEM_POP
+_LIBCPP_AVAILABILITY_FILESYSTEM_LIBRARY_POP
 
 _LIBCPP_END_NAMESPACE_FILESYSTEM
 

@@ -14,11 +14,13 @@
 #include <__config>
 #include <__filesystem/path.h>
 #include <__memory/shared_ptr.h>
+#include <__system_error/error_code.h>
+#include <__system_error/system_error.h>
 #include <__utility/forward.h>
+#include <__verbose_abort>
 #include <iosfwd>
 #include <new>
-#include <system_error>
-#include <type_traits>
+#include <string>
 
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
 #  pragma GCC system_header
@@ -28,7 +30,7 @@
 
 _LIBCPP_BEGIN_NAMESPACE_FILESYSTEM
 
-class _LIBCPP_AVAILABILITY_FILESYSTEM _LIBCPP_EXCEPTION_ABI filesystem_error : public system_error {
+class _LIBCPP_AVAILABILITY_FILESYSTEM_LIBRARY _LIBCPP_EXPORTED_FROM_ABI filesystem_error : public system_error {
 public:
   _LIBCPP_INLINE_VISIBILITY
   filesystem_error(const string& __what, error_code __ec)
@@ -58,7 +60,7 @@ public:
   _LIBCPP_INLINE_VISIBILITY
   const path& path2() const noexcept { return __storage_->__p2_; }
 
-  filesystem_error(const filesystem_error&) = default;
+  _LIBCPP_HIDE_FROM_ABI filesystem_error(const filesystem_error&) = default;
   ~filesystem_error() override; // key function
 
   _LIBCPP_HIDE_FROM_ABI_VIRTUAL
@@ -82,20 +84,20 @@ private:
 
 // TODO(ldionne): We need to pop the pragma and push it again after
 //                filesystem_error to work around PR41078.
-_LIBCPP_AVAILABILITY_FILESYSTEM_PUSH
+_LIBCPP_AVAILABILITY_FILESYSTEM_LIBRARY_PUSH
 
 template <class... _Args>
 _LIBCPP_NORETURN inline _LIBCPP_INLINE_VISIBILITY
-#ifndef _LIBCPP_NO_EXCEPTIONS
+#ifndef _LIBCPP_HAS_NO_EXCEPTIONS
 void __throw_filesystem_error(_Args&&... __args) {
   throw filesystem_error(_VSTD::forward<_Args>(__args)...);
 }
 #else
 void __throw_filesystem_error(_Args&&...) {
-  _VSTD::abort();
+    _LIBCPP_VERBOSE_ABORT("filesystem_error was thrown in -fno-exceptions mode");
 }
 #endif
-_LIBCPP_AVAILABILITY_FILESYSTEM_POP
+_LIBCPP_AVAILABILITY_FILESYSTEM_LIBRARY_POP
 
 _LIBCPP_END_NAMESPACE_FILESYSTEM
 

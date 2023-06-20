@@ -285,6 +285,14 @@ public:
 private:
   /// Returns the impl interface instance for the given type.
   static typename InterfaceBase::Concept *getInterfaceFor(Attribute attr) {
+#ifndef NDEBUG
+    // Check that the current interface isn't an unresolved promise for the
+    // given attribute.
+    dialect_extension_detail::handleUseOfUndefinedPromisedInterface(
+        attr.getDialect(), ConcreteType::getInterfaceID(),
+        llvm::getTypeName<ConcreteType>());
+#endif
+
     return attr.getAbstractAttribute().getInterface<ConcreteType>();
   }
 
@@ -392,6 +400,7 @@ struct CastInfo<To, From,
     /// Return a constant true instead of a dynamic true when casting to self or
     /// up the hierarchy.
     if constexpr (std::is_base_of_v<To, From>) {
+      (void)ty;
       return true;
     } else {
       return To::classof(ty);

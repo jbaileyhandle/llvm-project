@@ -18,6 +18,7 @@ add_libc_fuzzer(
 
 add_libc_fuzzer(
   strtofloat_fuzz
+  NEED_MPFR
   SRCS
     strtofloat_fuzz.cpp
   DEPENDS
@@ -58,7 +59,7 @@ add_libc_fuzzer(
     libc.src.stdlib.strtoul
     libc.src.stdlib.strtoull
   COMPILE_OPTIONS
-    -DLLVM_LIBC_FUZZ_ATOI_CLEANER_INPUT
+    -DLIBC_COPT_FUZZ_ATOI_CLEANER_INPUT
 )
 
 add_libc_fuzzer(

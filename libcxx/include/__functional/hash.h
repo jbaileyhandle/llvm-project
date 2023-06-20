@@ -13,7 +13,7 @@
 #include <__functional/invoke.h>
 #include <__functional/unary_function.h>
 #include <__fwd/hash.h>
-#include <__tuple_dir/sfinae_helpers.h>
+#include <__tuple/sfinae_helpers.h>
 #include <__type_traits/is_copy_constructible.h>
 #include <__type_traits/is_default_constructible.h>
 #include <__type_traits/is_enum.h>
@@ -136,12 +136,12 @@ struct __murmur2_or_cityhash<_Size, 64>
         __hash_len_16(__v.second, __w.second) + __x);
   }
 
- private:
-  // Some primes between 2^63 and 2^64.
-  static const _Size __k0 = 0xc3a5c85c97cb3127ULL;
-  static const _Size __k1 = 0xb492b66fbe98f273ULL;
-  static const _Size __k2 = 0x9ae16a3b2f90404fULL;
-  static const _Size __k3 = 0xc949d7c7509e6557ULL;
+  private:
+    // Some primes between 2^63 and 2^64.
+    static const _Size __k0 = 0xc3a5c85c97cb3127ULL;
+    static const _Size __k1 = 0xb492b66fbe98f273ULL;
+    static const _Size __k2 = 0x9ae16a3b2f90404fULL;
+    static const _Size __k3 = 0xc949d7c7509e6557ULL;
 
   _LIBCPP_HIDE_FROM_ABI
   static _Size __rotate(_Size __val, int __shift) {
@@ -640,7 +640,7 @@ struct _LIBCPP_TEMPLATE_VIS hash : public __enum_hash<_Tp>
 {
 };
 
-#if _LIBCPP_STD_VER > 14
+#if _LIBCPP_STD_VER >= 17
 
 template <>
 struct _LIBCPP_TEMPLATE_VIS hash<nullptr_t>
@@ -667,7 +667,7 @@ using __has_enabled_hash _LIBCPP_NODEBUG = integral_constant<bool,
     is_default_constructible<_Hash>::value
 >;
 
-#if _LIBCPP_STD_VER > 14
+#if _LIBCPP_STD_VER >= 17
 template <class _Type, class>
 using __enable_hash_helper_imp _LIBCPP_NODEBUG = _Type;
 

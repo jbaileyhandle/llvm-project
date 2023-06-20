@@ -2,7 +2,7 @@
 // DEFINE: %{compile} = mlir-opt %s --sparse-compiler=%{option}
 // DEFINE: %{run} = mlir-cpu-runner \
 // DEFINE:  -e entry -entry-point-result=void  \
-// DEFINE:  -shared-libs=%mlir_lib_dir/libmlir_c_runner_utils%shlibext | \
+// DEFINE:  -shared-libs=%mlir_c_runner_utils | \
 // DEFINE: FileCheck %s
 //
 // RUN: %{compile} | %{run}
@@ -19,11 +19,11 @@
 // the AArch64 SVE backend (so the set-up is a bit different to
 // sparse_reducitons.mlir)
 
-#SparseVector = #sparse_tensor.encoding<{dimLevelType = ["compressed"]}>
-#CSR = #sparse_tensor.encoding<{dimLevelType = ["dense", "compressed"]}>
+#SparseVector = #sparse_tensor.encoding<{lvlTypes = ["compressed"]}>
+#CSR = #sparse_tensor.encoding<{lvlTypes = ["dense", "compressed"]}>
 #CSC = #sparse_tensor.encoding<{
-  dimLevelType = [ "dense", "compressed" ],
-  dimOrdering = affine_map<(i,j) -> (j,i)>
+  lvlTypes = [ "dense", "compressed" ],
+  dimToLvl = affine_map<(i,j) -> (j,i)>
 }>
 
 //

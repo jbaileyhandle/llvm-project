@@ -120,28 +120,28 @@ multiclass VOP1Inst <string opName, VOPProfile P,
       def _e32 : VOP1_Pseudo <opName, P>;
     else
       // Only for V_MOV_B32
-      def _e32 : VOP1_Pseudo <opName, P>, VOPD_Component<VOPDOp, "v_mov_b32">;
+      def _e32 : VOP1_Pseudo <opName, P>, VOPD_Component<VOPDOp, opName>;
     def _e64 : VOP3InstBase <opName, P, node>;
   }
 
-  foreach _ = BoolToList<P.HasExtSDWA>.ret in
+  if P.HasExtSDWA then
     def _sdwa : VOP1_SDWA_Pseudo <opName, P>;
 
-  foreach _ = BoolToList<P.HasExtDPP>.ret in
+  if P.HasExtDPP then
     def _dpp : VOP1_DPP_Pseudo <opName, P>;
 
   let SubtargetPredicate = isGFX11Plus in {
-    foreach _ = BoolToList<P.HasExtVOP3DPP>.ret in
+    if P.HasExtVOP3DPP then
       def _e64_dpp  : VOP3_DPP_Pseudo <opName, P>;
   } // End SubtargetPredicate = isGFX11Plus
 
   def : MnemonicAlias<opName#"_e32", opName>, LetDummies;
   def : MnemonicAlias<opName#"_e64", opName>, LetDummies;
 
-  foreach _ = BoolToList<P.HasExtSDWA>.ret in
+  if P.HasExtSDWA then
     def : MnemonicAlias<opName#"_sdwa", opName>, LetDummies;
 
-  foreach _ = BoolToList<P.HasExtDPP>.ret in
+  if P.HasExtDPP then
     def : MnemonicAlias<opName#"_dpp", opName, AMDGPUAsmVariants.DPP>, LetDummies;
 }
 
@@ -321,8 +321,8 @@ defm V_RNDNE_F32 : VOP1Inst <"v_rndne_f32", VOP_F32_F32, frint>;
 defm V_FLOOR_F32 : VOP1Inst <"v_floor_f32", VOP_F32_F32, ffloor>;
 
 let TRANS = 1, SchedRW = [WriteTrans32] in {
-defm V_EXP_F32 : VOP1Inst <"v_exp_f32", VOP_F32_F32, fexp2>;
-defm V_LOG_F32 : VOP1Inst <"v_log_f32", VOP_F32_F32, flog2>;
+defm V_EXP_F32 : VOP1Inst <"v_exp_f32", VOP_F32_F32, AMDGPUexp>;
+defm V_LOG_F32 : VOP1Inst <"v_log_f32", VOP_F32_F32, AMDGPUlog>;
 defm V_RCP_F32 : VOP1Inst <"v_rcp_f32", VOP_F32_F32, AMDGPUrcp>;
 defm V_RCP_IFLAG_F32 : VOP1Inst <"v_rcp_iflag_f32", VOP_F32_F32, AMDGPUrcp_iflag>;
 defm V_RSQ_F32 : VOP1Inst <"v_rsq_f32", VOP_F32_F32, AMDGPUrsq>;
@@ -487,8 +487,8 @@ let TRANS = 1, SchedRW = [WriteTrans32] in {
 defm V_RCP_F16 : VOP1Inst_t16 <"v_rcp_f16", VOP_F16_F16, AMDGPUrcp>;
 defm V_SQRT_F16 : VOP1Inst_t16 <"v_sqrt_f16", VOP_F16_F16, any_amdgcn_sqrt>;
 defm V_RSQ_F16 : VOP1Inst_t16 <"v_rsq_f16", VOP_F16_F16, AMDGPUrsq>;
-defm V_LOG_F16 : VOP1Inst_t16 <"v_log_f16", VOP_F16_F16, flog2>;
-defm V_EXP_F16 : VOP1Inst_t16 <"v_exp_f16", VOP_F16_F16, fexp2>;
+defm V_LOG_F16 : VOP1Inst_t16 <"v_log_f16", VOP_F16_F16, AMDGPUlogf16>;
+defm V_EXP_F16 : VOP1Inst_t16 <"v_exp_f16", VOP_F16_F16, AMDGPUexpf16>;
 defm V_SIN_F16 : VOP1Inst_t16 <"v_sin_f16", VOP_F16_F16, AMDGPUsin>;
 defm V_COS_F16 : VOP1Inst_t16 <"v_cos_f16", VOP_F16_F16, AMDGPUcos>;
 } // End TRANS = 1, SchedRW = [WriteTrans32]
@@ -844,7 +844,7 @@ let AssemblerPredicate = isGFX10Only, DecoderNamespace = "GFX10" in {
       VOP3e_gfx10<{0, 1, 1, op{6-0}}, !cast<VOP3_Pseudo>(NAME#"_e64").Pfl>;
   }
   multiclass VOP1_Real_sdwa_gfx10<bits<9> op> {
-    foreach _ = BoolToList<!cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtSDWA9>.ret in
+    if !cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtSDWA9 then
     def _sdwa_gfx10 :
       VOP_SDWA10_Real<!cast<VOP1_SDWA_Pseudo>(NAME#"_sdwa")>,
       VOP1_SDWA9Ae<op{7-0}, !cast<VOP1_SDWA_Pseudo>(NAME#"_sdwa").Pfl> {
@@ -852,13 +852,13 @@ let AssemblerPredicate = isGFX10Only, DecoderNamespace = "GFX10" in {
     }
   }
   multiclass VOP1_Real_dpp_gfx10<bits<9> op> {
-    foreach _ = BoolToList<!cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExt32BitDPP>.ret in
+    if !cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExt32BitDPP then
     def _dpp_gfx10 : VOP1_DPP16<op{7-0}, !cast<VOP1_DPP_Pseudo>(NAME#"_dpp"), SIEncodingFamily.GFX10> {
       let DecoderNamespace = "SDWA10";
     }
   }
   multiclass VOP1_Real_dpp8_gfx10<bits<9> op> {
-    foreach _ = BoolToList<!cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExt32BitDPP>.ret in
+    if !cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExt32BitDPP then
     def _dpp8_gfx10 : VOP1_DPP8<op{7-0}, !cast<VOP1_Pseudo>(NAME#"_e32")> {
       let DecoderNamespace = "DPP8";
     }
@@ -1064,17 +1064,17 @@ multiclass VOP1_Real_e32e64_vi <bits<10> op> {
 multiclass VOP1_Real_vi <bits<10> op> {
   defm NAME : VOP1_Real_e32e64_vi <op>;
 
-  foreach _ = BoolToList<!cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtSDWA>.ret in
+  if !cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtSDWA then
   def _sdwa_vi :
     VOP_SDWA_Real <!cast<VOP1_SDWA_Pseudo>(NAME#"_sdwa")>,
     VOP1_SDWAe <op{7-0}, !cast<VOP1_SDWA_Pseudo>(NAME#"_sdwa").Pfl>;
 
-  foreach _ = BoolToList<!cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtSDWA9>.ret in
+  if !cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtSDWA9 then
   def _sdwa_gfx9 :
     VOP_SDWA9_Real <!cast<VOP1_SDWA_Pseudo>(NAME#"_sdwa")>,
     VOP1_SDWA9Ae <op{7-0}, !cast<VOP1_SDWA_Pseudo>(NAME#"_sdwa").Pfl>;
 
-  foreach _ = BoolToList<!cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtDPP>.ret in
+  if !cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtDPP then
     def _dpp_vi :
       VOP_DPP_Real<!cast<VOP1_DPP_Pseudo>(NAME#"_dpp"), SIEncodingFamily.VI>,
       VOP1_DPPe<op{7-0}, !cast<VOP1_DPP_Pseudo>(NAME#"_dpp")>;
@@ -1238,12 +1238,12 @@ multiclass VOP1_Real_gfx9 <bits<10> op> {
     defm NAME : VOP1_Real_e32e64_vi <op>;
   }
 
-  foreach _ = BoolToList<!cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtSDWA9>.ret in
+  if !cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtSDWA9 then
   def _sdwa_gfx9 :
     VOP_SDWA9_Real <!cast<VOP1_SDWA_Pseudo>(NAME#"_sdwa")>,
     VOP1_SDWA9Ae <op{7-0}, !cast<VOP1_SDWA_Pseudo>(NAME#"_sdwa").Pfl>;
 
-  foreach _ = BoolToList<!cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtDPP>.ret in
+  if !cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtDPP then
     def _dpp_gfx9 :
       VOP_DPP_Real<!cast<VOP1_DPP_Pseudo>(NAME#"_dpp"), SIEncodingFamily.GFX9>,
       VOP1_DPPe<op{7-0}, !cast<VOP1_DPP_Pseudo>(NAME#"_dpp")>;
@@ -1255,14 +1255,14 @@ multiclass VOP1_Real_NoDstSel_SDWA_gfx9 <bits<10> op> {
     defm NAME : VOP1_Real_e32e64_vi <op>;
   }
 
-  foreach _ = BoolToList<!cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtSDWA9>.ret in
+  if !cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtSDWA9 then
   def _sdwa_gfx9 :
     VOP_SDWA9_Real <!cast<VOP1_SDWA_Pseudo>(NAME#"_sdwa")>,
     VOP1_SDWA9Ae <op{7-0}, !cast<VOP1_SDWA_Pseudo>(NAME#"_sdwa").Pfl> {
       let Inst{42-40} = 6;
     }
 
-  foreach _ = BoolToList<!cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtDPP>.ret in
+  if !cast<VOP1_Pseudo>(NAME#"_e32").Pfl.HasExtDPP then
     def _dpp_gfx9 :
       VOP_DPP_Real<!cast<VOP1_DPP_Pseudo>(NAME#"_dpp"), SIEncodingFamily.GFX9>,
       VOP1_DPPe<op{7-0}, !cast<VOP1_DPP_Pseudo>(NAME#"_dpp")>;

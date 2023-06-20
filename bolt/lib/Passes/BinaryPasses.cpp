@@ -626,6 +626,30 @@ void LowerAnnotations::runOnFunctions(BinaryContext &BC) {
     BC.MIB->setOffset(*Item.first, Item.second);
 }
 
+// Check for dirty state in MCSymbol objects that might be a consequence
+// of running calculateEmittedSize() in parallel, during split functions
+// pass. If an inconsistent state is found (symbol already registered or
+// already defined), clean it.
+void CleanMCState::runOnFunctions(BinaryContext &BC) {
+  MCContext &Ctx = *BC.Ctx;
+  for (const auto &SymMapEntry : Ctx.getSymbols()) {
+    const MCSymbol *S = SymMapEntry.second;
+    if (S->isDefined()) {
+      LLVM_DEBUG(dbgs() << "BOLT-DEBUG: Symbol \"" << S->getName()
+                        << "\" is already defined\n");
+      const_cast<MCSymbol *>(S)->setUndefined();
+    }
+    if (S->isRegistered()) {
+      LLVM_DEBUG(dbgs() << "BOLT-DEBUG: Symbol \"" << S->getName()
+                        << "\" is already registered\n");
+      const_cast<MCSymbol *>(S)->setIsRegistered(false);
+    }
+    LLVM_DEBUG(if (S->isVariable()) {
+      dbgs() << "BOLT-DEBUG: Symbol \"" << S->getName() << "\" is variable\n";
+    });
+  }
+}
+
 // This peephole fixes jump instructions that jump to another basic
 // block with a single jump instruction, e.g.
 //
@@ -1317,10 +1341,13 @@ void PrintProfileStats::runOnFunctions(BinaryContext &BC) {
 void PrintProgramStats::runOnFunctions(BinaryContext &BC) {
   uint64_t NumRegularFunctions = 0;
   uint64_t NumStaleProfileFunctions = 0;
+  uint64_t NumAllStaleFunctions = 0;
+  uint64_t NumInferredFunctions = 0;
   uint64_t NumNonSimpleProfiledFunctions = 0;
   uint64_t NumUnknownControlFlowFunctions = 0;
   uint64_t TotalSampleCount = 0;
   uint64_t StaleSampleCount = 0;
+  uint64_t InferredSampleCount = 0;
   std::vector<const BinaryFunction *> ProfiledFunctions;
   const char *StaleFuncsHeader = "BOLT-INFO: Functions with stale profile:\n";
   for (auto &BFI : BC.getBinaryFunctions()) {
@@ -1355,6 +1382,11 @@ void PrintProgramStats::runOnFunctions(BinaryContext &BC) {
 
     if (Function.hasValidProfile()) {
       ProfiledFunctions.push_back(&Function);
+      if (Function.hasInferredProfile()) {
+        ++NumInferredFunctions;
+        InferredSampleCount += SampleCount;
+        ++NumAllStaleFunctions;
+      }
     } else {
       if (opts::ReportStaleFuncs) {
         outs() << StaleFuncsHeader;
@@ -1363,6 +1395,7 @@ void PrintProgramStats::runOnFunctions(BinaryContext &BC) {
       }
       ++NumStaleProfileFunctions;
       StaleSampleCount += SampleCount;
+      ++NumAllStaleFunctions;
     }
   }
   BC.NumProfiledFuncs = ProfiledFunctions.size();
@@ -1408,6 +1441,16 @@ void PrintProgramStats::runOnFunctions(BinaryContext &BC) {
              << opts::StaleThreshold << "%. Exiting.\n";
       exit(1);
     }
+  }
+  if (NumInferredFunctions) {
+    outs() << format("BOLT-INFO: inferred profile for %d (%.2f%% of profiled, "
+                     "%.2f%% of stale) functions responsible for %.2f%% samples"
+                     " (%zu out of %zu)\n",
+                     NumInferredFunctions,
+                     100.0 * NumInferredFunctions / NumAllProfiledFunctions,
+                     100.0 * NumInferredFunctions / NumAllStaleFunctions,
+                     100.0 * InferredSampleCount / TotalSampleCount,
+                     InferredSampleCount, TotalSampleCount);
   }
 
   if (const uint64_t NumUnusedObjects = BC.getNumUnusedProfiledObjects()) {

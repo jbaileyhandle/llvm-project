@@ -133,12 +133,44 @@ uint32_t atomicCAS(uint32_t *Address, uint32_t Compare, uint32_t Val,
   return Compare;
 }
 
+unsigned long long atomicCAS(unsigned long long *Address,
+                             unsigned long long Compare, unsigned long long Val,
+                             atomic::OrderingTy Ordering) {
+  (void)__atomic_compare_exchange(Address, &Compare, &Val, false, Ordering,
+                                  Ordering);
+  return Compare;
+}
+
 uint64_t atomicAdd(uint64_t *Address, uint64_t Val,
                    atomic::OrderingTy Ordering) {
   return __atomic_fetch_add(Address, Val, Ordering);
 }
 
 float unsafeAtomicAdd(float *addr, float value);
+
+#if defined(__gfx941__)
+#define ATOMIC_CAS_LOOP_MIN(TY) void atomicCASLoopMin(TY *addr, TY val);
+
+ATOMIC_CAS_LOOP_MIN(int32_t)
+ATOMIC_CAS_LOOP_MIN(uint32_t)
+ATOMIC_CAS_LOOP_MIN(int64_t)
+ATOMIC_CAS_LOOP_MIN(uint64_t)
+ATOMIC_CAS_LOOP_MIN(float);
+ATOMIC_CAS_LOOP_MIN(double);
+
+#undef ATOMIC_CAS_LOOP_MIN
+
+#define ATOMIC_CAS_LOOP_MAX(TY) void atomicCASLoopMax(TY *addr, TY val);
+
+ATOMIC_CAS_LOOP_MAX(int32_t)
+ATOMIC_CAS_LOOP_MAX(uint32_t)
+ATOMIC_CAS_LOOP_MAX(int64_t)
+ATOMIC_CAS_LOOP_MAX(uint64_t)
+ATOMIC_CAS_LOOP_MAX(float);
+ATOMIC_CAS_LOOP_MAX(double);
+
+#undef ATOMIC_CAS_LOOP_MAX
+#endif // #if defined(__gfx941__)
 
 constexpr uint32_t UNSET = 0;
 constexpr uint32_t SET = 1;
@@ -169,6 +201,8 @@ int testLock(omp_lock_t *);
 void initLock(omp_lock_t *);
 void destroyLock(omp_lock_t *);
 void setLock(omp_lock_t *);
+void unsetCriticalLock(omp_lock_t *);
+void setCriticalLock(omp_lock_t *);
 
 /// AMDGCN Implementation
 ///
@@ -206,7 +240,7 @@ void namedBarrier() {
   // assert(NumThreads % 32 == 0);
 
   uint32_t WarpSize = mapping::getWarpSize();
-  uint32_t NumWaves = NumThreads / WarpSize;
+  uint32_t NumWaves = (NumThreads < WarpSize) ? 1 : NumThreads / WarpSize;
 
   fence::team(atomic::aquire);
 
@@ -360,6 +394,89 @@ void workersDoneBarrier() {
   synchronize::threads();
 }
 
+void unsetCriticalLock(omp_lock_t *Lock) {
+  (void)atomicExchange((uint32_t *)Lock, UNSET, atomic::acq_rel);
+}
+
+void setCriticalLock(omp_lock_t *Lock) {
+  uint64_t LowestActiveThread = utils::ffs(mapping::activemask()) - 1;
+  if (mapping::getThreadIdInWarp() == LowestActiveThread) {
+    fenceKernel(atomic::release);
+    while (!atomicCAS((uint32_t *)Lock, UNSET, SET, atomic::relaxed,
+                      atomic::relaxed)) {
+      __builtin_amdgcn_s_sleep(32);
+    }
+    fenceKernel(atomic::aquire);
+  }
+}
+
+// atomicCAS-based implementation for certain atomic operations on gfx941
+#if defined(__gfx941__)
+
+template <typename T> void atomicCASLoopMin(T *addr, T val) {
+  unsigned long long assumed;
+  unsigned long long *addr_as_ull = (unsigned long long *)addr;
+  unsigned long long old;
+  T typed_old;
+  __atomic_load(addr, &typed_old, atomic::relaxed);
+  old = (*reinterpret_cast<unsigned long long *>(&typed_old));
+  T updated_val = val;
+  do {
+    assumed = old;
+    T t_assumed = (*reinterpret_cast<T *>(&assumed));
+    updated_val = val < t_assumed ? val : t_assumed;
+    // TODO: use intrinsic directly with release (success) and acquire (failure)
+    old = atomicCAS(addr_as_ull, assumed,
+                    (*reinterpret_cast<unsigned long long *>(&updated_val)),
+                    atomic::acq_rel);
+  } while (assumed != old);
+}
+
+#define ATOMIC_CAS_LOOP_MIN(TY)                                                \
+  void atomicCASLoopMin(TY *addr, TY val) { atomicCASLoopMin<TY>(addr, val); }
+
+ATOMIC_CAS_LOOP_MIN(int32_t)
+ATOMIC_CAS_LOOP_MIN(uint32_t)
+ATOMIC_CAS_LOOP_MIN(int64_t)
+ATOMIC_CAS_LOOP_MIN(uint64_t)
+ATOMIC_CAS_LOOP_MIN(float);
+ATOMIC_CAS_LOOP_MIN(double);
+
+#undef ATOMIC_CAS_LOOP_MIN
+
+template <typename T> void atomicCASLoopMax(T *addr, T val) {
+  unsigned long long assumed;
+  unsigned long long *addr_as_ull = (unsigned long long *)addr;
+  unsigned long long old;
+  T typed_old;
+  __atomic_load(addr, &typed_old, atomic::relaxed);
+  old = (*reinterpret_cast<unsigned long long *>(&typed_old));
+  T updated_val = val;
+  do {
+    assumed = old;
+    T t_assumed = (*reinterpret_cast<T *>(&assumed));
+    updated_val = val > t_assumed ? val : t_assumed;
+    // TODO: use intrinsic directly with release (success) and acquire (failure)
+    old = atomicCAS(addr_as_ull, assumed,
+                    (*reinterpret_cast<unsigned long long *>(&updated_val)),
+                    atomic::acq_rel);
+  } while (assumed != old);
+}
+
+#define ATOMIC_CAS_LOOP_MAX(TY)                                                \
+  void atomicCASLoopMax(TY *addr, TY val) { atomicCASLoopMax<TY>(addr, val); }
+
+ATOMIC_CAS_LOOP_MAX(int32_t)
+ATOMIC_CAS_LOOP_MAX(uint32_t)
+ATOMIC_CAS_LOOP_MAX(int64_t)
+ATOMIC_CAS_LOOP_MAX(uint64_t)
+ATOMIC_CAS_LOOP_MAX(float);
+ATOMIC_CAS_LOOP_MAX(double);
+
+#undef ATOMIC_CAS_LOOP_MAX
+
+#endif /// if defined(__gfx941__)
+
 #pragma omp end declare variant
 ///}
 
@@ -367,7 +484,8 @@ void workersDoneBarrier() {
 ///
 ///{
 #pragma omp begin declare variant match(                                       \
-    device = {arch(nvptx, nvptx64)}, implementation = {extension(match_any)})
+        device = {arch(nvptx, nvptx64)},                                       \
+            implementation = {extension(match_any)})
 
 uint32_t atomicInc(uint32_t *Address, uint32_t Val,
                    atomic::OrderingTy Ordering) {
@@ -549,6 +667,10 @@ uint32_t atomic::inc(uint32_t *Addr, uint32_t V, atomic::OrderingTy Ordering) {
   return impl::atomicInc(Addr, V, Ordering);
 }
 
+void unsetCriticalLock(omp_lock_t *Lock) { impl::unsetLock(Lock); }
+
+void setCriticalLock(omp_lock_t *Lock) { impl::setLock(Lock); }
+
 extern "C" {
 void __kmpc_ordered(IdentTy *Loc, int32_t TId) { FunctionTracingRAII(); }
 
@@ -592,6 +714,13 @@ int32_t __kmpc_master(IdentTy *Loc, int32_t TId) {
 
 void __kmpc_end_master(IdentTy *Loc, int32_t TId) { FunctionTracingRAII(); }
 
+int32_t __kmpc_masked(IdentTy *Loc, int32_t TId, int32_t Filter) {
+  FunctionTracingRAII();
+  return omp_get_thread_num() == Filter;
+}
+
+void __kmpc_end_masked(IdentTy *Loc, int32_t TId) { FunctionTracingRAII(); }
+
 int32_t __kmpc_single(IdentTy *Loc, int32_t TId) {
   FunctionTracingRAII();
   return __kmpc_master(Loc, TId);
@@ -634,12 +763,12 @@ void __kmpc_syncwarp(uint64_t Mask) {
 
 void __kmpc_critical(IdentTy *Loc, int32_t TId, CriticalNameTy *Name) {
   FunctionTracingRAII();
-  omp_set_lock(reinterpret_cast<omp_lock_t *>(Name));
+  impl::setCriticalLock(reinterpret_cast<omp_lock_t *>(Name));
 }
 
 void __kmpc_end_critical(IdentTy *Loc, int32_t TId, CriticalNameTy *Name) {
   FunctionTracingRAII();
-  omp_unset_lock(reinterpret_cast<omp_lock_t *>(Name));
+  impl::unsetCriticalLock(reinterpret_cast<omp_lock_t *>(Name));
 }
 
 void omp_init_lock(omp_lock_t *Lock) { impl::initLock(Lock); }
@@ -655,6 +784,37 @@ int omp_test_lock(omp_lock_t *Lock) { return impl::testLock(Lock); }
 float __kmpc_unsafeAtomicAdd(float *addr, float value) {
   return impl::unsafeAtomicAdd(addr, value);
 }
+
+#if defined(__gfx941__)
+#define KMPC_ATOMIC_CAS_LOOP_MIN(TY)                                           \
+  void __kmpc_atomicCASLoopMin_##TY(TY *addr, TY val) {                        \
+    return impl::atomicCASLoopMin(addr, val);                                  \
+  }
+
+KMPC_ATOMIC_CAS_LOOP_MIN(int32_t)
+KMPC_ATOMIC_CAS_LOOP_MIN(uint32_t)
+KMPC_ATOMIC_CAS_LOOP_MIN(int64_t)
+KMPC_ATOMIC_CAS_LOOP_MIN(uint64_t)
+KMPC_ATOMIC_CAS_LOOP_MIN(float);
+KMPC_ATOMIC_CAS_LOOP_MIN(double);
+
+#undef KMPC_ATOMIC_CAS_LOOP_MIN
+
+#define KMPC_ATOMIC_CAS_LOOP_MAX(TY)                                           \
+  void __kmpc_atomicCASLoopMax_##TY(TY *addr, TY val) {                        \
+    return impl::atomicCASLoopMax(addr, val);                                  \
+  }
+
+KMPC_ATOMIC_CAS_LOOP_MAX(int32_t)
+KMPC_ATOMIC_CAS_LOOP_MAX(uint32_t)
+KMPC_ATOMIC_CAS_LOOP_MAX(int64_t)
+KMPC_ATOMIC_CAS_LOOP_MAX(uint64_t)
+KMPC_ATOMIC_CAS_LOOP_MAX(float);
+KMPC_ATOMIC_CAS_LOOP_MAX(double);
+
+#undef KMPC_ATOMIC_CAS_LOOP_MAX
+#endif // endif defined(__gfx941__)
+
 } // extern "C"
 
 #pragma omp end declare target

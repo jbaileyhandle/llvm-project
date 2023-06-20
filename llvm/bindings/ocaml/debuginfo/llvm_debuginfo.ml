@@ -96,6 +96,15 @@ module DIFlag = struct
     | PtrToMemberRep
 end
 
+module DWARFMemorySpace = struct
+  type t =
+    | DW_MSPACE_LLVM_none
+    | DW_MSPACE_LLVM_global
+    | DW_MSPACE_LLVM_constant
+    | DW_MSPACE_LLVM_group
+    | DW_MSPACE_LLVM_private
+end
+
 type lldiflags
 
 external diflags_get : DIFlag.t -> lldiflags = "llvm_diflags_get"
@@ -231,7 +240,7 @@ external llmetadata_null : unit -> Llvm.llmetadata = "llvm_metadata_null"
 
 let dibuild_create_debug_location ?(inlined_at = llmetadata_null ()) llctx ~line
     ~column ~scope =
-  dibuild_create_debug_location_helper llctx line column scope inlined_at
+  dibuild_create_debug_location_helper llctx ~line ~column ~scope ~inlined_at
 
 external di_location_get_line : location:Llvm.llmetadata -> int
   = "llvm_di_location_get_line"
@@ -339,6 +348,7 @@ external dibuild_create_pointer_type :
   size_in_bits:int ->
   align_in_bits:int ->
   address_space:int ->
+  memory_space:DWARFMemorySpace.t ->
   name:string ->
   Llvm.llmetadata
   = "llvm_dibuild_create_pointer_type_bytecode" "llvm_dibuild_create_pointer_type_native"
@@ -406,7 +416,12 @@ external dibuild_create_qualified_type :
   = "llvm_dibuild_create_qualified_type"
 
 external dibuild_create_reference_type :
-  lldibuilder -> tag:int -> Llvm.llmetadata -> Llvm.llmetadata
+  lldibuilder ->
+  tag:int ->
+  ty:Llvm.llmetadata ->
+  address_space:int ->
+  memory_space:DWARFMemorySpace.t ->
+  Llvm.llmetadata
   = "llvm_dibuild_create_reference_type"
 
 external dibuild_create_null_ptr_type : lldibuilder -> Llvm.llmetadata
@@ -549,6 +564,7 @@ external dibuild_create_global_variable_expression :
   is_local_to_unit:bool ->
   expr:Llvm.llmetadata ->
   decl:Llvm.llmetadata ->
+  memory_space:DWARFMemorySpace.t ->
   align_in_bits:int ->
   Llvm.llmetadata
   = "llvm_dibuild_create_global_variable_expression_bytecode" "llvm_dibuild_create_global_variable_expression_native"
@@ -575,6 +591,7 @@ external dibuild_create_auto_variable :
   ty:Llvm.llmetadata ->
   always_preserve:bool ->
   lldiflags ->
+  memory_space:DWARFMemorySpace.t ->
   align_in_bits:int ->
   Llvm.llmetadata
   = "llvm_dibuild_create_auto_variable_bytecode" "llvm_dibuild_create_auto_variable_native"

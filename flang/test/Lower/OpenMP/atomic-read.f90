@@ -1,8 +1,8 @@
-! RUN: bbc -fopenmp -emit-fir %s -o - | FileCheck %s
+! RUN: bbc --use-desc-for-alloc=false -fopenmp -emit-fir %s -o - | FileCheck %s
 
 ! This test checks the lowering of atomic read
 
-!CHECK: func @_QQmain() {
+!CHECK: func @_QQmain() attributes {fir.bindc_name = "ompatomic"} {
 !CHECK: %[[VAR_A:.*]] = fir.alloca !fir.char<1> {bindc_name = "a", uniq_name = "_QFEa"}
 !CHECK: %[[VAR_B:.*]] = fir.alloca !fir.char<1> {bindc_name = "b", uniq_name = "_QFEb"}
 !CHECK: %[[VAR_C:.*]] = fir.alloca !fir.logical<4> {bindc_name = "c", uniq_name = "_QFEc"}

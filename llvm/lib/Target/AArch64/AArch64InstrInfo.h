@@ -17,6 +17,7 @@
 #include "AArch64RegisterInfo.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/Support/TypeSize.h"
+#include <optional>
 
 #define GET_INSTRINFO_HEADER
 #include "AArch64GenInstrInfo.inc"
@@ -112,6 +113,9 @@ public:
 
   /// Returns whether the instruction is FP or NEON.
   static bool isFpOrNEON(const MachineInstr &MI);
+
+  /// Returns whether the instruction is in H form (16 bit operands)
+  static bool isHForm(const MachineInstr &MI);
 
   /// Returns whether the instruction is in Q form (128 bit operands)
   static bool isQForm(const MachineInstr &MI);
@@ -289,7 +293,7 @@ public:
 
   bool isFunctionSafeToOutlineFrom(MachineFunction &MF,
                                    bool OutlineFromLinkOnceODRs) const override;
-  outliner::OutlinedFunction getOutliningCandidateInfo(
+  std::optional<outliner::OutlinedFunction> getOutliningCandidateInfo(
       std::vector<outliner::Candidate> &RepeatedSequenceLocs) const override;
   outliner::InstrType
   getOutliningTypeImpl(MachineBasicBlock::iterator &MIT, unsigned Flags) const override;

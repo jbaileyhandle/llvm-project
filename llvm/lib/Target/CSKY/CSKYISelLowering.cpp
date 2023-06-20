@@ -51,8 +51,8 @@ CSKYTargetLowering::CSKYTargetLowering(const TargetMachine &TM,
       addRegisterClass(MVT::f64, &CSKY::FPR64RegClass);
   }
 
-  setOperationAction(ISD::ADDCARRY, MVT::i32, Legal);
-  setOperationAction(ISD::SUBCARRY, MVT::i32, Legal);
+  setOperationAction(ISD::UADDO_CARRY, MVT::i32, Legal);
+  setOperationAction(ISD::USUBO_CARRY, MVT::i32, Legal);
   setOperationAction(ISD::BITREVERSE, MVT::i32, Legal);
 
   setOperationAction(ISD::SREM, MVT::i32, Expand);
@@ -117,7 +117,8 @@ CSKYTargetLowering::CSKYTargetLowering(const TargetMachine &TM,
   };
 
   ISD::NodeType FPOpToExpand[] = {ISD::FSIN, ISD::FCOS, ISD::FSINCOS,
-                                  ISD::FPOW, ISD::FREM, ISD::FCOPYSIGN};
+                                  ISD::FPOW, ISD::FREM, ISD::FCOPYSIGN,
+                                  ISD::FP16_TO_FP, ISD::FP_TO_FP16};
 
   if (STI.useHardFloat()) {
 
@@ -136,10 +137,14 @@ CSKYTargetLowering::CSKYTargetLowering(const TargetMachine &TM,
 
     if (STI.hasFPUv2SingleFloat() || STI.hasFPUv3SingleFloat()) {
       setOperationAction(ISD::ConstantFP, MVT::f32, Legal);
+      setLoadExtAction(ISD::EXTLOAD, MVT::f32, MVT::f16, Expand);
+      setTruncStoreAction(MVT::f32, MVT::f16, Expand);
     }
     if (STI.hasFPUv2DoubleFloat() || STI.hasFPUv3DoubleFloat()) {
       setLoadExtAction(ISD::EXTLOAD, MVT::f64, MVT::f32, Expand);
       setTruncStoreAction(MVT::f64, MVT::f32, Expand);
+      setLoadExtAction(ISD::EXTLOAD, MVT::f64, MVT::f16, Expand);
+      setTruncStoreAction(MVT::f64, MVT::f16, Expand);
     }
   }
 
@@ -378,7 +383,7 @@ SDValue CSKYTargetLowering::LowerFormalArguments(
     // If all registers are allocated, then all varargs must be passed on the
     // stack and we don't need to save any argregs.
     if (ArgRegs.size() == Idx) {
-      VaArgOffset = CCInfo.getNextStackOffset();
+      VaArgOffset = CCInfo.getStackSize();
       VarArgsSaveSize = 0;
     } else {
       VarArgsSaveSize = XLenInBytes * (ArgRegs.size() - Idx);
@@ -531,7 +536,7 @@ SDValue CSKYTargetLowering::LowerCall(CallLoweringInfo &CLI,
                        "site marked musttail");
 
   // Get a count of how many bytes are to be pushed on the stack.
-  unsigned NumBytes = ArgCCInfo.getNextStackOffset();
+  unsigned NumBytes = ArgCCInfo.getStackSize();
 
   // Create local copies for byval args
   SmallVector<SDValue, 8> ByValArgs;

@@ -34,9 +34,9 @@ class CombinedAllocator {
 #endif
 
   void InitLinkerInitialized(s32 release_to_os_interval_ms,
+                             uptr heap_start = 0,
                              bool enable_device_allocator = false) {
-    stats_.InitLinkerInitialized();
-    primary_.Init(release_to_os_interval_ms);
+    primary_.Init(release_to_os_interval_ms, heap_start);
     secondary_.InitLinkerInitialized();
 #if SANITIZER_AMDGPU
     device_.Init(enable_device_allocator, primary_.kMetadataSize);
@@ -104,8 +104,7 @@ class CombinedAllocator {
     primary_.ForceReleaseToOS();
   }
 
-  void Deallocate(AllocatorCache *cache, void *p,
-                  DeviceAllocationInfo *da_info = nullptr) {
+  void Deallocate(AllocatorCache *cache, void *p) {
     if (!p) return;
     if (primary_.PointerIsMine(p))
       cache->Deallocate(&primary_, primary_.GetSizeClass(p), p);
@@ -113,7 +112,7 @@ class CombinedAllocator {
       secondary_.Deallocate(&stats_, p);
 #if SANITIZER_AMDGPU
     else if (device_.PointerIsMine(p))
-      device_.Deallocate(&stats_, p, da_info);
+      device_.Deallocate(&stats_, p);
 #endif
   }
 

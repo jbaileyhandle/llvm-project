@@ -121,7 +121,8 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const Function &F,
   else if (ST.isMesaGfxShader(F))
     ImplicitBufferPtr = true;
 
-  if (!AMDGPU::isGraphics(CC)) {
+  if (!AMDGPU::isGraphics(CC) ||
+      (CC == CallingConv::AMDGPU_CS && ST.hasArchitectedSGPRs())) {
     if (IsKernel || !F.hasFnAttribute("amdgpu-no-workgroup-id-x"))
       WorkGroupIDX = true;
 
@@ -130,7 +131,9 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const Function &F,
 
     if (!F.hasFnAttribute("amdgpu-no-workgroup-id-z"))
       WorkGroupIDZ = true;
+  }
 
+  if (!AMDGPU::isGraphics(CC)) {
     if (IsKernel || !F.hasFnAttribute("amdgpu-no-workitem-id-x"))
       WorkItemIDX = true;
 
@@ -650,7 +653,10 @@ yaml::SIMachineFunctionInfo::SIMachineFunctionInfo(
       StackPtrOffsetReg(regToString(MFI.getStackPtrOffsetReg(), TRI)),
       BytesInStackArgArea(MFI.getBytesInStackArgArea()),
       ReturnsVoid(MFI.returnsVoid()),
-      ArgInfo(convertArgumentInfo(MFI.getArgInfo(), TRI)), Mode(MFI.getMode()) {
+      ArgInfo(convertArgumentInfo(MFI.getArgInfo(), TRI)),
+      PSInputAddr(MFI.getPSInputAddr()),
+      PSInputEnable(MFI.getPSInputEnable()),
+      Mode(MFI.getMode()) {
   for (Register Reg : MFI.getWWMReservedRegs())
     WWMReservedRegs.push_back(regToString(Reg, TRI));
 
@@ -677,6 +683,8 @@ bool SIMachineFunctionInfo::initializeBaseYamlFields(
   LDSSize = YamlMFI.LDSSize;
   GDSSize = YamlMFI.GDSSize;
   DynLDSAlign = YamlMFI.DynLDSAlign;
+  PSInputAddr = YamlMFI.PSInputAddr;
+  PSInputEnable = YamlMFI.PSInputEnable;
   HighBitsOf32BitAddress = YamlMFI.HighBitsOf32BitAddress;
   Occupancy = YamlMFI.Occupancy;
   IsEntryFunction = YamlMFI.IsEntryFunction;

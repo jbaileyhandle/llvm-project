@@ -68,6 +68,7 @@ void MCObjectStreamer::addPendingLabel(MCSymbol* S) {
 }
 
 void MCObjectStreamer::flushPendingLabels(MCFragment *F, uint64_t FOffset) {
+  assert(F);
   MCSection *CurSection = getCurrentSectionOnly();
   if (!CurSection) {
     assert(PendingLabels.empty());
@@ -80,12 +81,8 @@ void MCObjectStreamer::flushPendingLabels(MCFragment *F, uint64_t FOffset) {
     PendingLabels.clear();
   }
 
-  // Associate a fragment with this label, either the supplied fragment
-  // or an empty data fragment.
-  if (F)
-    CurSection->flushPendingLabels(F, FOffset, CurSubsectionIdx);
-  else
-    CurSection->flushPendingLabels(nullptr, 0, CurSubsectionIdx);
+  // Associate the labels with F.
+  CurSection->flushPendingLabels(F, FOffset, CurSubsectionIdx);
 }
 
 void MCObjectStreamer::flushPendingLabels() {
@@ -376,10 +373,16 @@ bool MCObjectStreamer::changeSectionImpl(MCSection *Section,
 
   int64_t IntSubsection = 0;
   if (Subsection &&
-      !Subsection->evaluateAsAbsolute(IntSubsection, getAssemblerPtr()))
-    report_fatal_error("Cannot evaluate subsection number");
-  if (IntSubsection < 0 || IntSubsection > 8192)
-    report_fatal_error("Subsection number out of range");
+      !Subsection->evaluateAsAbsolute(IntSubsection, getAssemblerPtr())) {
+    getContext().reportError(Subsection->getLoc(),
+                             "cannot evaluate subsection number");
+  }
+  if (!isUInt<31>(IntSubsection)) {
+    getContext().reportError(Subsection->getLoc(),
+                             "subsection number " + Twine(IntSubsection) +
+                                 " is not within [0,2147483647]");
+  }
+
   CurSubsectionIdx = unsigned(IntSubsection);
   CurInsertionPoint =
       Section->getSubsectionInsertionPoint(CurSubsectionIdx);
@@ -471,8 +474,7 @@ void MCObjectStreamer::emitInstToFragment(const MCInst &Inst,
   insert(IF);
 
   SmallString<128> Code;
-  raw_svector_ostream VecOS(Code);
-  getAssembler().getEmitter().encodeInstruction(Inst, VecOS, IF->getFixups(),
+  getAssembler().getEmitter().encodeInstruction(Inst, Code, IF->getFixups(),
                                                 STI);
   IF->getContents().append(Code.begin(), Code.end());
 }
@@ -542,12 +544,6 @@ void MCObjectStreamer::emitDwarfAdvanceLineAddr(int64_t LineDelta,
     return;
   }
   const MCExpr *AddrDelta = buildSymbolDiff(*this, Label, LastLabel);
-  int64_t Res;
-  if (AddrDelta->evaluateAsAbsolute(Res, getAssemblerPtr())) {
-    MCDwarfLineAddr::Emit(this, Assembler->getDWARFLinetableParams(), LineDelta,
-                          Res);
-    return;
-  }
   insert(new MCDwarfLineAddrFragment(LineDelta, *AddrDelta));
 }
 
@@ -572,11 +568,6 @@ void MCObjectStreamer::emitDwarfLineEndEntry(MCSection *Section,
 void MCObjectStreamer::emitDwarfAdvanceFrameAddr(const MCSymbol *LastLabel,
                                                  const MCSymbol *Label) {
   const MCExpr *AddrDelta = buildSymbolDiff(*this, Label, LastLabel);
-  int64_t Res;
-  if (AddrDelta->evaluateAsAbsolute(Res, getAssemblerPtr())) {
-    MCDwarfFrameEmitter::EmitAdvanceLoc(*this, Res);
-    return;
-  }
   insert(new MCDwarfCallFrameFragment(*AddrDelta));
 }
 

@@ -23,7 +23,6 @@
 #include <__utility/declval.h>
 #include <__utility/move.h>
 #include <__utility/unreachable.h>
-#include <cstdlib>
 #include <limits>
 
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
@@ -64,12 +63,12 @@ _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX17
 void advance(_InputIter& __i, _Distance __orig_n) {
   typedef typename iterator_traits<_InputIter>::difference_type _Difference;
   _Difference __n = static_cast<_Difference>(_VSTD::__convert_to_integral(__orig_n));
-  _LIBCPP_ASSERT(__n >= 0 || __is_cpp17_bidirectional_iterator<_InputIter>::value,
+  _LIBCPP_ASSERT(__n >= 0 || __has_bidirectional_iterator_category<_InputIter>::value,
                  "Attempt to advance(it, n) with negative n on a non-bidirectional iterator");
   _VSTD::__advance(__i, __n, typename iterator_traits<_InputIter>::iterator_category());
 }
 
-#if _LIBCPP_STD_VER > 17
+#if _LIBCPP_STD_VER >= 20
 
 // [range.iter.op.advance]
 
@@ -196,7 +195,7 @@ inline namespace __cpo {
 } // namespace __cpo
 } // namespace ranges
 
-#endif // _LIBCPP_STD_VER > 17
+#endif // _LIBCPP_STD_VER >= 20
 
 _LIBCPP_END_NAMESPACE_STD
 

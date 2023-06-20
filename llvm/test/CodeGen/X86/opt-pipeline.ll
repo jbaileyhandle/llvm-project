@@ -25,6 +25,7 @@
 ; CHECK-NEXT: Default Regalloc Eviction Advisor
 ; CHECK-NEXT: Default Regalloc Priority Advisor
 ; CHECK-NEXT:   ModulePass Manager
+; CHECK-NEXT:     Verify Heterogeneous Debug Preconditions
 ; CHECK-NEXT:     Pre-ISel Intrinsic Lowering
 ; CHECK-NEXT:     FunctionPass Manager
 ; CHECK-NEXT:       Expand large div/rem
@@ -72,6 +73,7 @@
 ; CHECK-NEXT:       CodeGen Prepare
 ; CHECK-NEXT:       Dominator Tree Construction
 ; CHECK-NEXT:       Exception handling preparation
+; CHECK-NEXT:       Prepare callbr
 ; CHECK-NEXT:       Safe Stack instrumentation pass
 ; CHECK-NEXT:       Insert stack protectors
 ; CHECK-NEXT:       Module Verifier
@@ -87,7 +89,8 @@
 ; CHECK-NEXT:       MachineDominator Tree Construction
 ; CHECK-NEXT:       Local Dynamic TLS Access Clean-up
 ; CHECK-NEXT:       X86 PIC Global Base Reg Initialization
-; CHECK-NEXT:        Finalize ISel and expand pseudo-instructions
+; CHECK-NEXT:       Argument Stack Rebase
+; CHECK-NEXT:       Finalize ISel and expand pseudo-instructions
 ; CHECK-NEXT:       X86 Domain Reassignment Pass
 ; CHECK-NEXT:       Lazy Machine Block Frequency Analysis
 ; CHECK-NEXT:       Early Tail Duplication
@@ -201,6 +204,8 @@
 ; CHECK-NEXT:       Lazy Machine Block Frequency Analysis
 ; CHECK-NEXT:       X86 Atom pad short functions
 ; CHECK-NEXT:       X86 LEA Fixup
+; CHECK-NEXT:       X86 Fixup Inst Tuning
+; CHECK-NEXT:       X86 Fixup Vector Constants
 ; CHECK-NEXT:       Compressing EVEX instrs to VEX encoding when possible
 ; CHECK-NEXT:       X86 Discriminate Memory Operands
 ; CHECK-NEXT:       X86 Insert Cache Prefetches

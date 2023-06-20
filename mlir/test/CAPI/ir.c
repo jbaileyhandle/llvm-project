@@ -473,7 +473,7 @@ static void printFirstOfEach(MlirContext ctx, MlirOperation operation) {
   mlirOperationPrintWithFlags(operation, flags, printToStderr, NULL);
   fprintf(stderr, "\n");
   // clang-format off
-  // CHECK: Op print with all flags: %{{.*}} = "arith.constant"() {elts = dense_resource<__elided__> : tensor<4xi32>, value = 0 : index} : () -> index loc(unknown)
+  // CHECK: Op print with all flags: %{{.*}} = "arith.constant"() <{value = 0 : index}> {elts = dense_resource<__elided__> : tensor<4xi32>} : () -> index loc(unknown)
   // clang-format on
 
   mlirOpPrintingFlagsDestroy(flags);
@@ -1725,10 +1725,10 @@ int registerOnlyStd(void) {
   fprintf(stderr, "@registration\n");
   // CHECK-LABEL: @registration
 
-  // CHECK: cf.cond_br is_registered: 1
-  fprintf(stderr, "cf.cond_br is_registered: %d\n",
+  // CHECK: func.call is_registered: 1
+  fprintf(stderr, "func.call is_registered: %d\n",
           mlirContextIsRegisteredOperation(
-              ctx, mlirStringRefCreateFromCString("cf.cond_br")));
+              ctx, mlirStringRefCreateFromCString("func.call")));
 
   // CHECK: func.not_existing_op is_registered: 0
   fprintf(stderr, "func.not_existing_op is_registered: %d\n",
@@ -1873,9 +1873,61 @@ int testOperands(void) {
     return 3;
   }
 
+  MlirOperationState op2State =
+      mlirOperationStateGet(mlirStringRefCreateFromCString("dummy.op2"), loc);
+  MlirValue initialOperands2[] = {constOneValue};
+  mlirOperationStateAddOperands(&op2State, 1, initialOperands2);
+  MlirOperation op2 = mlirOperationCreate(&op2State);
+
+  MlirOpOperand use3 = mlirValueGetFirstUse(constOneValue);
+  fprintf(stderr, "First use owner: ");
+  mlirOperationPrint(mlirOpOperandGetOwner(use3), printToStderr, NULL);
+  fprintf(stderr, "\n");
+  // CHECK: First use owner: "dummy.op2"
+
+  use3 = mlirOpOperandGetNextUse(mlirValueGetFirstUse(constOneValue));
+  fprintf(stderr, "Second use owner: ");
+  mlirOperationPrint(mlirOpOperandGetOwner(use3), printToStderr, NULL);
+  fprintf(stderr, "\n");
+  // CHECK: Second use owner: "dummy.op"
+
+  MlirAttribute indexTwoLiteral =
+      mlirAttributeParseGet(ctx, mlirStringRefCreateFromCString("2 : index"));
+  MlirNamedAttribute indexTwoValueAttr = mlirNamedAttributeGet(
+      mlirIdentifierGet(ctx, mlirStringRefCreateFromCString("value")),
+      indexTwoLiteral);
+  MlirOperationState constTwoState = mlirOperationStateGet(
+      mlirStringRefCreateFromCString("arith.constant"), loc);
+  mlirOperationStateAddResults(&constTwoState, 1, &indexType);
+  mlirOperationStateAddAttributes(&constTwoState, 1, &indexTwoValueAttr);
+  MlirOperation constTwo = mlirOperationCreate(&constTwoState);
+  MlirValue constTwoValue = mlirOperationGetResult(constTwo, 0);
+
+  mlirValueReplaceAllUsesOfWith(constOneValue, constTwoValue);
+
+  use3 = mlirValueGetFirstUse(constOneValue);
+  if (!mlirOpOperandIsNull(use3)) {
+    fprintf(stderr, "ERROR: Use should be null\n");
+    return 4;
+  }
+
+  MlirOpOperand use4 = mlirValueGetFirstUse(constTwoValue);
+  fprintf(stderr, "First replacement use owner: ");
+  mlirOperationPrint(mlirOpOperandGetOwner(use4), printToStderr, NULL);
+  fprintf(stderr, "\n");
+  // CHECK: First replacement use owner: "dummy.op"
+
+  use4 = mlirOpOperandGetNextUse(mlirValueGetFirstUse(constTwoValue));
+  fprintf(stderr, "Second replacement use owner: ");
+  mlirOperationPrint(mlirOpOperandGetOwner(use4), printToStderr, NULL);
+  fprintf(stderr, "\n");
+  // CHECK: Second replacement use owner: "dummy.op2"
+
   mlirOperationDestroy(op);
+  mlirOperationDestroy(op2);
   mlirOperationDestroy(constZero);
   mlirOperationDestroy(constOne);
+  mlirOperationDestroy(constTwo);
   mlirContextDestroy(ctx);
 
   return 0;
@@ -1890,6 +1942,7 @@ int testClone(void) {
   registerAllUpstreamDialects(ctx);
 
   mlirContextGetOrLoadDialect(ctx, mlirStringRefCreateFromCString("func"));
+  mlirContextGetOrLoadDialect(ctx, mlirStringRefCreateFromCString("arith"));
   MlirLocation loc = mlirLocationUnknownGet(ctx);
   MlirType indexType = mlirIndexTypeGet(ctx);
   MlirStringRef valueStringRef = mlirStringRefCreateFromCString("value");

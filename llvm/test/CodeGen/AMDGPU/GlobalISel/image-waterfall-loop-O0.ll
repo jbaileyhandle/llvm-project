@@ -16,6 +16,7 @@ define <4 x float> @waterfall_loop(<8 x i32> %vgpr_srd) {
 ; CHECK-NEXT:    buffer_store_dword v0, off, s[0:3], s32 offset:80 ; 4-byte Folded Spill
 ; CHECK-NEXT:    buffer_store_dword v2, off, s[0:3], s32 offset:84 ; 4-byte Folded Spill
 ; CHECK-NEXT:    s_mov_b32 exec_lo, s4
+; CHECK-NEXT:    ; implicit-def: $vgpr8
 ; CHECK-NEXT:    buffer_store_dword v0, off, s[0:3], s32 offset:68 ; 4-byte Folded Spill
 ; CHECK-NEXT:    v_mov_b32_e32 v14, v1
 ; CHECK-NEXT:    buffer_store_dword v14, off, s[0:3], s32 offset:64 ; 4-byte Folded Spill
@@ -47,12 +48,15 @@ define <4 x float> @waterfall_loop(<8 x i32> %vgpr_srd) {
 ; CHECK-NEXT:    buffer_store_dword v5, off, s[0:3], s32 offset:28 ; 4-byte Folded Spill
 ; CHECK-NEXT:    buffer_store_dword v6, off, s[0:3], s32 offset:32 ; 4-byte Folded Spill
 ; CHECK-NEXT:    buffer_store_dword v7, off, s[0:3], s32 offset:36 ; 4-byte Folded Spill
+; CHECK-NEXT:    s_or_saveexec_b32 s21, -1
+; CHECK-NEXT:    buffer_load_dword v0, off, s[0:3], s32 offset:76 ; 4-byte Folded Reload
+; CHECK-NEXT:    s_mov_b32 exec_lo, s21
 ; CHECK-NEXT:    s_mov_b32 s8, 0
 ; CHECK-NEXT:    s_mov_b32 s4, s8
 ; CHECK-NEXT:    s_mov_b32 s5, s8
 ; CHECK-NEXT:    s_mov_b32 s6, s8
 ; CHECK-NEXT:    s_mov_b32 s7, s8
-; CHECK-NEXT:    ; implicit-def: $vgpr0
+; CHECK-NEXT:    s_waitcnt vmcnt(0)
 ; CHECK-NEXT:    v_writelane_b32 v0, s4, 0
 ; CHECK-NEXT:    v_writelane_b32 v0, s5, 1
 ; CHECK-NEXT:    v_writelane_b32 v0, s6, 2
@@ -187,12 +191,17 @@ define <4 x float> @waterfall_loop(<8 x i32> %vgpr_srd) {
 ; CHECK-NEXT:    v_readlane_b32 s4, v0, 4
 ; CHECK-NEXT:    s_mov_b32 exec_lo, s4
 ; CHECK-NEXT:  ; %bb.4:
+; CHECK-NEXT:    s_or_saveexec_b32 s21, -1
+; CHECK-NEXT:    buffer_load_dword v4, off, s[0:3], s32 offset:76 ; 4-byte Folded Reload
+; CHECK-NEXT:    s_mov_b32 exec_lo, s21
 ; CHECK-NEXT:    buffer_load_dword v0, off, s[0:3], s32 offset:72 ; 4-byte Folded Reload
 ; CHECK-NEXT:    ; implicit-def: $sgpr4
 ; CHECK-NEXT:    v_mov_b32_e32 v1, s4
 ; CHECK-NEXT:    v_mov_b32_e32 v2, s4
 ; CHECK-NEXT:    v_mov_b32_e32 v3, s4
+; CHECK-NEXT:    ; kill: killed $vgpr4
 ; CHECK-NEXT:    s_xor_saveexec_b32 s4, -1
+; CHECK-NEXT:    s_waitcnt vmcnt(0)
 ; CHECK-NEXT:    buffer_load_dword v0, off, s[0:3], s32 offset:80 ; 4-byte Folded Reload
 ; CHECK-NEXT:    buffer_load_dword v2, off, s[0:3], s32 offset:84 ; 4-byte Folded Reload
 ; CHECK-NEXT:    s_mov_b32 exec_lo, s4

@@ -48,8 +48,8 @@ public:
         DeviceId(-1), Kind(ompt_target), ScopeKind(ompt_scope_begin) {}
   OMPTInvokeWrapper(void *CodePtr, void *ReturnFramePtr, int64_t DeviceId,
                     ompt_target_t Kind, ompt_scope_endpoint_t ScopeKind)
-      : CodePtr(CodePtr), ReturnFramePtr(ReturnFramePtr), DeviceId(DeviceId),
-        Kind(Kind), ScopeKind(ScopeKind) {}
+      : IsNullOpt(false), CodePtr(CodePtr), ReturnFramePtr(ReturnFramePtr),
+        DeviceId(DeviceId), Kind(Kind), ScopeKind(ScopeKind) {}
 
   void setDeviceId(int64_t DevId) { DeviceId = DevId; }
 
@@ -258,7 +258,6 @@ EXTERN void __tgt_target_data_update_mapper(ident_t *Loc, int64_t DeviceId,
                                             map_var_info_t *ArgNames,
                                             void **ArgMappers) {
   TIMESCOPE_WITH_IDENT(Loc);
-  void *CodePtr = nullptr;
 
 #ifdef OMPT_SUPPORT
   OMPTInvokeWrapper IWrapper(OMPT_GET_RETURN_ADDRESS(0),
@@ -496,6 +495,12 @@ EXTERN void __tgt_set_info_flag(uint32_t NewInfoLevel) {
 }
 
 EXTERN int __tgt_print_device_info(int64_t DeviceId) {
+  // Make sure the device is ready.
+  if (!deviceIsReady(DeviceId)) {
+    DP("Device %" PRId64 " is not ready\n", DeviceId);
+    return OMP_TGT_FAIL;
+  }
+
   return PM->Devices[DeviceId]->printDeviceInfo(
       PM->Devices[DeviceId]->RTLDeviceID);
 }
@@ -524,6 +529,8 @@ EXTERN void __tgt_target_nowait_query(void **AsyncHandle) {
   if (QueryCounter.isAboveThreshold())
     AsyncInfo->SyncType = AsyncInfoTy::SyncTy::BLOCKING;
 
+  if (const int Rc = AsyncInfo->synchronize())
+    FATAL_MESSAGE0(1, "Error while querying the async queue for completion.\n");
   // If there are device operations still pending, return immediately without
   // deallocating the handle and increase the current thread query count.
   if (!AsyncInfo->isDone()) {

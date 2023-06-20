@@ -644,6 +644,9 @@ public:
     return getModuleOwnershipKind() > ModuleOwnershipKind::VisibleWhenImported;
   }
 
+  /// Whether this declaration comes from another module unit.
+  bool isInAnotherModuleUnit() const;
+
   /// FIXME: Implement discarding declarations actually in global module
   /// fragment. See [module.global.frag]p3,4 for details.
   bool isDiscardedInGlobalModuleFragment() const { return false; }
@@ -810,7 +813,7 @@ public:
   }
 
   /// Get the module that owns this declaration for linkage purposes.
-  /// There only ever is such a module under the C++ Modules TS.
+  /// There only ever is such a standard C++ module.
   ///
   /// \param IgnoreLinkage Ignore the linkage of the entity; assume that
   /// all declarations in a global module fragment are unowned.
@@ -1172,6 +1175,12 @@ public:
     }
   }
 
+  /// Clears the namespace of this declaration.
+  ///
+  /// This is useful if we want this declaration to be available for
+  /// redeclaration lookup but otherwise hidden for ordinary name lookups.
+  void clearIdentifierNamespace() { IdentifierNamespace = 0; }
+
   enum FriendObjectKind {
     FOK_None,      ///< Not a friend object.
     FOK_Declared,  ///< A friend of a previously-declared entity.
@@ -1226,6 +1235,10 @@ public:
   /// when possible. Will return null if the type underlying the Decl does not
   /// have a FunctionType.
   const FunctionType *getFunctionType(bool BlocksToo = true) const;
+
+  // Looks through the Decl's underlying type to determine if it's a
+  // function pointer type.
+  bool isFunctionPointerType() const;
 
 private:
   void setAttrsImpl(const AttrVec& Attrs, ASTContext &Ctx);
@@ -1597,7 +1610,7 @@ class DeclContext {
     uint64_t : NumDeclContextBits;
 
     /// Kind of initializer,
-    /// function call or omp_priv<init_expr> initializtion.
+    /// function call or omp_priv<init_expr> initialization.
     uint64_t InitializerKind : 2;
   };
 
@@ -1646,6 +1659,8 @@ class DeclContext {
 
     /// Kind of contexpr specifier as defined by ConstexprSpecKind.
     uint64_t ConstexprKind : 2;
+    uint64_t BodyContainsImmediateEscalatingExpression : 1;
+
     uint64_t InstantiationIsPending : 1;
 
     /// Indicates if the function uses __try.
@@ -1680,7 +1695,7 @@ class DeclContext {
   };
 
   /// Number of non-inherited bits in FunctionDeclBitfields.
-  enum { NumFunctionDeclBits = 29 };
+  enum { NumFunctionDeclBits = 30 };
 
   /// Stores the bits used by CXXConstructorDecl. If modified
   /// NumCXXConstructorDeclBits and the accessor
@@ -1692,12 +1707,12 @@ class DeclContext {
     /// For the bits in FunctionDeclBitfields.
     uint64_t : NumFunctionDeclBits;
 
-    /// 22 bits to fit in the remaining available space.
+    /// 21 bits to fit in the remaining available space.
     /// Note that this makes CXXConstructorDeclBitfields take
     /// exactly 64 bits and thus the width of NumCtorInitializers
     /// will need to be shrunk if some bit is added to NumDeclContextBitfields,
     /// NumFunctionDeclBitfields or CXXConstructorDeclBitfields.
-    uint64_t NumCtorInitializers : 19;
+    uint64_t NumCtorInitializers : 18;
     uint64_t IsInheritingConstructor : 1;
 
     /// Whether this constructor has a trail-allocated explicit specifier.
@@ -2527,10 +2542,8 @@ public:
                  D == LastDecl);
   }
 
-  bool setUseQualifiedLookup(bool use = true) const {
-    bool old_value = DeclContextBits.UseQualifiedLookup;
+  void setUseQualifiedLookup(bool use = true) const {
     DeclContextBits.UseQualifiedLookup = use;
-    return old_value;
   }
 
   bool shouldUseQualifiedLookup() const {
@@ -2590,14 +2603,6 @@ private:
 
   void reconcileExternalVisibleStorage() const;
   bool LoadLexicalDeclsFromExternalStorage() const;
-
-  /// Makes a declaration visible within this context, but
-  /// suppresses searches for external declarations with the same
-  /// name.
-  ///
-  /// Analogous to makeDeclVisibleInContext, but for the exclusive
-  /// use of addDeclInternal().
-  void makeDeclVisibleInContextInternal(NamedDecl *D);
 
   StoredDeclsMap *CreateStoredDeclsMap(ASTContext &C) const;
 

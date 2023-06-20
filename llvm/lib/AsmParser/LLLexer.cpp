@@ -158,8 +158,7 @@ static const char *isLabelTail(const char *CurPtr) {
 
 LLLexer::LLLexer(StringRef StartBuf, SourceMgr &SM, SMDiagnostic &Err,
                  LLVMContext &C)
-    : CurBuf(StartBuf), ErrorInfo(Err), SM(SM), Context(C), APFloatVal(0.0),
-      IgnoreColonInIdentifiers(false) {
+    : CurBuf(StartBuf), ErrorInfo(Err), SM(SM), Context(C) {
   CurPtr = CurBuf.begin();
 }
 
@@ -653,6 +652,24 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(inaccessiblememonly);
   KEYWORD(inaccessiblemem_or_argmemonly);
 
+  // nofpclass attribute
+  KEYWORD(all);
+  KEYWORD(nan);
+  KEYWORD(snan);
+  KEYWORD(qnan);
+  KEYWORD(inf);
+  // ninf already a keyword
+  KEYWORD(pinf);
+  KEYWORD(norm);
+  KEYWORD(nnorm);
+  KEYWORD(pnorm);
+  // sub already a keyword
+  KEYWORD(nsub);
+  KEYWORD(psub);
+  KEYWORD(zero);
+  KEYWORD(nzero);
+  KEYWORD(pzero);
+
   KEYWORD(type);
   KEYWORD(opaque);
 
@@ -781,7 +798,6 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(versions);
   KEYWORD(memProf);
   KEYWORD(notcold);
-  KEYWORD(notcoldandcold);
 
 #undef KEYWORD
 
@@ -904,6 +920,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   DWKEYWORD(CC, DwarfCC);
   DWKEYWORD(OP, DwarfOp);
   DWKEYWORD(MACINFO, DwarfMacinfo);
+  DWKEYWORD(MSPACE_LLVM, DwarfMSpaceLLVM);
 
 #undef DWKEYWORD
 
@@ -928,7 +945,8 @@ lltok::Kind LLLexer::LexIdentifier() {
     return lltok::EmissionKind;
   }
 
-  if (Keyword == "GNU" || Keyword == "None" || Keyword == "Default") {
+  if (Keyword == "GNU" || Keyword == "Apple" || Keyword == "None" ||
+      Keyword == "Default") {
     StrVal.assign(Keyword.begin(), Keyword.end());
     return lltok::NameTableKind;
   }

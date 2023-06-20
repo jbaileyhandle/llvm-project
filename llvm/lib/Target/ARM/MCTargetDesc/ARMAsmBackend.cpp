@@ -35,7 +35,6 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/TargetParser/TargetParser.h"
 using namespace llvm;
 
 namespace {
@@ -208,8 +207,8 @@ void ARMAsmBackend::handleAssemblerFlag(MCAssemblerFlag Flag) {
 
 unsigned ARMAsmBackend::getRelaxedOpcode(unsigned Op,
                                          const MCSubtargetInfo &STI) const {
-  bool HasThumb2 = STI.getFeatureBits()[ARM::FeatureThumb2];
-  bool HasV8MBaselineOps = STI.getFeatureBits()[ARM::HasV8MBaselineOps];
+  bool HasThumb2 = STI.hasFeature(ARM::FeatureThumb2);
+  bool HasV8MBaselineOps = STI.hasFeature(ARM::HasV8MBaselineOps);
 
   switch (Op) {
   default:
@@ -449,7 +448,6 @@ unsigned ARMAsmBackend::adjustFixupValue(const MCAssembler &Asm,
 
   switch (Kind) {
   default:
-    Ctx.reportError(Fixup.getLoc(), "bad relocation fixup type");
     return 0;
   case FK_Data_1:
   case FK_Data_2:
@@ -604,9 +602,9 @@ unsigned ARMAsmBackend::adjustFixupValue(const MCAssembler &Asm,
   }
   case ARM::fixup_arm_thumb_bl: {
     if (!isInt<25>(Value - 4) ||
-        (!STI->getFeatureBits()[ARM::FeatureThumb2] &&
-         !STI->getFeatureBits()[ARM::HasV8MBaselineOps] &&
-         !STI->getFeatureBits()[ARM::HasV6MOps] &&
+        (!STI->hasFeature(ARM::FeatureThumb2) &&
+         !STI->hasFeature(ARM::HasV8MBaselineOps) &&
+         !STI->hasFeature(ARM::HasV6MOps) &&
          !isInt<23>(Value - 4))) {
       Ctx.reportError(Fixup.getLoc(), "Relocation out of range");
       return 0;
@@ -679,7 +677,7 @@ unsigned ARMAsmBackend::adjustFixupValue(const MCAssembler &Asm,
     // On CPUs supporting Thumb2, this will be relaxed to an ldr.w, otherwise we
     // could have an error on our hands.
     assert(STI != nullptr);
-    if (!STI->getFeatureBits()[ARM::FeatureThumb2] && IsResolved) {
+    if (!STI->hasFeature(ARM::FeatureThumb2) && IsResolved) {
       const char *FixupDiagnostic = reasonForFixupRelaxation(Fixup, Value);
       if (FixupDiagnostic) {
         Ctx.reportError(Fixup.getLoc(), FixupDiagnostic);
@@ -704,8 +702,8 @@ unsigned ARMAsmBackend::adjustFixupValue(const MCAssembler &Asm,
   case ARM::fixup_arm_thumb_br:
     // Offset by 4 and don't encode the lower bit, which is always 0.
     assert(STI != nullptr);
-    if (!STI->getFeatureBits()[ARM::FeatureThumb2] &&
-        !STI->getFeatureBits()[ARM::HasV8MBaselineOps]) {
+    if (!STI->hasFeature(ARM::FeatureThumb2) &&
+        !STI->hasFeature(ARM::HasV8MBaselineOps)) {
       const char *FixupDiagnostic = reasonForFixupRelaxation(Fixup, Value);
       if (FixupDiagnostic) {
         Ctx.reportError(Fixup.getLoc(), FixupDiagnostic);
@@ -716,7 +714,7 @@ unsigned ARMAsmBackend::adjustFixupValue(const MCAssembler &Asm,
   case ARM::fixup_arm_thumb_bcc:
     // Offset by 4 and don't encode the lower bit, which is always 0.
     assert(STI != nullptr);
-    if (!STI->getFeatureBits()[ARM::FeatureThumb2]) {
+    if (!STI->hasFeature(ARM::FeatureThumb2)) {
       const char *FixupDiagnostic = reasonForFixupRelaxation(Fixup, Value);
       if (FixupDiagnostic) {
         Ctx.reportError(Fixup.getLoc(), FixupDiagnostic);
@@ -1109,14 +1107,19 @@ enum CompactUnwindEncodings {
 /// encoded in compact unwind, the method returns UNWIND_ARM_MODE_DWARF which
 /// tells the runtime to fallback and unwind using dwarf.
 uint32_t ARMAsmBackendDarwin::generateCompactUnwindEncoding(
-    ArrayRef<MCCFIInstruction> Instrs) const {
+    const MCDwarfFrameInfo *FI, const MCContext *Ctxt) const {
   DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs() << "generateCU()\n");
   // Only armv7k uses CFI based unwinding.
   if (Subtype != MachO::CPU_SUBTYPE_ARM_V7K)
     return 0;
   // No .cfi directives means no frame.
+  ArrayRef<MCCFIInstruction> Instrs = FI->Instructions;
   if (Instrs.empty())
     return 0;
+  if (!isDarwinCanonicalPersonality(FI->Personality) &&
+      !Ctxt->emitCompactUnwindNonCanonical())
+    return CU::UNWIND_ARM_MODE_DWARF;
+
   // Start off assuming CFA is at SP+0.
   unsigned CFARegister = ARM::SP;
   int CFARegisterOffset = 0;
@@ -1158,7 +1161,7 @@ uint32_t ARMAsmBackendDarwin::generateCompactUnwindEncoding(
       // Directive not convertable to compact unwind, bail out.
       DEBUG_WITH_TYPE("compact-unwind",
                       llvm::dbgs()
-                          << "CFI directive not compatiable with comact "
+                          << "CFI directive not compatible with compact "
                              "unwind encoding, opcode=" << Inst.getOperation()
                           << "\n");
       return CU::UNWIND_ARM_MODE_DWARF;

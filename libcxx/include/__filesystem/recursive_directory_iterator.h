@@ -19,8 +19,9 @@
 #include <__memory/shared_ptr.h>
 #include <__ranges/enable_borrowed_range.h>
 #include <__ranges/enable_view.h>
+#include <__system_error/error_code.h>
+#include <__utility/move.h>
 #include <cstddef>
-#include <system_error>
 
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
 #  pragma GCC system_header
@@ -30,7 +31,7 @@
 
 _LIBCPP_BEGIN_NAMESPACE_FILESYSTEM
 
-_LIBCPP_AVAILABILITY_FILESYSTEM_PUSH
+_LIBCPP_AVAILABILITY_FILESYSTEM_LIBRARY_PUSH
 
 class recursive_directory_iterator {
 public:
@@ -59,10 +60,10 @@ public:
   recursive_directory_iterator(const path& __p, error_code& __ec)
       : recursive_directory_iterator(__p, directory_options::none, &__ec) {}
 
-  recursive_directory_iterator(const recursive_directory_iterator&) = default;
-  recursive_directory_iterator(recursive_directory_iterator&&) = default;
+  _LIBCPP_HIDE_FROM_ABI recursive_directory_iterator(const recursive_directory_iterator&) = default;
+  _LIBCPP_HIDE_FROM_ABI recursive_directory_iterator(recursive_directory_iterator&&) = default;
 
-  recursive_directory_iterator&
+  _LIBCPP_HIDE_FROM_ABI recursive_directory_iterator&
   operator=(const recursive_directory_iterator&) = default;
 
   _LIBCPP_INLINE_VISIBILITY
@@ -76,7 +77,7 @@ public:
     return *this;
   }
 
-  ~recursive_directory_iterator() = default;
+  _LIBCPP_HIDE_FROM_ABI ~recursive_directory_iterator() = default;
 
   _LIBCPP_INLINE_VISIBILITY
   const directory_entry& operator*() const { return __dereference(); }
@@ -84,7 +85,7 @@ public:
   _LIBCPP_INLINE_VISIBILITY
   const directory_entry* operator->() const { return &__dereference(); }
 
-  recursive_directory_iterator& operator++() { return __increment(); }
+  _LIBCPP_HIDE_FROM_ABI recursive_directory_iterator& operator++() { return __increment(); }
 
   _LIBCPP_INLINE_VISIBILITY
   __dir_element_proxy operator++(int) {
@@ -98,8 +99,8 @@ public:
     return __increment(&__ec);
   }
 
-  _LIBCPP_FUNC_VIS directory_options options() const;
-  _LIBCPP_FUNC_VIS int depth() const;
+  _LIBCPP_EXPORTED_FROM_ABI directory_options options() const;
+  _LIBCPP_EXPORTED_FROM_ABI int depth() const;
 
   _LIBCPP_INLINE_VISIBILITY
   void pop() { __pop(); }
@@ -114,24 +115,12 @@ public:
   void disable_recursion_pending() { __rec_ = false; }
 
 private:
-  _LIBCPP_FUNC_VIS
-  recursive_directory_iterator(const path& __p, directory_options __opt,
-                               error_code* __ec);
-
-  _LIBCPP_FUNC_VIS
-  const directory_entry& __dereference() const;
-
-  _LIBCPP_FUNC_VIS
-  bool __try_recursion(error_code* __ec);
-
-  _LIBCPP_FUNC_VIS
-  void __advance(error_code* __ec = nullptr);
-
-  _LIBCPP_FUNC_VIS
-  recursive_directory_iterator& __increment(error_code* __ec = nullptr);
-
-  _LIBCPP_FUNC_VIS
-  void __pop(error_code* __ec = nullptr);
+  _LIBCPP_EXPORTED_FROM_ABI recursive_directory_iterator(const path& __p, directory_options __opt, error_code* __ec);
+  _LIBCPP_EXPORTED_FROM_ABI const directory_entry& __dereference() const;
+  _LIBCPP_EXPORTED_FROM_ABI bool __try_recursion(error_code* __ec);
+  _LIBCPP_EXPORTED_FROM_ABI void __advance(error_code* __ec = nullptr);
+  _LIBCPP_EXPORTED_FROM_ABI recursive_directory_iterator& __increment(error_code* __ec = nullptr);
+  _LIBCPP_EXPORTED_FROM_ABI void __pop(error_code* __ec = nullptr);
 
   inline _LIBCPP_INLINE_VISIBILITY friend bool
   operator==(const recursive_directory_iterator&,
@@ -164,21 +153,21 @@ end(recursive_directory_iterator) noexcept {
   return recursive_directory_iterator();
 }
 
-_LIBCPP_AVAILABILITY_FILESYSTEM_POP
+_LIBCPP_AVAILABILITY_FILESYSTEM_LIBRARY_POP
 
 _LIBCPP_END_NAMESPACE_FILESYSTEM
 
-#if _LIBCPP_STD_VER > 17
+#if _LIBCPP_STD_VER >= 20
 
 template <>
-_LIBCPP_AVAILABILITY_FILESYSTEM
+_LIBCPP_AVAILABILITY_FILESYSTEM_LIBRARY
 inline constexpr bool _VSTD::ranges::enable_borrowed_range<_VSTD_FS::recursive_directory_iterator> = true;
 
 template <>
-_LIBCPP_AVAILABILITY_FILESYSTEM
+_LIBCPP_AVAILABILITY_FILESYSTEM_LIBRARY
 inline constexpr bool _VSTD::ranges::enable_view<_VSTD_FS::recursive_directory_iterator> = true;
 
-#endif // _LIBCPP_STD_VER > 17
+#endif // _LIBCPP_STD_VER >= 20
 
 #endif // _LIBCPP_CXX03_LANG
 

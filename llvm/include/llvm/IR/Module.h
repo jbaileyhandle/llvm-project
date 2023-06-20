@@ -623,7 +623,6 @@ private: // Please use functions like insertAlias(), removeAlias() etc.
   }
   friend class llvm::SymbolTableListTraits<llvm::GlobalAlias>;
 
-public:
   /// Get the Module's list of ifuncs (constant).
   const IFuncListType    &getIFuncList() const        { return IFuncList; }
   /// Get the Module's list of ifuncs.
@@ -945,6 +944,11 @@ public:
 
   /// Set that PLT should be avoid for RTLib calls.
   void setRtLibUseGOT();
+
+  /// Get/set whether referencing global variables can use direct access
+  /// relocations on ELF targets.
+  bool getDirectAccessExternalData() const;
+  void setDirectAccessExternalData(bool Value);
 
   /// Get/set whether synthesized functions should get the uwtable attribute.
   UWTableKind getUwtable() const;

@@ -58,8 +58,13 @@ endif()
 
 add_dependencies(clang clang-resource-headers)
 
+option(CLANG_LINK_FLANG "Create flang install link to clang" ON)
 if(NOT CLANG_LINKS_TO_CREATE)
-  set(CLANG_LINKS_TO_CREATE clang++ clang-cl clang-cpp flang)
+  if(CLANG_LINK_FLANG)
+    set(CLANG_LINKS_TO_CREATE clang++ clang-cl clang-cpp flang)
+  else()
+    set(CLANG_LINKS_TO_CREATE clang++ clang-cl clang-cpp)
+  endif()
 endif()
 
 if (CLANG_ENABLE_HLSL)
@@ -67,7 +72,11 @@ if (CLANG_ENABLE_HLSL)
 endif()
 
 foreach(link ${CLANG_LINKS_TO_CREATE} ${HLSL_LINK})
-  add_clang_symlink(${link} clang)
+  if(CLANG_LINK_FLANG_LEGACY AND "${link}" STREQUAL "flang")
+    add_clang_symlink(${link} flang-legacy)
+  else()
+    add_clang_symlink(${link} clang)
+  endif()
 endforeach()
 
 # Configure plist creation for OS X.
@@ -84,7 +93,14 @@ if (APPLE)
   set(TOOL_INFO_BUILD_VERSION "${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}")
 
   set(TOOL_INFO_PLIST_OUT "${CMAKE_CURRENT_BINARY_DIR}/${TOOL_INFO_PLIST}")
-  target_link_libraries(clang
+
+  if(LLVM_TOOL_LLVM_DRIVER_BUILD AND clang IN_LIST LLVM_DRIVER_TOOLS)
+    set(TARGET_NAME llvm-driver)
+  else()
+    set(TARGET_NAME clang)
+  endif()
+
+  target_link_libraries(${TARGET_NAME}
     PRIVATE
     "-Wl,-sectcreate,__TEXT,__info_plist,\"${TOOL_INFO_PLIST_OUT}\"")
   configure_file("${TOOL_INFO_PLIST}.in" "${TOOL_INFO_PLIST_OUT}" @ONLY)

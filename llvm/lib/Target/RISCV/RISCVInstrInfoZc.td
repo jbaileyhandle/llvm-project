@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 ///
 /// This file describes the RISC-V instructions from the 'Zc*' compressed
-/// instruction extensions, version 1.0.1.
+/// instruction extensions, version 1.0.3.
 /// This version is still experimental as the 'Zc*' extensions haven't been
 /// ratified yet.
 ///
@@ -32,15 +32,108 @@ def uimm2_lsb0 : Operand<XLenVT>,
   }];
 }
 
+def uimm8ge32 : Operand<XLenVT> {
+  let ParserMatchClass = UImmAsmOperand<8, "GE32">;
+  let DecoderMethod = "decodeUImmOperand<8>";
+  let OperandType = "OPERAND_UIMM8_GE32";
+  let OperandNamespace = "RISCVOp";
+}
+
+def RlistAsmOperand : AsmOperandClass {
+  let Name = "Rlist";
+  let ParserMethod = "parseReglist";
+  let DiagnosticType = "InvalidRlist";
+}
+
+def SpimmAsmOperand : AsmOperandClass {
+  let Name = "Spimm";
+  let ParserMethod = "parseZcmpSpimm";
+  let DiagnosticType = "InvalidSpimm";
+}
+
+def rlist : Operand<OtherVT> {
+   let ParserMatchClass = RlistAsmOperand;
+   let PrintMethod = "printRlist";
+   let DecoderMethod = "decodeZcmpRlist";
+   let EncoderMethod = "getRlistOpValue";
+   let MCOperandPredicate = [{
+    int64_t Imm;
+    if (!MCOp.evaluateAsConstantImm(Imm))
+      return false;
+    if (!isUInt<4>(Imm)) return false;
+    // 0~3 Reserved for EABI
+    return (Imm >= 4) && (Imm <= 15);
+  }];
+ }
+
+def spimm : Operand<OtherVT> {
+  let ParserMatchClass = SpimmAsmOperand;
+  let PrintMethod = "printSpimm";
+  let DecoderMethod = "decodeZcmpSpimm";
+  let MCOperandPredicate = [{
+    int64_t Imm;
+    if (!MCOp.evaluateAsConstantImm(Imm))
+      return false;
+    return isShiftedUInt<5, 4>(Imm);
+  }];
+}
+
 //===----------------------------------------------------------------------===//
 // Instruction Class Templates
 //===----------------------------------------------------------------------===//
+
+let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in
+class CLoadB_ri<bits<6> funct6, string OpcodeStr>
+    : RVInst16CLB<funct6, 0b00, (outs GPRC:$rd),
+                  (ins GPRCMem:$rs1, uimm2:$imm),
+                  OpcodeStr, "$rd, ${imm}(${rs1})"> {
+  bits<2> imm;
+
+  let Inst{6-5} = imm{0,1};
+}
+
+let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in
+class CLoadH_ri<bits<6> funct6, bit funct1, string OpcodeStr>
+    : RVInst16CLH<funct6, funct1, 0b00, (outs GPRC:$rd),
+                  (ins GPRCMem:$rs1, uimm2_lsb0:$imm),
+                  OpcodeStr, "$rd, ${imm}(${rs1})"> {
+  bits<2> imm;
+
+  let Inst{5} = imm{1};
+}
+
+let hasSideEffects = 0, mayLoad = 0, mayStore = 1 in
+class CStoreB_rri<bits<6> funct6, string OpcodeStr>
+    : RVInst16CSB<funct6, 0b00, (outs),
+                  (ins GPRC:$rs2, GPRCMem:$rs1, uimm2:$imm),
+                  OpcodeStr, "$rs2, ${imm}(${rs1})"> {
+  bits<2> imm;
+
+  let Inst{6-5} = imm{0,1};
+}
+
+let hasSideEffects = 0, mayLoad = 0, mayStore = 1 in
+class CStoreH_rri<bits<6> funct6, bit funct1, string OpcodeStr>
+    : RVInst16CSH<funct6, funct1, 0b00, (outs),
+                  (ins GPRC:$rs2, GPRCMem:$rs1, uimm2_lsb0:$imm),
+                  OpcodeStr, "$rs2, ${imm}(${rs1})"> {
+  bits<2> imm;
+
+  let Inst{5} = imm{1};
+}
 
 let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
 class RVZcArith_r<bits<5> funct5, string OpcodeStr> :
   RVInst16CU<0b100111, funct5, 0b01, (outs GPRC:$rd_wb), (ins GPRC:$rd),
              OpcodeStr, "$rd"> {
   let Constraints = "$rd = $rd_wb";
+}
+
+class RVInstZcCPPP<dag outs, dag ins, string opcodestr, string argstr>
+    : RVInst16<outs, ins, opcodestr, argstr, [], InstFormatOther> {
+
+  let Inst{1-0} = 0b10;
+  let Inst{15-13} = 0b101;
 }
 
 //===----------------------------------------------------------------------===//
@@ -72,49 +165,95 @@ let Predicates = [HasStdExtZcb] in {
 def C_NOT : RVZcArith_r<0b11101 , "c.not">,
             Sched<[WriteIALU, ReadIALU]>;
 
-def C_LBU : CLoad_ri<0b100, "c.lbu", GPRC, uimm2>,
-            Sched<[WriteLDB, ReadMemBase]> {
-  bits<2> imm;
+def C_LBU : CLoadB_ri<0b100000, "c.lbu">,
+            Sched<[WriteLDB, ReadMemBase]>;
+def C_LHU : CLoadH_ri<0b100001, 0b0, "c.lhu">,
+            Sched<[WriteLDH, ReadMemBase]>;
+def C_LH  : CLoadH_ri<0b100001, 0b1, "c.lh">,
+            Sched<[WriteLDH, ReadMemBase]>;
+
+def C_SB : CStoreB_rri<0b100010, "c.sb">,
+           Sched<[WriteSTB, ReadStoreData, ReadMemBase]>;
+def C_SH : CStoreH_rri<0b100011, 0b1, "c.sh">,
+           Sched<[WriteSTH, ReadStoreData, ReadMemBase]>;
+}
+
+// Zcmp
+let DecoderNamespace = "RVZcmp", Predicates = [HasStdExtZcmp],
+    Defs = [X10, X11], hasSideEffects = 0, mayLoad = 0, mayStore = 0 in {
+def CM_MVA01S : RVInst16CA<0b101011, 0b11, 0b10, (outs),
+                            (ins SR07:$rs1, SR07:$rs2), "cm.mva01s", "$rs1, $rs2">;
+
+def CM_MVSA01 : RVInst16CA<0b101011, 0b01, 0b10, (outs SR07:$rs1, SR07:$rs2),
+                            (ins), "cm.mvsa01", "$rs1, $rs2">;
+} // DecoderNamespace = "RVZcmp", Predicates = [HasStdExtZcmp]...
+
+let DecoderNamespace = "RVZcmp", Predicates = [HasStdExtZcmp] in {
+let hasSideEffects = 0, mayLoad = 0, mayStore = 1 in 
+def CM_PUSH : RVInstZcCPPP<(outs), (ins rlist:$rlist, spimm:$spimm), 
+    "cm.push", "{$rlist}, $spimm"> {
+  bits<4> rlist;
+  bits<16> spimm;
+
+  let Inst{12-8} = 0b11000;
+  let Inst{7-4} = rlist;
+  let Inst{3-2} = spimm{5-4};
+}
+
+let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in 
+def CM_POPRET : RVInstZcCPPP<(outs), (ins rlist:$rlist, spimm:$spimm), 
+    "cm.popret", "{$rlist}, $spimm"> {
+  bits<4> rlist;
+  bits<16> spimm;
+
+  let Inst{12-8} = 0b11110;
+  let Inst{7-4} = rlist;
+  let Inst{3-2} = spimm{5-4};
+}
+
+let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in 
+def CM_POPRETZ : RVInstZcCPPP<(outs), (ins rlist:$rlist, spimm:$spimm), 
+    "cm.popretz", "{$rlist}, $spimm"> {
+  bits<4> rlist;
+  bits<16> spimm;
+
+  let Inst{12-8} = 0b11100;
+  let Inst{7-4} = rlist;
+  let Inst{3-2} = spimm{5-4};
+}
+
+let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in 
+def CM_POP : RVInstZcCPPP<(outs), (ins rlist:$rlist, spimm:$spimm), 
+    "cm.pop", "{$rlist}, $spimm"> {
+  bits<4> rlist;
+  bits<16> spimm;
+
+  let Inst{12-8} = 0b11010;
+  let Inst{7-4} = rlist;
+  let Inst{3-2} = spimm{5-4};
+}
+} // DecoderNamespace = "RVZcmp", Predicates = [HasStdExtZcmp]...
+
+let DecoderNamespace = "RVZcmt", Predicates = [HasStdExtZcmt],
+    hasSideEffects = 0, mayLoad = 0, mayStore = 0 in {
+def CM_JT : RVInst16CJ<0b101, 0b10, (outs), (ins uimm5:$index),
+                       "cm.jt", "$index">{
+  bits<5> index;
+
+  let Inst{12-7} = 0b000000;
+  let Inst{6-2} = index;
+}
+
+let Defs = [X1] in
+def CM_JALT : RVInst16CJ<0b101, 0b10, (outs), (ins uimm8ge32:$index),
+                         "cm.jalt", "$index">{
+  bits<8> index;
 
   let Inst{12-10} = 0b000;
-  let Inst{6-5} = imm{0,1};
+  let Inst{9-2} = index;
 }
+} // DecoderNamespace = "RVZcmt", Predicates = [HasStdExtZcmt]...
 
-def C_LHU : CLoad_ri<0b100, "c.lhu", GPRC, uimm2_lsb0>,
-            Sched<[WriteLDH, ReadMemBase]> {
-  bits<2> imm;
-
-  let Inst{12-10} = 0b001;
-  let Inst{6} = 0b0;
-  let Inst{5} = imm{1};
-}
-
-def C_LH  : CLoad_ri<0b100, "c.lh", GPRC, uimm2_lsb0>,
-            Sched<[WriteLDH, ReadMemBase]> {
-  bits<2> imm;
-
-  let Inst{12-10} = 0b001;
-  let Inst{6} = 0b1;
-  let Inst{5} = imm{1};
-}
-
-def C_SB : CStore_rri<0b100, "c.sb", GPRC, uimm2>,
-           Sched<[WriteSTB, ReadStoreData, ReadMemBase]> {
-  bits<2> imm;
-
-  let Inst{12-10} = 0b010;
-  let Inst{6-5} = imm{0,1};
-}
-
-def C_SH : CStore_rri<0b100, "c.sh", GPRC, uimm2_lsb0>, 
-           Sched<[WriteSTH, ReadStoreData, ReadMemBase]> {
-  bits<2> imm;
-
-  let Inst{12-10} = 0b011;
-  let Inst{6} = 0b1;
-  let Inst{5} = imm{1};
-}
-}
 
 let Predicates = [HasStdExtZcb, HasStdExtMOrZmmul] in{
 def : CompressPat<(MUL GPRC:$rs1, GPRC:$rs1, GPRC:$rs2),

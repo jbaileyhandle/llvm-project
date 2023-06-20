@@ -367,8 +367,6 @@ static bool initTargetOptions(DiagnosticsEngine &Diags,
   Options.BinutilsVersion =
       llvm::TargetMachine::parseBinutilsVersion(CodeGenOpts.BinutilsVersion);
   Options.UseInitArray = CodeGenOpts.UseInitArray;
-  Options.LowerGlobalDtorsViaCxaAtExit =
-      CodeGenOpts.RegisterGlobalDtorsWithAtExit;
   Options.DisableIntegratedAS = CodeGenOpts.DisableIntegratedAS;
   Options.CompressDebugSections = CodeGenOpts.getCompressDebugSections();
   Options.RelaxELFRelocations = CodeGenOpts.RelaxELFRelocations;
@@ -424,20 +422,20 @@ static bool initTargetOptions(DiagnosticsEngine &Diags,
       CodeGenOpts.UniqueBasicBlockSectionNames;
   Options.TLSSize = CodeGenOpts.TLSSize;
   Options.EmulatedTLS = CodeGenOpts.EmulatedTLS;
-  Options.ExplicitEmulatedTLS = true;
   Options.DebuggerTuning = CodeGenOpts.getDebuggerTuning();
   Options.EmitStackSizeSection = CodeGenOpts.StackSizeSection;
   Options.StackUsageOutput = CodeGenOpts.StackUsageOutput;
   Options.EmitAddrsig = CodeGenOpts.Addrsig;
   Options.ForceDwarfFrameSection = CodeGenOpts.ForceDwarfFrameSection;
   Options.EmitCallSiteInfo = CodeGenOpts.EmitCallSiteInfo;
-  Options.EnableAIXExtendedAltivecABI = CodeGenOpts.EnableAIXExtendedAltivecABI;
-  Options.XRayOmitFunctionIndex = CodeGenOpts.XRayOmitFunctionIndex;
+  Options.EnableAIXExtendedAltivecABI = LangOpts.EnableAIXExtendedAltivecABI;
+  Options.XRayFunctionIndex = CodeGenOpts.XRayFunctionIndex;
   Options.LoopAlignment = CodeGenOpts.LoopAlignment;
   Options.DebugStrictDwarf = CodeGenOpts.DebugStrictDwarf;
   Options.ObjectFilenameForDebug = CodeGenOpts.ObjectFilenameForDebug;
   Options.Hotpatch = CodeGenOpts.HotPatch;
   Options.JMCInstrument = CodeGenOpts.JMCInstrument;
+  Options.XCOFFReadOnlyPointers = CodeGenOpts.XCOFFReadOnlyPointers;
 
   switch (CodeGenOpts.getSwiftAsyncFramePointer()) {
   case CodeGenOptions::SwiftAsyncFramePointerKind::Auto:
@@ -456,6 +454,8 @@ static bool initTargetOptions(DiagnosticsEngine &Diags,
 
   Options.MCOptions.SplitDwarfFile = CodeGenOpts.SplitDwarfFile;
   Options.MCOptions.EmitDwarfUnwind = CodeGenOpts.getEmitDwarfUnwind();
+  Options.MCOptions.EmitCompactUnwindNonCanonical =
+      CodeGenOpts.EmitCompactUnwindNonCanonical;
   Options.MCOptions.MCRelaxAll = CodeGenOpts.RelaxAll;
   Options.MCOptions.MCSaveTempLabels = CodeGenOpts.SaveTempLabels;
   Options.MCOptions.MCUseDwarfDirectory =
@@ -488,13 +488,14 @@ static bool initTargetOptions(DiagnosticsEngine &Diags,
 
 static std::optional<GCOVOptions>
 getGCOVOptions(const CodeGenOptions &CodeGenOpts, const LangOptions &LangOpts) {
-  if (!CodeGenOpts.EmitGcovArcs && !CodeGenOpts.EmitGcovNotes)
+  if (CodeGenOpts.CoverageNotesFile.empty() &&
+      CodeGenOpts.CoverageDataFile.empty())
     return std::nullopt;
   // Not using 'GCOVOptions::getDefault' allows us to avoid exiting if
   // LLVM's -default-gcov-version flag is set to something invalid.
   GCOVOptions Options;
-  Options.EmitNotes = CodeGenOpts.EmitGcovNotes;
-  Options.EmitData = CodeGenOpts.EmitGcovArcs;
+  Options.EmitNotes = !CodeGenOpts.CoverageNotesFile.empty();
+  Options.EmitData = !CodeGenOpts.CoverageDataFile.empty();
   llvm::copy(CodeGenOpts.CoverageVersion, std::begin(Options.Version));
   Options.NoRedZone = CodeGenOpts.DisableRedZone;
   Options.Filter = CodeGenOpts.ProfileFilterFiles;
@@ -839,14 +840,32 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
       TheModule->getContext(),
       (CodeGenOpts.DebugPassManager || DebugPassStructure),
       /*VerifyEach*/ false, PrintPassOpts);
-  SI.registerCallbacks(PIC, &FAM);
+  SI.registerCallbacks(PIC, &MAM);
   PassBuilder PB(TM.get(), PTO, PGOOpt, &PIC);
 
-  if (CodeGenOpts.EnableAssignmentTracking) {
+  // Handle the assignment tracking feature options.
+  switch (CodeGenOpts.getAssignmentTrackingMode()) {
+  case CodeGenOptions::AssignmentTrackingOpts::Forced:
     PB.registerPipelineStartEPCallback(
         [&](ModulePassManager &MPM, OptimizationLevel Level) {
           MPM.addPass(AssignmentTrackingPass());
         });
+    break;
+  case CodeGenOptions::AssignmentTrackingOpts::Enabled:
+    // Disable assignment tracking in LTO builds for now as the performance
+    // cost is too high. Disable for LLDB tuning due to llvm.org/PR43126.
+    if (!CodeGenOpts.PrepareForThinLTO && !CodeGenOpts.PrepareForLTO &&
+        CodeGenOpts.getDebuggerTuning() != llvm::DebuggerKind::LLDB) {
+      PB.registerPipelineStartEPCallback(
+          [&](ModulePassManager &MPM, OptimizationLevel Level) {
+            // Only use assignment tracking if optimisations are enabled.
+            if (Level != OptimizationLevel::O0)
+              MPM.addPass(AssignmentTrackingPass());
+          });
+    }
+    break;
+  case CodeGenOptions::AssignmentTrackingOpts::Disabled:
+    break;
   }
 
   // Enable verify-debuginfo-preserve-each for new PM.
@@ -859,7 +878,7 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
     if (!CodeGenOpts.DIBugsReportFilePath.empty())
       Debugify.setOrigDIVerifyBugsReportFilePath(
           CodeGenOpts.DIBugsReportFilePath);
-    Debugify.registerCallbacks(PIC);
+    Debugify.registerCallbacks(PIC, MAM);
   }
   // Attempt to load pass plugins and register their callbacks with PB.
   for (auto &PluginFN : CodeGenOpts.PassPlugins) {
@@ -975,19 +994,22 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
             MPM.addPass(InstrProfiling(*Options, false));
           });
 
-    if (CodeGenOpts.OptimizationLevel == 0) {
-      MPM = PB.buildO0DefaultPipeline(Level, IsLTO || IsThinLTO);
-    } else if (IsThinLTO) {
+    // TODO: Consider passing the MemoryProfileOutput to the pass builder via
+    // the PGOOptions, and set this up there.
+    if (!CodeGenOpts.MemoryProfileOutput.empty()) {
+      PB.registerOptimizerLastEPCallback(
+          [](ModulePassManager &MPM, OptimizationLevel Level) {
+            MPM.addPass(createModuleToFunctionPassAdaptor(MemProfilerPass()));
+            MPM.addPass(ModuleMemProfilerPass());
+          });
+    }
+
+    if (IsThinLTO) {
       MPM = PB.buildThinLTOPreLinkDefaultPipeline(Level);
     } else if (IsLTO) {
       MPM = PB.buildLTOPreLinkDefaultPipeline(Level);
     } else {
       MPM = PB.buildPerModuleDefaultPipeline(Level);
-    }
-
-    if (!CodeGenOpts.MemoryProfileOutput.empty()) {
-      MPM.addPass(createModuleToFunctionPassAdaptor(MemProfilerPass()));
-      MPM.addPass(ModuleMemProfilerPass());
     }
   }
 

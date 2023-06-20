@@ -42,6 +42,8 @@ VERS1.0 {
     omp_target_is_present;
     omp_target_memcpy;
     omp_target_memcpy_rect;
+    omp_target_memcpy_async;
+    omp_target_memcpy_rect_async;
     omp_target_associate_ptr;
     omp_target_disassociate_ptr;
     __kmpc_push_target_tripcount;
@@ -49,17 +51,7 @@ VERS1.0 {
     printf_execute;
     global_allocate;
     global_free;
-    hostrpc_varfn_uint;
-    hostrpc_varfn_double;
-    hostrpc_varfn_uint_allocate;
-    hostrpc_varfn_uint_execute;
-    hostrpc_varfn_double_allocate;
-    hostrpc_varfn_double_execute;
-    hostrpc_fptr0;
-    hostrpc_varfn_uint64_allocate;
-    hostrpc_varfn_double_allocate;
-    hostrpc_varfn_uint64_execute;
-    hostrpc_varfn_uint64;
+    hostexec*;
     llvm_omp_target_alloc_host;
     llvm_omp_target_alloc_shared;
     llvm_omp_target_alloc_device;

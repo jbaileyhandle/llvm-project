@@ -43,7 +43,6 @@
 #include "llvm/Support/WithColor.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/IPO/FunctionImport.h"
-#include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/Utils/FunctionImportUtils.h"
 
 #include <map>
@@ -143,8 +142,8 @@ static bool convertExternsToLinkOnce(Module *MOUT, LLVMContext &Ctx) {
         if (!strncmp(F->getName().str().c_str(), "__ockl_dm_dealloc",
                      strlen("__ockl_dm_dealloc")))
           continue;
-        if (!strncmp(F->getName().str().c_str(), "hostrpc_invoke",
-                     strlen("hostrpc_invoke")))
+        if (!strncmp(F->getName().str().c_str(), "hostexec_invoke",
+                     strlen("hostexec_invoke")))
           continue;
         // all other functions
         F->setLinkage(GlobalValue::LinkOnceODRLinkage);

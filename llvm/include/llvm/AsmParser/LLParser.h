@@ -294,6 +294,7 @@ namespace llvm {
     bool parseOptionalUWTableKind(UWTableKind &Kind);
     bool parseAllocKind(AllocFnKind &Kind);
     std::optional<MemoryEffects> parseMemoryAttr();
+    unsigned parseNoFPClassAttr();
     bool parseScopeAndOrdering(bool IsAtomic, SyncScope::ID &SSID,
                                AtomicOrdering &Ordering);
     bool parseScope(SyncScope::ID &SSID);
@@ -564,8 +565,7 @@ namespace llvm {
     template <class ParserTy> bool parseMDFieldsImplBody(ParserTy ParseField);
     template <class ParserTy>
     bool parseMDFieldsImpl(ParserTy ParseField, LocTy &ClosingLoc);
-    bool parseSpecializedMDNode(MDNode *&N, bool IsDistinct = false,
-                                LocTy DistinctLoc = LocTy());
+    bool parseSpecializedMDNode(MDNode *&N, bool IsDistinct = false);
 
 #define HANDLE_SPECIALIZED_MDNODE_LEAF(CLASS)                                  \
   bool parse##CLASS(MDNode *&Result, bool IsDistinct);

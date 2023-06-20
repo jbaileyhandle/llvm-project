@@ -15,6 +15,7 @@
 ; SGPR-NEXT: v_readlane_b32 s{{[0-9]+}}, [[VHI]], 1
 ; SGPR-NEXT: v_readlane_b32 s{{[0-9]+}}, [[VHI]], 2
 ; SGPR-NEXT: v_readlane_b32 s[[HI:[0-9]+]], [[VHI]], 3
+; SGPR-NEXT: ; kill: killed $vgpr1
 ; SGPR-NEXT: s_nop 4
 ; SGPR-NEXT: buffer_store_dword v0, off, s[0:3], 0
 

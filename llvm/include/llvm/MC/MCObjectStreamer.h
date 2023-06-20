@@ -46,7 +46,7 @@ class MCObjectStreamer : public MCStreamer {
   bool EmitDebugFrame;
   SmallVector<MCSymbol *, 2> PendingLabels;
   SmallSetVector<MCSection *, 4> PendingLabelSections;
-  unsigned CurSubsectionIdx;
+  unsigned CurSubsectionIdx = 0;
   struct PendingMCFixup {
     const MCSymbol *Sym;
     MCFixup Fixup;
@@ -113,9 +113,9 @@ protected:
   void addPendingLabel(MCSymbol* label);
 
   /// If any labels have been emitted but not assigned fragments in the current
-  /// Section and Subsection, ensure that they get assigned, either to fragment
-  /// F if possible or to a new data fragment. Optionally, one can provide an
-  /// offset \p FOffset as a symbol offset within the fragment.
+  /// Section and Subsection, ensure that they get assigned to fragment F.
+  /// Optionally, one can provide an offset \p FOffset as a symbol offset within
+  /// the fragment.
   void flushPendingLabels(MCFragment *F, uint64_t FOffset = 0);
 
 public:

@@ -15,6 +15,7 @@
 ; CHECK-NEXT: Profile summary info
 ; CHECK-NEXT: Machine Branch Probability Analysis
 ; CHECK-NEXT:   ModulePass Manager
+; CHECK-NEXT:     Verify Heterogeneous Debug Preconditions
 ; CHECK-NEXT:     Pre-ISel Intrinsic Lowering
 ; CHECK-NEXT:     FunctionPass Manager
 ; CHECK-NEXT:       Expand large div/rem
@@ -32,12 +33,14 @@
 ; CHECK-NEXT:       Expand reduction intrinsics
 ; CHECK-NEXT:       Expand indirectbr instructions
 ; CHECK-NEXT:       Exception handling preparation
+; CHECK-NEXT:       Prepare callbr
 ; CHECK-NEXT:       Safe Stack instrumentation pass
 ; CHECK-NEXT:       Insert stack protectors
 ; CHECK-NEXT:       Module Verifier
 ; CHECK-NEXT:       Assignment Tracking Analysis
 ; CHECK-NEXT:       X86 DAG->DAG Instruction Selection
 ; CHECK-NEXT:       X86 PIC Global Base Reg Initialization
+; CHECK-NEXT:       Argument Stack Rebase
 ; CHECK-NEXT:       Finalize ISel and expand pseudo-instructions
 ; CHECK-NEXT:       Local Stack Slot Allocation
 ; CHECK-NEXT:       X86 speculative load hardening

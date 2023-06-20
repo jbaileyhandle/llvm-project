@@ -13,11 +13,13 @@
 #include "src/__support/FPUtil/FEnvImpl.h"
 #include "src/__support/FPUtil/FPBits.h"
 #include "src/__support/FPUtil/FloatProperties.h"
+#include "src/__support/FPUtil/rounding_mode.h"
 #include "src/__support/UInt.h"
 #include "src/__support/UInt128.h"
 #include "src/__support/common.h"
 #include "src/__support/float_to_string.h"
 #include "src/__support/integer_to_string.h"
+#include "src/__support/libc_assert.h"
 #include "src/stdio/printf_core/converter_utils.h"
 #include "src/stdio/printf_core/core_structs.h"
 #include "src/stdio/printf_core/float_inf_nan_converter.h"
@@ -32,9 +34,10 @@ namespace printf_core {
 using MantissaInt = fputil::FPBits<long double>::UIntType;
 
 // Returns true if value is divisible by 2^p.
-LIBC_INLINE constexpr bool multiple_of_power_of_2(const uint64_t value,
-                                                  const uint32_t p) {
-  return (value & ((uint64_t(1) << p) - 1)) == 0;
+template <typename T>
+LIBC_INLINE constexpr cpp::enable_if_t<cpp::is_integral_v<T>, bool>
+multiple_of_power_of_2(T value, uint32_t p) {
+  return (value & ((T(1) << p) - 1)) == 0;
 }
 
 constexpr size_t BLOCK_SIZE = 9;
@@ -492,6 +495,10 @@ public:
   }
 };
 
+// This implementation is based on the Ryu Printf algorithm by Ulf Adams:
+// Ulf Adams. 2019. Ryū revisited: printf floating point conversion.
+// Proc. ACM Program. Lang. 3, OOPSLA, Article 169 (October 2019), 23 pages.
+// https://doi.org/10.1145/3360595
 template <typename T, cpp::enable_if_t<cpp::is_floating_point_v<T>, int> = 0>
 LIBC_INLINE int convert_float_decimal_typed(Writer *writer,
                                             const FormatSection &to_conv,
@@ -589,13 +596,13 @@ LIBC_INLINE int convert_float_decimal_typed(Writer *writer,
         RoundDirection round;
         // Is m * 10^(additionalDigits + 1) / 2^(-exponent) integer?
         const int32_t requiredTwos =
-            -exponent - MANT_WIDTH - static_cast<int32_t>(precision) - 1;
+            -(exponent - MANT_WIDTH) - static_cast<int32_t>(precision) - 1;
         const bool trailingZeros =
             requiredTwos <= 0 ||
             (requiredTwos < 60 &&
              multiple_of_power_of_2(float_bits.get_explicit_mantissa(),
                                     static_cast<uint32_t>(requiredTwos)));
-        switch (fputil::get_round()) {
+        switch (fputil::quick_get_round()) {
         case FE_TONEAREST:
           // Round to nearest, if it's exactly halfway then round to even.
           if (last_digit != 5) {
@@ -763,13 +770,13 @@ LIBC_INLINE int convert_float_dec_exp_typed(Writer *writer,
   RoundDirection round;
   // Is m * 10^(additionalDigits + 1) / 2^(-exponent) integer?
   const int32_t requiredTwos =
-      -exponent - MANT_WIDTH - static_cast<int32_t>(precision) - 1;
+      -(exponent - MANT_WIDTH) - static_cast<int32_t>(precision) - 1;
   const bool trailingZeros =
       requiredTwos <= 0 ||
       (requiredTwos < 60 &&
        multiple_of_power_of_2(float_bits.get_explicit_mantissa(),
                               static_cast<uint32_t>(requiredTwos)));
-  switch (fputil::get_round()) {
+  switch (fputil::quick_get_round()) {
   case FE_TONEAREST:
     // Round to nearest, if it's exactly halfway then round to even.
     if (last_digit != 5) {
@@ -1010,14 +1017,14 @@ LIBC_INLINE int convert_float_dec_auto_typed(Writer *writer,
   RoundDirection round;
   // Is m * 10^(additionalDigits + 1) / 2^(-exponent) integer?
   const int32_t requiredTwos =
-      -exponent - MANT_WIDTH - static_cast<int32_t>(exp_precision) - 1;
+      -(exponent - MANT_WIDTH) - static_cast<int32_t>(exp_precision) - 1;
   // TODO: rename this variable to remove confusion with trailing_zeroes
   const bool trailingZeros =
       requiredTwos <= 0 ||
       (requiredTwos < 60 &&
        multiple_of_power_of_2(float_bits.get_explicit_mantissa(),
                               static_cast<uint32_t>(requiredTwos)));
-  switch (fputil::get_round()) {
+  switch (fputil::quick_get_round()) {
   case FE_TONEAREST:
     // Round to nearest, if it's exactly halfway then round to even.
     if (last_digit != 5) {
@@ -1058,7 +1065,7 @@ LIBC_INLINE int convert_float_dec_auto_typed(Writer *writer,
   }
 
   digits_checked += digits_requested;
-  // assert(digits_checked == init_precision);
+  LIBC_ASSERT(digits_checked == init_precision);
   // At this point we should have checked all the digits requested by the
   // precision. We may increment this number 1 more if we round up all of the
   // digits, but at this point in the code digits_checked should always equal
@@ -1142,7 +1149,8 @@ LIBC_INLINE int convert_float_decimal(Writer *writer,
                                                       float_bits);
     }
   } else {
-    fputil::FPBits<double>::UIntType float_raw = to_conv.conv_val_raw;
+    fputil::FPBits<double>::UIntType float_raw =
+        static_cast<fputil::FPBits<double>::UIntType>(to_conv.conv_val_raw);
     fputil::FPBits<double> float_bits(float_raw);
     if (!float_bits.is_inf_or_nan()) {
       return convert_float_decimal_typed<double>(writer, to_conv, float_bits);
@@ -1162,7 +1170,8 @@ LIBC_INLINE int convert_float_dec_exp(Writer *writer,
                                                       float_bits);
     }
   } else {
-    fputil::FPBits<double>::UIntType float_raw = to_conv.conv_val_raw;
+    fputil::FPBits<double>::UIntType float_raw =
+        static_cast<fputil::FPBits<double>::UIntType>(to_conv.conv_val_raw);
     fputil::FPBits<double> float_bits(float_raw);
     if (!float_bits.is_inf_or_nan()) {
       return convert_float_dec_exp_typed<double>(writer, to_conv, float_bits);
@@ -1182,7 +1191,8 @@ LIBC_INLINE int convert_float_dec_auto(Writer *writer,
                                                        float_bits);
     }
   } else {
-    fputil::FPBits<double>::UIntType float_raw = to_conv.conv_val_raw;
+    fputil::FPBits<double>::UIntType float_raw =
+        static_cast<fputil::FPBits<double>::UIntType>(to_conv.conv_val_raw);
     fputil::FPBits<double> float_bits(float_raw);
     if (!float_bits.is_inf_or_nan()) {
       return convert_float_dec_auto_typed<double>(writer, to_conv, float_bits);

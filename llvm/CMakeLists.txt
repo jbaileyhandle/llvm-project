@@ -1,14 +1,7 @@
 
 # See docs/CMake.html for instructions about how to build LLVM with CMake.
 
-cmake_minimum_required(VERSION 3.13.4)
-if ("${CMAKE_VERSION}" VERSION_LESS "3.20.0")
-  message(WARNING
-    "Your CMake version is ${CMAKE_VERSION}. Starting with LLVM 17.0.0, the "
-    "minimum version of CMake required to build LLVM will become 3.20.0, and "
-    "using an older CMake will become an error. Please upgrade your CMake to "
-    "at least 3.20.0 now to avoid issues in the future!")
-endif()
+cmake_minimum_required(VERSION 3.20.0)
 
 set(LLVM_COMMON_CMAKE_UTILS ${CMAKE_CURRENT_SOURCE_DIR}/../cmake)
 include(${LLVM_COMMON_CMAKE_UTILS}/Modules/CMakePolicy.cmake
@@ -389,7 +382,7 @@ string(TOUPPER "${CMAKE_BUILD_TYPE}" uppercase_CMAKE_BUILD_TYPE)
 
 if (CMAKE_BUILD_TYPE AND
     NOT uppercase_CMAKE_BUILD_TYPE MATCHES "^(DEBUG|RELEASE|RELWITHDEBINFO|MINSIZEREL)$")
-  message(FATAL_ERROR "Invalid value for CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
+  message(WARNING "Unknown value for CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
 endif()
 
 # LLVM_INSTALL_PACKAGE_DIR needs to be declared prior to adding the tools
@@ -566,6 +559,7 @@ else()
 endif()
 option(LLVM_ENABLE_LOCAL_SUBMODULE_VISIBILITY "Compile with -fmodules-local-submodule-visibility." ON)
 option(LLVM_ENABLE_LIBCXX "Use libc++ if available." OFF)
+option(LLVM_ENABLE_LLVM_LIBC "Set to on to link all LLVM executables against LLVM libc, assuming it is accessible by the host compiler." OFF)
 option(LLVM_STATIC_LINK_CXX_STDLIB "Statically link the standard library." OFF)
 option(LLVM_ENABLE_LLD "Use lld as C and C++ linker." OFF)
 option(LLVM_ENABLE_PEDANTIC "Compile with pedantic enabled." ON)
@@ -720,6 +714,10 @@ endif(LLVM_BUILD_EXAMPLES)
 option(LLVM_BUILD_TESTS
   "Build LLVM unit tests. If OFF, just generate build targets." OFF)
 option(LLVM_INCLUDE_TESTS "Generate build targets for the LLVM unit tests." ON)
+
+option(LLVM_INSTALL_GTEST
+  "Install the llvm gtest library.  This should be on if you want to do
+   stand-alone builds of the other projects and run their unit tests." OFF)
 
 option(LLVM_BUILD_BENCHMARKS "Add LLVM benchmark targets to the list of default
 targets. If OFF, benchmarks still could be built using Benchmarks target." OFF)
@@ -978,11 +976,6 @@ set( CMAKE_RUNTIME_OUTPUT_DIRECTORY ${LLVM_BINARY_DIR}/bin )
 set( CMAKE_LIBRARY_OUTPUT_DIRECTORY ${LLVM_BINARY_DIR}/lib${LLVM_LIBDIR_SUFFIX} )
 set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${LLVM_BINARY_DIR}/lib${LLVM_LIBDIR_SUFFIX} )
 
-if(LLVM_INCLUDE_TESTS)
-  include(GetErrcMessages)
-  get_errc_messages(LLVM_LIT_ERRC_MESSAGES)
-endif()
-
 # For up-to-date instructions for installing the TFLite dependency, refer to
 # the bot setup script: https://github.com/google/ml-compiler-opt/blob/main/buildbot/buildbot_init.sh
 set(LLVM_HAVE_TFLITE "" CACHE BOOL "Use tflite")
@@ -1074,29 +1067,6 @@ if (UNIX AND ${CMAKE_SYSTEM_NAME} MATCHES "AIX")
           add_compile_definitions(_XOPEN_SOURCE=700)
           add_compile_definitions(_LARGE_FILE_API)
 
-  # CMake versions less than 3.16 set default linker flags to include -brtl, as
-  # well as setting -G when building libraries, so clear them out. Note we only
-  # try to clear the form that CMake will set as part of its initial
-  # configuration, it is still possible the user may force it as part of a
-  # compound option.
-  if(CMAKE_VERSION VERSION_LESS 3.16)
-    string(REGEX REPLACE "(^|[ \t]+)-Wl,-brtl([ \t]+|$)" " " CMAKE_EXE_LINKER_FLAGS  "${CMAKE_EXE_LINKER_FLAGS}")
-    string(REGEX REPLACE "(^|[ \t]+)-Wl,-brtl([ \t]+|$)" " " CMAKE_SHARED_LINKER_FLAGS  "${CMAKE_SHARED_LINKER_FLAGS}")
-    string(REGEX REPLACE "(^|[ \t]+)-Wl,-brtl([ \t]+|$)" " " CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS}")
-    string(REGEX REPLACE "(^|[ \t]+)(-Wl,)?-G([ \t]+|$)" " " CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS
-      "${CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS}")
-    string(REGEX REPLACE "(^|[ \t]+)(-Wl,)?-G([ \t]+|$)" " " CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS
-      "${CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS}")
-    string(REGEX REPLACE "(^|[ \t]+)(-Wl,)?-G([ \t]+|$)" " " CMAKE_SHARED_LIBRARY_CREATE_ASM_FLAGS
-      "${CMAKE_SHARED_LIBRARY_CREATE_ASM_FLAGS}")
-    string(REGEX REPLACE "(^|[ \t]+)-Wl,-G," " -Wl," CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS
-      "${CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS}")
-    string(REGEX REPLACE "(^|[ \t]+)-Wl,-G," " -Wl," CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS
-      "${CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS}")
-    string(REGEX REPLACE "(^|[ \t]+)-Wl,-G," " -Wl," CMAKE_SHARED_LIBRARY_CREATE_ASM_FLAGS
-      "${CMAKE_SHARED_LIBRARY_CREATE_ASM_FLAGS}")
-  endif()
-
   # Modules should be built with -shared -Wl,-G, so we can use runtime linking
   # with plugins.
   string(APPEND CMAKE_MODULE_LINKER_FLAGS " -shared -Wl,-G")
@@ -1140,11 +1110,6 @@ endif( ${CMAKE_SYSTEM_NAME} MATCHES SunOS )
 # use export_executable_symbols(target).
 set(CMAKE_SHARED_LIBRARY_LINK_CXX_FLAGS "")
 
-set(LLVM_EXTRACT_SYMBOLS_FLAGS ""
-  CACHE STRING "Additional options to pass to llvm/utils/extract_symbols.py.
-  These cannot override the options set by cmake, but can add extra options
-  such as --tools.")
-
 include(AddLLVM)
 include(TableGen)
 
@@ -1167,7 +1132,7 @@ add_subdirectory(lib/TableGen)
 
 add_subdirectory(utils/TableGen)
 
-add_subdirectory(include/llvm)
+add_subdirectory(include)
 
 add_subdirectory(lib)
 
@@ -1279,14 +1244,14 @@ if (NOT LLVM_INSTALL_TOOLCHAIN_ONLY)
     )
 
   if (LLVM_INSTALL_MODULEMAPS)
-    install(DIRECTORY include/llvm include/llvm-c
+    install(DIRECTORY include
             DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
             COMPONENT llvm-headers
             FILES_MATCHING
             PATTERN "module.modulemap"
             )
-    install(FILES include/llvm/module.install.modulemap
-            DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/llvm"
+    install(FILES include/module.install.modulemap
+            DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
             COMPONENT llvm-headers
             RENAME "module.extern.modulemap"
             )

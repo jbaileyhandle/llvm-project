@@ -47,7 +47,6 @@ namespace llvm {
     Function *DeclareFn;     ///< llvm.dbg.declare
     Function *ValueFn;       ///< llvm.dbg.value
     Function *LabelFn;       ///< llvm.dbg.label
-    Function *AddrFn;        ///< llvm.dbg.addr
     Function *AssignFn;      ///< llvm.dbg.assign
     Function *DefFn;         ///< llvm.dbg.def
     Function *KillFn;        ///< llvm.dbg.kill
@@ -55,9 +54,9 @@ namespace llvm {
     SmallVector<TrackingMDNodeRef, 4> AllEnumTypes;
     /// Track the RetainTypes, since they can be updated later on.
     SmallVector<TrackingMDNodeRef, 4> AllRetainTypes;
-    SmallVector<Metadata *, 4> AllSubprograms;
+    SmallVector<DISubprogram *, 4> AllSubprograms;
     SmallVector<Metadata *, 4> AllGVs;
-    SmallVector<TrackingMDNodeRef, 4> AllImportedModules;
+    SmallVector<TrackingMDNodeRef, 4> ImportedModules;
     /// Map Macro parent (which can be DIMacroFile or nullptr) to a list of
     /// Metadata all of type DIMacroNode.
     /// DIMacroNode's with nullptr parent are DICompileUnit direct children.
@@ -67,15 +66,25 @@ namespace llvm {
     SmallVector<TrackingMDNodeRef, 4> UnresolvedNodes;
     bool AllowUnresolvedNodes;
 
-    /// Each subprogram's preserved local variables.
+    /// Each subprogram's preserved local variables, labels and imported
+    /// entities.
     ///
     /// Do not use a std::vector.  Some versions of libc++ apparently copy
     /// instead of move on grow operations, and TrackingMDRef is expensive to
     /// copy.
-    DenseMap<MDNode *, SmallVector<TrackingMDNodeRef, 1>> PreservedVariables;
+    DenseMap<DISubprogram *, SmallVector<TrackingMDNodeRef, 4>>
+        SubprogramTrackedNodes;
 
-    /// Each subprogram's preserved labels.
-    DenseMap<MDNode *, SmallVector<TrackingMDNodeRef, 1>> PreservedLabels;
+    SmallVectorImpl<TrackingMDNodeRef> &
+    getImportTrackingVector(const DIScope *S) {
+      return isa_and_nonnull<DILocalScope>(S)
+                 ? getSubprogramNodesTrackingVector(S)
+                 : ImportedModules;
+    }
+    SmallVectorImpl<TrackingMDNodeRef> &
+    getSubprogramNodesTrackingVector(const DIScope *S) {
+      return SubprogramTrackedNodes[cast<DILocalScope>(S)->getSubprogram()];
+    }
 
     /// Create a temporary.
     ///
@@ -262,13 +271,14 @@ namespace llvm {
     /// \param SizeInBits        Size.
     /// \param AlignInBits       Alignment. (optional)
     /// \param DWARFAddressSpace DWARF address space. (optional)
+    /// \param DWARFMemorySpace  DWARF memory space. (optional)
     /// \param Name              Pointer type name. (optional)
     /// \param Annotations       Member annotations.
-    DIDerivedType *
-    createPointerType(DIType *PointeeTy, uint64_t SizeInBits,
-                      uint32_t AlignInBits = 0,
-                      std::optional<unsigned> DWARFAddressSpace = std::nullopt,
-                      StringRef Name = "", DINodeArray Annotations = nullptr);
+    DIDerivedType *createPointerType(
+        DIType *PointeeTy, uint64_t SizeInBits, uint32_t AlignInBits = 0,
+        std::optional<unsigned> DWARFAddressSpace = std::nullopt,
+        dwarf::MemorySpace DWARFMemorySpace = dwarf::DW_MSPACE_LLVM_none,
+        StringRef Name = "", DINodeArray Annotations = nullptr);
 
     /// Create debugging information entry for a pointer to member.
     /// \param PointeeTy Type pointed to by this pointer.
@@ -285,7 +295,8 @@ namespace llvm {
     DIDerivedType *createReferenceType(
         unsigned Tag, DIType *RTy, uint64_t SizeInBits = 0,
         uint32_t AlignInBits = 0,
-        std::optional<unsigned> DWARFAddressSpace = std::nullopt);
+        std::optional<unsigned> DWARFAddressSpace = std::nullopt,
+        dwarf::MemorySpace MS = dwarf::DW_MSPACE_LLVM_none);
 
     /// Create debugging information entry for a typedef.
     /// \param Ty          Original type.
@@ -686,12 +697,14 @@ namespace llvm {
     /// \param IsLocalToUnit Boolean flag indicate whether this variable is
     ///                      externally visible or not.
     /// \param Decl          Reference to the corresponding declaration.
+    /// \param MS            DWARF memory space.
     /// \param AlignInBits   Variable alignment(or 0 if no alignment attr was
     ///                      specified)
     DIGlobalVariable *createGlobalVariable(
         DIScope *Context, StringRef Name, StringRef LinkageName, DIFile *File,
         unsigned LineNo, DIType *Ty, bool IsLocalToUnit, bool isDefined = true,
         MDNode *Decl = nullptr, MDTuple *TemplateParams = nullptr,
+        dwarf::MemorySpace MS = dwarf::DW_MSPACE_LLVM_none,
         uint32_t AlignInBits = 0, DINodeArray Annotations = nullptr);
 
     /// Create a new descriptor for the specified variable.
@@ -706,21 +719,25 @@ namespace llvm {
     /// \param Expr        The location of the global relative to the attached
     ///                    GlobalVariable.
     /// \param Decl        Reference to the corresponding declaration.
+    /// \param MS          DWARF memory space.
     /// \param AlignInBits Variable alignment(or 0 if no alignment attr was
     ///                    specified)
     DIGlobalVariableExpression *createGlobalVariableExpression(
         DIScope *Context, StringRef Name, StringRef LinkageName, DIFile *File,
         unsigned LineNo, DIType *Ty, bool IsLocalToUnit, bool isDefined = true,
         DIExpression *Expr = nullptr, MDNode *Decl = nullptr,
-        MDTuple *TemplateParams = nullptr, uint32_t AlignInBits = 0,
-        DINodeArray Annotations = nullptr);
+        MDTuple *TemplateParams = nullptr,
+        dwarf::MemorySpace MS = dwarf::DW_MSPACE_LLVM_none,
+        uint32_t AlignInBits = 0, DINodeArray Annotations = nullptr);
 
     /// Identical to createGlobalVariable
     /// except that the resulting DbgNode is temporary and meant to be RAUWed.
     DIGlobalVariable *createTempGlobalVariableFwdDecl(
         DIScope *Context, StringRef Name, StringRef LinkageName, DIFile *File,
         unsigned LineNo, DIType *Ty, bool IsLocalToUnit, MDNode *Decl = nullptr,
-        MDTuple *TemplateParams = nullptr, uint32_t AlignInBits = 0);
+        MDTuple *TemplateParams = nullptr,
+        dwarf::MemorySpace MS = dwarf::DW_MSPACE_LLVM_none,
+        uint32_t AlignInBits = 0);
 
     /// Create a new descriptor for an auto variable.  This is a local variable
     /// that is not a subprogram parameter.
@@ -734,6 +751,7 @@ namespace llvm {
     createAutoVariable(DIScope *Scope, StringRef Name, DIFile *File,
                        unsigned LineNo, DIType *Ty, bool AlwaysPreserve = false,
                        DINode::DIFlags Flags = DINode::FlagZero,
+                       dwarf::MemorySpace MS = dwarf::DW_MSPACE_LLVM_none,
                        uint32_t AlignInBits = 0);
 
     /// Create a new descriptor for an label.
@@ -760,6 +778,7 @@ namespace llvm {
                             DIFile *File, unsigned LineNo, DIType *Ty,
                             bool AlwaysPreserve = false,
                             DINode::DIFlags Flags = DINode::FlagZero,
+                            dwarf::MemorySpace MS = dwarf::DW_MSPACE_LLVM_none,
                             DINodeArray Annotations = nullptr);
 
     /// Create a new descriptor for the specified
@@ -1019,30 +1038,6 @@ namespace llvm {
                                          DIExpression *Expr,
                                          const DILocation *DL,
                                          Instruction *InsertBefore);
-
-    /// Insert a new llvm.dbg.addr intrinsic call.
-    /// \param Addr          llvm::Value of the address
-    /// \param VarInfo      Variable's debug info descriptor.
-    /// \param Expr         A complex location expression.
-    /// \param DL           Debug info location.
-    /// \param InsertAtEnd Location for the new intrinsic.
-    Instruction *insertDbgAddrIntrinsic(llvm::Value *Addr,
-                                        DILocalVariable *VarInfo,
-                                        DIExpression *Expr,
-                                        const DILocation *DL,
-                                        BasicBlock *InsertAtEnd);
-
-    /// Insert a new llvm.dbg.addr intrinsic call.
-    /// \param Addr         llvm::Value of the address.
-    /// \param VarInfo      Variable's debug info descriptor.
-    /// \param Expr         A complex location expression.
-    /// \param DL           Debug info location.
-    /// \param InsertBefore Location for the new intrinsic.
-    Instruction *insertDbgAddrIntrinsic(llvm::Value *Addr,
-                                        DILocalVariable *VarInfo,
-                                        DIExpression *Expr,
-                                        const DILocation *DL,
-                                        Instruction *InsertBefore);
 
     /// Replace the vtable holder in the given type.
     ///

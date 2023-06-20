@@ -46,6 +46,9 @@ static const unsigned X86AddrSpaceMap[] = {
     271, // ptr32_uptr
     272, // ptr64
     0,   // hlsl_groupshared
+    // Wasm address space values for this target are dummy values,
+    // as it is only enabled for Wasm targets.
+    20, // wasm_funcref
 };
 
 // X86 target abstract base class; x86-32 and x86-64 are very close, so
@@ -150,6 +153,7 @@ class LLVM_LIBRARY_VISIBILITY X86TargetInfo : public TargetInfo {
   bool HasAMXTILE = false;
   bool HasAMXINT8 = false;
   bool HasAMXBF16 = false;
+  bool HasAMXCOMPLEX = false;
   bool HasSERIALIZE = false;
   bool HasTSXLDTRK = false;
   bool HasUINTR = false;
@@ -201,9 +205,9 @@ public:
     return RegName.equals("esp") || RegName.equals("rsp");
   }
 
-  bool validateCpuSupports(StringRef Name) const override;
+  bool validateCpuSupports(StringRef FeatureStr) const override;
 
-  bool validateCpuIs(StringRef Name) const override;
+  bool validateCpuIs(StringRef FeatureStr) const override;
 
   bool validateCPUSpecificCPUDispatch(StringRef Name) const override;
 
@@ -257,7 +261,7 @@ public:
                                    StringRef Constraint, unsigned Size) const;
 
   std::string convertConstraint(const char *&Constraint) const override;
-  const char *getClobbers() const override {
+  std::string_view getClobbers() const override {
     return "~{dirflag},~{fpsr},~{flags}";
   }
 
@@ -412,7 +416,6 @@ public:
     return getPointerWidthV(AddrSpace);
   }
 
-  const char *getBFloat16Mangling() const override { return "u6__bf16"; };
 };
 
 // X86-32 generic target
@@ -959,6 +962,28 @@ class LLVM_LIBRARY_VISIBILITY AndroidX86_64TargetInfo
 public:
   AndroidX86_64TargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
       : LinuxTargetInfo<X86_64TargetInfo>(Triple, Opts) {
+    LongDoubleFormat = &llvm::APFloat::IEEEquad();
+  }
+};
+
+// x86_32 OHOS target
+class LLVM_LIBRARY_VISIBILITY OHOSX86_32TargetInfo
+    : public OHOSTargetInfo<X86_32TargetInfo> {
+public:
+  OHOSX86_32TargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
+      : OHOSTargetInfo<X86_32TargetInfo>(Triple, Opts) {
+    SuitableAlign = 32;
+    LongDoubleWidth = 64;
+    LongDoubleFormat = &llvm::APFloat::IEEEdouble();
+  }
+};
+
+// x86_64 OHOS target
+class LLVM_LIBRARY_VISIBILITY OHOSX86_64TargetInfo
+    : public OHOSTargetInfo<X86_64TargetInfo> {
+public:
+  OHOSX86_64TargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
+      : OHOSTargetInfo<X86_64TargetInfo>(Triple, Opts) {
     LongDoubleFormat = &llvm::APFloat::IEEEquad();
   }
 };

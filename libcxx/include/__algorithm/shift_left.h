@@ -19,7 +19,7 @@
 
 _LIBCPP_BEGIN_NAMESPACE_STD
 
-#if _LIBCPP_STD_VER > 17
+#if _LIBCPP_STD_VER >= 20
 
 template <class _ForwardIterator>
 inline _LIBCPP_INLINE_VISIBILITY constexpr
@@ -32,7 +32,7 @@ shift_left(_ForwardIterator __first, _ForwardIterator __last,
     }
 
     _ForwardIterator __m = __first;
-    if constexpr (__is_cpp17_random_access_iterator<_ForwardIterator>::value) {
+    if constexpr (__has_random_access_iterator_category<_ForwardIterator>::value) {
         if (__n >= __last - __first) {
             return __first;
         }
@@ -48,7 +48,7 @@ shift_left(_ForwardIterator __first, _ForwardIterator __last,
     return _VSTD::move(__m, __last, __first);
 }
 
-#endif // _LIBCPP_STD_VER > 17
+#endif // _LIBCPP_STD_VER >= 20
 
 _LIBCPP_END_NAMESPACE_STD
 

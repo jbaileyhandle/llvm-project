@@ -47,7 +47,7 @@ let Uses = [MODE, M0, EXEC] in {
 multiclass V_INTERP_P1_F32_m : VINTRP_m <
   0x00000000,
   (outs VINTRPDst:$vdst),
-  (ins VGPR_32:$vsrc, Attr:$attr, AttrChan:$attrchan),
+  (ins VGPR_32:$vsrc, InterpAttr:$attr, InterpAttrChan:$attrchan),
   "v_interp_p1_f32$vdst, $vsrc, $attr$attrchan",
   [(set f32:$vdst, (int_amdgcn_interp_p1 f32:$vsrc,
                    (i32 timm:$attrchan), (i32 timm:$attr), M0))]
@@ -73,7 +73,8 @@ let DisableEncoding = "$src0", Constraints = "$src0 = $vdst" in {
 defm V_INTERP_P2_F32 : VINTRP_m <
   0x00000001,
   (outs VINTRPDst:$vdst),
-  (ins VGPR_32:$src0, VGPR_32:$vsrc, Attr:$attr, AttrChan:$attrchan),
+  (ins VGPR_32:$src0, VGPR_32:$vsrc, InterpAttr:$attr,
+       InterpAttrChan:$attrchan),
   "v_interp_p2_f32$vdst, $vsrc, $attr$attrchan",
   [(set f32:$vdst, (int_amdgcn_interp_p2 f32:$src0, f32:$vsrc,
                    (i32 timm:$attrchan), (i32 timm:$attr), M0))]>;
@@ -83,7 +84,7 @@ defm V_INTERP_P2_F32 : VINTRP_m <
 defm V_INTERP_MOV_F32 : VINTRP_m <
   0x00000002,
   (outs VINTRPDst:$vdst),
-  (ins InterpSlot:$vsrc, Attr:$attr, AttrChan:$attrchan),
+  (ins InterpSlot:$vsrc, InterpAttr:$attr, InterpAttrChan:$attrchan),
   "v_interp_mov_f32$vdst, $vsrc, $attr$attrchan",
   [(set f32:$vdst, (int_amdgcn_interp_mov (i32 timm:$vsrc),
                    (i32 timm:$attrchan), (i32 timm:$attr), M0))]>;
@@ -95,6 +96,16 @@ defm V_INTERP_MOV_F32 : VINTRP_m <
 //===----------------------------------------------------------------------===//
 // Pseudo Instructions
 //===----------------------------------------------------------------------===//
+
+// Insert a branch to an endpgm block to use as a fallback trap.
+def ENDPGM_TRAP : SPseudoInstSI<
+  (outs), (ins),
+  [(AMDGPUendpgm_trap)],
+  "ENDPGM_TRAP"> {
+  let hasSideEffects = 1;
+  let usesCustomInserter = 1;
+}
+
 def ATOMIC_FENCE : SPseudoInstSI<
   (outs), (ins i32imm:$ordering, i32imm:$scope),
   [(atomic_fence (i32 timm:$ordering), (i32 timm:$scope))],
@@ -189,6 +200,12 @@ def EXIT_STRICT_WQM : SPseudoInstSI <(outs SReg_1:$sdst), (ins SReg_1:$src0)> {
   let mayStore = 0;
 }
 
+let usesCustomInserter = 1 in {
+def S_INVERSE_BALLOT_U32 : SPseudoInstSI <(outs SReg_32:$sdst), (ins SSrc_b32:$mask)>;
+
+def S_INVERSE_BALLOT_U64 : SPseudoInstSI <(outs SReg_64:$sdst), (ins SSrc_b64:$mask)>;
+} // End usesCustomInserter = 1
+
 // PSEUDO_WM is treated like STRICT_WWM/STRICT_WQM without exec changes.
 def ENTER_PSEUDO_WM : SPseudoInstSI <(outs), (ins)> {
   let Uses = [EXEC];
@@ -222,7 +239,7 @@ def FPTRUNC_DOWNWARD_PSEUDO : VPseudoInstSI <(outs VGPR_32:$vdst),
 
 // Invert the exec mask and overwrite the inactive lanes of dst with inactive,
 // restoring it after we're done.
-let Defs = [SCC] in {
+let Defs = [SCC], isConvergent = 1 in {
 def V_SET_INACTIVE_B32 : VPseudoInstSI <(outs VGPR_32:$vdst),
   (ins VSrc_b32: $src, VSrc_b32:$inactive),
   [(set i32:$vdst, (int_amdgcn_set_inactive i32:$src, i32:$inactive))]> {
@@ -300,6 +317,7 @@ def S_XOR_B64_term : WrapTerminatorInst<S_XOR_B64>;
 def S_OR_B64_term : WrapTerminatorInst<S_OR_B64>;
 def S_ANDN2_B64_term : WrapTerminatorInst<S_ANDN2_B64>;
 def S_AND_B64_term : WrapTerminatorInst<S_AND_B64>;
+def S_AND_SAVEEXEC_B64_term : WrapTerminatorInst<S_AND_SAVEEXEC_B64>;
 }
 
 let WaveSizePredicate = isWave32 in {
@@ -308,6 +326,7 @@ def S_XOR_B32_term : WrapTerminatorInst<S_XOR_B32>;
 def S_OR_B32_term : WrapTerminatorInst<S_OR_B32>;
 def S_ANDN2_B32_term : WrapTerminatorInst<S_ANDN2_B32>;
 def S_AND_B32_term : WrapTerminatorInst<S_AND_B32>;
+def S_AND_SAVEEXEC_B32_term : WrapTerminatorInst<S_AND_SAVEEXEC_B32>;
 }
 
 
@@ -391,6 +410,7 @@ def SI_IF: CFPseudoInstSI <
   let Constraints = "";
   let Size = 12;
   let hasSideEffects = 1;
+  let IsNeverUniform = 1;
 }
 
 def SI_ELSE : CFPseudoInstSI <
@@ -398,6 +418,7 @@ def SI_ELSE : CFPseudoInstSI <
   (ins SReg_1:$src, brtarget:$target), [], 1, 1> {
   let Size = 12;
   let hasSideEffects = 1;
+  let IsNeverUniform = 1;
 }
 
 def SI_WATERFALL_LOOP : CFPseudoInstSI <
@@ -414,6 +435,7 @@ def SI_LOOP : CFPseudoInstSI <
   let Size = 8;
   let isBranch = 1;
   let hasSideEffects = 1;
+  let IsNeverUniform = 1;
 }
 
 } // End isTerminator = 1
@@ -551,7 +573,7 @@ def SI_RETURN_TO_EPILOG : SPseudoInstSI <
 
 // Return for returning function calls.
 def SI_RETURN : SPseudoInstSI <
-  (outs), (ins), [(AMDGPUret_flag)],
+  (outs), (ins), [(AMDGPUret_glue)],
   "; return"> {
   let isTerminator = 1;
   let isBarrier = 1;
@@ -592,10 +614,9 @@ def SI_CALL : SPseudoInstSI <
   let isConvergent = 1;
 }
 
-// Tail call handling pseudo
-def SI_TCRETURN : SPseudoInstSI <(outs),
-  (ins SReg_64:$src0, unknown:$callee, i32imm:$fpdiff),
-  [(AMDGPUtc_return i64:$src0, tglobaladdr:$callee, i32:$fpdiff)]> {
+class SI_TCRETURN_Pseudo<RegisterClass rc, SDNode sd> : SPseudoInstSI <(outs),
+  (ins rc:$src0, unknown:$callee, i32imm:$fpdiff),
+  [(sd i64:$src0, tglobaladdr:$callee, i32:$fpdiff)]> {
   let Size = 4;
   let FixedSize = 1;
   let isCall = 1;
@@ -608,10 +629,20 @@ def SI_TCRETURN : SPseudoInstSI <(outs),
   let isConvergent = 1;
 }
 
+// Tail call handling pseudo
+def SI_TCRETURN :     SI_TCRETURN_Pseudo<CCR_SGPR_64, AMDGPUtc_return>;
+def SI_TCRETURN_GFX : SI_TCRETURN_Pseudo<Gfx_CCR_SGPR_64, AMDGPUtc_return_gfx>;
+
 // Handle selecting indirect tail calls
 def : GCNPat<
   (AMDGPUtc_return i64:$src0, (i64 0), (i32 timm:$fpdiff)),
-  (SI_TCRETURN SReg_64:$src0, (i64 0), i32imm:$fpdiff)
+  (SI_TCRETURN CCR_SGPR_64:$src0, (i64 0), i32imm:$fpdiff)
+>;
+
+// Handle selecting indirect tail calls for AMDGPU_gfx
+def : GCNPat<
+  (AMDGPUtc_return_gfx i64:$src0, (i64 0), (i32 timm:$fpdiff)),
+  (SI_TCRETURN_GFX Gfx_CCR_SGPR_64:$src0, (i64 0), i32imm:$fpdiff)
 >;
 
 def ADJCALLSTACKUP : SPseudoInstSI<
@@ -728,6 +759,10 @@ def S_INDIRECT_REG_WRITE_MOVREL_B32_V3 : S_INDIRECT_REG_WRITE_MOVREL_B32_pseudo<
 def S_INDIRECT_REG_WRITE_MOVREL_B32_V4 : S_INDIRECT_REG_WRITE_MOVREL_B32_pseudo<SReg_128>;
 def S_INDIRECT_REG_WRITE_MOVREL_B32_V5 : S_INDIRECT_REG_WRITE_MOVREL_B32_pseudo<SReg_160>;
 def S_INDIRECT_REG_WRITE_MOVREL_B32_V8 : S_INDIRECT_REG_WRITE_MOVREL_B32_pseudo<SReg_256>;
+def S_INDIRECT_REG_WRITE_MOVREL_B32_V9 : S_INDIRECT_REG_WRITE_MOVREL_B32_pseudo<SReg_288>;
+def S_INDIRECT_REG_WRITE_MOVREL_B32_V10 : S_INDIRECT_REG_WRITE_MOVREL_B32_pseudo<SReg_320>;
+def S_INDIRECT_REG_WRITE_MOVREL_B32_V11 : S_INDIRECT_REG_WRITE_MOVREL_B32_pseudo<SReg_352>;
+def S_INDIRECT_REG_WRITE_MOVREL_B32_V12 : S_INDIRECT_REG_WRITE_MOVREL_B32_pseudo<SReg_384>;
 def S_INDIRECT_REG_WRITE_MOVREL_B32_V16 : S_INDIRECT_REG_WRITE_MOVREL_B32_pseudo<SReg_512>;
 def S_INDIRECT_REG_WRITE_MOVREL_B32_V32 : S_INDIRECT_REG_WRITE_MOVREL_B32_pseudo<SReg_1024>;
 
@@ -982,25 +1017,6 @@ def : Pat <
 //===----------------------------------------------------------------------===//
 // VOP1 Patterns
 //===----------------------------------------------------------------------===//
-
-let OtherPredicates = [UnsafeFPMath] in {
-
-// Convert (x - floor(x)) to fract(x)
-def : GCNPat <
-  (f32 (fsub (f32 (VOP3Mods f32:$x, i32:$mods)),
-             (f32 (ffloor (f32 (VOP3Mods f32:$x, i32:$mods)))))),
-  (V_FRACT_F32_e64 $mods, $x)
->;
-
-// Convert (x + (-floor(x))) to fract(x)
-def : GCNPat <
-  (f64 (fadd (f64 (VOP3Mods f64:$x, i32:$mods)),
-             (f64 (fneg (f64 (ffloor (f64 (VOP3Mods f64:$x, i32:$mods)))))))),
-  (V_FRACT_F64_e64 $mods, $x)
->;
-
-} // End OtherPredicates = [UnsafeFPMath]
-
 
 multiclass f16_fp_Pats<Instruction cvt_f16_f32_inst_e64, Instruction cvt_f32_f16_inst_e64> {
   // f16_to_fp patterns
@@ -2031,13 +2047,13 @@ def : GCNPat <
 def : GCNPat <
   (i32 (sext i1:$src0)),
   (V_CNDMASK_B32_e64 /*src0mod*/(i32 0), /*src0*/(i32 0),
-                     /*src1mod*/(i32 0), /*src1*/(i32 -1), $src0)
+                     /*src1mod*/(i32 0), /*src1*/(i32 -1), i1:$src0)
 >;
 
 class Ext32Pat <SDNode ext> : GCNPat <
   (i32 (ext i1:$src0)),
   (V_CNDMASK_B32_e64 /*src0mod*/(i32 0), /*src0*/(i32 0),
-                     /*src1mod*/(i32 0), /*src1*/(i32 1), $src0)
+                     /*src1mod*/(i32 0), /*src1*/(i32 1), i1:$src0)
 >;
 
 def : Ext32Pat <zext>;
@@ -3648,15 +3664,6 @@ def G_FPTRUNC_ROUND_DOWNWARD : AMDGPUGenericInstruction {
 //============================================================================//
 // Dummy Instructions
 //============================================================================//
-
-def V_ILLEGAL_gfx6_gfx7_gfx8_gfx9 : Enc32, InstSI<(outs), (ins), "v_illegal"> {
-  let Inst{31-0} = 0xFFFFFFFF;
-  let FixedSize = 1;
-  let Size = 4;
-  let Uses = [EXEC];
-  let hasSideEffects = 1;
-  let SubtargetPredicate = isGFX6GFX7GFX8GFX9;
-}
 
 def V_ILLEGAL : Enc32, InstSI<(outs), (ins), "v_illegal"> {
   let Inst{31-0} = 0x00000000;

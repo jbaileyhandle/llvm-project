@@ -732,8 +732,16 @@ void DebugLoclistWriter::addList(AttrInfo &AttrVal,
 uint32_t DebugLoclistWriter::LoclistBaseOffset = 0;
 void DebugLoclistWriter::finalizeDWARF5(
     DebugInfoBinaryPatcher &DebugInfoPatcher, DebugAbbrevWriter &AbbrevWriter) {
-  if (LocBodyBuffer->empty())
+  if (LocBodyBuffer->empty()) {
+    std::optional<AttrInfo> AttrInfoVal =
+        findAttributeInfo(CU.getUnitDIE(), dwarf::DW_AT_loclists_base);
+    // Pointing to first one, because it doesn't matter. There are no uses of it
+    // in this CU.
+    if (!isSplitDwarf() && AttrInfoVal)
+      DebugInfoPatcher.addLE32Patch(AttrInfoVal->Offset,
+                                    getDWARF5RngListLocListHeaderSize());
     return;
+  }
 
   std::unique_ptr<DebugBufferVector> LocArrayBuffer =
       std::make_unique<DebugBufferVector>();
@@ -1166,7 +1174,7 @@ void DebugStrOffsetsWriter::initialize(
          "Dwarf String Offsets Byte Size is not supported.");
   uint32_t Index = 0;
   for (uint64_t Offset = 0; Offset < Contr->Size; Offset += DwarfOffsetByteSize)
-    IndexToAddressMap[Index++] = *reinterpret_cast<const uint32_t *>(
+    IndexToAddressMap[Index++] = support::endian::read32le(
         StrOffsetsSection.Data.data() + Contr->Base + Offset);
 }
 
@@ -1627,15 +1635,6 @@ void DwarfLineTable::emitCU(MCStreamer *MCOS, MCDwarfLineTableParams Params,
            "cannot combine raw data with new line entries");
     MCOS->emitLabel(getLabel());
     MCOS->emitBytes(RawData);
-
-    // Emit fake relocation for RuntimeDyld to always allocate the section.
-    //
-    // FIXME: remove this once RuntimeDyld stops skipping allocatable sections
-    //        without relocations.
-    MCOS->emitRelocDirective(
-        *MCConstantExpr::create(0, *BC.Ctx), "BFD_RELOC_NONE",
-        MCSymbolRefExpr::create(getLabel(), *BC.Ctx), SMLoc(), *BC.STI);
-
     return;
   }
 
@@ -1717,12 +1716,8 @@ void DwarfLineTable::emit(BinaryContext &BC, MCStreamer &Streamer) {
 
   // Still need to write the section out for the ExecutionEngine, and temp in
   // memory object we are constructing.
-  if (LineStr) {
+  if (LineStr)
     LineStr->emitSection(&Streamer);
-    SmallString<0> Data = LineStr->getFinalizedData();
-    BC.registerOrUpdateNoteSection(".debug_line_str", copyByteArray(Data.str()),
-                                   Data.size());
-  }
 }
 
 } // namespace bolt

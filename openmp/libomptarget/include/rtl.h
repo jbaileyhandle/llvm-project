@@ -15,6 +15,7 @@
 
 #include "omptarget.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/DynamicLibrary.h"
 
@@ -69,8 +70,8 @@ struct RTLInfoTy {
   typedef int32_t(wait_event_ty)(int32_t, void *, __tgt_async_info *);
   typedef int32_t(sync_event_ty)(int32_t, void *);
   typedef int32_t(destroy_event_ty)(int32_t, void *);
-  typedef int(set_coarse_grain_mem_region_ty)(void *, int64_t);
-  typedef int32_t(query_coarse_grain_mem_region_ty)(void *, int64_t);
+  typedef int(set_coarse_grain_mem_region_ty)(int32_t, void *, int64_t);
+  typedef int32_t(query_coarse_grain_mem_region_ty)(int32_t, void *, int64_t);
   typedef int32_t(enable_access_to_all_agents_ty)(void *, int32_t);
   typedef int32_t(release_async_info_ty)(int32_t, __tgt_async_info *);
   typedef int32_t(init_async_info_ty)(int32_t, __tgt_async_info **);
@@ -194,9 +195,26 @@ struct RTLsTy {
   void loadRTLs();
 
   std::vector<std::string> archsSupportingManagedMemory = {
-      "gfx908", "gfx90a", "sm_35", "sm_50", "sm_60", "sm_70", "sm_61"};
+      "gfx908", "gfx90a", "gfx940", "gfx941", "gfx942", "sm_35",
+      "sm_50",  "sm_60",  "sm_70",  "sm_61"};
   // Return whether the current system supports omp_get_target_memory_space
   bool SystemSupportManagedMemory();
+
+  // enable OMPX_APU_MAPS for gfx90a, gfx940, and gfx942
+  std::vector<std::string> archsAPU = {"gfx90a", "gfx940", "gfx942"};
+  bool IsAPUSystem();
+  void disableAPUMapsForUSM(int64_t RequiresFlags);
+
+  // List of pointers to be allocated when running in USM mode
+  // std::vector<const void *> HostPtrsRequireAlloc;
+  llvm::SmallPtrSet<const void *, 32> HostPtrsRequireAlloc;
+
+  /// returns if a pointer requires allocation in USM mode
+  bool requiresAllocForGlobal(const void *HstPtr);
+  /// Mark pointer for allocation in USM mode
+  void markHostPtrForRequiresAlloc(const void *HstPtr);
+  /// FIXME: Not implemented yet
+  void deMarkHostPtrForRequiresAlloc(const void *HstPtr);
 
 private:
   static bool attemptLoadRTL(const std::string &RTLName, RTLInfoTy &RTL);

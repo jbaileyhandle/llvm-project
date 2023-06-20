@@ -47,14 +47,11 @@ using namespace llvm;
 
 void llvm::initializeCore(PassRegistry &Registry) {
   initializeDominatorTreeWrapperPassPass(Registry);
+  initializeHeterogeneousDebugVerifyLegacyPass(Registry);
   initializePrintModulePassWrapperPass(Registry);
   initializePrintFunctionPassWrapperPass(Registry);
   initializeSafepointIRVerifierPass(Registry);
   initializeVerifierLegacyPassPass(Registry);
-}
-
-void LLVMInitializeCore(LLVMPassRegistryRef R) {
-  initializeCore(*unwrap(R));
 }
 
 void LLVMShutdown() {
@@ -788,6 +785,10 @@ LLVMTypeRef LLVMArrayType(LLVMTypeRef ElementType, unsigned ElementCount) {
   return wrap(ArrayType::get(unwrap(ElementType), ElementCount));
 }
 
+LLVMTypeRef LLVMArrayType2(LLVMTypeRef ElementType, uint64_t ElementCount) {
+  return wrap(ArrayType::get(unwrap(ElementType), ElementCount));
+}
+
 LLVMTypeRef LLVMPointerType(LLVMTypeRef ElementType, unsigned AddressSpace) {
   return wrap(PointerType::get(unwrap(ElementType), AddressSpace));
 }
@@ -807,8 +808,6 @@ LLVMTypeRef LLVMScalableVectorType(LLVMTypeRef ElementType,
 
 LLVMTypeRef LLVMGetElementType(LLVMTypeRef WrappedTy) {
   auto *Ty = unwrap(WrappedTy);
-  if (auto *PTy = dyn_cast<PointerType>(Ty))
-    return wrap(PTy->getNonOpaquePointerElementType());
   if (auto *ATy = dyn_cast<ArrayType>(Ty))
     return wrap(ATy->getElementType());
   return wrap(cast<VectorType>(Ty)->getElementType());
@@ -819,6 +818,10 @@ unsigned LLVMGetNumContainedTypes(LLVMTypeRef Tp) {
 }
 
 unsigned LLVMGetArrayLength(LLVMTypeRef ArrayTy) {
+  return unwrap<ArrayType>(ArrayTy)->getNumElements();
+}
+
+uint64_t LLVMGetArrayLength2(LLVMTypeRef ArrayTy) {
   return unwrap<ArrayType>(ArrayTy)->getNumElements();
 }
 
@@ -1493,6 +1496,12 @@ LLVMValueRef LLVMConstArray(LLVMTypeRef ElementTy,
   return wrap(ConstantArray::get(ArrayType::get(unwrap(ElementTy), Length), V));
 }
 
+LLVMValueRef LLVMConstArray2(LLVMTypeRef ElementTy, LLVMValueRef *ConstantVals,
+                             uint64_t Length) {
+  ArrayRef<Constant *> V(unwrap<Constant>(ConstantVals, Length), Length);
+  return wrap(ConstantArray::get(ArrayType::get(unwrap(ElementTy), Length), V));
+}
+
 LLVMValueRef LLVMConstStructInContext(LLVMContextRef C,
                                       LLVMValueRef *ConstantVals,
                                       unsigned Count, LLVMBool Packed) {
@@ -1785,14 +1794,6 @@ LLVMValueRef LLVMConstIntCast(LLVMValueRef ConstantVal, LLVMTypeRef ToType,
 LLVMValueRef LLVMConstFPCast(LLVMValueRef ConstantVal, LLVMTypeRef ToType) {
   return wrap(ConstantExpr::getFPCast(unwrap<Constant>(ConstantVal),
                                       unwrap(ToType)));
-}
-
-LLVMValueRef LLVMConstSelect(LLVMValueRef ConstantCondition,
-                             LLVMValueRef ConstantIfTrue,
-                             LLVMValueRef ConstantIfFalse) {
-  return wrap(ConstantExpr::getSelect(unwrap<Constant>(ConstantCondition),
-                                      unwrap<Constant>(ConstantIfTrue),
-                                      unwrap<Constant>(ConstantIfFalse)));
 }
 
 LLVMValueRef LLVMConstExtractElement(LLVMValueRef VectorConstant,
@@ -3444,6 +3445,36 @@ LLVMValueRef LLVMBuildNot(LLVMBuilderRef B, LLVMValueRef V, const char *Name) {
   return wrap(unwrap(B)->CreateNot(unwrap(V), Name));
 }
 
+LLVMBool LLVMGetNUW(LLVMValueRef ArithInst) {
+  Value *P = unwrap<Value>(ArithInst);
+  return cast<Instruction>(P)->hasNoUnsignedWrap();
+}
+
+void LLVMSetNUW(LLVMValueRef ArithInst, LLVMBool HasNUW) {
+  Value *P = unwrap<Value>(ArithInst);
+  cast<Instruction>(P)->setHasNoUnsignedWrap(HasNUW);
+}
+
+LLVMBool LLVMGetNSW(LLVMValueRef ArithInst) {
+  Value *P = unwrap<Value>(ArithInst);
+  return cast<Instruction>(P)->hasNoSignedWrap();
+}
+
+void LLVMSetNSW(LLVMValueRef ArithInst, LLVMBool HasNSW) {
+  Value *P = unwrap<Value>(ArithInst);
+  cast<Instruction>(P)->setHasNoSignedWrap(HasNSW);
+}
+
+LLVMBool LLVMGetExact(LLVMValueRef DivOrShrInst) {
+  Value *P = unwrap<Value>(DivOrShrInst);
+  return cast<Instruction>(P)->isExact();
+}
+
+void LLVMSetExact(LLVMValueRef DivOrShrInst, LLVMBool IsExact) {
+  Value *P = unwrap<Value>(DivOrShrInst);
+  cast<Instruction>(P)->setIsExact(IsExact);
+}
+
 /*--.. Memory ..............................................................--*/
 
 LLVMValueRef LLVMBuildMalloc(LLVMBuilderRef B, LLVMTypeRef Ty,
@@ -3949,7 +3980,7 @@ int LLVMGetMaskValue(LLVMValueRef SVInst, unsigned Elt) {
   return I->getMaskValue(Elt);
 }
 
-int LLVMGetUndefMaskElem(void) { return UndefMaskElem; }
+int LLVMGetUndefMaskElem(void) { return PoisonMaskElem; }
 
 LLVMBool LLVMIsAtomicSingleThread(LLVMValueRef AtomicInst) {
   Value *P = unwrap(AtomicInst);
@@ -4065,12 +4096,6 @@ size_t LLVMGetBufferSize(LLVMMemoryBufferRef MemBuf) {
 
 void LLVMDisposeMemoryBuffer(LLVMMemoryBufferRef MemBuf) {
   delete unwrap(MemBuf);
-}
-
-/*===-- Pass Registry -----------------------------------------------------===*/
-
-LLVMPassRegistryRef LLVMGetGlobalPassRegistry(void) {
-  return wrap(PassRegistry::getPassRegistry());
 }
 
 /*===-- Pass Manager ------------------------------------------------------===*/

@@ -593,17 +593,6 @@ Constant *llvm::ConstantFoldSelectInstruction(Constant *Cond,
   if (isa<UndefValue>(V1) && NotPoison(V2)) return V2;
   if (isa<UndefValue>(V2) && NotPoison(V1)) return V1;
 
-  if (ConstantExpr *TrueVal = dyn_cast<ConstantExpr>(V1)) {
-    if (TrueVal->getOpcode() == Instruction::Select)
-      if (TrueVal->getOperand(0) == Cond)
-        return ConstantExpr::getSelect(Cond, TrueVal->getOperand(1), V2);
-  }
-  if (ConstantExpr *FalseVal = dyn_cast<ConstantExpr>(V2)) {
-    if (FalseVal->getOpcode() == Instruction::Select)
-      if (FalseVal->getOperand(0) == Cond)
-        return ConstantExpr::getSelect(Cond, V1, FalseVal->getOperand(2));
-  }
-
   return nullptr;
 }
 
@@ -721,9 +710,9 @@ Constant *llvm::ConstantFoldShuffleVectorInstruction(Constant *V1, Constant *V2,
       ElementCount::get(MaskNumElts, isa<ScalableVectorType>(V1VTy));
   Type *EltTy = V1VTy->getElementType();
 
-  // Undefined shuffle mask -> undefined value.
-  if (all_of(Mask, [](int Elt) { return Elt == UndefMaskElem; })) {
-    return UndefValue::get(VectorType::get(EltTy, MaskEltCount));
+  // Poison shuffle mask -> poison value.
+  if (all_of(Mask, [](int Elt) { return Elt == PoisonMaskElem; })) {
+    return PoisonValue::get(VectorType::get(EltTy, MaskEltCount));
   }
 
   // If the mask is all zeros this is a splat, no need to go through all
@@ -1941,7 +1930,7 @@ static bool isInBoundsIndices(ArrayRef<IndexTy> Idxs) {
 static bool isIndexInRangeOfArrayType(uint64_t NumElements,
                                       const ConstantInt *CI) {
   // We cannot bounds check the index if it doesn't fit in an int64_t.
-  if (CI->getValue().getMinSignedBits() > 64)
+  if (CI->getValue().getSignificantBits() > 64)
     return false;
 
   // A negative index or an index past the end of our sequential type is

@@ -15,6 +15,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -53,6 +54,7 @@
 #include <deque>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -400,6 +402,18 @@ static Error error(const Twine &Message) {
       Message, make_error_code(BitcodeError::CorruptedBitcode));
 }
 
+static Expected<dwarf::MemorySpace>
+getDWARFMemorySpaceAtPosition(ArrayRef<uint64_t> Records, size_t Position) {
+  if (Position >= Records.size())
+    return dwarf::DW_MSPACE_LLVM_none;
+
+  const uint64_t Record = Records[Position];
+  if (Record > dwarf::DW_MSPACE_LLVM_hi_user)
+    return error("MemorySpace value is too large");
+
+  return {static_cast<dwarf::MemorySpace>(Record)};
+};
+
 class MetadataLoader::MetadataLoaderImpl {
   BitcodeReaderMetadataList MetadataList;
   BitcodeReaderValueList &ValueList;
@@ -463,6 +477,9 @@ class MetadataLoader::MetadataLoaderImpl {
   bool NeedUpgradeToDIGlobalVariableExpression = false;
   bool NeedDeclareExpressionUpgrade = false;
 
+  /// Map DILocalScope to the enclosing DISubprogram, if any.
+  DenseMap<DILocalScope *, DISubprogram *> ParentSubprogram;
+
   /// True if metadata is being parsed for a module being ThinLTO imported.
   bool IsImporting = false;
 
@@ -519,6 +536,84 @@ class MetadataLoader::MetadataLoaderImpl {
         } else
           GV.addMetadata(LLVMContext::MD_dbg, *MD);
     }
+  }
+
+  DISubprogram *findEnclosingSubprogram(DILocalScope *S) {
+    if (!S)
+      return nullptr;
+    if (auto *SP = ParentSubprogram[S]) {
+      return SP;
+    }
+
+    DILocalScope *InitialScope = S;
+    DenseSet<DILocalScope *> Visited;
+    while (S && !isa<DISubprogram>(S)) {
+      S = dyn_cast_or_null<DILocalScope>(S->getScope());
+      if (Visited.contains(S))
+        break;
+      Visited.insert(S);
+    }
+    ParentSubprogram[InitialScope] = llvm::dyn_cast_or_null<DISubprogram>(S);
+
+    return ParentSubprogram[InitialScope];
+  }
+
+  /// Move local imports from DICompileUnit's 'imports' field to
+  /// DISubprogram's retainedNodes.
+  void upgradeCULocals() {
+    if (NamedMDNode *CUNodes = TheModule.getNamedMetadata("llvm.dbg.cu")) {
+      for (unsigned I = 0, E = CUNodes->getNumOperands(); I != E; ++I) {
+        auto *CU = dyn_cast<DICompileUnit>(CUNodes->getOperand(I));
+        if (!CU)
+          continue;
+
+        if (auto *RawImported = CU->getRawImportedEntities()) {
+          // Collect a set of imported entities to be moved.
+          SetVector<Metadata *> EntitiesToRemove;
+          for (Metadata *Op : CU->getImportedEntities()->operands()) {
+            auto *IE = cast<DIImportedEntity>(Op);
+            if (auto *S = dyn_cast_or_null<DILocalScope>(IE->getScope())) {
+              EntitiesToRemove.insert(IE);
+            }
+          }
+
+          if (!EntitiesToRemove.empty()) {
+            // Make a new list of CU's 'imports'.
+            SmallVector<Metadata *> NewImports;
+            for (Metadata *Op : CU->getImportedEntities()->operands()) {
+              if (!EntitiesToRemove.contains(cast<DIImportedEntity>(Op))) {
+                NewImports.push_back(Op);
+              }
+            }
+
+            // Find DISubprogram corresponding to each entity.
+            std::map<DISubprogram *, SmallVector<Metadata *>> SPToEntities;
+            for (auto *I : EntitiesToRemove) {
+              auto *Entity = cast<DIImportedEntity>(I);
+              if (auto *SP = findEnclosingSubprogram(
+                      cast<DILocalScope>(Entity->getScope()))) {
+                SPToEntities[SP].push_back(Entity);
+              }
+            }
+
+            // Update DISubprograms' retainedNodes.
+            for (auto I = SPToEntities.begin(); I != SPToEntities.end(); ++I) {
+              auto *SP = I->first;
+              auto RetainedNodes = SP->getRetainedNodes();
+              SmallVector<Metadata *> MDs(RetainedNodes.begin(),
+                                          RetainedNodes.end());
+              MDs.append(I->second);
+              SP->replaceRetainedNodes(MDNode::get(Context, MDs));
+            }
+
+            // Remove entities with local scope from CU.
+            CU->replaceImportedEntities(MDTuple::get(Context, NewImports));
+          }
+        }
+      }
+    }
+
+    ParentSubprogram.clear();
   }
 
   /// Remove a leading DW_OP_deref from DIExpressions in a dbg.declare that
@@ -628,6 +723,7 @@ class MetadataLoader::MetadataLoaderImpl {
   void upgradeDebugInfo() {
     upgradeCUSubprograms();
     upgradeCUVariables();
+    upgradeCULocals();
   }
 
   void callMDTypeCallback(Metadata **Val, unsigned TypeID);
@@ -1459,7 +1555,7 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
     break;
   }
   case bitc::METADATA_DERIVED_TYPE: {
-    if (Record.size() < 12 || Record.size() > 14)
+    if (Record.size() < 12 || Record.size() > 15)
       return error("Invalid record");
 
     // DWARF address space is encoded as N->getDWARFAddressSpace() + 1. 0 means
@@ -1472,6 +1568,10 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
     if (Record.size() > 13 && Record[13])
       Annotations = getMDOrNull(Record[13]);
 
+    auto MSpace = getDWARFMemorySpaceAtPosition(Record, 14);
+    if (!MSpace)
+      return MSpace.takeError();
+
     IsDistinct = Record[0];
     DINode::DIFlags Flags = static_cast<DINode::DIFlags>(Record[10]);
     MetadataList.assignValue(
@@ -1480,7 +1580,7 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
                          getMDOrNull(Record[3]), Record[4],
                          getDITypeRefOrNull(Record[5]),
                          getDITypeRefOrNull(Record[6]), Record[7], Record[8],
-                         Record[9], DWARFAddressSpace, Flags,
+                         Record[9], DWARFAddressSpace, *MSpace, Flags,
                          getDITypeRefOrNull(Record[11]), Annotations)),
         NextMetadataNo);
     NextMetadataNo++;
@@ -1900,7 +2000,7 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
     break;
   }
   case bitc::METADATA_GLOBAL_VAR: {
-    if (Record.size() < 11 || Record.size() > 13)
+    if (Record.size() < 11 || Record.size() > 14)
       return error("Invalid record");
 
     IsDistinct = Record[0] & 1;
@@ -1908,17 +2008,24 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
 
     if (Version == 2) {
       Metadata *Annotations = nullptr;
-      if (Record.size() > 12)
-        Annotations = getMDOrNull(Record[12]);
+      auto Align = Record[11];
 
+      bool HasAnnotations = Record.size() > 12;
+      if (HasAnnotations) {
+        Annotations = getMDOrNull(Record[12]);
+      }
+
+      auto MSpace = getDWARFMemorySpaceAtPosition(Record, 13);
+      if (!MSpace)
+        return MSpace.takeError();
       MetadataList.assignValue(
-          GET_OR_DISTINCT(
-              DIGlobalVariable,
-              (Context, getMDOrNull(Record[1]), getMDString(Record[2]),
-               getMDString(Record[3]), getMDOrNull(Record[4]), Record[5],
-               getDITypeRefOrNull(Record[6]), Record[7], Record[8],
-               getMDOrNull(Record[9]), getMDOrNull(Record[10]), Record[11],
-               Annotations)),
+          GET_OR_DISTINCT(DIGlobalVariable,
+                          (Context, getMDOrNull(Record[1]),
+                           getMDString(Record[2]), getMDString(Record[3]),
+                           getMDOrNull(Record[4]), Record[5],
+                           getDITypeRefOrNull(Record[6]), Record[7], Record[8],
+                           getMDOrNull(Record[9]), getMDOrNull(Record[10]),
+                           *MSpace, Align, Annotations)),
           NextMetadataNo);
 
       NextMetadataNo++;
@@ -1931,8 +2038,8 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
                            getMDString(Record[2]), getMDString(Record[3]),
                            getMDOrNull(Record[4]), Record[5],
                            getDITypeRefOrNull(Record[6]), Record[7], Record[8],
-                           getMDOrNull(Record[10]), nullptr, Record[11],
-                           nullptr)),
+                           getMDOrNull(Record[10]), nullptr,
+                           dwarf::DW_MSPACE_LLVM_none, Record[11], nullptr)),
           NextMetadataNo);
 
       NextMetadataNo++;
@@ -1965,7 +2072,8 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
           (Context, getMDOrNull(Record[1]), getMDString(Record[2]),
            getMDString(Record[3]), getMDOrNull(Record[4]), Record[5],
            getDITypeRefOrNull(Record[6]), Record[7], Record[8],
-           getMDOrNull(Record[10]), nullptr, AlignInBits, nullptr));
+           getMDOrNull(Record[10]), nullptr, dwarf::DW_MSPACE_LLVM_none,
+           AlignInBits, nullptr));
 
       DIGlobalVariableExpression *DGVE = nullptr;
       if (Attach || Expr)
@@ -1996,7 +2104,7 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
   }
   case bitc::METADATA_LOCAL_VAR: {
     // 10th field is for the obseleted 'inlinedAt:' field.
-    if (Record.size() < 8 || Record.size() > 10)
+    if (Record.size() < 8 || Record.size() > 11)
       return error("Invalid record");
 
     IsDistinct = Record[0] & 1;
@@ -2016,14 +2124,17 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
         Annotations = getMDOrNull(Record[9]);
     }
 
+    auto MSpace = getDWARFMemorySpaceAtPosition(Record, 10);
+    if (!MSpace)
+      return MSpace.takeError();
+
     MetadataList.assignValue(
-        GET_OR_DISTINCT(DILocalVariable,
-                        (Context, getMDOrNull(Record[1 + HasTag]),
-                         getMDString(Record[2 + HasTag]),
-                         getMDOrNull(Record[3 + HasTag]), Record[4 + HasTag],
-                         getDITypeRefOrNull(Record[5 + HasTag]),
-                         Record[6 + HasTag], Flags, AlignInBits,
-                         Annotations)),
+        GET_OR_DISTINCT(
+            DILocalVariable,
+            (Context, getMDOrNull(Record[1 + HasTag]),
+             getMDString(Record[2 + HasTag]), getMDOrNull(Record[3 + HasTag]),
+             Record[4 + HasTag], getDITypeRefOrNull(Record[5 + HasTag]),
+             Record[6 + HasTag], Flags, *MSpace, AlignInBits, Annotations)),
         NextMetadataNo);
     NextMetadataNo++;
     break;

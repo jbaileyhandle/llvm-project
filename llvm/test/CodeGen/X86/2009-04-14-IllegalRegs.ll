@@ -53,7 +53,6 @@ define i32 @z() nounwind ssp {
 ; CHECK-NEXT:    retl
 ; CHECK-NEXT:  LBB0_3: ## %CallStackCheckFailBlk
 ; CHECK-NEXT:    calll ___stack_chk_fail
-; CHECK-NEXT:    ud2
 entry:
 	%retval = alloca i32		; <i32*> [#uses=2]
 	%xxx = alloca %struct.X		; <%struct.X*> [#uses=6]
@@ -81,4 +80,7 @@ return:		; preds = %entry
 	ret i32 %retval1
 }
 
-declare i32 @f(%struct.X* byval(%struct.X) align 4, %struct.X* byval(%struct.X) align 4) nounwind ssp
+declare i32 @f(ptr byval(%struct.X) align 4, ptr byval(%struct.X) align 4) nounwind ssp
+
+!llvm.module.flags = !{!0}
+!0 = !{i32 7, !"PIC Level", i32 2}

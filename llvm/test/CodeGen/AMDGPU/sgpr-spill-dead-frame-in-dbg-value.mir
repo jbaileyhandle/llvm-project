@@ -54,7 +54,7 @@ body:             |
   ; PEI:   renamable $[[VGPR:vgpr[0-9]+]] = IMPLICIT_DEF
   ; PEI:   renamable $[[VGPR]] = V_WRITELANE_B32 killed $sgpr10, 0, killed $[[VGPR]]
   ; PEI: bb.1:
-  ; PEI:   $sgpr10 = V_READLANE_B32 killed $[[VGPR]], 0
+  ; PEI:   $sgpr10 = V_READLANE_B32 $[[VGPR]], 0
   ; PEI:   S_ENDPGM 0
   bb.0:
     renamable $sgpr10 = IMPLICIT_DEF

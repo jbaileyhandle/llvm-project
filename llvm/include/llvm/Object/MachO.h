@@ -717,7 +717,7 @@ public:
   ArrayRef<uint8_t> getDyldInfoLazyBindOpcodes() const;
   ArrayRef<uint8_t> getDyldInfoExportsTrie() const;
 
-  /// If the optional is None, no header was found, but the object was
+  /// If the optional is std::nullopt, no header was found, but the object was
   /// well-formed.
   Expected<std::optional<MachO::dyld_chained_fixups_header>>
   getChainedFixupsHeader() const;
@@ -807,6 +807,8 @@ public:
     case MachO::TOOL_CLANG: return "clang";
     case MachO::TOOL_SWIFT: return "swift";
     case MachO::TOOL_LD: return "ld";
+    case MachO::TOOL_LLD:
+      return "lld";
     default:
       std::string ret;
       raw_string_ostream ss(ret);

@@ -175,22 +175,9 @@ class LargeChunkHeader {
                : nullptr;
   }
 
-  void Set(AsanChunk *p, DeviceAllocationInfo *da_info = nullptr) {
+  void Set(AsanChunk *p) {
     if (p) {
       chunk_header = p;
-
-      // remapped_device_page is stored right after chunk_header. We don't
-      // declare it formally in the data structure otherwise some sanity check
-      // will fail for host allocations, where remapped_device_page is really
-      // meaningless.
-      // For device memory, we always have enough space in LargeChunkHeader to
-      // store remapped_device_page because the alignment is always kPageSize_
-      if (da_info) {
-        void **remapped_device_page = reinterpret_cast<void **>(
-            reinterpret_cast<uptr>(&chunk_header) + sizeof(AsanChunk *));
-        *remapped_device_page = da_info->remapped_device_page;
-      }
-
       atomic_store(&magic, kAllocBegMagic, memory_order_release);
       return;
     }
@@ -200,14 +187,6 @@ class LargeChunkHeader {
                                         memory_order_release)) {
       CHECK_EQ(old, kAllocBegMagic);
     }
-  }
-
-  void *GetRemappedDevicePage() const {
-    void **remapped_device_page = reinterpret_cast<void **>(
-      reinterpret_cast<uptr>(&chunk_header) + sizeof(AsanChunk *));
-    return atomic_load(&magic, memory_order_acquire) == kAllocBegMagic
-               ? *remapped_device_page
-               : nullptr;
   }
 };
 
@@ -219,13 +198,7 @@ struct QuarantineCallback {
 
   void Recycle(AsanChunk *m) {
     void *p = get_allocator().GetBlockBegin(m);
-    DeviceAllocationInfo da_info;
     if (p != m) {
-      // For host allocations, GetRemappedDevicePage() doesn't return valid
-      // values for remapped_device_page, but it shouldn't matter because host
-      // memory Deallocate() calls won't use da_info
-      da_info.remapped_device_page =
-        reinterpret_cast<LargeChunkHeader *>(p)->GetRemappedDevicePage();
       // Clear the magic value, as allocator internals may overwrite the
       // contents of deallocated chunk, confusing GetAsanChunk lookup.
       reinterpret_cast<LargeChunkHeader *>(p)->Set(nullptr);
@@ -245,7 +218,7 @@ struct QuarantineCallback {
     thread_stats.real_frees++;
     thread_stats.really_freed += m->UsedSize();
 
-    get_allocator().Deallocate(cache_, p, &da_info);
+    get_allocator().Deallocate(cache_, p);
   }
 
   void *Allocate(uptr size) {
@@ -363,7 +336,7 @@ struct Allocator {
   void InitLinkerInitialized(const AllocatorOptions &options) {
     SetAllocatorMayReturnNull(options.may_return_null);
 #if SANITIZER_AMDGPU
-    allocator.InitLinkerInitialized(options.release_to_os_interval_ms, true);
+    allocator.InitLinkerInitialized(options.release_to_os_interval_ms, 0, true);
 #else
     allocator.InitLinkerInitialized(options.release_to_os_interval_ms);
 #endif
@@ -627,7 +600,7 @@ struct Allocator {
     atomic_store(&m->chunk_state, CHUNK_ALLOCATED, memory_order_release);
     if (alloc_beg != chunk_beg) {
       CHECK_LE(alloc_beg + sizeof(LargeChunkHeader), chunk_beg);
-      reinterpret_cast<LargeChunkHeader *>(alloc_beg)->Set(m, da_info);
+      reinterpret_cast<LargeChunkHeader *>(alloc_beg)->Set(m);
     }
     RunMallocHooks(res, size);
     return res;
@@ -828,6 +801,10 @@ struct Allocator {
       return 0;
     if (m->Beg() != p) return 0;
     return m->UsedSize();
+  }
+
+  uptr AllocationSizeFast(uptr p) {
+    return reinterpret_cast<AsanChunk *>(p - kChunkHeaderSize)->UsedSize();
   }
 
   AsanChunkView FindHeapChunkByAddress(uptr addr) {
@@ -1176,7 +1153,7 @@ void ForEachChunk(ForEachChunkCallback callback, void *arg) {
   __asan::get_allocator().ForEachChunk(callback, arg);
 }
 
-IgnoreObjectResult IgnoreObjectLocked(const void *p) {
+IgnoreObjectResult IgnoreObject(const void *p) {
   uptr addr = reinterpret_cast<uptr>(p);
   __asan::AsanChunk *m = __asan::instance.GetAsanChunkByAddr(addr);
   if (!m ||
@@ -1195,6 +1172,17 @@ IgnoreObjectResult IgnoreObjectLocked(const void *p) {
 
 // ---------------------- Interface ---------------- {{{1
 using namespace __asan;
+
+static const void *AllocationBegin(const void *p) {
+  AsanChunk *m = __asan::instance.GetAsanChunkByAddr((uptr)p);
+  if (!m)
+    return nullptr;
+  if (atomic_load(&m->chunk_state, memory_order_acquire) != CHUNK_ALLOCATED)
+    return nullptr;
+  if (m->UsedSize() == 0)
+    return nullptr;
+  return (const void *)(m->Beg());
+}
 
 // ASan allocator doesn't reserve extra bytes, so normally we would
 // just return "size". We don't want to expose our redzone sizes, etc here.
@@ -1219,6 +1207,17 @@ uptr __sanitizer_get_allocated_size(const void *p) {
   return allocated_size;
 }
 
+uptr __sanitizer_get_allocated_size_fast(const void *p) {
+  DCHECK_EQ(p, __sanitizer_get_allocated_begin(p));
+  uptr ret = instance.AllocationSizeFast(reinterpret_cast<uptr>(p));
+  DCHECK_EQ(ret, __sanitizer_get_allocated_size(p));
+  return ret;
+}
+
+const void *__sanitizer_get_allocated_begin(const void *p) {
+  return AllocationBegin(p);
+}
+
 void __sanitizer_purge_allocator() {
   GET_STACK_TRACE_MALLOC;
   instance.Purge(&stack);
@@ -1236,6 +1235,12 @@ DECLARE_REAL(hsa_status_t, hsa_amd_memory_pool_allocate,
   hsa_amd_memory_pool_t memory_pool, size_t size, uint32_t flags,
   void **ptr)
 DECLARE_REAL(hsa_status_t, hsa_amd_memory_pool_free, void *ptr)
+DECLARE_REAL(hsa_status_t, hsa_amd_ipc_memory_create, void *ptr, size_t len,
+  hsa_amd_ipc_memory_t *handle)
+DECLARE_REAL(hsa_status_t, hsa_amd_ipc_memory_attach,
+  const hsa_amd_ipc_memory_t *handle, size_t len, uint32_t num_agents,
+  const hsa_agent_t *mapping_agents, void **mapped_ptr)
+DECLARE_REAL(hsa_status_t, hsa_amd_ipc_memory_detach, void *mapped_ptr)
 
 namespace __asan {
 
@@ -1248,7 +1253,6 @@ hsa_status_t asan_hsa_amd_memory_pool_allocate(
   AmdgpuAllocationInfo aa_info;
   aa_info.alloc_func =
     reinterpret_cast<void *>(asan_hsa_amd_memory_pool_allocate);
-  aa_info.remap_first_device_page = true;
   aa_info.memory_pool = memory_pool;
   aa_info.size = size;
   aa_info.flags = flags;
@@ -1280,6 +1284,52 @@ hsa_status_t asan_hsa_amd_agents_allow_access(
   } else {
     return REAL(hsa_amd_agents_allow_access)(num_agents, agents, flags, ptr);
   }
+}
+
+// For asan allocator, kMetadataSize is 0 and maximum redzone size is 2048. This
+// implies for device allocation, the gap between user_beg and GetBlockBegin()
+// is always one kPageSize_
+// IPC calls use static_assert to make sure kMetadataSize = 0
+//
+#if SANITIZER_CAN_USE_ALLOCATOR64
+static struct AP64<LocalAddressSpaceView> AP_;
+#else
+static struct AP32<LocalAddressSpaceView> AP_;
+#endif
+
+hsa_status_t asan_hsa_amd_ipc_memory_create(void *ptr, size_t len,
+  hsa_amd_ipc_memory_t * handle) {
+  void *ptr_;
+  size_t len_ = get_allocator().GetActuallyAllocatedSize(ptr);
+  if (len_) {
+    static_assert(AP_.kMetadataSize == 0, "Expression below requires this");
+    ptr_ = reinterpret_cast<void *>(reinterpret_cast<uptr>(ptr) - kPageSize_);
+  } else {
+    ptr_ = ptr;
+    len_ = len;
+  }
+  return REAL(hsa_amd_ipc_memory_create)(ptr_, len_, handle);
+}
+
+hsa_status_t asan_hsa_amd_ipc_memory_attach(const hsa_amd_ipc_memory_t *handle,
+  size_t len, uint32_t num_agents, const hsa_agent_t *mapping_agents,
+  void **mapped_ptr) {
+  static_assert(AP_.kMetadataSize == 0, "Expression below requires this");
+  size_t len_ = len + kPageSize_;
+  hsa_status_t status = REAL(hsa_amd_ipc_memory_attach)(
+    handle, len_, num_agents, mapping_agents, mapped_ptr);
+  if (status == HSA_STATUS_SUCCESS && mapped_ptr) {
+    *mapped_ptr = reinterpret_cast<void *>(reinterpret_cast<uptr>(*mapped_ptr) +
+                                           kPageSize_);
+  }
+  return status;
+}
+
+hsa_status_t asan_hsa_amd_ipc_memory_detach(void *mapped_ptr) {
+  static_assert(AP_.kMetadataSize == 0, "Expression below requires this");
+  void *mapped_ptr_ =
+      reinterpret_cast<void *>(reinterpret_cast<uptr>(mapped_ptr) - kPageSize_);
+  return REAL(hsa_amd_ipc_memory_detach)(mapped_ptr_);
 }
 }  // namespace __asan
 #endif

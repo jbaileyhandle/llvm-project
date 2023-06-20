@@ -1,7 +1,7 @@
 ;; Test that the -print-pipeline-passes option correctly prints some explicitly specified pipelines.
 
-; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='function(adce),function(simplifycfg<bonus-inst-threshold=123;no-forward-switch-cond;switch-to-lookup;keep-loops;no-hoist-common-insts;sink-common-insts>)' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-0
-; CHECK-0: function(adce),function(simplifycfg<bonus-inst-threshold=123;no-forward-switch-cond;no-switch-range-to-icmp;switch-to-lookup;keep-loops;no-hoist-common-insts;sink-common-insts>)
+; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='function(adce),function(adce)' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-0
+; CHECK-0: function(adce),function(adce)
 
 ; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='module(rpo-function-attrs,require<globals-aa>,function(float2int,lower-constant-intrinsics,loop(loop-rotate)),invalidate<globals-aa>)' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-1
 ; CHECK-1: rpo-function-attrs,require<globals-aa>,function(float2int,lower-constant-intrinsics,loop(loop-rotate)),invalidate<globals-aa>
@@ -52,8 +52,8 @@
 ; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='function(print<stack-lifetime><may>,print<stack-lifetime><must>)' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-17
 ; CHECK-17: function(print<stack-lifetime><may>,print<stack-lifetime><must>)
 
-; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='function(simplifycfg<bonus-inst-threshold=5;forward-switch-cond;switch-to-lookup;keep-loops;hoist-common-insts;sink-common-insts>,simplifycfg<bonus-inst-threshold=7;no-forward-switch-cond;no-switch-to-lookup;no-keep-loops;no-hoist-common-insts;no-sink-common-insts>)' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-18
-; CHECK-18: function(simplifycfg<bonus-inst-threshold=5;forward-switch-cond;no-switch-range-to-icmp;switch-to-lookup;keep-loops;hoist-common-insts;sink-common-insts>,simplifycfg<bonus-inst-threshold=7;no-forward-switch-cond;no-switch-range-to-icmp;no-switch-to-lookup;no-keep-loops;no-hoist-common-insts;no-sink-common-insts>)
+; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='function(simplifycfg<bonus-inst-threshold=5;forward-switch-cond;switch-to-lookup;keep-loops;hoist-common-insts;sink-common-insts;fold-two-entry-phi;simplify-cond-branch>,simplifycfg<bonus-inst-threshold=7;no-forward-switch-cond;no-switch-to-lookup;no-keep-loops;no-hoist-common-insts;no-sink-common-insts;no-fold-two-entry-phi;no-simplify-cond-branch>)' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-18
+; CHECK-18: function(simplifycfg<bonus-inst-threshold=5;forward-switch-cond;no-switch-range-to-icmp;switch-to-lookup;keep-loops;hoist-common-insts;sink-common-insts;fold-two-entry-phi;simplify-cond-branch>,simplifycfg<bonus-inst-threshold=7;no-forward-switch-cond;no-switch-range-to-icmp;no-switch-to-lookup;no-keep-loops;no-hoist-common-insts;no-sink-common-insts;no-fold-two-entry-phi;no-simplify-cond-branch>)
 
 ; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='function(loop-vectorize<no-interleave-forced-only;no-vectorize-forced-only>,loop-vectorize<interleave-forced-only;vectorize-forced-only>)' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-19
 ; CHECK-19: function(loop-vectorize<no-interleave-forced-only;no-vectorize-forced-only;>,loop-vectorize<interleave-forced-only;vectorize-forced-only;>)
@@ -89,3 +89,25 @@
 ; RUN: opt -disable-output -passes='default<O1>' < %s
 ; RUN: opt -disable-output -passes='default<O2>' < %s
 ; RUN: opt -disable-output -passes='default<O3>' < %s
+
+;; Test SeparateConstOffsetFromGEPPass option.
+; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='separate-const-offset-from-gep<lower-gep>' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-27
+; CHECK-27: function(separate-const-offset-from-gep<lower-gep>)
+
+;; Test InstCombine options - the first pass checks default settings, and the second checks customized options.
+; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='function(instcombine,instcombine<use-loop-info;max-iterations=42>)' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-28
+; CHECK-28: function(instcombine<max-iterations=1000;no-use-loop-info>,instcombine<max-iterations=42;use-loop-info>)
+
+;; Test function-attrs
+; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='cgscc(function-attrs<skip-non-recursive>)' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-29
+; CHECK-29: cgscc(function-attrs<skip-non-recursive>)
+
+;; Test cgscc -> function adaptor
+; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='cgscc(function<eager-inv;no-rerun>(no-op-function))' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-30
+; CHECK-30: cgscc(function<eager-inv;no-rerun>(no-op-function))
+
+; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='cgscc(function<no-rerun;eager-inv>(no-op-function))' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-31
+; CHECK-31: cgscc(function<eager-inv;no-rerun>(no-op-function))
+
+; RUN: opt -disable-output -disable-verify -print-pipeline-passes -passes='cgscc(function<no-rerun>(no-op-function))' < %s | FileCheck %s --match-full-lines --check-prefixes=CHECK-32
+; CHECK-32: cgscc(function<no-rerun>(no-op-function))

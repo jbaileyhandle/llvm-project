@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "LoongArch.h"
+#include "ToolChains/CommonArgs.h"
 #include "clang/Basic/DiagnosticDriver.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/DriverDiagnostic.h"
@@ -54,7 +55,28 @@ StringRef loongarch::getLoongArchABI(const Driver &D, const ArgList &Args,
   }
 
   // Choose a default based on the triple.
-  return IsLA32 ? "ilp32d" : "lp64d";
+  // Honor the explicit ABI modifier suffix in triple's environment part if
+  // present, falling back to {ILP32,LP64}D otherwise.
+  switch (Triple.getEnvironment()) {
+  case llvm::Triple::GNUSF:
+    return IsLA32 ? "ilp32s" : "lp64s";
+  case llvm::Triple::GNUF32:
+    return IsLA32 ? "ilp32f" : "lp64f";
+  case llvm::Triple::GNUF64:
+    // This was originally permitted (and indeed the canonical way) to
+    // represent the {ILP32,LP64}D ABIs, but in Feb 2023 Loongson decided to
+    // drop the explicit suffix in favor of unmarked `-gnu` for the
+    // "general-purpose" ABIs, among other non-technical reasons.
+    //
+    // The spec change did not mention whether existing usages of "gnuf64"
+    // shall remain valid or not, so we are going to continue recognizing it
+    // for some time, until it is clear that everyone else has migrated away
+    // from it.
+    [[fallthrough]];
+  case llvm::Triple::GNU:
+  default:
+    return IsLA32 ? "ilp32d" : "lp64d";
+  }
 }
 
 void loongarch::getLoongArchTargetFeatures(const Driver &D,
@@ -112,4 +134,15 @@ void loongarch::getLoongArchTargetFeatures(const Driver &D,
       D.Diag(diag::err_drv_loongarch_invalid_mfpu_EQ) << FPU;
     }
   }
+
+  // Select the `ual` feature determined by -m[no-]unaligned-access
+  // or the alias -m[no-]strict-align.
+  AddTargetFeature(Args, Features, options::OPT_munaligned_access,
+                   options::OPT_mno_unaligned_access, "ual");
+
+  // Accept but warn about these TargetSpecific options.
+  if (Arg *A = Args.getLastArgNoClaim(options::OPT_mabi_EQ))
+    A->ignoreTargetSpecific();
+  if (Arg *A = Args.getLastArgNoClaim(options::OPT_mfpu_EQ))
+    A->ignoreTargetSpecific();
 }

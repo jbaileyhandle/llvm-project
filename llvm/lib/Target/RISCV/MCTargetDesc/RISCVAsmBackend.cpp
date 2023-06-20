@@ -53,6 +53,7 @@ RISCVAsmBackend::getFixupKindInfo(MCFixupKind Kind) const {
       // name                      offset bits  flags
       {"fixup_riscv_hi20", 12, 20, 0},
       {"fixup_riscv_lo12_i", 20, 12, 0},
+      {"fixup_riscv_12_i", 20, 12, 0},
       {"fixup_riscv_lo12_s", 0, 32, 0},
       {"fixup_riscv_pcrel_hi20", 12, 20,
        MCFixupKindInfo::FKF_IsPCRel | MCFixupKindInfo::FKF_IsTarget},
@@ -134,7 +135,7 @@ bool RISCVAsmBackend::shouldForceRelocation(const MCAssembler &Asm,
     return true;
   }
 
-  return STI.getFeatureBits()[RISCV::FeatureRelax] || ForceRelocs;
+  return STI.hasFeature(RISCV::FeatureRelax) || ForceRelocs;
 }
 
 bool RISCVAsmBackend::fixupNeedsRelaxationAdvanced(const MCFixup &Fixup,
@@ -272,14 +273,15 @@ bool RISCVAsmBackend::relaxDwarfLineAddr(MCDwarfLineAddrFragment &DF,
 bool RISCVAsmBackend::relaxDwarfCFA(MCDwarfCallFrameFragment &DF,
                                     MCAsmLayout &Layout,
                                     bool &WasRelaxed) const {
-
   const MCExpr &AddrDelta = DF.getAddrDelta();
   SmallVectorImpl<char> &Data = DF.getContents();
   SmallVectorImpl<MCFixup> &Fixups = DF.getFixups();
   size_t OldSize = Data.size();
 
   int64_t Value;
-  bool IsAbsolute = AddrDelta.evaluateKnownAbsolute(Value, Layout);
+  if (AddrDelta.evaluateAsAbsolute(Value, Layout.getAssembler()))
+    return false;
+  bool IsAbsolute = AddrDelta.evaluateAsAbsolute(Value, Layout);
   assert(IsAbsolute && "CFA with invalid expression");
   (void)IsAbsolute;
 
@@ -374,11 +376,11 @@ bool RISCVAsmBackend::writeNopData(raw_ostream &OS, uint64_t Count,
     Count -= 1;
   }
 
-  bool HasStdExtC = STI->getFeatureBits()[RISCV::FeatureStdExtC];
-  bool HasStdExtZca = STI->getFeatureBits()[RISCV::FeatureExtZca];
+  bool UseCompressedNop = STI->hasFeature(RISCV::FeatureStdExtC) ||
+                          STI->hasFeature(RISCV::FeatureStdExtZca);
   // The canonical nop on RVC is c.nop.
   if (Count % 4 == 2) {
-    OS.write((HasStdExtC || HasStdExtZca) ? "\x01\0" : "\0\0", 2);
+    OS.write(UseCompressedNop ? "\x01\0" : "\0\0", 2);
     Count -= 2;
   }
 
@@ -420,6 +422,12 @@ static uint64_t adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
   case RISCV::fixup_riscv_lo12_i:
   case RISCV::fixup_riscv_pcrel_lo12_i:
   case RISCV::fixup_riscv_tprel_lo12_i:
+    return Value & 0xfff;
+  case RISCV::fixup_riscv_12_i:
+    if (!isInt<12>(Value)) {
+      Ctx.reportError(Fixup.getLoc(),
+                      "operand must be a constant 12-bit integer");
+    }
     return Value & 0xfff;
   case RISCV::fixup_riscv_lo12_s:
   case RISCV::fixup_riscv_pcrel_lo12_s:
@@ -602,11 +610,11 @@ bool RISCVAsmBackend::shouldInsertExtraNopBytesForCodeAlign(
     const MCAlignFragment &AF, unsigned &Size) {
   // Calculate Nops Size only when linker relaxation enabled.
   const MCSubtargetInfo *STI = AF.getSubtargetInfo();
-  if (!STI->getFeatureBits()[RISCV::FeatureRelax])
+  if (!STI->hasFeature(RISCV::FeatureRelax))
     return false;
 
-  bool UseCompressedNop = STI->getFeatureBits()[RISCV::FeatureStdExtC] ||
-                          STI->getFeatureBits()[RISCV::FeatureExtZca];
+  bool UseCompressedNop = STI->hasFeature(RISCV::FeatureStdExtC) ||
+                          STI->hasFeature(RISCV::FeatureStdExtZca);
   unsigned MinNopLen = UseCompressedNop ? 2 : 4;
 
   if (AF.getAlignment() <= MinNopLen) {
@@ -627,7 +635,7 @@ bool RISCVAsmBackend::shouldInsertFixupForCodeAlign(MCAssembler &Asm,
                                                     MCAlignFragment &AF) {
   // Insert the fixup only when linker relaxation enabled.
   const MCSubtargetInfo *STI = AF.getSubtargetInfo();
-  if (!STI->getFeatureBits()[RISCV::FeatureRelax])
+  if (!STI->hasFeature(RISCV::FeatureRelax))
     return false;
 
   // Calculate total Nops we need to insert. If there are none to insert

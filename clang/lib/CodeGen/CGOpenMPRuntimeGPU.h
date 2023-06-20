@@ -113,45 +113,7 @@ private:
                                   bool IsOffloadEntry,
                                   const RegionCodeGenTy &CodeGen) override;
 
-  /// Emits code for parallel or serial call of the \a OutlinedFn with
-  /// variables captured in a record which address is stored in \a
-  /// CapturedStruct.
-  /// This call is for the Non-SPMD Execution Mode.
-  /// \param OutlinedFn Outlined function to be run in parallel threads. Type of
-  /// this function is void(*)(kmp_int32 *, kmp_int32, struct context_vars*).
-  /// \param CapturedVars A pointer to the record with the references to
-  /// variables used in \a OutlinedFn function.
-  /// \param IfCond Condition in the associated 'if' clause, if it was
-  /// specified, nullptr otherwise.
-  void emitNonSPMDParallelCall(CodeGenFunction &CGF, SourceLocation Loc,
-                               llvm::Value *OutlinedFn,
-                               ArrayRef<llvm::Value *> CapturedVars,
-                               const Expr *IfCond);
-
-  /// Emits code for parallel or serial call of the \a OutlinedFn with
-  /// variables captured in a record which address is stored in \a
-  /// CapturedStruct.
-  /// This call is for a parallel directive within an SPMD target directive.
-  /// \param OutlinedFn Outlined function to be run in parallel threads. Type of
-  /// this function is void(*)(kmp_int32 *, kmp_int32, struct context_vars*).
-  /// \param CapturedVars A pointer to the record with the references to
-  /// variables used in \a OutlinedFn function.
-  /// \param IfCond Condition in the associated 'if' clause, if it was
-  /// specified, nullptr otherwise.
-  ///
-  void emitSPMDParallelCall(CodeGenFunction &CGF, SourceLocation Loc,
-                            llvm::Function *OutlinedFn,
-                            ArrayRef<llvm::Value *> CapturedVars,
-                            const Expr *IfCond);
-
 protected:
-  /// Get the function name of an outlined region.
-  //  The name can be customized depending on the target.
-  //
-  StringRef getOutlinedHelperName() const override {
-    return "__omp_outlined__";
-  }
-
   /// Check if the default location must be constant.
   /// Constant for NVPTX for better optimization.
   bool isDefaultLocationConstant() const override { return true; }
@@ -178,11 +140,6 @@ public:
   /// Get the block id of the current thread on the GPU
   llvm::Value *getGPUBlockID(CodeGenFunction &CGF);
 
-  /// Get the complete block size in use on the GPU. If there is a
-  /// partial block, that information is not returned.
-  llvm::Value *getGPUCompleteBlockSize(CodeGenFunction &CGF,
-                                       const OMPExecutableDirective &D);
-
   /// Get the number of blocks on the GPU
   llvm::Value *getGPUNumBlocks(CodeGenFunction &CGF);
 
@@ -207,6 +164,16 @@ public:
                                                RValue Update,
                                                BinaryOperatorKind BO,
                                                bool IsXBinopExpr) override;
+
+  /// Return whether the current architecture must emit CAS loop runtime call
+  /// for given type and atomic operation
+  bool mustEmitSafeAtomic(CodeGenFunction &CGF, LValue X, RValue Update,
+                          BinaryOperatorKind BO) override;
+
+  // Emit call to CAS loop
+  std::pair<bool, RValue> emitAtomicCASLoop(CodeGenFunction &CGF, LValue X,
+                                            RValue Update,
+                                            BinaryOperatorKind BO) override;
 
   /// Emit call to void __kmpc_push_proc_bind(ident_t *loc, kmp_int32
   /// global_tid, int proc_bind) to generate code for 'proc_bind' clause.
@@ -233,31 +200,31 @@ public:
   //  directive.
   /// \a D. This outlined function has type void(*)(kmp_int32 *ThreadID,
   /// kmp_int32 BoundID, struct context_vars*).
+  /// \param CGF Reference to current CodeGenFunction.
   /// \param D OpenMP directive.
   /// \param ThreadIDVar Variable for thread id in the current OpenMP region.
   /// \param InnermostKind Kind of innermost directive (for simple directives it
   /// is a directive itself, for combined - its innermost directive).
   /// \param CodeGen Code generation sequence for the \a D directive.
-  llvm::Function *
-  emitParallelOutlinedFunction(const OMPExecutableDirective &D,
-                               const VarDecl *ThreadIDVar,
-                               OpenMPDirectiveKind InnermostKind,
-                               const RegionCodeGenTy &CodeGen) override;
+  llvm::Function *emitParallelOutlinedFunction(
+      CodeGenFunction &CGF, const OMPExecutableDirective &D,
+      const VarDecl *ThreadIDVar, OpenMPDirectiveKind InnermostKind,
+      const RegionCodeGenTy &CodeGen) override;
 
   /// Emits inlined function for the specified OpenMP teams
   //  directive.
   /// \a D. This outlined function has type void(*)(kmp_int32 *ThreadID,
   /// kmp_int32 BoundID, struct context_vars*).
+  /// \param CGF Reference to current CodeGenFunction.
   /// \param D OpenMP directive.
   /// \param ThreadIDVar Variable for thread id in the current OpenMP region.
   /// \param InnermostKind Kind of innermost directive (for simple directives it
   /// is a directive itself, for combined - its innermost directive).
   /// \param CodeGen Code generation sequence for the \a D directive.
-  llvm::Function *
-  emitTeamsOutlinedFunction(const OMPExecutableDirective &D,
-                            const VarDecl *ThreadIDVar,
-                            OpenMPDirectiveKind InnermostKind,
-                            const RegionCodeGenTy &CodeGen) override;
+  llvm::Function *emitTeamsOutlinedFunction(
+      CodeGenFunction &CGF, const OMPExecutableDirective &D,
+      const VarDecl *ThreadIDVar, OpenMPDirectiveKind InnermostKind,
+      const RegionCodeGenTy &CodeGen) override;
 
   /// Emits code for teams call of the \a OutlinedFn with
   /// variables captured in a record which address is stored in \a
@@ -329,12 +296,6 @@ public:
                      ArrayRef<const Expr *> RHSExprs,
                      ArrayRef<const Expr *> ReductionOps,
                      ReductionOptionsTy Options) override;
-
-  /// Returns specified OpenMP runtime function for the current OpenMP
-  /// implementation.  Specialized for the NVPTX device.
-  /// \param Function OpenMP runtime function.
-  /// \return Specified function.
-  llvm::FunctionCallee createNVPTXRuntimeFunction(unsigned Function);
 
   /// Translates the native parameter of outlined function if this is required
   /// for target.

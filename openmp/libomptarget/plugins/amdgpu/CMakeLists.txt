@@ -92,12 +92,15 @@ add_llvm_library(omptarget.rtl.amdgpu SHARED
   MemoryManager
   ${LIBOMPTARGET_DEP_LIBRARIES}
   ${OPENMP_PTHREAD_LIB}
-  -Wl,--whole-archive hostrpc_services -Wl,--no-whole-archive
+  -Wl,--whole-archive amdgcn_hostexec_services -Wl,--no-whole-archive
   "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/../exports"
   ${LDFLAGS_UNDEFINED}
 
   NO_INSTALL_RPATH
 )
+
+add_dependencies(omptarget.rtl.amdgpu omptarget.devicertl.amdgpu )
+add_dependencies(omptarget.rtl.amdgpu amdgcn_hostexec_services)
 
 target_include_directories(
   omptarget.rtl.amdgpu
@@ -132,7 +135,6 @@ if (LIBOMPTARGET_FOUND_AMDGPU_GPU OR LIBOMPTARGET_FORCE_AMDGPU_TESTS)
   list(APPEND LIBOMPTARGET_TESTED_PLUGINS "omptarget.rtl.amdgpu")
   set(LIBOMPTARGET_TESTED_PLUGINS "${LIBOMPTARGET_TESTED_PLUGINS}" PARENT_SCOPE)
 else()
-  libomptarget_say("Not generating amdgcn test targets as libhsa is not linkable")
+  libomptarget_say("Not generating AMDGPU tests, no supported devices detected. Use 'LIBOMPTARGET_FORCE_AMDGPU_TESTS' to override.")
   return()
 endif()
-

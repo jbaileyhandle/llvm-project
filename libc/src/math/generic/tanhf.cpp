@@ -8,6 +8,7 @@
 
 #include "src/math/tanhf.h"
 #include "src/__support/FPUtil/FPBits.h"
+#include "src/__support/FPUtil/rounding_mode.h"
 #include "src/__support/macros/optimization.h"            // LIBC_UNLIKELY
 #include "src/__support/macros/properties/cpu_features.h" // LIBC_TARGET_CPU_HAS_FMA
 #include "src/math/generic/explogxf.h"
@@ -22,8 +23,8 @@ LLVM_LIBC_FUNCTION(float, tanhf, (float x)) {
 
   // |x| <= 2^-26
   if (LIBC_UNLIKELY(x_abs <= 0x3280'0000U)) {
-    return LIBC_UNLIKELY(x_abs == 0) ? x
-                                     : (x - 0x1.5555555555555p-2 * x * x * x);
+    return static_cast<float>(
+        LIBC_UNLIKELY(x_abs == 0) ? x : (x - 0x1.5555555555555p-2 * x * x * x));
   }
 
   // When |x| >= 15, or x is inf or nan
@@ -48,11 +49,11 @@ LLVM_LIBC_FUNCTION(float, tanhf, (float x)) {
     double pe = fputil::polyeval(x2, 0.0, -0x1.5555555555555p-2,
                                  0x1.1111111111111p-3, -0x1.ba1ba1ba1ba1cp-5,
                                  0x1.664f4882c10fap-6, -0x1.226e355e6c23dp-7);
-    return fputil::multiply_add(xdbl, pe, xdbl);
+    return static_cast<float>(fputil::multiply_add(xdbl, pe, xdbl));
   }
 
   if (LIBC_UNLIKELY(xbits.bits == 0x4058'e0a3U)) {
-    if (fputil::get_round() == FE_DOWNWARD)
+    if (fputil::fenv_is_round_down())
       return FPBits(0x3f7f'6ad9U).get_val();
   }
 
@@ -61,11 +62,11 @@ LLVM_LIBC_FUNCTION(float, tanhf, (float x)) {
   double r = ExpBase::powb_lo(ep.lo);
   // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
 #if defined(LIBC_TARGET_CPU_HAS_FMA)
-  return fputil::multiply_add(ep.mh, r, -1.0) /
-         fputil::multiply_add(ep.mh, r, 1.0);
+  return static_cast<float>(fputil::multiply_add(ep.mh, r, -1.0) /
+                            fputil::multiply_add(ep.mh, r, 1.0));
 #else
   double exp_x = ep.mh * r;
-  return (exp_x - 1.0) / (exp_x + 1.0);
+  return static_cast<float>((exp_x - 1.0) / (exp_x + 1.0));
 #endif // LIBC_TARGET_CPU_HAS_FMA
 }
 

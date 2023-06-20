@@ -8,6 +8,7 @@ add_clang_library(clangTidyUtils
   ASTUtils.cpp
   DeclRefExprUtils.cpp
   ExceptionAnalyzer.cpp
+  ExceptionSpecAnalyzer.cpp
   ExprSequence.cpp
   FileExtensionsUtils.cpp
   FixItHintUtils.cpp
@@ -36,5 +37,6 @@ clang_target_link_libraries(clangTidyUtils
   clangBasic
   clangLex
   clangSema
+  clangTooling
   clangTransformer
   )

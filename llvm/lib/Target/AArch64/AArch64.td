@@ -50,7 +50,7 @@ def FeatureAES : SubtargetFeature<
 // Crypto has been split up and any combination is now valid (see the
 // crypto definitions above). Also, crypto is now context sensitive:
 // it has a different meaning for e.g. Armv8.4 than it has for Armv8.2.
-// Therefore, we rely on Clang, the user interacing tool, to pass on the
+// Therefore, we rely on Clang, the user interfacing tool, to pass on the
 // appropriate crypto options. But here in the backend, crypto has very little
 // meaning anymore. We kept the Crypto definition here for backward
 // compatibility, and now imply features SHA2 and AES, which was the
@@ -522,6 +522,12 @@ def FeatureNoBTIAtReturnTwice : SubtargetFeature<"no-bti-at-return-twice",
                                                  "Don't place a BTI instruction "
                                                  "after a return-twice">;
 
+def FeatureCHK : SubtargetFeature<"chk", "HasCHK",
+    "true", "Enable Armv8.0-A Check Feature Status Extension (FEAT_CHK)">;
+
+def FeatureGCS : SubtargetFeature<"gcs", "HasGCS",
+    "true", "Enable Armv9.4-A Guarded Call Stack Extension", [FeatureCHK]>;
+
 def FeatureCLRBHB : SubtargetFeature<"clrbhb", "HasCLRBHB",
     "true", "Enable Clear BHB instruction (FEAT_CLRBHB)">;
 
@@ -603,7 +609,7 @@ def HasV8_8aOps : SubtargetFeature<
 def HasV8_9aOps : SubtargetFeature<
   "v8.9a", "HasV8_9aOps", "true", "Support ARM v8.9a instructions",
   [HasV8_8aOps, FeatureCLRBHB, FeaturePRFM_SLC, FeatureSPECRES2,
-   FeatureCSSC, FeatureRASv2]>;
+   FeatureCSSC, FeatureRASv2, FeatureCHK]>;
 
 def HasV9_0aOps : SubtargetFeature<
   "v9a", "HasV9_0aOps", "true", "Support ARM v9a instructions",
@@ -666,6 +672,7 @@ include "AArch64InstrInfo.td"
 include "AArch64SchedPredicates.td"
 include "AArch64SchedPredExynos.td"
 include "AArch64SchedPredAmpere.td"
+include "AArch64SchedPredNeoverse.td"
 include "AArch64Combine.td"
 
 def AArch64InstrInfo : InstrInfo;
@@ -683,6 +690,8 @@ include "AArch64SystemOperands.td"
 foreach i = 1-3 in
 def FeatureUseEL#i#ForTP : SubtargetFeature<"tpidr-el"#i, "UseEL"#i#"ForTP",
   "true", "Permit use of TPIDR_EL"#i#" for the TLS base">;
+def FeatureUseROEL0ForTP : SubtargetFeature<"tpidrro-el0", "UseROEL0ForTP",
+  "true", "Permit use of TPIDRRO_EL0 for the TLS base">;
 
 //===----------------------------------------------------------------------===//
 // Control codegen mitigation against Straight Line Speculation vulnerability.
@@ -738,6 +747,7 @@ include "AArch64SchedThunderX3T110.td"
 include "AArch64SchedTSV110.td"
 include "AArch64SchedAmpere1.td"
 include "AArch64SchedNeoverseN2.td"
+include "AArch64SchedNeoverseV2.td"
 
 def TuneA35     : SubtargetFeature<"a35", "ARMProcFamily", "CortexA35",
                                 "Cortex-A35 ARM processors">;
@@ -1385,7 +1395,7 @@ def : ProcessorModel<"neoverse-512tvb", NeoverseN2Model,
                      ProcessorFeatures.Neoverse512TVB, [TuneNeoverse512TVB]>;
 def : ProcessorModel<"neoverse-v1", NeoverseN2Model,
                      ProcessorFeatures.NeoverseV1, [TuneNeoverseV1]>;
-def : ProcessorModel<"neoverse-v2", NeoverseN2Model,
+def : ProcessorModel<"neoverse-v2", NeoverseV2Model,
                      ProcessorFeatures.NeoverseV2, [TuneNeoverseV2]>;
 def : ProcessorModel<"exynos-m3", ExynosM3Model, ProcessorFeatures.ExynosM3,
                      [TuneExynosM3]>;

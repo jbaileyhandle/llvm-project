@@ -502,8 +502,7 @@ namespace llvm {
   /// printing assembly.
   ModulePass *createMachineOutlinerPass(bool RunOnAllFunctions = true);
 
-  /// This pass expands the experimental reduction intrinsics into sequences of
-  /// shuffles.
+  /// This pass expands the reduction intrinsics into sequences of shuffles.
   FunctionPass *createExpandReductionsPass();
 
   // This pass replaces intrinsics operating on vector operands with calls to
@@ -600,6 +599,11 @@ namespace llvm {
 
   /// This pass converts conditional moves to conditional jumps when profitable.
   FunctionPass *createSelectOptimizePass();
+
+  FunctionPass *createCallBrPass();
+
+  /// Lowers KCFI operand bundles for indirect calls.
+  FunctionPass *createKCFIPass();
 } // End llvm namespace
 
 #endif

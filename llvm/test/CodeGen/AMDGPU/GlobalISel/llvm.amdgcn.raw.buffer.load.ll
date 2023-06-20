@@ -15,7 +15,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 0)
@@ -36,7 +36,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__sgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr7
   ; CHECK-NEXT:   [[PRED_COPY6:%[0-9]+]]:vgpr_32 = PRED_COPY [[PRED_COPY4]]
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY6]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY6]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 0)
@@ -73,13 +73,13 @@ define amdgpu_ps float @raw_buffer_load_f32__vgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY9:%[0-9]+]]:sreg_64 = PRED_COPY [[REG_SEQUENCE1]].sub2_sub3
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY8]], [[PRED_COPY6]], implicit $exec
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_1:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY9]], [[PRED_COPY7]], implicit $exec
-  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def dead $scc
+  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def $scc
   ; CHECK-NEXT:   [[S_AND_SAVEEXEC_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_SAVEEXEC_B64 killed [[S_AND_B64_]], implicit-def $exec, implicit-def $scc, implicit $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.3:
   ; CHECK-NEXT:   successors: %bb.4(0x40000000), %bb.2(0x40000000)
   ; CHECK-NEXT: {{  $}}
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE1]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE1]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $exec = S_XOR_B64_term $exec, [[S_AND_SAVEEXEC_B64_]], implicit-def $scc
   ; CHECK-NEXT:   SI_WATERFALL_LOOP %bb.2, implicit $exec
   ; CHECK-NEXT: {{  $}}
@@ -125,16 +125,16 @@ define amdgpu_ps float @raw_buffer_load_f32__vgpr_rsrc__vgpr_voffset__vgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY9:%[0-9]+]]:sreg_64 = PRED_COPY [[REG_SEQUENCE1]].sub2_sub3
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY8]], [[PRED_COPY6]], implicit $exec
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_1:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY9]], [[PRED_COPY7]], implicit $exec
-  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def dead $scc
+  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def $scc
   ; CHECK-NEXT:   [[V_READFIRSTLANE_B32_4:%[0-9]+]]:sreg_32 = V_READFIRSTLANE_B32 [[PRED_COPY5]], implicit $exec
   ; CHECK-NEXT:   [[V_CMP_EQ_U32_e64_:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U32_e64 [[V_READFIRSTLANE_B32_4]], [[PRED_COPY5]], implicit $exec
-  ; CHECK-NEXT:   [[S_AND_B64_1:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[S_AND_B64_]], [[V_CMP_EQ_U32_e64_]], implicit-def dead $scc
+  ; CHECK-NEXT:   [[S_AND_B64_1:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[S_AND_B64_]], [[V_CMP_EQ_U32_e64_]], implicit-def $scc
   ; CHECK-NEXT:   [[S_AND_SAVEEXEC_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_SAVEEXEC_B64 killed [[S_AND_B64_1]], implicit-def $exec, implicit-def $scc, implicit $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.3:
   ; CHECK-NEXT:   successors: %bb.4(0x40000000), %bb.2(0x40000000)
   ; CHECK-NEXT: {{  $}}
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE1]], [[V_READFIRSTLANE_B32_4]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE1]], [[V_READFIRSTLANE_B32_4]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $exec = S_XOR_B64_term $exec, [[S_AND_SAVEEXEC_B64_]], implicit-def $scc
   ; CHECK-NEXT:   SI_WATERFALL_LOOP %bb.2, implicit $exec
   ; CHECK-NEXT: {{  $}}
@@ -163,7 +163,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 1, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 1, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 1)
@@ -183,7 +183,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 2, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 2, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 2)
@@ -203,7 +203,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 4, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 4, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 4)
@@ -223,7 +223,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 6, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 6, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 6)
@@ -243,7 +243,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 5, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 5, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 5)
@@ -263,7 +263,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 7, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 7, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 7)
@@ -283,7 +283,7 @@ define amdgpu_ps <2 x float> @raw_buffer_load_v2f32__sgpr_rsrc__vgpr_voffset__sg
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORDX2_OFFEN:%[0-9]+]]:vreg_64 = BUFFER_LOAD_DWORDX2_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (<2 x s32>), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORDX2_OFFEN:%[0-9]+]]:vreg_64 = BUFFER_LOAD_DWORDX2_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (<2 x s32>), align 1, addrspace 8)
   ; CHECK-NEXT:   [[PRED_COPY6:%[0-9]+]]:vgpr_32 = PRED_COPY [[BUFFER_LOAD_DWORDX2_OFFEN]].sub0
   ; CHECK-NEXT:   [[PRED_COPY7:%[0-9]+]]:vgpr_32 = PRED_COPY [[BUFFER_LOAD_DWORDX2_OFFEN]].sub1
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[PRED_COPY6]]
@@ -305,7 +305,7 @@ define amdgpu_ps <3 x float> @raw_buffer_load_v3f32__sgpr_rsrc__vgpr_voffset__sg
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORDX3_OFFEN:%[0-9]+]]:vreg_96 = BUFFER_LOAD_DWORDX3_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (<3 x s32>), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORDX3_OFFEN:%[0-9]+]]:vreg_96 = BUFFER_LOAD_DWORDX3_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (<3 x s32>), align 1, addrspace 8)
   ; CHECK-NEXT:   [[PRED_COPY6:%[0-9]+]]:vgpr_32 = PRED_COPY [[BUFFER_LOAD_DWORDX3_OFFEN]].sub0
   ; CHECK-NEXT:   [[PRED_COPY7:%[0-9]+]]:vgpr_32 = PRED_COPY [[BUFFER_LOAD_DWORDX3_OFFEN]].sub1
   ; CHECK-NEXT:   [[PRED_COPY8:%[0-9]+]]:vgpr_32 = PRED_COPY [[BUFFER_LOAD_DWORDX3_OFFEN]].sub2
@@ -329,7 +329,7 @@ define amdgpu_ps <4 x float> @raw_buffer_load_v4f32__sgpr_rsrc__vgpr_voffset__sg
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORDX4_OFFEN:%[0-9]+]]:vreg_128 = BUFFER_LOAD_DWORDX4_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (<4 x s32>), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORDX4_OFFEN:%[0-9]+]]:vreg_128 = BUFFER_LOAD_DWORDX4_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (<4 x s32>), align 1, addrspace 8)
   ; CHECK-NEXT:   [[PRED_COPY6:%[0-9]+]]:vgpr_32 = PRED_COPY [[BUFFER_LOAD_DWORDX4_OFFEN]].sub0
   ; CHECK-NEXT:   [[PRED_COPY7:%[0-9]+]]:vgpr_32 = PRED_COPY [[BUFFER_LOAD_DWORDX4_OFFEN]].sub1
   ; CHECK-NEXT:   [[PRED_COPY8:%[0-9]+]]:vgpr_32 = PRED_COPY [[BUFFER_LOAD_DWORDX4_OFFEN]].sub2
@@ -355,7 +355,7 @@ define amdgpu_ps half @raw_buffer_load_f16__sgpr_rsrc__vgpr_voffset__sgpr_soffse
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_USHORT_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_USHORT_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s16), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_USHORT_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_USHORT_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s16), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_USHORT_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call half @llvm.amdgcn.raw.buffer.load.f16(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 0)
@@ -374,7 +374,7 @@ define amdgpu_ps <2 x half> @raw_buffer_load_v2f16__sgpr_rsrc__vgpr_voffset__sgp
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (<2 x s16>), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (<2 x s16>), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call <2 x half> @llvm.amdgcn.raw.buffer.load.v2f16(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 0)
@@ -399,7 +399,7 @@ define amdgpu_ps <4 x half> @raw_buffer_load_v4f16__sgpr_rsrc__vgpr_voffset__sgp
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORDX2_OFFEN:%[0-9]+]]:vreg_64 = BUFFER_LOAD_DWORDX2_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (<4 x s16>), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORDX2_OFFEN:%[0-9]+]]:vreg_64 = BUFFER_LOAD_DWORDX2_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (<4 x s16>), align 1, addrspace 8)
   ; CHECK-NEXT:   [[PRED_COPY6:%[0-9]+]]:vgpr_32 = PRED_COPY [[BUFFER_LOAD_DWORDX2_OFFEN]].sub0
   ; CHECK-NEXT:   [[PRED_COPY7:%[0-9]+]]:vgpr_32 = PRED_COPY [[BUFFER_LOAD_DWORDX2_OFFEN]].sub1
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[PRED_COPY6]]
@@ -421,7 +421,7 @@ define amdgpu_ps float @raw_buffer_load_i8__sgpr_rsrc__vgpr_voffset__sgpr_soffse
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_UBYTE_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_UBYTE_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s8), addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_UBYTE_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_UBYTE_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s8), addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_UBYTE_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call i8 @llvm.amdgcn.raw.buffer.load.i8(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 0)
@@ -442,13 +442,54 @@ define amdgpu_ps float @raw_buffer_load_i8__sgpr_rsrc__vgpr_voffset__sgpr_soffse
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_UBYTE_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_UBYTE_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s8), addrspace 7)
-  ; CHECK-NEXT:   [[V_BFE_I32_e64_:%[0-9]+]]:vgpr_32 = V_BFE_I32_e64 [[BUFFER_LOAD_UBYTE_OFFEN]], 0, 8, implicit $exec
-  ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[V_BFE_I32_e64_]]
+  ; CHECK-NEXT:   [[BUFFER_LOAD_SBYTE_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_SBYTE_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s8), addrspace 8)
+  ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_SBYTE_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call i8 @llvm.amdgcn.raw.buffer.load.i8(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 0)
   %zext = sext i8 %val to i32
   %cast = bitcast i32 %zext to float
+  ret float %cast
+}
+
+define amdgpu_ps float @raw_buffer_load_i16__sgpr_rsrc__vgpr_voffset__sgpr_soffset_zext(<4 x i32> inreg %rsrc, i32 %voffset, i32 inreg %soffset) {
+  ; CHECK-LABEL: name: raw_buffer_load_i16__sgpr_rsrc__vgpr_voffset__sgpr_soffset_zext
+  ; CHECK: bb.1 (%ir-block.0):
+  ; CHECK-NEXT:   liveins: $sgpr2, $sgpr3, $sgpr4, $sgpr5, $sgpr6, $vgpr0
+  ; CHECK-NEXT: {{  $}}
+  ; CHECK-NEXT:   [[PRED_COPY:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr2
+  ; CHECK-NEXT:   [[PRED_COPY1:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr3
+  ; CHECK-NEXT:   [[PRED_COPY2:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr4
+  ; CHECK-NEXT:   [[PRED_COPY3:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr5
+  ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
+  ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
+  ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
+  ; CHECK-NEXT:   [[BUFFER_LOAD_USHORT_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_USHORT_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s16), align 1, addrspace 8)
+  ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_USHORT_OFFEN]]
+  ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
+  %val = call i16 @llvm.amdgcn.raw.buffer.load.i16(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 0)
+  %zext = zext i16 %val to i32
+  %cast = bitcast i32 %zext to float
+  ret float %cast
+}
+
+define amdgpu_ps float @raw_buffer_load_i16__sgpr_rsrc__vgpr_voffset__sgpr_soffset_sext(<4 x i32> inreg %rsrc, i32 %voffset, i32 inreg %soffset) {
+  ; CHECK-LABEL: name: raw_buffer_load_i16__sgpr_rsrc__vgpr_voffset__sgpr_soffset_sext
+  ; CHECK: bb.1 (%ir-block.0):
+  ; CHECK-NEXT:   liveins: $sgpr2, $sgpr3, $sgpr4, $sgpr5, $sgpr6, $vgpr0
+  ; CHECK-NEXT: {{  $}}
+  ; CHECK-NEXT:   [[PRED_COPY:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr2
+  ; CHECK-NEXT:   [[PRED_COPY1:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr3
+  ; CHECK-NEXT:   [[PRED_COPY2:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr4
+  ; CHECK-NEXT:   [[PRED_COPY3:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr5
+  ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
+  ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
+  ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
+  ; CHECK-NEXT:   [[BUFFER_LOAD_SSHORT_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_SSHORT_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s16), align 1, addrspace 8)
+  ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_SSHORT_OFFEN]]
+  ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
+  %val = call i16 @llvm.amdgcn.raw.buffer.load.i16(<4 x i32> %rsrc, i32 %voffset, i32 %soffset, i32 0)
+  %sext = sext i16 %val to i32
+  %cast = bitcast i32 %sext to float
   ret float %cast
 }
 
@@ -482,13 +523,13 @@ define amdgpu_ps half @raw_buffer_load_f16__vgpr_rsrc__vgpr_voffset__sgpr_soffse
   ; CHECK-NEXT:   [[PRED_COPY9:%[0-9]+]]:sreg_64 = PRED_COPY [[REG_SEQUENCE1]].sub2_sub3
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY8]], [[PRED_COPY6]], implicit $exec
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_1:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY9]], [[PRED_COPY7]], implicit $exec
-  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def dead $scc
+  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def $scc
   ; CHECK-NEXT:   [[S_AND_SAVEEXEC_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_SAVEEXEC_B64 killed [[S_AND_B64_]], implicit-def $exec, implicit-def $scc, implicit $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.3:
   ; CHECK-NEXT:   successors: %bb.4(0x40000000), %bb.2(0x40000000)
   ; CHECK-NEXT: {{  $}}
-  ; CHECK-NEXT:   [[BUFFER_LOAD_USHORT_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_USHORT_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE1]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s16), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_USHORT_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_USHORT_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE1]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s16), align 1, addrspace 8)
   ; CHECK-NEXT:   $exec = S_XOR_B64_term $exec, [[S_AND_SAVEEXEC_B64_]], implicit-def $scc
   ; CHECK-NEXT:   SI_WATERFALL_LOOP %bb.2, implicit $exec
   ; CHECK-NEXT: {{  $}}
@@ -534,13 +575,13 @@ define amdgpu_ps float @raw_buffer_load_i8__vgpr_rsrc__vgpr_voffset__sgpr_soffse
   ; CHECK-NEXT:   [[PRED_COPY9:%[0-9]+]]:sreg_64 = PRED_COPY [[REG_SEQUENCE1]].sub2_sub3
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY8]], [[PRED_COPY6]], implicit $exec
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_1:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY9]], [[PRED_COPY7]], implicit $exec
-  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def dead $scc
+  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def $scc
   ; CHECK-NEXT:   [[S_AND_SAVEEXEC_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_SAVEEXEC_B64 killed [[S_AND_B64_]], implicit-def $exec, implicit-def $scc, implicit $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.3:
   ; CHECK-NEXT:   successors: %bb.4(0x40000000), %bb.2(0x40000000)
   ; CHECK-NEXT: {{  $}}
-  ; CHECK-NEXT:   [[BUFFER_LOAD_UBYTE_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_UBYTE_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE1]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s8), addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_UBYTE_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_UBYTE_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE1]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s8), addrspace 8)
   ; CHECK-NEXT:   $exec = S_XOR_B64_term $exec, [[S_AND_SAVEEXEC_B64_]], implicit-def $scc
   ; CHECK-NEXT:   SI_WATERFALL_LOOP %bb.2, implicit $exec
   ; CHECK-NEXT: {{  $}}
@@ -569,7 +610,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vdpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY3:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr5
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFSET:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFSET [[REG_SEQUENCE]], [[PRED_COPY4]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFSET:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFSET [[REG_SEQUENCE]], [[PRED_COPY4]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFSET]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 0, i32 %soffset, i32 0)
@@ -587,7 +628,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY3:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr5
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFSET:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFSET [[REG_SEQUENCE]], [[PRED_COPY4]], 4095, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFSET:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFSET [[REG_SEQUENCE]], [[PRED_COPY4]], 4095, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFSET]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 4095, i32 %soffset, i32 0)
@@ -607,7 +648,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
   ; CHECK-NEXT:   [[S_MOV_B32_:%[0-9]+]]:sreg_32 = S_MOV_B32 4096
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:vgpr_32 = PRED_COPY [[S_MOV_B32_]]
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY5]], [[REG_SEQUENCE]], [[PRED_COPY4]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY5]], [[REG_SEQUENCE]], [[PRED_COPY4]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 4096, i32 %soffset, i32 0)
@@ -626,7 +667,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 16, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 16, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %voffset = add i32 %voffset.base, 16
@@ -646,7 +687,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 4095, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[PRED_COPY5]], 4095, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %voffset = add i32 %voffset.base, 4095
@@ -668,8 +709,8 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
   ; CHECK-NEXT:   [[S_MOV_B32_:%[0-9]+]]:sreg_32 = S_MOV_B32 4096
   ; CHECK-NEXT:   [[PRED_COPY6:%[0-9]+]]:vgpr_32 = PRED_COPY [[S_MOV_B32_]]
-  ; CHECK-NEXT:   [[V_ADD_CO_U32_e64_:%[0-9]+]]:vgpr_32, dead [[V_ADD_CO_U32_e64_1:%[0-9]+]]:sreg_64_xexec = V_ADD_CO_U32_e64 [[PRED_COPY4]], [[PRED_COPY6]], 0, implicit $exec
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[V_ADD_CO_U32_e64_]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[V_ADD_CO_U32_e64_:%[0-9]+]]:vgpr_32, dead [[V_ADD_CO_U32_e64_1:%[0-9]+]]:sreg_64 = V_ADD_CO_U32_e64 [[PRED_COPY4]], [[PRED_COPY6]], 0, implicit $exec
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[V_ADD_CO_U32_e64_]], [[REG_SEQUENCE]], [[PRED_COPY5]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %voffset = add i32 %voffset.base, 4096
@@ -689,7 +730,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[S_MOV_B32_:%[0-9]+]]:sreg_32 = S_MOV_B32 4095
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[S_MOV_B32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[S_MOV_B32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 %voffset, i32 4095, i32 0)
@@ -708,7 +749,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[REG_SEQUENCE:%[0-9]+]]:sgpr_128 = REG_SEQUENCE [[PRED_COPY]], %subreg.sub0, [[PRED_COPY1]], %subreg.sub1, [[PRED_COPY2]], %subreg.sub2, [[PRED_COPY3]], %subreg.sub3
   ; CHECK-NEXT:   [[PRED_COPY4:%[0-9]+]]:vgpr_32 = PRED_COPY $vgpr0
   ; CHECK-NEXT:   [[S_MOV_B32_:%[0-9]+]]:sreg_32 = S_MOV_B32 4096
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[S_MOV_B32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[S_MOV_B32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %val = call float @llvm.amdgcn.raw.buffer.load.f32(<4 x i32> %rsrc, i32 %voffset, i32 4096, i32 0)
@@ -729,7 +770,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
   ; CHECK-NEXT:   [[S_MOV_B32_:%[0-9]+]]:sreg_32 = S_MOV_B32 16
   ; CHECK-NEXT:   [[S_ADD_I32_:%[0-9]+]]:sreg_32 = S_ADD_I32 [[PRED_COPY5]], [[S_MOV_B32_]], implicit-def $scc
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[S_ADD_I32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[S_ADD_I32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %soffset = add i32 %soffset.base, 16
@@ -751,7 +792,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
   ; CHECK-NEXT:   [[S_MOV_B32_:%[0-9]+]]:sreg_32 = S_MOV_B32 4095
   ; CHECK-NEXT:   [[S_ADD_I32_:%[0-9]+]]:sreg_32 = S_ADD_I32 [[PRED_COPY5]], [[S_MOV_B32_]], implicit-def $scc
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[S_ADD_I32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[S_ADD_I32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %soffset = add i32 %soffset.base, 4095
@@ -773,7 +814,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr6
   ; CHECK-NEXT:   [[S_MOV_B32_:%[0-9]+]]:sreg_32 = S_MOV_B32 4096
   ; CHECK-NEXT:   [[S_ADD_I32_:%[0-9]+]]:sreg_32 = S_ADD_I32 [[PRED_COPY5]], [[S_MOV_B32_]], implicit-def $scc
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[S_ADD_I32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE]], [[S_ADD_I32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $vgpr0 = PRED_COPY [[BUFFER_LOAD_DWORD_OFFEN]]
   ; CHECK-NEXT:   SI_RETURN_TO_EPILOG implicit $vgpr0
   %soffset = add i32 %soffset.base, 4096
@@ -813,13 +854,13 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY9:%[0-9]+]]:sreg_64 = PRED_COPY [[REG_SEQUENCE1]].sub2_sub3
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY8]], [[PRED_COPY6]], implicit $exec
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_1:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY9]], [[PRED_COPY7]], implicit $exec
-  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def dead $scc
+  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def $scc
   ; CHECK-NEXT:   [[S_AND_SAVEEXEC_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_SAVEEXEC_B64 killed [[S_AND_B64_]], implicit-def $exec, implicit-def $scc, implicit $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.3:
   ; CHECK-NEXT:   successors: %bb.4(0x40000000), %bb.2(0x40000000)
   ; CHECK-NEXT: {{  $}}
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE1]], [[S_ADD_I32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[PRED_COPY4]], [[REG_SEQUENCE1]], [[S_ADD_I32_]], 0, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $exec = S_XOR_B64_term $exec, [[S_AND_SAVEEXEC_B64_]], implicit-def $scc
   ; CHECK-NEXT:   SI_WATERFALL_LOOP %bb.2, implicit $exec
   ; CHECK-NEXT: {{  $}}
@@ -852,7 +893,7 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY5:%[0-9]+]]:sreg_32 = PRED_COPY $sgpr2
   ; CHECK-NEXT:   [[S_MOV_B32_:%[0-9]+]]:sreg_32 = S_MOV_B32 4096
   ; CHECK-NEXT:   [[PRED_COPY6:%[0-9]+]]:vgpr_32 = PRED_COPY [[S_MOV_B32_]]
-  ; CHECK-NEXT:   [[V_ADD_CO_U32_e64_:%[0-9]+]]:vgpr_32, dead [[V_ADD_CO_U32_e64_1:%[0-9]+]]:sreg_64_xexec = V_ADD_CO_U32_e64 [[PRED_COPY4]], [[PRED_COPY6]], 0, implicit $exec
+  ; CHECK-NEXT:   [[V_ADD_CO_U32_e64_:%[0-9]+]]:vgpr_32, dead [[V_ADD_CO_U32_e64_1:%[0-9]+]]:sreg_64 = V_ADD_CO_U32_e64 [[PRED_COPY4]], [[PRED_COPY6]], 0, implicit $exec
   ; CHECK-NEXT:   [[S_MOV_B64_:%[0-9]+]]:sreg_64_xexec = S_MOV_B64 $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.2:
@@ -869,13 +910,13 @@ define amdgpu_ps float @raw_buffer_load_f32__sgpr_rsrc__vgpr_voffset__sgpr_soffs
   ; CHECK-NEXT:   [[PRED_COPY10:%[0-9]+]]:sreg_64 = PRED_COPY [[REG_SEQUENCE1]].sub2_sub3
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY9]], [[PRED_COPY7]], implicit $exec
   ; CHECK-NEXT:   [[V_CMP_EQ_U64_e64_1:%[0-9]+]]:sreg_64_xexec = V_CMP_EQ_U64_e64 [[PRED_COPY10]], [[PRED_COPY8]], implicit $exec
-  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def dead $scc
+  ; CHECK-NEXT:   [[S_AND_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_B64 [[V_CMP_EQ_U64_e64_]], [[V_CMP_EQ_U64_e64_1]], implicit-def $scc
   ; CHECK-NEXT:   [[S_AND_SAVEEXEC_B64_:%[0-9]+]]:sreg_64_xexec = S_AND_SAVEEXEC_B64 killed [[S_AND_B64_]], implicit-def $exec, implicit-def $scc, implicit $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.3:
   ; CHECK-NEXT:   successors: %bb.4(0x40000000), %bb.2(0x40000000)
   ; CHECK-NEXT: {{  $}}
-  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[V_ADD_CO_U32_e64_]], [[REG_SEQUENCE1]], [[PRED_COPY5]], 904, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 7)
+  ; CHECK-NEXT:   [[BUFFER_LOAD_DWORD_OFFEN:%[0-9]+]]:vgpr_32 = BUFFER_LOAD_DWORD_OFFEN [[V_ADD_CO_U32_e64_]], [[REG_SEQUENCE1]], [[PRED_COPY5]], 904, 0, 0, implicit $exec :: (dereferenceable load (s32), align 1, addrspace 8)
   ; CHECK-NEXT:   $exec = S_XOR_B64_term $exec, [[S_AND_SAVEEXEC_B64_]], implicit-def $scc
   ; CHECK-NEXT:   SI_WATERFALL_LOOP %bb.2, implicit $exec
   ; CHECK-NEXT: {{  $}}
@@ -903,3 +944,4 @@ declare <3 x half> @llvm.amdgcn.raw.buffer.load.v3f16(<4 x i32>, i32, i32, i32 i
 declare <4 x half> @llvm.amdgcn.raw.buffer.load.v4f16(<4 x i32>, i32, i32, i32 immarg)
 
 declare i8 @llvm.amdgcn.raw.buffer.load.i8(<4 x i32>, i32, i32, i32 immarg)
+declare i16 @llvm.amdgcn.raw.buffer.load.i16(<4 x i32>, i32, i32, i32 immarg)

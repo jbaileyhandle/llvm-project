@@ -292,7 +292,8 @@ llvm::Constant *CodeGenModule::getOrCreateStaticVarDecl(
   if (AS != ExpectedAS) {
     Addr = getTargetCodeGenInfo().performAddrSpaceCast(
         *this, GV, AS, ExpectedAS,
-        LTy->getPointerTo(getContext().getTargetAddressSpace(ExpectedAS)));
+        llvm::PointerType::get(getLLVMContext(),
+                               getContext().getTargetAddressSpace(ExpectedAS)));
   }
 
   setStaticLocalDeclAddress(&D, Addr);
@@ -394,13 +395,15 @@ CodeGenFunction::AddInitializerToStaticVarDecl(const VarDecl &D,
     OldGV->eraseFromParent();
   }
 
-  GV->setConstant(CGM.isTypeConstant(D.getType(), true));
+  bool NeedsDtor =
+      D.needsDestruction(getContext()) == QualType::DK_cxx_destructor;
+
+  GV->setConstant(CGM.isTypeConstant(D.getType(), true, !NeedsDtor));
   GV->setInitializer(Init);
 
   emitter.finalize(GV);
 
-  if (D.needsDestruction(getContext()) == QualType::DK_cxx_destructor &&
-      HaveInsertPoint()) {
+  if (NeedsDtor && HaveInsertPoint()) {
     // We have a constant initializer, but a nontrivial destructor. We still
     // need to perform a guarded "initialization" in order to register the
     // destructor.
@@ -730,8 +733,8 @@ static bool tryEmitARCCopyWeakInit(CodeGenFunction &CGF,
       // Handle a formal type change to avoid asserting.
       auto srcAddr = srcLV.getAddress(CGF);
       if (needsCast) {
-        srcAddr = CGF.Builder.CreateElementBitCast(
-            srcAddr, destLV.getAddress(CGF).getElementType());
+        srcAddr =
+            srcAddr.withElementType(destLV.getAddress(CGF).getElementType());
       }
 
       // If it was an l-value, use objc_copyWeak.
@@ -1176,7 +1179,7 @@ static Address createUnnamedGlobalForMemcpyFrom(CodeGenModule &CGM,
                                                 llvm::Constant *Constant,
                                                 CharUnits Align) {
   Address SrcPtr = CGM.createUnnamedGlobalFrom(D, Constant, Align);
-  return Builder.CreateElementBitCast(SrcPtr, CGM.Int8Ty);
+  return SrcPtr.withElementType(CGM.Int8Ty);
 }
 
 static void emitStoresForConstant(CodeGenModule &CGM, const VarDecl &D,
@@ -1210,7 +1213,7 @@ static void emitStoresForConstant(CodeGenModule &CGM, const VarDecl &D,
     bool valueAlreadyCorrect =
         constant->isNullValue() || isa<llvm::UndefValue>(constant);
     if (!valueAlreadyCorrect) {
-      Loc = Builder.CreateElementBitCast(Loc, Ty);
+      Loc = Loc.withElementType(Ty);
       emitStoresForInitAfterBZero(CGM, constant, Loc, isVolatile, Builder,
                                   IsAutoInit);
     }
@@ -1409,9 +1412,6 @@ void CodeGenFunction::EmitAndRegisterVariableArrayDimensions(
     else {
       // Create an artificial VarDecl to generate debug info for.
       IdentifierInfo *NameIdent = VLAExprNames[NameIdx++];
-      assert(cast<llvm::PointerType>(VlaSize.NumElts->getType())
-                 ->isOpaqueOrPointeeTypeMatches(SizeTy) &&
-             "Number of VLA elements must be SizeTy");
       auto QT = getContext().getIntTypeForBitwidth(
           SizeTy->getScalarSizeInBits(), false);
       auto *ArtificialDecl = VarDecl::Create(
@@ -1487,10 +1487,12 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
       // emit it as a global instead.
       // Exception is if a variable is located in non-constant address space
       // in OpenCL.
+      bool NeedsDtor =
+          D.needsDestruction(getContext()) == QualType::DK_cxx_destructor;
       if ((!getLangOpts().OpenCL ||
            Ty.getAddressSpace() == LangAS::opencl_constant) &&
           (CGM.getCodeGenOpts().MergeAllConstants && !NRVO &&
-           !isEscapingByRef && CGM.isTypeConstant(Ty, true))) {
+           !isEscapingByRef && CGM.isTypeConstant(Ty, true, !NeedsDtor))) {
         EmitStaticVarDecl(D, llvm::GlobalValue::InternalLinkage);
 
         // Signal this condition to later callbacks.
@@ -1805,7 +1807,7 @@ void CodeGenFunction::emitZeroOrPatternForAutoVarInit(QualType type,
       SizeVal = Builder.CreateNUWMul(SizeVal, CGM.getSize(EltSize));
     llvm::Value *BaseSizeInChars =
         llvm::ConstantInt::get(IntPtrTy, EltSize.getQuantity());
-    Address Begin = Builder.CreateElementBitCast(Loc, Int8Ty, "vla.begin");
+    Address Begin = Loc.withElementType(Int8Ty);
     llvm::Value *End = Builder.CreateInBoundsGEP(
         Begin.getElementType(), Begin.getPointer(), SizeVal, "vla.end");
     llvm::BasicBlock *OriginBB = Builder.GetInsertBlock();
@@ -1936,7 +1938,7 @@ void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
     return EmitStoreThroughLValue(RValue::get(constant), lv, true);
   }
 
-  emitStoresForConstant(CGM, D, Builder.CreateElementBitCast(Loc, CGM.Int8Ty),
+  emitStoresForConstant(CGM, D, Loc.withElementType(CGM.Int8Ty),
                         type.isVolatileQualified(), Builder, constant,
                         /*IsAutoInit=*/false);
 }
@@ -2497,14 +2499,12 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
 
   // If we already have a pointer to the argument, reuse the input pointer.
   if (Arg.isIndirect()) {
-    // If we have a prettier pointer type at this point, bitcast to that.
     DeclPtr = Arg.getIndirectAddress();
     if (auto DebugAddr = Arg.getDebugAddr())
       DebugPtr = *DebugAddr;
     else
       DebugPtr = DeclPtr;
-    DeclPtr = Builder.CreateElementBitCast(DeclPtr, ConvertTypeForMem(Ty),
-                                           D.getName());
+    DeclPtr = DeclPtr.withElementType(ConvertTypeForMem(Ty));
     // Indirect argument is in alloca address space, which may be different
     // from the default address space.
     auto AllocaAS = CGM.getASTAllocaAddressSpace();
@@ -2531,9 +2531,11 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
       assert(getContext().getTargetAddressSpace(SrcLangAS) ==
              CGM.getDataLayout().getAllocaAddrSpace());
       auto DestAS = getContext().getTargetAddressSpace(DestLangAS);
-      auto *T = DeclPtr.getElementType()->getPointerTo(DestAS);
-      DeclPtr = DeclPtr.withPointer(getTargetHooks().performAddrSpaceCast(
-          *this, V, SrcLangAS, DestLangAS, T, true));
+      auto *T = llvm::PointerType::get(getLLVMContext(), DestAS);
+      DeclPtr =
+          DeclPtr.withPointer(getTargetHooks().performAddrSpaceCast(
+                                  *this, V, SrcLangAS, DestLangAS, T, true),
+                              DeclPtr.isKnownNonNull());
     }
 
     // Push a destructor cleanup for this parameter if the ABI requires it.

@@ -5,7 +5,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
+
 // UNSUPPORTED: c++03, c++11, c++14, c++17
+// UNSUPPORTED: GCC-ALWAYS_INLINE-FIXME
 
 // <deque>
 
@@ -20,7 +22,7 @@
 #include "min_allocator.h"
 
 template <class S, class Pred>
-void test0(S s, Pred p, S expected, size_t expected_erased_count) {
+void test0(S s, Pred p, S expected, std::size_t expected_erased_count) {
   ASSERT_SAME_TYPE(typename S::size_type, decltype(std::erase_if(s, p)));
   assert(expected_erased_count == std::erase_if(s, p));
   assert(s == expected);

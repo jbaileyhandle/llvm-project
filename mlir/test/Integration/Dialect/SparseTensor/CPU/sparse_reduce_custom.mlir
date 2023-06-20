@@ -2,7 +2,7 @@
 // DEFINE: %{compile} = mlir-opt %s --sparse-compiler=%{option}
 // DEFINE: %{run} = mlir-cpu-runner \
 // DEFINE:  -e entry -entry-point-result=void  \
-// DEFINE:  -shared-libs=%mlir_lib_dir/libmlir_c_runner_utils%shlibext | \
+// DEFINE:  -shared-libs=%mlir_c_runner_utils | \
 // DEFINE: FileCheck %s
 //
 // RUN: %{compile} | %{run}
@@ -18,7 +18,7 @@
 // Do the same run, but now with direct IR generation and, if available, VLA
 // vectorization.
 // REDEFINE: %{option} = "enable-runtime-library=false enable-buffer-initialization=true vl=4 reassociate-fp-reductions=true enable-index-optimizations=true enable-arm-sve=%ENABLE_VLA"
-// REDEFINE: %{run} = %lli \
+// REDEFINE: %{run} = %lli_host_or_aarch64_cmd \
 // REDEFINE:   --entry-function=entry_lli \
 // REDEFINE:   --extra-module=%S/Inputs/main_for_lli.ll \
 // REDEFINE:   %VLA_ARCH_ATTR_OPTIONS \
@@ -28,11 +28,11 @@
 
 // Reduction in this file _are_ supported by the AArch64 SVE backend
 
-#SparseVector = #sparse_tensor.encoding<{dimLevelType = ["compressed"]}>
-#CSR = #sparse_tensor.encoding<{dimLevelType = ["dense", "compressed"]}>
+#SparseVector = #sparse_tensor.encoding<{lvlTypes = ["compressed"]}>
+#CSR = #sparse_tensor.encoding<{lvlTypes = ["dense", "compressed"]}>
 #CSC = #sparse_tensor.encoding<{
-  dimLevelType = [ "dense", "compressed" ],
-  dimOrdering = affine_map<(i,j) -> (j,i)>
+  lvlTypes = [ "dense", "compressed" ],
+  dimToLvl = affine_map<(i,j) -> (j,i)>
 }>
 
 //

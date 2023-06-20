@@ -88,22 +88,22 @@ _SampleIterator __sample(_PopulationIterator __first,
       __g, _PopIterCategory());
 }
 
-#if _LIBCPP_STD_VER > 14
+#if _LIBCPP_STD_VER >= 17
 template <class _PopulationIterator, class _SampleIterator, class _Distance,
           class _UniformRandomNumberGenerator>
 inline _LIBCPP_INLINE_VISIBILITY
 _SampleIterator sample(_PopulationIterator __first,
                        _PopulationIterator __last, _SampleIterator __output_iter,
                        _Distance __n, _UniformRandomNumberGenerator&& __g) {
-  static_assert(__is_cpp17_forward_iterator<_PopulationIterator>::value ||
-                __is_cpp17_random_access_iterator<_SampleIterator>::value,
+  static_assert(__has_forward_iterator_category<_PopulationIterator>::value ||
+                __has_random_access_iterator_category<_SampleIterator>::value,
                 "SampleIterator must meet the requirements of RandomAccessIterator");
 
   return std::__sample<_ClassicAlgPolicy>(
       std::move(__first), std::move(__last), std::move(__output_iter), __n, __g);
 }
 
-#endif // _LIBCPP_STD_VER > 14
+#endif // _LIBCPP_STD_VER >= 17
 
 _LIBCPP_END_NAMESPACE_STD
 

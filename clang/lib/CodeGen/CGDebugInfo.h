@@ -56,7 +56,7 @@ class CGDebugInfo {
   friend class ApplyDebugLocation;
   friend class SaveAndRestoreLocation;
   CodeGenModule &CGM;
-  const codegenoptions::DebugInfoKind DebugKind;
+  const llvm::codegenoptions::DebugInfoKind DebugKind;
   bool DebugTypeExtRefs;
   llvm::DIBuilder DBuilder;
   llvm::DICompileUnit *TheCU = nullptr;
@@ -80,12 +80,11 @@ class CGDebugInfo {
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   llvm::DIType *Id##Ty = nullptr;
 #include "clang/Basic/OpenCLExtensionTypes.def"
+#define WASM_TYPE(Name, Id, SingletonId) llvm::DIType *SingletonId = nullptr;
+#include "clang/Basic/WebAssemblyReferenceTypes.def"
 
   /// Cache of previously constructed Types.
   llvm::DenseMap<const void *, llvm::TrackingMDRef> TypeCache;
-
-  std::map<llvm::StringRef, llvm::StringRef, std::greater<llvm::StringRef>>
-      DebugPrefixMap;
 
   /// Cache that maps VLA types to size expressions for that type,
   /// represented by instantiated Metadata nodes.
@@ -190,7 +189,15 @@ class CGDebugInfo {
   llvm::DIType *CreateType(const FunctionType *Ty, llvm::DIFile *F);
   /// Get structure or union type.
   llvm::DIType *CreateType(const RecordType *Tyg);
-  llvm::DIType *CreateTypeDefinition(const RecordType *Ty);
+
+  /// Create definition for the specified 'Ty'.
+  ///
+  /// \returns A pair of 'llvm::DIType's. The first is the definition
+  /// of the 'Ty'. The second is the type specified by the preferred_name
+  /// attribute on 'Ty', which can be a nullptr if no such attribute
+  /// exists.
+  std::pair<llvm::DIType *, llvm::DIType *>
+  CreateTypeDefinition(const RecordType *Ty);
   llvm::DICompositeType *CreateLimitedType(const RecordType *Ty);
   void CollectContainingType(const CXXRecordDecl *RD,
                              llvm::DICompositeType *CT);
@@ -274,6 +281,12 @@ class CGDebugInfo {
       llvm::DenseSet<CanonicalDeclPtr<const CXXRecordDecl>> &SeenTypes,
       llvm::DINode::DIFlags StartingFlags);
 
+  /// Helper function that returns the llvm::DIType that the
+  /// PreferredNameAttr attribute on \ref RD refers to. If no such
+  /// attribute exists, returns nullptr.
+  llvm::DIType *GetPreferredNameType(const CXXRecordDecl *RD,
+                                     llvm::DIFile *Unit);
+
   struct TemplateArgs {
     const TemplateParameterList *TList;
     llvm::ArrayRef<TemplateArgument> Args;
@@ -320,9 +333,15 @@ class CGDebugInfo {
   }
 
   /// Create new bit field member.
-  llvm::DIType *createBitFieldType(const FieldDecl *BitFieldDecl,
-                                   llvm::DIScope *RecordTy,
-                                   const RecordDecl *RD);
+  llvm::DIDerivedType *createBitFieldType(const FieldDecl *BitFieldDecl,
+                                          llvm::DIScope *RecordTy,
+                                          const RecordDecl *RD);
+
+  /// Create an anonnymous zero-size separator for bit-field-decl if needed on
+  /// the target.
+  llvm::DIDerivedType *createBitFieldSeparatorIfNeeded(
+      const FieldDecl *BitFieldDecl, const llvm::DIDerivedType *BitFieldDI,
+      llvm::ArrayRef<llvm::Metadata *> PreviousFieldsDI, const RecordDecl *RD);
 
   /// Helpers for collecting fields of a record.
   /// @{
@@ -601,7 +620,7 @@ private:
   /// Returns a pointer to the DILocalVariable associated with the
   /// llvm.dbg.def, or nullptr otherwise.
   llvm::DILocalVariable *EmitDef(const VarDecl *decl, llvm::Value *AI,
-                                 llvm::Optional<unsigned> ArgNo,
+                                 std::optional<unsigned> ArgNo,
                                  CGBuilderTy &Builder,
                                  const bool UsePointerValue = false);
 
@@ -737,7 +756,8 @@ private:
   llvm::DIGlobalVariableExpression *
   CollectAnonRecordDecls(const RecordDecl *RD, llvm::DIFile *Unit,
                          unsigned LineNo, StringRef LinkageName,
-                         llvm::GlobalVariable *Var, llvm::DIScope *DContext);
+                         llvm::dwarf::MemorySpace MS, llvm::GlobalVariable *Var,
+                         llvm::DIScope *DContext);
 
   /// Return a global variable that represents one of the collection of global
   /// variables created for an anonmyous union (-gheterogeneous-dwarf).
@@ -746,14 +766,10 @@ private:
   /// anonymous decl and create static variables for them. The first
   /// time this is called it needs to be on a union and then from
   /// there we can have additional unnamed fields.
-  llvm::DIGlobalVariable *
-  CollectAnonRecordDeclsForHeterogeneousDwarf(const RecordDecl *RD,
-                                              llvm::DIFile *Unit,
-                                              unsigned LineNo,
-                                              StringRef LinkageName,
-                                              llvm::GlobalVariable *Var,
-                                              llvm::DIScope *DContext);
-
+  llvm::DIGlobalVariable *CollectAnonRecordDeclsForHeterogeneousDwarf(
+      const RecordDecl *RD, llvm::DIFile *Unit, unsigned LineNo,
+      StringRef LinkageName, llvm::dwarf::MemorySpace MS,
+      llvm::GlobalVariable *Var, llvm::DIScope *DContext);
 
   /// Return flags which enable debug info emission for call sites, provided
   /// that it is supported and enabled.
@@ -843,7 +859,13 @@ public:
   ApplyDebugLocation(ApplyDebugLocation &&Other) : CGF(Other.CGF) {
     Other.CGF = nullptr;
   }
-  ApplyDebugLocation &operator=(ApplyDebugLocation &&) = default;
+
+  // Define copy assignment operator.
+  ApplyDebugLocation &operator=(ApplyDebugLocation &&Other) {
+    CGF = Other.CGF;
+    Other.CGF = nullptr;
+    return *this;
+  }
 
   ~ApplyDebugLocation();
 

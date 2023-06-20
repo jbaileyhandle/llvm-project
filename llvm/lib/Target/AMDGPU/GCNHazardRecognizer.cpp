@@ -588,23 +588,21 @@ int GCNHazardRecognizer::getWaitStatesSinceSetReg(IsHazardFn IsHazard,
 
 static void addRegUnits(const SIRegisterInfo &TRI, BitVector &BV,
                         MCRegister Reg) {
-  for (MCRegUnitIterator RUI(Reg, &TRI); RUI.isValid(); ++RUI)
-    BV.set(*RUI);
+  for (MCRegUnit Unit : TRI.regunits(Reg))
+    BV.set(Unit);
 }
 
 static void addRegsToSet(const SIRegisterInfo &TRI,
                          iterator_range<MachineInstr::const_mop_iterator> Ops,
-                         BitVector &Set) {
+                         BitVector &DefSet, BitVector &UseSet) {
   for (const MachineOperand &Op : Ops) {
     if (Op.isReg())
-      addRegUnits(TRI, Set, Op.getReg().asMCReg());
+      addRegUnits(TRI, Op.isDef() ? DefSet : UseSet, Op.getReg().asMCReg());
   }
 }
 
 void GCNHazardRecognizer::addClauseInst(const MachineInstr &MI) {
-  // XXX: Do we need to worry about implicit operands
-  addRegsToSet(TRI, MI.defs(), ClauseDefs);
-  addRegsToSet(TRI, MI.uses(), ClauseUses);
+  addRegsToSet(TRI, MI.operands(), ClauseDefs, ClauseUses);
 }
 
 static bool breaksSMEMSoftClause(MachineInstr *MI) {
@@ -1033,11 +1031,11 @@ int GCNHazardRecognizer::checkInlineAsmHazards(MachineInstr *IA) {
   const MachineRegisterInfo &MRI = MF.getRegInfo();
   int WaitStatesNeeded = 0;
 
-  for (unsigned I = InlineAsm::MIOp_FirstOperand, E = IA->getNumOperands();
-       I != E; ++I) {
-    const MachineOperand &Op = IA->getOperand(I);
+  for (const MachineOperand &Op :
+       llvm::drop_begin(IA->operands(), InlineAsm::MIOp_FirstOperand)) {
     if (Op.isReg() && Op.isDef()) {
-      WaitStatesNeeded = std::max(WaitStatesNeeded, checkVALUHazardsHelper(Op, MRI));
+      WaitStatesNeeded =
+          std::max(WaitStatesNeeded, checkVALUHazardsHelper(Op, MRI));
     }
   }
 

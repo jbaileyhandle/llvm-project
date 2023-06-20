@@ -26,6 +26,7 @@
 #include "llvm/CodeGen/MachinePassRegistry.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/RegAllocRegistry.h"
+#include "llvm/IR/HeterogeneousDebugVerify.h"
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/PassInstrumentation.h"
@@ -100,6 +101,9 @@ static cl::opt<bool> DisableCopyProp("disable-copyprop", cl::Hidden,
     cl::desc("Disable Copy Propagation pass"));
 static cl::opt<bool> DisablePartialLibcallInlining("disable-partial-libcall-inlining",
     cl::Hidden, cl::desc("Disable Partial Libcall Inlining"));
+static cl::opt<bool> DisableAtExitBasedGlobalDtorLowering(
+    "disable-atexit-based-global-dtor-lowering", cl::Hidden,
+    cl::desc("For MachO, disable atexit()-based global destructor lowering"));
 static cl::opt<bool> EnableImplicitNullChecks(
     "enable-implicit-null-checks",
     cl::desc("Fold null checks into faulting memory operations"),
@@ -879,7 +883,7 @@ void TargetPassConfig::addIRPasses() {
   // For MachO, lower @llvm.global_dtors into @llvm.global_ctors with
   // __cxa_atexit() calls to avoid emitting the deprecated __mod_term_func.
   if (TM->getTargetTriple().isOSBinFormatMachO() &&
-      TM->Options.LowerGlobalDtorsViaCxaAtExit)
+      !DisableAtExitBasedGlobalDtorLowering)
     addPass(createLowerGlobalDtorsLegacyPass());
 
   // Make sure that no unreachable blocks are instruction selected.
@@ -977,6 +981,8 @@ void TargetPassConfig::addISelPrepare() {
   // Force codegen to run according to the callgraph.
   if (requiresCodeGenSCCOrder())
     addPass(new DummyCGSCCPass);
+
+  addPass(createCallBrPass());
 
   // Add both the safe stack and the stack protection passes: each of them will
   // only protect functions that have corresponding attributes.
@@ -1080,11 +1086,13 @@ bool TargetPassConfig::addCoreISelPasses() {
 }
 
 bool TargetPassConfig::addISelPasses() {
+  addPass(createHeterogeneousDebugVerifyLegacyPass(TM->getOptLevel()));
+
   if (TM->useEmulatedTLS())
     addPass(createLowerEmuTLSPass());
 
-  addPass(createPreISelIntrinsicLoweringPass());
   PM->add(createTargetTransformInfoWrapperPass(TM->getTargetIRAnalysis()));
+  addPass(createPreISelIntrinsicLoweringPass());
   addPass(createExpandLargeDivRemPass());
   addPass(createExpandLargeFpConvertPass());
   addIRPasses();

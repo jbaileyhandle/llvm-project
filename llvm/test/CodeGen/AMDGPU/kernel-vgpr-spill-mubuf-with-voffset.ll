@@ -90,8 +90,18 @@ define amdgpu_kernel void @test_kernel(i32 %val) #0 {
 ; CHECK-NEXT:    v_mov_b32_e32 v0, s4
 ; CHECK-NEXT:    s_waitcnt vmcnt(0)
 ; CHECK-NEXT:    ds_write_b32 v0, v1
+; CHECK-NEXT:    s_or_saveexec_b64 s[34:35], -1
+; CHECK-NEXT:    s_add_i32 s4, s33, 0x100200
+; CHECK-NEXT:    buffer_load_dword v0, off, s[0:3], s4 ; 4-byte Folded Reload
+; CHECK-NEXT:    s_mov_b64 exec, s[34:35]
+; CHECK-NEXT:    ; kill: killed $vgpr0
 ; CHECK-NEXT:    s_endpgm
 ; CHECK-NEXT:  .LBB0_2: ; %end
+; CHECK-NEXT:    s_or_saveexec_b64 s[34:35], -1
+; CHECK-NEXT:    s_add_i32 s4, s33, 0x100200
+; CHECK-NEXT:    buffer_load_dword v0, off, s[0:3], s4 ; 4-byte Folded Reload
+; CHECK-NEXT:    s_mov_b64 exec, s[34:35]
+; CHECK-NEXT:    ; kill: killed $vgpr0
 ; CHECK-NEXT:    s_endpgm
   %arr = alloca < 1339 x i32>, align 8192, addrspace(5)
   %cmp = icmp ne i32 %val, 0

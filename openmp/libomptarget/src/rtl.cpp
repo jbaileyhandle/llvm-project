@@ -34,12 +34,12 @@ using namespace llvm::omp::target;
 
 // List of all plugins that can support offloading.
 static const char *RTLNames[] = {
-    /* PowerPC target       */ "libomptarget.rtl.ppc64",
-    /* x86_64 target        */ "libomptarget.rtl.x86_64",
+    /* AMDGPU target        */ "libomptarget.rtl.amdgpu",
     /* CUDA target          */ "libomptarget.rtl.cuda",
+    /* x86_64 target        */ "libomptarget.rtl.x86_64",
+    /* PowerPC target       */ "libomptarget.rtl.ppc64",
     /* AArch64 target       */ "libomptarget.rtl.aarch64",
     /* SX-Aurora VE target  */ "libomptarget.rtl.ve",
-    /* AMDGPU target        */ "libomptarget.rtl.amdgpu",
     /* Remote target        */ "libomptarget.rtl.rpc",
 };
 
@@ -130,16 +130,40 @@ void RTLsTy::loadRTLs() {
     }
   }
 
-  // Parse environement variable OMPX_APU_MAPS (if set)
-  if (auto *ApuMaps = getenv("OMPX_APU_MAPS")) {
-    auto Value{std::stoi(ApuMaps)};
-    if (Value > 0) {
-      DisableAllocationsForMapsOnApus = true;
+  // On APU systems (e.g., gfx940), running with
+  // OMPX_APU_MAPS=1, in default mode and HSA_XNACK=1 triggers
+  // disabling of most map clauses
+  // (except for declare target variables).
+  // Disabling means no device memory allocation
+  // and h2d or d2h memory copies are performed,
+  // but host thread allocated memory is used on
+  // devices. This behavior is reset if user app
+  // calls register requires later with unified_shared_memory flag
+  if (IsAPUSystem()) {
+    auto *ApuMaps = getenv("OMPX_APU_MAPS");
+    auto *hsaXnack = getenv("HSA_XNACK");
+    if (ApuMaps && hsaXnack) {
+      auto ApuMapsVal = std::stoi(ApuMaps);
+      auto hsaXnackVal = std::stoi(hsaXnack);
+
+      // OMPX_APU_MAPS is a temporary env variable
+      // that should always be used with HSA_XNACK=1:
+      // error if it is not. Once this is made default behavior
+      // for USM=OFF, HSA_XNACK=1, then we can remove the error
+      // as the behavior is only triggered by HSA_XNACK value
+      if (ApuMapsVal > 0 && hsaXnackVal == 0) {
+	FATAL_MESSAGE0(
+		       1,
+		       "OMPX_APU_MAPS behavior requires HSA_XNACK=1");
+      }
+      if (ApuMapsVal > 0 && hsaXnackVal > 0)
+        DisableAllocationsForMapsOnApus = true;
     }
   }
 
   DP("Loading RTLs...\n");
-  BoolEnvar NextGenPlugins("LIBOMPTARGET_NEXTGEN_PLUGINS", false);
+  BoolEnvar NextGenPlugins("LIBOMPTARGET_NEXTGEN_PLUGINS", true);
+  BoolEnvar UseFirstGoodRTL("LIBOMPTARGET_USE_FIRST_GOOD_RTL", false);
 
   // Attempt to open all the plugins and, if they exist, check if the interface
   // is correct and if they are supporting any devices.
@@ -150,9 +174,11 @@ void RTLsTy::loadRTLs() {
 
     const std::string BaseRTLName(Name);
     if (NextGenPlugins) {
-      if (attemptLoadRTL(BaseRTLName + ".nextgen.so", RTL))
+      if (attemptLoadRTL(BaseRTLName + ".nextgen.so", RTL)) {
+	if (UseFirstGoodRTL)
+	  break;
         continue;
-
+      }
       DP("Falling back to original plugin...\n");
     }
 
@@ -222,6 +248,9 @@ bool RTLsTy::attemptLoadRTL(const std::string &RTLName, RTLInfoTy &RTL) {
     ValidPlugin = false;
   if (!(*((void **)&RTL.launch_kernel) =
             DynLibrary->getAddressOfSymbol("__tgt_rtl_launch_kernel")))
+    ValidPlugin = false;
+  if (!(*((void **)&RTL.launch_kernel_sync) =
+            DynLibrary->getAddressOfSymbol("__tgt_rtl_launch_kernel_sync")))
     ValidPlugin = false;
 
   // Invalid plugin
@@ -410,6 +439,31 @@ static __tgt_image_info getImageInfo(__tgt_device_image *Image) {
   return __tgt_image_info{(*BinaryOrErr)->getArch().data()};
 }
 
+// Temp workaround due to the presence of OMPX_APU_MAPS
+// to enable unified shared memory mode for default programs
+// run with HSA_XNACK=1. Remove once the OMPX_APU_MAPS mode is
+// made default
+void RTLsTy::disableAPUMapsForUSM(int64_t RequiresFlags) {
+  // TODO: insert any other missing checks
+  if (RequiresFlags & OMP_REQ_UNIFIED_SHARED_MEMORY)
+    DisableAllocationsForMapsOnApus = false;
+}
+
+bool RTLsTy::requiresAllocForGlobal(const void *HstPtr) {
+  auto It =
+      std::find_if(HostPtrsRequireAlloc.begin(), HostPtrsRequireAlloc.end(),
+                   [=](const void *Arg) { return Arg == HstPtr; });
+  return It != HostPtrsRequireAlloc.end();
+}
+void RTLsTy::markHostPtrForRequiresAlloc(const void *HstPtr) {
+  if (!requiresAllocForGlobal(HstPtr))
+    HostPtrsRequireAlloc.insert(HstPtr);
+}
+
+void RTLsTy::deMarkHostPtrForRequiresAlloc(const void *HstPtr) {
+  assert(false);
+}
+
 void RTLsTy::registerRequires(int64_t Flags) {
   // TODO: add more elaborate check.
   // Minimal check: only set requires flags if previous value
@@ -420,6 +474,7 @@ void RTLsTy::registerRequires(int64_t Flags) {
          "illegal undefined flag for requires directive!");
   if (RequiresFlags == OMP_REQ_UNDEFINED) {
     RequiresFlags = Flags;
+    disableAPUMapsForUSM(RequiresFlags);
     return;
   }
 
@@ -445,6 +500,8 @@ void RTLsTy::registerRequires(int64_t Flags) {
         "'#pragma omp requires unified_shared_memory' not used consistently!");
   }
 
+  disableAPUMapsForUSM(RequiresFlags);
+  
   // TODO: insert any other missing checks
 
   DP("New requires flags %" PRId64 " compatible with existing %" PRId64 "!\n",
@@ -539,6 +596,14 @@ void RTLsTy::registerLib(__tgt_bin_desc *Desc) {
       PM->TrlTblMtx.lock();
       if (!PM->HostEntriesBeginToTransTable.count(Desc->HostEntriesBegin)) {
         PM->HostEntriesBeginRegistrationOrder.push_back(Desc->HostEntriesBegin);
+        // Add all globals to the list of globals in this image, so later
+        // look-ups for globals are faster.
+        for (auto *Entry : PM->HostEntriesBeginRegistrationOrder)
+          if (Entry->size > 0) // globals have a size larger 0
+            HostPtrsRequireAlloc.insert(Entry->addr);
+        DP("USM_SPECIAL: Marked %i pointers for alloc handling\n",
+           HostPtrsRequireAlloc.size());
+
         TranslationTable &TransTable =
             (PM->HostEntriesBeginToTransTable)[Desc->HostEntriesBegin];
         TransTable.HostTable.EntriesBegin = Desc->HostEntriesBegin;
@@ -671,6 +736,21 @@ void RTLsTy::unregisterLib(__tgt_bin_desc *Desc) {
 
 bool RTLsTy::SystemSupportManagedMemory() {
   for (auto it : archsSupportingManagedMemory)
+    if (isHomogeneousSystemOf(it))
+      return true;
+  return false;
+}
+
+// HACK: These depricated device stubs still needs host versions for fallback
+// FIXME: Deprecate upstream, change test cases to use malloc & free directly
+extern "C" char *global_allocate(uint32_t sz) { return (char *)malloc(sz); }
+extern "C" int global_free(void *ptr) {
+  free(ptr);
+  return 0;
+}
+
+bool RTLsTy::IsAPUSystem() {
+  for (auto it : archsAPU)
     if (isHomogeneousSystemOf(it))
       return true;
   return false;

@@ -217,6 +217,11 @@ void DwarfUnit::insertDIE(DIE *D) {
   MDNodeToDieMap.insert(std::make_pair(nullptr, D));
 }
 
+void DwarfUnit::addMemorySpaceAttribute(DIE &D, dwarf::MemorySpace MS) {
+  if (MS != dwarf::DW_MSPACE_LLVM_none)
+    addUInt(D, dwarf::DW_AT_LLVM_memory_space, dwarf::DW_FORM_data4, MS);
+}
+
 void DwarfUnit::addFlag(DIE &Die, dwarf::Attribute Attribute) {
   if (DD->getDwarfVersion() >= 4)
     addAttribute(Die, Attribute, dwarf::DW_FORM_flag_present, DIEInteger(1));
@@ -552,7 +557,7 @@ void DwarfUnit::addAccess(DIE &Die, DINode::DIFlags Flags) {
 }
 
 DIE *DwarfUnit::getOrCreateContextDIE(const DIScope *Context) {
-  if (!Context || isa<DIFile>(Context))
+  if (!Context || isa<DIFile>(Context) || isa<DICompileUnit>(Context))
     return &getUnitDie();
   if (auto *T = dyn_cast<DIType>(Context))
     return getOrCreateTypeDIE(T);
@@ -808,9 +813,14 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DIDerivedType *DTy) {
   // If DWARF address space value is other than None, add it.  The IR
   // verifier checks that DWARF address space only exists for pointer
   // or reference types.
-  if (DTy->getDWARFAddressSpace())
-    addUInt(Buffer, dwarf::DW_AT_address_class, dwarf::DW_FORM_data4,
-            *DTy->getDWARFAddressSpace());
+  if (auto AS = DTy->getDWARFAddressSpace()) {
+    // TODO: Drop address_class once the debugger adopts address_space
+    for (auto ASTag :
+         {dwarf::DW_AT_address_class, dwarf::DW_AT_LLVM_address_space})
+      addUInt(Buffer, ASTag, dwarf::DW_FORM_data4, *AS);
+  }
+
+  addMemorySpaceAttribute(Buffer, DTy->getDWARFMemorySpace());
 }
 
 void DwarfUnit::constructSubprogramArguments(DIE &Buffer, DITypeRefArray Args) {
@@ -1232,7 +1242,7 @@ bool DwarfUnit::applySubprogramDefinitionAttributes(const DISubprogram *SP,
          "decl has a linkage name and it is different");
   if (DeclLinkageName.empty() &&
       // Always emit it for abstract subprograms.
-      (DD->useAllLinkageNames() || DU->getAbstractSPDies().lookup(SP)))
+      (DD->useAllLinkageNames() || DU->getAbstractScopeDIEs().lookup(SP)))
     addLinkageName(SPDie, LinkageName);
 
   if (!DeclDie)
@@ -1377,16 +1387,16 @@ void DwarfUnit::constructSubrangeDIE(DIE &Buffer, const DISubrange *SR,
 
   auto AddBoundTypeEntry = [&](dwarf::Attribute Attr,
                                DISubrange::BoundType Bound) -> void {
-    if (auto *BV = Bound.dyn_cast<DIVariable *>()) {
+    if (auto *BV = dyn_cast_if_present<DIVariable *>(Bound)) {
       if (auto *VarDIE = getDIE(BV))
         addDIEEntry(DW_Subrange, Attr, *VarDIE);
-    } else if (auto *BE = Bound.dyn_cast<DIExpression *>()) {
+    } else if (auto *BE = dyn_cast_if_present<DIExpression *>(Bound)) {
       DIELoc *Loc = new (DIEValueAllocator) DIELoc;
       DIEDwarfExpression DwarfExpr(*Asm, getCU(), *Loc);
       DwarfExpr.setMemoryLocationKind();
       DwarfExpr.addExpression(BE);
       addBlock(DW_Subrange, Attr, DwarfExpr.finalize());
-    } else if (auto *BI = Bound.dyn_cast<ConstantInt *>()) {
+    } else if (auto *BI = dyn_cast_if_present<ConstantInt *>(Bound)) {
       if (Attr == dwarf::DW_AT_count) {
         if (BI->getSExtValue() != -1)
           addUInt(DW_Subrange, Attr, std::nullopt, BI->getSExtValue());
@@ -1416,10 +1426,10 @@ void DwarfUnit::constructGenericSubrangeDIE(DIE &Buffer,
 
   auto AddBoundTypeEntry = [&](dwarf::Attribute Attr,
                                DIGenericSubrange::BoundType Bound) -> void {
-    if (auto *BV = Bound.dyn_cast<DIVariable *>()) {
+    if (auto *BV = dyn_cast_if_present<DIVariable *>(Bound)) {
       if (auto *VarDIE = getDIE(BV))
         addDIEEntry(DwGenericSubrange, Attr, *VarDIE);
-    } else if (auto *BE = Bound.dyn_cast<DIExpression *>()) {
+    } else if (auto *BE = dyn_cast_if_present<DIExpression *>(Bound)) {
       if (BE->isConstant() &&
           DIExpression::SignedOrUnsignedConstant::SignedConstant ==
               *BE->isConstant()) {
@@ -1478,7 +1488,7 @@ static bool hasVectorBeenPadded(const DICompositeType *CTy) {
   const auto Subrange = cast<DISubrange>(Elements[0]);
   const auto NumVecElements =
       Subrange->getCount()
-          ? Subrange->getCount().get<ConstantInt *>()->getSExtValue()
+          ? cast<ConstantInt *>(Subrange->getCount())->getSExtValue()
           : 0;
 
   // Ensure we found the element count and that the actual size is wide
