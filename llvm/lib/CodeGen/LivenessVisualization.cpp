@@ -73,7 +73,12 @@ using namespace llvm;
 #define LOCATION_PADDING_AMOUNT 35
 
 #define SEMI_HOT_PERCENT 0.8
-const int col_width[] = {6,6,6,5,30,45};
+#define SLOT_COL_WIDTH 6
+#define PERCENT_PEAK_COL_WIDTH 6
+#define NUM_LIVE_REGS_COL_WIDTH 6
+#define REG_USAGE_COL_WIDTH 6
+#define SRC_COL_WIDTH 30
+#define ASM_COL_WIDTH 45
 
 
 char LivenessVisualization::ID = 0;
@@ -174,12 +179,18 @@ std::vector<LivenessVisualization::GraphBB::RegSegment> LivenessVisualization::G
 
     for(unsigned i = 0; i < LVpass_->member_vars_.MRI_->getNumVirtRegs(); ++i) {
         Register reg = Register::index2VirtReg(i);
+        //LLT reg_type = LVpass_->member_vars_.MRI_->getType(reg);
 
         if(LVpass_->member_vars_.LIA_->hasInterval(reg)) {
             const LiveInterval *interval = &(LVpass_->member_vars_.LIA_->getInterval(reg));
             if(interval->liveAt(si)) {
                 live_virt_registers.push_back(RegSegment(reg, interval->getSegmentContaining(si)));
                 info.live_virt_registers_.push_back(reg);
+                /*
+                if(reg_type.isScalar) {
+                    info.live_virt_scalar_registers_.push_back(reg);
+                }
+                */
             }
         }
     }
@@ -362,9 +373,9 @@ std::vector<Register> LivenessVisualization::getLiveVirtRegsInRange(SlotIndex be
 char LivenessVisualization::SlotIndexInfo::getRegUsageSymbol(Register reg) const {
     assert(mi_ != nullptr);
     bool live = std::find(live_virt_registers_.begin(), live_virt_registers_.end(), reg) != live_virt_registers_.end();
-    // Note - could also possible use readsWritesVirtualRegister here
     bool read = mi_->readsRegister(reg, LVpass_->member_vars_.TRI_);
     bool write = mi_->modifiesRegister(reg, LVpass_->member_vars_.TRI_);
+
     if(read && write) {
         return 'X';
     } else if(read) {
@@ -382,15 +393,15 @@ std::string LivenessVisualization::regHeaderStr(const std::vector<Register>& reg
     std::stringstream sstream;
     std::string dummy;
 
-    sstream << std::right << std::setw(col_width[0]) << "slot" << " | ";
-    sstream << std::right << std::setw(col_width[1]) << "\%peak" << " | ";
-    sstream << std::right << std::setw(col_width[2]) << "#live" << " | ";
+    sstream << std::right << std::setw(SLOT_COL_WIDTH) << "slot" << " | ";
+    sstream << std::right << std::setw(PERCENT_PEAK_COL_WIDTH) << "\%peak" << " | ";
+    sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << "#live" << " | ";
     for(Register reg : registers) {
         auto printable_vreg_or_unit = printVRegOrUnit(reg, member_vars_.TRI_);
-        sstream << std::setw(col_width[3]) << objPtrToString(&printable_vreg_or_unit);
+        sstream << std::setw(REG_USAGE_COL_WIDTH) << objPtrToString(&printable_vreg_or_unit);
     }
     sstream << " | ";
-    sstream << std::left << std::setw(col_width[4]) << "src" << " | ";
+    sstream << std::left << std::setw(SRC_COL_WIDTH) << "src" << " | ";
 
     return sstream.str();
 }
@@ -398,19 +409,19 @@ std::string LivenessVisualization::regHeaderStr(const std::vector<Register>& reg
 std::string LivenessVisualization::SlotIndexInfo::toString(const std::vector<Register>& registers) const {
     std::stringstream sstream;
 
-    sstream << std::right << std::setw(col_width[0]) << objPtrToString(&si_) << " | ";
-    sstream << std::right << std::setw(col_width[1]-1) << std::fixed << std::setprecision(0) << percent_virt_live_registers_*100.0 << "% | ";
-    sstream << std::right << std::setw(col_width[2]) << live_virt_registers_.size() << " | ";
+    sstream << std::right << std::setw(SLOT_COL_WIDTH) << objPtrToString(&si_) << " | ";
+    sstream << std::right << std::setw(PERCENT_PEAK_COL_WIDTH-1) << std::fixed << std::setprecision(0) << percent_virt_live_registers_*100.0 << "% | ";
+    sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << live_virt_registers_.size() << " | ";
     for(Register reg : registers) {
-        sstream << std::setw(col_width[3]) << getRegUsageSymbol(reg);
+        sstream << std::setw(REG_USAGE_COL_WIDTH) << getRegUsageSymbol(reg);
     }
     sstream << " | ";
     /*
     std::string mi_str_copy = mi_str_;
     mi_str_copy.resize(std::min(mi_str_copy.size(), 200 - sstream.str().size()));
     */
-    sstream << std::left << std::setw(col_width[4]) << src_location_ << " | ";
-    sstream << std::left << std::setw(col_width[5]) << mi_str_;
+    sstream << std::left << std::setw(SRC_COL_WIDTH) << src_location_ << " | ";
+    sstream << std::left << std::setw(ASM_COL_WIDTH) << mi_str_;
 
     return sstream.str();
 }
@@ -462,7 +473,7 @@ void LivenessVisualization::emitGraphBBs(std::ofstream &dot_file) const {
     }
 }
 
-// TODO: put in constructor
+// MemberVars constructor
 LivenessVisualization::MemberVars::MemberVars(const MachineFunction &fn, LiveIntervals *LIA) {
     MF_ = &fn;
     MRI_ = &MF_->getRegInfo();
@@ -474,6 +485,7 @@ LivenessVisualization::MemberVars::MemberVars(const MachineFunction &fn, LiveInt
 }
 
 bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
+
     // Only care about GPU code.
     if(!(fn.getTarget().getTargetTriple().isAMDGPU() || fn.getTarget().getTargetTriple().isNVPTX())) {
         return false;
@@ -482,6 +494,7 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
     // Init variables.
     member_vars_ = MemberVars(fn, &getAnalysis<LiveIntervals>());
 
+    // Open dot file
     std::ofstream dot_file;
     dot_file.open(member_vars_.sanitized_func_name_+ ".dot");
     dot_file << "digraph {\n";

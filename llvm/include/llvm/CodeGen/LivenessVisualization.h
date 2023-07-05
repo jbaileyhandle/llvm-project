@@ -166,7 +166,7 @@ class VirtRegMap;
         // Return virtual registers that are live at the SlotIndex.
         std::vector<RegSegment> getLiveVirtRegsAtSlotIndex(const SlotIndex, SlotIndexInfo &info);
 
-        // Return virtual registers that are live at the SlotIndex.
+        // Return physical registers that are live at the SlotIndex.
         std::vector<RegSegment> getLivePhysRegsAtSlotIndex(const SlotIndex);
 
 
