@@ -64,7 +64,7 @@ class VirtRegMap;
     // Store information about liveness at a SlotIndex.
     class SlotIndexInfo {
     public:
-        SlotIndexInfo(SlotIndex si, LivenessVisualization *LVpass);
+        SlotIndexInfo(SlotIndex si, const LivenessVisualization *LVpass);
 
         // Return a string representing the SlotIndexInfo.
         // "registers" indicates for which registers to report register
@@ -113,22 +113,29 @@ class VirtRegMap;
         void markHotspot(int function_max_virt_live);
 
         // Add text descriptor of connections to children to descriptor.
-        void emitConnections(std::ofstream& dot_file) const;
-
-        // Get a report showing register liveness for the BB.
-        std::string getLinearReport() const;
+        void emitXdotConnections(std::ofstream& dot_file) const;
 
         // Write a linear / text report showing register liveness for the BB.
-        void emitLinearReport() const;
+        void emitTextReport() const;
 
         // Add node descriptor to descriptor.
-        void emitNode(std::ofstream& dot_file) const;
+        void emitXdotNode(std::ofstream& dot_file) const;
+
+        // Get start and end Slot Indexes
+        SlotIndex getStartIdx() const;
+        SlotIndex getEndIdx() const;
+
+        // Generate a string showing register liveness in the BB.
+        // title is placed in the first line of the stirng.
+        // newline is inserted between each line.
+        std::string getLinearReport(std::string title, std::string newline) const;
+
+        // Return the virtual registers that are live in the BB, ordered
+        // by first instance of liveness.
+        std::vector<Register> getLiveVirtRegsInBB() const;
 
         // Return max_virt_live.
         int getMaxVirtLive() const;
-
-        // Return an xdot-friendly name for the basic block.
-        std::string getSanitizedMBBName(const MachineBasicBlock &MBB);
 
         class RegSegment {
         public:
@@ -139,19 +146,6 @@ class VirtRegMap;
 
     private:
 
-        // Add instructions at the SlotIndex to node description.
-        void addInstructionAtSlotIndex(const SlotIndex, SlotIndexInfo &info);
-
-        // Add instruction location at the SlotIndex to node description.
-        void addInstructionLocationAtSlotIndex(const SlotIndex, SlotIndexInfo &info);
-
-        // Add the virtual instruciton for the LiveInterval to node description
-        // if it is live at at the given SlotIndex.
-        void addRegistersAtSlotIndex(const SlotIndex, SlotIndexInfo &info);
-
-        // Add left-justified newline to label.
-        void addNewlineToLabel();
-
         // Return a string w/ graphviz attributes to mark this BB as a hotspot
         // Return an empty string if this BB is not a hotspot.
         std::string getHotspotAttr() const;
@@ -159,17 +153,20 @@ class VirtRegMap;
         // Return physical registers that are live at the SlotIndex.
         std::vector<RegSegment> getLivePhysRegsAtSlotIndex(const SlotIndex);
 
+        // Helper function to generate header of register portion of linear report
+        std::string getRegHeaderStr(const std::vector<Register>& registers) const;
+
+        // Return an xdot-friendly name for the basic block.
+        std::string getSanitizedMBBName() const;
+
+        // Get a report showing register liveness for the BB.
+        std::string getLinearReport() const;
+
+        // Map form SlotIndexes to info about SlotIndexes.
+        std::map<SlotIndex, SlotIndexInfo> si_to_info_;
+
         // The successor nodes of this basic block. 
         std::vector<GraphBB*> children_;
-
-        // Slot indexes.
-        SlotIndexes *indexes_;
-
-        // For building up a descriptor (instructions, live registers) of
-        // this basic block.
-        std::string label_str_;
-
-        const LivenessVisualization *LVpass_;
 
         // Unique name of the basic block.
         std::string name_;
@@ -182,6 +179,13 @@ class VirtRegMap;
 
         // MachineBasicBlock which this graph node models.
         const MachineBasicBlock *MBB_;
+
+        // Liveness pass
+        const LivenessVisualization *LVpass_;
+
+        // Slot indexes.
+        SlotIndexes *indexes_;
+
     };
 
 
@@ -192,27 +196,8 @@ class VirtRegMap;
     // Emit the GraphBBs to dot_file.
     void emitGraphBBs(std::ofstream &dot_file) const;
 
-    // Generate a text report showing register liveness in the range [begin, end_inclusive].
-    // name_stub forms the base of the file name.
-    void emitLinearReport(std::string name_stub, SlotIndex begin, SlotIndex end_inclusive) const;
-
-    // Generate a string showing register liveness in the range [begin, end_inclusive].
-    // title is placed in the first line of the stirng.
-    // newline is inserted between each line.
-    std::string getLinearReport(std::string title, std::string newline, SlotIndex begin, SlotIndex end_inclusive) const;
-
-    // Helper function for the above linear report functions.
-    std::string regHeaderStr(const std::vector<Register>& registers) const;
-
-    // Return the virtual registers that are live in the range [begin, end_inclusive], ordered
-    // by first instance of liveness.
-    std::vector<Register> getLiveVirtRegsInRange(SlotIndex begin, SlotIndex end_inclusive) const;
-
     // Get the name of the function, modified cleanliness.
     static std::string getSanitizedFuncName(const MachineFunction *fn);
-
-    // Get a modified version of str which is safe to emit as an xdot label.
-    static std::string getSanitizedXdotLabelStr(const std::string& str);
 
     // Initialize member variables to run pass on a new function.
     void initVarsPerFunction(const MachineFunction &fn);
@@ -227,9 +212,6 @@ class VirtRegMap;
         // Map MachineBasicBlock's of the function to the GraphBB's
         // representing the basic blocks in the dot graph.
         std::unordered_map<const MachineBasicBlock*, GraphBB> mbb_to_gbb_;
-
-        // Map form SlotIndexes to info about SlotIndexes.
-        std::map<SlotIndex, SlotIndexInfo> si_to_info_;
 
         // Greatest number of virtual registers live at any point in the function.
         int function_max_virt_live_ = 0;
