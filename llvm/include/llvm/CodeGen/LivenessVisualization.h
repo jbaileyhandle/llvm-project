@@ -64,19 +64,7 @@ class VirtRegMap;
     // Store information about liveness at a SlotIndex.
     class SlotIndexInfo {
     public:
-        SlotIndexInfo(SlotIndex si, LivenessVisualization *LVpass): si_(si), mi_(LVpass->member_vars_.indexes_->getInstructionFromIndex(si)), LVpass_(LVpass) {}
-
-        void probe() const {
-            MachineInstr *new_mi = LVpass_->member_vars_.indexes_->getInstructionFromIndex(si_);
-            outs() << "probe this: " << this << "\n";
-            outs() << "probe LVpass_: " << LVpass_ << "\n";
-            outs() << "probe indexes_: " << LVpass_->member_vars_.indexes_ << "\n";
-            outs() << "probe si_: " << si_ << "\n";
-            outs() << "probe new_mi: " << new_mi << "\n";
-            outs() << "probe vs mi_: " << mi_ << "\n";
-            outs().flush();
-            assert(mi_ == new_mi);
-        }
+        SlotIndexInfo(SlotIndex si, LivenessVisualization *LVpass);
 
         // Return a string representing the SlotIndexInfo.
         // "registers" indicates for which registers to report register
@@ -99,6 +87,17 @@ class VirtRegMap;
         std::string src_location_;
 
         const LivenessVisualization *LVpass_;
+
+    private:
+        // Constructor helper to save string of source locatoin of slot index
+        void addInstructionLocationStr();
+
+        // Constructor helpers to save registers at slot index
+        void addRegisters();
+        void addLiveVirtRegs();
+
+        // Constructor helper to save instruction string
+        void addInstructionStr();
     };
 
     // Class used to build up information for a basic
@@ -109,9 +108,6 @@ class VirtRegMap;
 
         // Link this GraphBB to its children GraphBB's
         void addChildren(std::unordered_map<const MachineBasicBlock*, GraphBB>& mbb_to_gbb);
-
-        // Add information for the given slot index to the node.
-        void addSlotIndex(const SlotIndex, SlotIndexInfo &info);
 
         // Color BB if it is a register pressure hotspot.
         void markHotspot(int function_max_virt_live);
@@ -153,9 +149,6 @@ class VirtRegMap;
         // if it is live at at the given SlotIndex.
         void addRegistersAtSlotIndex(const SlotIndex, SlotIndexInfo &info);
 
-        // Helper function to addRegistersAtSlotIndex for printing registers to label.
-        void addSetOfLiveRegs(std::vector<RegSegment>& live_registers, std::string label);
-
         // Add left-justified newline to label.
         void addNewlineToLabel();
 
@@ -163,12 +156,8 @@ class VirtRegMap;
         // Return an empty string if this BB is not a hotspot.
         std::string getHotspotAttr() const;
 
-        // Return virtual registers that are live at the SlotIndex.
-        std::vector<RegSegment> getLiveVirtRegsAtSlotIndex(const SlotIndex, SlotIndexInfo &info);
-
         // Return physical registers that are live at the SlotIndex.
         std::vector<RegSegment> getLivePhysRegsAtSlotIndex(const SlotIndex);
-
 
         // The successor nodes of this basic block. 
         std::vector<GraphBB*> children_;
@@ -187,6 +176,7 @@ class VirtRegMap;
 
         // Greatest number of virtual registers live at any point in the BB.
         int max_virt_live_ = 0;
+
         // "max_virt_live_" as a percent of function_max_virt_live_.
         float percent_max_virt_live_;
 
