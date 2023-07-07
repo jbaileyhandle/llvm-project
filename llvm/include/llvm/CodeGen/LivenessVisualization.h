@@ -61,15 +61,17 @@ class VirtRegMap;
     bool runOnMachineFunction(MachineFunction&) override;
     bool doFinalization(Module &M) override;
 
+    class GraphBB;
+
     // Store information about liveness at a SlotIndex.
     class SlotIndexInfo {
     public:
-        SlotIndexInfo(SlotIndex si, const LivenessVisualization *LVpass);
+        SlotIndexInfo(SlotIndex si, const GraphBB *graph_bb, const LivenessVisualization *LVpass);
 
         // Return a string representing the SlotIndexInfo.
         // "registers" indicates for which registers to report register
         // liveness.
-        std::string toString(const std::vector<Register>& registers) const;
+        std::string toString() const;
 
         // For the register "reg" at this slot index, return
         // ' ' if the register is not live
@@ -79,6 +81,15 @@ class VirtRegMap;
         // 'X' if the register is both read and written
         char getRegUsageSymbol(Register reg) const;
 
+        int getNumLiveVirtRegisters() const {
+            return (int)live_virt_registers_.size();
+        }
+
+        void setLivenessPercent(int function_max_virt_registers_live) {
+            percent_virt_live_registers_ = (float)getNumLiveVirtRegisters() / (float)function_max_virt_registers_live;
+        }
+
+        // TODO: Move some of this to private?
         const SlotIndex si_;
         float percent_virt_live_registers_;
         std::vector<Register> live_virt_registers_;
@@ -86,6 +97,7 @@ class VirtRegMap;
         std::string mi_str_;
         std::string src_location_;
 
+        const GraphBB *graph_bb_;
         const LivenessVisualization *LVpass_;
 
     private:
@@ -104,13 +116,13 @@ class VirtRegMap;
     // block in the final dot file.
     class GraphBB {
     public:
-        GraphBB(LivenessVisualization*, const MachineBasicBlock &MBB);
+        GraphBB(LivenessVisualization*, const MachineBasicBlock *MBB);
 
         // Link this GraphBB to its children GraphBB's
         void addChildren(std::unordered_map<const MachineBasicBlock*, GraphBB>& mbb_to_gbb);
 
-        // Color BB if it is a register pressure hotspot.
-        void markHotspot(int function_max_virt_live);
+        // Mark register usage as percent of max
+        void markHotspot(int function_max_virt_registers_live);
 
         // Add text descriptor of connections to children to descriptor.
         void emitXdotConnections(std::ofstream& dot_file) const;
@@ -121,21 +133,27 @@ class VirtRegMap;
         // Add node descriptor to descriptor.
         void emitXdotNode(std::ofstream& dot_file) const;
 
+        // Virtual registers that are live in the BB, ordered by first
+        // instance of liveness
+        std::vector<Register> getLiveVirtRegsInBB() const {
+            return live_virt_regs_in_BB_;
+        }
+
         // Get start and end Slot Indexes
         SlotIndex getStartIdx() const;
         SlotIndex getEndIdx() const;
+
+        std::string getName() const {
+            return name_;
+        }
 
         // Generate a string showing register liveness in the BB.
         // title is placed in the first line of the stirng.
         // newline is inserted between each line.
         std::string getLinearReport(std::string title, std::string newline) const;
 
-        // Return the virtual registers that are live in the BB, ordered
-        // by first instance of liveness.
-        std::vector<Register> getLiveVirtRegsInBB() const;
-
-        // Return max_virt_live.
-        int getMaxVirtLive() const;
+        // Return max_virt_registers_live_
+        int getMaxVirtRegistersLive() const;
 
         class RegSegment {
         public:
@@ -146,6 +164,14 @@ class VirtRegMap;
 
     private:
 
+        // Construcotr helper to populate virtual registers that are live in the BB, ordered
+        // by first instance of liveness.
+        void addLiveVirtRegsInBB();
+
+        // Construcotr helper to determine the greatest number of virtual registers
+        // live at once
+        void setMaxLiveVirtRegs();
+
         // Return a string w/ graphviz attributes to mark this BB as a hotspot
         // Return an empty string if this BB is not a hotspot.
         std::string getHotspotAttr() const;
@@ -154,7 +180,7 @@ class VirtRegMap;
         std::vector<RegSegment> getLivePhysRegsAtSlotIndex(const SlotIndex);
 
         // Helper function to generate header of register portion of linear report
-        std::string getRegHeaderStr(const std::vector<Register>& registers) const;
+        std::string getLinearReportHeaderStr() const;
 
         // Return an xdot-friendly name for the basic block.
         std::string getSanitizedMBBName() const;
@@ -162,8 +188,15 @@ class VirtRegMap;
         // Get a report showing register liveness for the BB.
         std::string getLinearReport() const;
 
-        // Map form SlotIndexes to info about SlotIndexes.
-        std::map<SlotIndex, SlotIndexInfo> si_to_info_;
+        // List of info about SlotIndexes in BB in order of instructions.
+        // Really, want this to be std::vector, but this won't compile
+        // becuase operator= of SlotIndexInfo is not valid because of
+        // const member variables.
+        std::list<SlotIndexInfo> si_info_list_;
+
+        // Virtual registers that are live in the BB, ordered by first
+        // instance of liveness
+        std::vector<Register> live_virt_regs_in_BB_;
 
         // The successor nodes of this basic block. 
         std::vector<GraphBB*> children_;
@@ -172,10 +205,10 @@ class VirtRegMap;
         std::string name_;
 
         // Greatest number of virtual registers live at any point in the BB.
-        int max_virt_live_ = 0;
+        int max_virt_registers_live_ = 0;
 
         // "max_virt_live_" as a percent of function_max_virt_live_.
-        float percent_max_virt_live_;
+        float percent_max_virt_registers_live_;
 
         // MachineBasicBlock which this graph node models.
         const MachineBasicBlock *MBB_;
@@ -214,7 +247,7 @@ class VirtRegMap;
         std::unordered_map<const MachineBasicBlock*, GraphBB> mbb_to_gbb_;
 
         // Greatest number of virtual registers live at any point in the function.
-        int function_max_virt_live_ = 0;
+        int function_max_virt_registers_live_ = 0;
 
         std::string sanitized_func_name_;
         LiveIntervals *LIA_ = nullptr;

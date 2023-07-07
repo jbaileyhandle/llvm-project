@@ -199,6 +199,7 @@ LivenessVisualization::GraphBB::GraphBB(LivenessVisualization *LVpass, const Mac
 
     // Add live virtual registers.
     addLiveVirtRegsInBB();
+    setMaxLiveVirtRegs();
 }
 
 // Get first / last slot index in GraphBB
@@ -230,19 +231,22 @@ std::vector<LivenessVisualization::GraphBB::RegSegment> LivenessVisualization::G
     return live_phys_registers;
 }
 
-int LivenessVisualization::GraphBB::getMaxVirtLive() const {
-    return max_virt_live_;
+int LivenessVisualization::GraphBB::getMaxVirtRegistersLive() const {
+    return max_virt_registers_live_;
 }
 
-void LivenessVisualization::GraphBB::markHotspot(int function_max_virt_live) {
-    percent_max_virt_live_ = (float)max_virt_live_ / (float)function_max_virt_live;
+void LivenessVisualization::GraphBB::markHotspot(int function_max_virt_registers_live) {
+    percent_max_virt_registers_live_ = (float)max_virt_registers_live_ / (float)function_max_virt_registers_live;
+    for(auto &info : si_info_list_) {
+        info.setLivenessPercent(function_max_virt_registers_live);
+    }
 }
 
 std::string LivenessVisualization::GraphBB::getHotspotAttr() const {
     std::string attr_str;
-    if(percent_max_virt_live_ >= SEMI_HOT_PERCENT) {
+    if(percent_max_virt_registers_live_ >= SEMI_HOT_PERCENT) {
         std::string color("blue");
-        if(percent_max_virt_live_ == 1.0) {
+        if(percent_max_virt_registers_live_ == 1.0) {
             color = "purple";
         }
         attr_str += std::string("color=") + color + "; fontcolor=" + color + "; fontsize=20;";
@@ -311,37 +315,30 @@ void LivenessVisualization::buildGraphBBs() {
     // ID hotspots.
     for (const MachineBasicBlock &MBB : *(member_vars_.MF_)) {
         GraphBB& gbb = member_vars_.mbb_to_gbb_.at(&MBB);
-        member_vars_.function_max_virt_live_ = std::max(member_vars_.function_max_virt_live_, gbb.getMaxVirtLive());
+        member_vars_.function_max_virt_registers_live_ = std::max(member_vars_.function_max_virt_registers_live_, gbb.getMaxVirtRegistersLive());
     }
-    /*
     for (const MachineBasicBlock &MBB : *(member_vars_.MF_)) {
         GraphBB& gbb = member_vars_.mbb_to_gbb_.at(&MBB);
-        gbb.markHotspot(member_vars_.function_max_virt_live_);
-        for(SlotIndex si = member_vars_.indexes_->getMBBStartIdx(&MBB); si <= member_vars_.indexes_->getMBBEndIdx(&MBB); si = member_vars_.indexes_->getNextNonNullIndex(si)) {
-            SlotIndexInfo &info = member_vars_.si_to_info_.at(si);
-            info.percent_virt_live_registers_ = (float)info.live_virt_registers_.size() / (float)member_vars_.function_max_virt_live_;
-            if(si == member_vars_.indexes_->getLastIndex()) {
-                break;
-            }
-        }
+        gbb.markHotspot(member_vars_.function_max_virt_registers_live_);
     }
-    */
 }
 
-// TODO: Could / Should pre-compute this in the constructor...
 void LivenessVisualization::GraphBB::addLiveVirtRegsInBB() {
     std::unordered_set<unsigned> enumerated_reg_ids;
     for(const auto &info : si_info_list_) {
         for(Register reg : info.live_virt_registers_) {
-
-            //findme
-
             if(enumerated_reg_ids.find(reg) == enumerated_reg_ids.end()) {
                 auto printable_vreg_or_unit = printVRegOrUnit(reg, LVpass_->member_vars_.TRI_);
                 enumerated_reg_ids.insert(reg);
                 live_virt_regs_in_BB_.push_back(reg);
             }
         }
+    }
+}
+
+void LivenessVisualization::GraphBB::setMaxLiveVirtRegs() {
+    for(const auto &info : si_info_list_) {
+        max_virt_registers_live_ = std::max(max_virt_registers_live_, info.getNumLiveVirtRegisters());
     }
 }
 
