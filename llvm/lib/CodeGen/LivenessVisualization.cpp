@@ -123,7 +123,7 @@ std::string LivenessVisualization::GraphBB::getSanitizedMBBName() const {
     return name;
 }
 
-LivenessVisualization::SlotIndexInfo::SlotIndexInfo(SlotIndex si, const LivenessVisualization *LVpass): si_(si), mi_(LVpass->member_vars_.indexes_->getInstructionFromIndex(si)), LVpass_(LVpass) {
+LivenessVisualization::SlotIndexInfo::SlotIndexInfo(SlotIndex si, const GraphBB *graph_bb, const LivenessVisualization *LVpass): si_(si), mi_(LVpass->member_vars_.indexes_->getInstructionFromIndex(si)), graph_bb_(graph_bb), LVpass_(LVpass) {
     addInstructionStr();
     addInstructionLocationStr();
     addRegisters();
@@ -183,21 +183,22 @@ void LivenessVisualization::SlotIndexInfo::addLiveVirtRegs() {
     }
 }
 
-
-LivenessVisualization::GraphBB::GraphBB(LivenessVisualization *LVpass, const MachineBasicBlock &MBB) {
+LivenessVisualization::GraphBB::GraphBB(LivenessVisualization *LVpass, const MachineBasicBlock *MBB) {
     indexes_ = LVpass->member_vars_.LIA_->getSlotIndexes();
-    MBB_ = &MBB;
+    MBB_ = MBB;
     name_ = getSanitizedMBBName();
     LVpass_ = LVpass;
 
     // Add information at each index in GraphBB's
     for(SlotIndex si = getStartIdx(); si <= getEndIdx(); si = indexes_->getNextNonNullIndex(si)) {
-        auto elem_success = si_to_info_.emplace(si, SlotIndexInfo(si, LVpass_));
-        assert(elem_success.second == true);
+        si_info_list_.emplace(si_info_list_.end(), si, this, LVpass_);
         if(si == indexes_->getLastIndex()) {
             break;
         }
     }
+
+    // Add live virtual registers.
+    addLiveVirtRegsInBB();
 }
 
 // Get first / last slot index in GraphBB
@@ -296,7 +297,8 @@ void LivenessVisualization::buildGraphBBs() {
     // Make GraphBB objects.
     for (const MachineBasicBlock &MBB : *(member_vars_.MF_)) {
         assert(member_vars_.mbb_to_gbb_.find(&MBB) == member_vars_.mbb_to_gbb_.end());
-        member_vars_.mbb_to_gbb_.emplace(&MBB, GraphBB(this, MBB));
+        auto iter_success = member_vars_.mbb_to_gbb_.try_emplace(&MBB, this, &MBB);
+        assert(iter_success.second);
     }
 
     // Make connections between GraphBB's and their children.
@@ -326,25 +328,27 @@ void LivenessVisualization::buildGraphBBs() {
     */
 }
 
-// TODO: Could pre-compute this in the constructor...
-std::vector<Register> LivenessVisualization::GraphBB::getLiveVirtRegsInBB() const {
+// TODO: Could / Should pre-compute this in the constructor...
+void LivenessVisualization::GraphBB::addLiveVirtRegsInBB() {
     std::unordered_set<unsigned> enumerated_reg_ids;
-    std::vector<Register> registers;
-    for(const auto index_info : si_to_info_) {
-        const auto &info = index_info.second;
+    for(const auto &info : si_info_list_) {
         for(Register reg : info.live_virt_registers_) {
+
+            //findme
+
             if(enumerated_reg_ids.find(reg) == enumerated_reg_ids.end()) {
+                auto printable_vreg_or_unit = printVRegOrUnit(reg, LVpass_->member_vars_.TRI_);
                 enumerated_reg_ids.insert(reg);
-                registers.push_back(reg);
+                live_virt_regs_in_BB_.push_back(reg);
             }
         }
     }
-    return registers;
 }
 
 char LivenessVisualization::SlotIndexInfo::getRegUsageSymbol(Register reg) const {
     assert(mi_ != nullptr);
     bool live = std::find(live_virt_registers_.begin(), live_virt_registers_.end(), reg) != live_virt_registers_.end();
+    auto printable_vreg_or_unit = printVRegOrUnit(reg, LVpass_->member_vars_.TRI_);
     bool read = mi_->readsRegister(reg, LVpass_->member_vars_.TRI_);
     bool write = mi_->modifiesRegister(reg, LVpass_->member_vars_.TRI_);
 
@@ -361,14 +365,14 @@ char LivenessVisualization::SlotIndexInfo::getRegUsageSymbol(Register reg) const
     }
 }
 
-std::string LivenessVisualization::GraphBB::getRegHeaderStr(const std::vector<Register>& registers) const {
+std::string LivenessVisualization::GraphBB::getLinearReportHeaderStr() const {
     std::stringstream sstream;
     std::string dummy;
 
     sstream << std::right << std::setw(SLOT_COL_WIDTH) << "slot" << " | ";
     sstream << std::right << std::setw(PERCENT_PEAK_COL_WIDTH) << "\%peak" << " | ";
     sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << "#live" << " | ";
-    for(Register reg : registers) {
+    for(Register reg : live_virt_regs_in_BB_) {
         auto printable_vreg_or_unit = printVRegOrUnit(reg, LVpass_->member_vars_.TRI_);
         sstream << std::setw(REG_USAGE_COL_WIDTH) << objPtrToString(&printable_vreg_or_unit);
     }
@@ -378,13 +382,13 @@ std::string LivenessVisualization::GraphBB::getRegHeaderStr(const std::vector<Re
     return sstream.str();
 }
 
-std::string LivenessVisualization::SlotIndexInfo::toString(const std::vector<Register>& registers) const {
+std::string LivenessVisualization::SlotIndexInfo::toString() const {
     std::stringstream sstream;
 
     sstream << std::right << std::setw(SLOT_COL_WIDTH) << objPtrToString(&si_) << " | ";
     sstream << std::right << std::setw(PERCENT_PEAK_COL_WIDTH-1) << std::fixed << std::setprecision(0) << percent_virt_live_registers_*100.0 << "% | ";
     sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << live_virt_registers_.size() << " | ";
-    for(Register reg : registers) {
+    for(Register reg : graph_bb_->getLiveVirtRegsInBB()) {
         sstream << std::setw(REG_USAGE_COL_WIDTH) << getRegUsageSymbol(reg);
     }
     sstream << " | ";
@@ -399,16 +403,12 @@ std::string LivenessVisualization::SlotIndexInfo::toString(const std::vector<Reg
 }
 
 std::string LivenessVisualization::GraphBB::getLinearReport(std::string title, std::string newline) const {
-    // Get live registers in BB.
-    std::vector<Register> registers = getLiveVirtRegsInBB();
-
     std::stringstream linear_report;
     linear_report << title << newline;
-    linear_report << getRegHeaderStr(registers) << newline;
-    for(const auto index_info : si_to_info_) {
-        const auto &info = index_info.second;
+    linear_report << getLinearReportHeaderStr() << newline;
+    for(const auto &info : si_info_list_) {
         if(info.mi_ != nullptr) {
-            std::string si_str = info.toString(registers);
+            std::string si_str = info.toString();
             linear_report << si_str << newline;
         }
     }
