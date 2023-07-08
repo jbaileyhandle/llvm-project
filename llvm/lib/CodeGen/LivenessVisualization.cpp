@@ -123,6 +123,12 @@ std::string LivenessVisualization::GraphBB::getSanitizedMBBName() const {
     return name;
 }
 
+std::string LivenessVisualization::getRegString(Register reg) const {
+    auto printable_vreg_or_unit = printVRegOrUnit(reg, member_vars_.TRI_);
+    return objPtrToString(&printable_vreg_or_unit);
+}
+
+
 LivenessVisualization::SlotIndexInfo::SlotIndexInfo(SlotIndex si, const GraphBB *graph_bb, const LivenessVisualization *LVpass): si_(si), mi_(LVpass->member_vars_.indexes_->getInstructionFromIndex(si)), graph_bb_(graph_bb), LVpass_(LVpass) {
     addInstructionStr();
     addInstructionLocationStr();
@@ -157,30 +163,54 @@ void LivenessVisualization::SlotIndexInfo::addInstructionStr() {
 // Constructor helpers to save registers at slot index
 void LivenessVisualization::SlotIndexInfo::addRegisters() {
     addLiveVirtRegs();
-
-    //std::vector<RegSegment> live_registers = getLivePhysRegsAtSlotIndex(si);
-
-    //live_registers.insert(live_registers.end(), live_virt_registers.begin(), live_virt_registers.end());
+    addLivePhysRegs();
+    addCombinedRegs();
 }
 
 void LivenessVisualization::SlotIndexInfo::addLiveVirtRegs() {
 
     for(unsigned i = 0; i < LVpass_->member_vars_.MRI_->getNumVirtRegs(); ++i) {
         Register reg = Register::index2VirtReg(i);
-        //LLT reg_type = LVpass_->member_vars_.MRI_->getType(reg);
+        LLT reg_type = LVpass_->member_vars_.MRI_->getType(reg);
+        //const RegisterBank *Bank = getRegBank(reg, *(LVpass_->member_vars_.MRI_), *(LVpass_->member_vars_.TRI_));
 
         if(LVpass_->member_vars_.LIA_->hasInterval(reg)) {
             const LiveInterval *interval = &(LVpass_->member_vars_.LIA_->getInterval(reg));
             if(interval->liveAt(si_)) {
-                live_virt_registers_.push_back(reg);
-                /*
-                if(reg_type.isScalar) {
-                    info.live_virt_scalar_registers_.push_back(reg);
+                if(reg_type.isScalar()) {
+                    live_virtual_scalar_registers_.push_back(reg);
+                } else if(reg_type.isVector()) {
+                    live_virtual_vector_registers_.push_back(reg);
                 }
-                */
             }
         }
     }
+}
+
+void LivenessVisualization::SlotIndexInfo::addLivePhysRegs() {
+
+    for(unsigned reg=0; reg < LVpass_->member_vars_.TRI_->getNumRegUnits(); ++reg) {
+        // See https://llvm.org/doxygen/LiveIntervals_8h_source.html#l00387
+        LiveRange &range = LVpass_->member_vars_.LIA_->getRegUnit(reg);
+        LLT reg_type = LVpass_->member_vars_.MRI_->getType(reg);
+
+        if(range.liveAt(si_)) {
+            if(reg_type.isScalar()) {
+                live_physical_scalar_registers_.push_back(reg);
+            } else if(reg_type.isVector()) {
+                live_physical_vector_registers_.push_back(reg);
+            }
+        }
+    }
+}
+
+void LivenessVisualization::SlotIndexInfo::addCombinedRegs() {
+    live_vector_registers_.insert(live_vector_registers_.end(), live_physical_vector_registers_.begin(), live_physical_vector_registers_.end());
+    live_vector_registers_.insert(live_vector_registers_.end(), live_virtual_vector_registers_.begin(), live_virtual_vector_registers_.end());
+    live_scalar_registers_.insert(live_scalar_registers_.end(), live_physical_scalar_registers_.begin(), live_physical_scalar_registers_.end());
+    live_scalar_registers_.insert(live_scalar_registers_.end(), live_virtual_scalar_registers_.begin(), live_virtual_scalar_registers_.end());
+    live_registers_.insert(live_registers_.end(), live_scalar_registers_.begin(), live_scalar_registers_.end());
+    live_registers_.insert(live_registers_.end(), live_vector_registers_.begin(), live_vector_registers_.end());
 }
 
 LivenessVisualization::GraphBB::GraphBB(LivenessVisualization *LVpass, const MachineBasicBlock *MBB) {
@@ -197,9 +227,9 @@ LivenessVisualization::GraphBB::GraphBB(LivenessVisualization *LVpass, const Mac
         }
     }
 
-    // Add live virtual registers.
-    addLiveVirtRegsInBB();
-    setMaxLiveVirtRegs();
+    // Add live vector registers.
+    addLiveVectorRegsInBB();
+    setMaxLiveVectorRegs();
 }
 
 // Get first / last slot index in GraphBB
@@ -231,22 +261,22 @@ std::vector<LivenessVisualization::GraphBB::RegSegment> LivenessVisualization::G
     return live_phys_registers;
 }
 
-int LivenessVisualization::GraphBB::getMaxVirtRegistersLive() const {
-    return max_virt_registers_live_;
+int LivenessVisualization::GraphBB::getMaxVectorRegistersLive() const {
+    return max_vector_registers_live_;
 }
 
-void LivenessVisualization::GraphBB::markHotspot(int function_max_virt_registers_live) {
-    percent_max_virt_registers_live_ = (float)max_virt_registers_live_ / (float)function_max_virt_registers_live;
+void LivenessVisualization::GraphBB::markHotspot(int function_max_vector_registers_live) {
+    percent_max_vector_registers_live_ = (float)max_vector_registers_live_ / (float)function_max_vector_registers_live;
     for(auto &info : si_info_list_) {
-        info.setLivenessPercent(function_max_virt_registers_live);
+        info.setLivenessPercent(function_max_vector_registers_live);
     }
 }
 
 std::string LivenessVisualization::GraphBB::getHotspotAttr() const {
     std::string attr_str;
-    if(percent_max_virt_registers_live_ >= SEMI_HOT_PERCENT) {
+    if(percent_max_vector_registers_live_ >= SEMI_HOT_PERCENT) {
         std::string color("blue");
-        if(percent_max_virt_registers_live_ == 1.0) {
+        if(percent_max_vector_registers_live_ == 1.0) {
             color = "purple";
         }
         attr_str += std::string("color=") + color + "; fontcolor=" + color + "; fontsize=20;";
@@ -315,37 +345,35 @@ void LivenessVisualization::buildGraphBBs() {
     // ID hotspots.
     for (const MachineBasicBlock &MBB : *(member_vars_.MF_)) {
         GraphBB& gbb = member_vars_.mbb_to_gbb_.at(&MBB);
-        member_vars_.function_max_virt_registers_live_ = std::max(member_vars_.function_max_virt_registers_live_, gbb.getMaxVirtRegistersLive());
+        member_vars_.function_max_vector_registers_live_ = std::max(member_vars_.function_max_vector_registers_live_, gbb.getMaxVectorRegistersLive());
     }
     for (const MachineBasicBlock &MBB : *(member_vars_.MF_)) {
         GraphBB& gbb = member_vars_.mbb_to_gbb_.at(&MBB);
-        gbb.markHotspot(member_vars_.function_max_virt_registers_live_);
+        gbb.markHotspot(member_vars_.function_max_vector_registers_live_);
     }
 }
 
-void LivenessVisualization::GraphBB::addLiveVirtRegsInBB() {
+void LivenessVisualization::GraphBB::addLiveVectorRegsInBB() {
     std::unordered_set<unsigned> enumerated_reg_ids;
     for(const auto &info : si_info_list_) {
-        for(Register reg : info.live_virt_registers_) {
+        for(Register reg : info.live_vector_registers_) {
             if(enumerated_reg_ids.find(reg) == enumerated_reg_ids.end()) {
-                auto printable_vreg_or_unit = printVRegOrUnit(reg, LVpass_->member_vars_.TRI_);
                 enumerated_reg_ids.insert(reg);
-                live_virt_regs_in_BB_.push_back(reg);
+                live_vector_regs_in_BB_.push_back(reg);
             }
         }
     }
 }
 
-void LivenessVisualization::GraphBB::setMaxLiveVirtRegs() {
+void LivenessVisualization::GraphBB::setMaxLiveVectorRegs() {
     for(const auto &info : si_info_list_) {
-        max_virt_registers_live_ = std::max(max_virt_registers_live_, info.getNumLiveVirtRegisters());
+        max_vector_registers_live_ = std::max(max_vector_registers_live_, info.getNumLiveVectorRegisters());
     }
 }
 
 char LivenessVisualization::SlotIndexInfo::getRegUsageSymbol(Register reg) const {
     assert(mi_ != nullptr);
-    bool live = std::find(live_virt_registers_.begin(), live_virt_registers_.end(), reg) != live_virt_registers_.end();
-    auto printable_vreg_or_unit = printVRegOrUnit(reg, LVpass_->member_vars_.TRI_);
+    bool live = std::find(live_registers_.begin(), live_registers_.end(), reg) != live_registers_.end();
     bool read = mi_->readsRegister(reg, LVpass_->member_vars_.TRI_);
     bool write = mi_->modifiesRegister(reg, LVpass_->member_vars_.TRI_);
 
@@ -369,9 +397,8 @@ std::string LivenessVisualization::GraphBB::getLinearReportHeaderStr() const {
     sstream << std::right << std::setw(SLOT_COL_WIDTH) << "slot" << " | ";
     sstream << std::right << std::setw(PERCENT_PEAK_COL_WIDTH) << "\%peak" << " | ";
     sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << "#live" << " | ";
-    for(Register reg : live_virt_regs_in_BB_) {
-        auto printable_vreg_or_unit = printVRegOrUnit(reg, LVpass_->member_vars_.TRI_);
-        sstream << std::setw(REG_USAGE_COL_WIDTH) << objPtrToString(&printable_vreg_or_unit);
+    for(Register reg : live_vector_regs_in_BB_) {
+        sstream << std::setw(REG_USAGE_COL_WIDTH) << LVpass_->getRegString(reg);
     }
     sstream << " | ";
     sstream << std::left << std::setw(SRC_COL_WIDTH) << "src" << " | ";
@@ -383,9 +410,9 @@ std::string LivenessVisualization::SlotIndexInfo::toString() const {
     std::stringstream sstream;
 
     sstream << std::right << std::setw(SLOT_COL_WIDTH) << objPtrToString(&si_) << " | ";
-    sstream << std::right << std::setw(PERCENT_PEAK_COL_WIDTH-1) << std::fixed << std::setprecision(0) << percent_virt_live_registers_*100.0 << "% | ";
-    sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << live_virt_registers_.size() << " | ";
-    for(Register reg : graph_bb_->getLiveVirtRegsInBB()) {
+    sstream << std::right << std::setw(PERCENT_PEAK_COL_WIDTH-1) << std::fixed << std::setprecision(0) << percent_vector_live_registers_*100.0 << "% | ";
+    sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << live_vector_registers_.size() << " | ";
+    for(Register reg : graph_bb_->getLiveVectorRegsInBB()) {
         sstream << std::setw(REG_USAGE_COL_WIDTH) << getRegUsageSymbol(reg);
     }
     sstream << " | ";
@@ -438,6 +465,7 @@ LivenessVisualization::MemberVars::MemberVars(const MachineFunction &fn, LiveInt
     TRI_ = MF_->getSubtarget().getRegisterInfo();
     TII_ = MF_->getSubtarget().getInstrInfo();
     sanitized_func_name_ = getSanitizedFuncName(MF_);
+    //GCN_Subtarget_ = MF_.getSubtarget<GCNSubtarget>();
 }
 
 bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {

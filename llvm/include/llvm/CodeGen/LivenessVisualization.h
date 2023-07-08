@@ -13,6 +13,7 @@
 #ifndef LLVM_CODEGEN_LIVENESSVISUALIZATION_H
 #define LLVM_CODEGEN_LIVENESSVISUALIZATION_H
 
+//#include "../lib/Target/AMDGPU/GCNSubtarget.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/IndexedMap.h"
 #include "llvm/ADT/SmallVector.h"
@@ -61,6 +62,9 @@ class VirtRegMap;
     bool runOnMachineFunction(MachineFunction&) override;
     bool doFinalization(Module &M) override;
 
+    // Helper to get register as human readable string
+    std::string getRegString(Register reg) const;
+
     class GraphBB;
 
     // Store information about liveness at a SlotIndex.
@@ -81,18 +85,24 @@ class VirtRegMap;
         // 'X' if the register is both read and written
         char getRegUsageSymbol(Register reg) const;
 
-        int getNumLiveVirtRegisters() const {
-            return (int)live_virt_registers_.size();
+        int getNumLiveVectorRegisters() const {
+            return (int)live_vector_registers_.size();
         }
 
-        void setLivenessPercent(int function_max_virt_registers_live) {
-            percent_virt_live_registers_ = (float)getNumLiveVirtRegisters() / (float)function_max_virt_registers_live;
+        void setLivenessPercent(int function_max_vector_registers_live) {
+            percent_vector_live_registers_ = (float)getNumLiveVectorRegisters() / (float)function_max_vector_registers_live;
         }
 
         // TODO: Move some of this to private?
         const SlotIndex si_;
-        float percent_virt_live_registers_;
-        std::vector<Register> live_virt_registers_;
+        float percent_vector_live_registers_;
+        std::vector<Register> live_virtual_vector_registers_;
+        std::vector<Register> live_virtual_scalar_registers_;
+        std::vector<Register> live_physical_vector_registers_;
+        std::vector<Register> live_physical_scalar_registers_;
+        std::vector<Register> live_vector_registers_;
+        std::vector<Register> live_scalar_registers_;
+        std::vector<Register> live_registers_;
         const MachineInstr * const mi_;
         std::string mi_str_;
         std::string src_location_;
@@ -107,6 +117,8 @@ class VirtRegMap;
         // Constructor helpers to save registers at slot index
         void addRegisters();
         void addLiveVirtRegs();
+        void addLivePhysRegs();
+        void addCombinedRegs();
 
         // Constructor helper to save instruction string
         void addInstructionStr();
@@ -122,7 +134,7 @@ class VirtRegMap;
         void addChildren(std::unordered_map<const MachineBasicBlock*, GraphBB>& mbb_to_gbb);
 
         // Mark register usage as percent of max
-        void markHotspot(int function_max_virt_registers_live);
+        void markHotspot(int function_max_vector_registers_live);
 
         // Add text descriptor of connections to children to descriptor.
         void emitXdotConnections(std::ofstream& dot_file) const;
@@ -133,10 +145,10 @@ class VirtRegMap;
         // Add node descriptor to descriptor.
         void emitXdotNode(std::ofstream& dot_file) const;
 
-        // Virtual registers that are live in the BB, ordered by first
+        // Vector registers that are live in the BB, ordered by first
         // instance of liveness
-        std::vector<Register> getLiveVirtRegsInBB() const {
-            return live_virt_regs_in_BB_;
+        std::vector<Register> getLiveVectorRegsInBB() const {
+            return live_vector_regs_in_BB_;
         }
 
         // Get start and end Slot Indexes
@@ -152,8 +164,8 @@ class VirtRegMap;
         // newline is inserted between each line.
         std::string getLinearReport(std::string title, std::string newline) const;
 
-        // Return max_virt_registers_live_
-        int getMaxVirtRegistersLive() const;
+        // Return max_vector_registers_live_
+        int getMaxVectorRegistersLive() const;
 
         class RegSegment {
         public:
@@ -164,13 +176,13 @@ class VirtRegMap;
 
     private:
 
-        // Construcotr helper to populate virtual registers that are live in the BB, ordered
+        // Construcotr helper to populate vector registers that are live in the BB, ordered
         // by first instance of liveness.
-        void addLiveVirtRegsInBB();
+        void addLiveVectorRegsInBB();
 
-        // Construcotr helper to determine the greatest number of virtual registers
+        // Construcotr helper to determine the greatest number of vector registers
         // live at once
-        void setMaxLiveVirtRegs();
+        void setMaxLiveVectorRegs();
 
         // Return a string w/ graphviz attributes to mark this BB as a hotspot
         // Return an empty string if this BB is not a hotspot.
@@ -194,9 +206,9 @@ class VirtRegMap;
         // const member variables.
         std::list<SlotIndexInfo> si_info_list_;
 
-        // Virtual registers that are live in the BB, ordered by first
+        // Vector registers that are live in the BB, ordered by first
         // instance of liveness
-        std::vector<Register> live_virt_regs_in_BB_;
+        std::vector<Register> live_vector_regs_in_BB_;
 
         // The successor nodes of this basic block. 
         std::vector<GraphBB*> children_;
@@ -204,11 +216,11 @@ class VirtRegMap;
         // Unique name of the basic block.
         std::string name_;
 
-        // Greatest number of virtual registers live at any point in the BB.
-        int max_virt_registers_live_ = 0;
+        // Greatest number of vector registers live at any point in the BB.
+        int max_vector_registers_live_ = 0;
 
-        // "max_virt_live_" as a percent of function_max_virt_live_.
-        float percent_max_virt_registers_live_;
+        // "max_vector_live_" as a percent of function_max_vector_live_.
+        float percent_max_vector_registers_live_;
 
         // MachineBasicBlock which this graph node models.
         const MachineBasicBlock *MBB_;
@@ -246,16 +258,17 @@ class VirtRegMap;
         // representing the basic blocks in the dot graph.
         std::unordered_map<const MachineBasicBlock*, GraphBB> mbb_to_gbb_;
 
-        // Greatest number of virtual registers live at any point in the function.
-        int function_max_virt_registers_live_ = 0;
+        // Greatest number of vector registers live at any point in the function.
+        int function_max_vector_registers_live_ = 0;
 
         std::string sanitized_func_name_;
         LiveIntervals *LIA_ = nullptr;
         SlotIndexes *indexes_ = nullptr;
-        const MachineFunction* MF_ = nullptr;
-        const MachineRegisterInfo* MRI_ = nullptr;
-        const TargetRegisterInfo* TRI_ = nullptr;
-        const TargetInstrInfo* TII_ = nullptr;
+        const MachineFunction *MF_ = nullptr;
+        const MachineRegisterInfo *MRI_ = nullptr;
+        const TargetRegisterInfo *TRI_ = nullptr;
+        const TargetInstrInfo *TII_ = nullptr;
+        //const GCNSubtarget GCN_substarget_;
     };
 
     MemberVars member_vars_;
