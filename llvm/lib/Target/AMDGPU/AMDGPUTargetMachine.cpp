@@ -430,6 +430,8 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeAMDGPUTarget() {
   initializeGCNNSAReassignPass(*PR);
   initializeGCNPreRAOptimizationsPass(*PR);
   initializeGCNRewritePartialRegUsesPass(*PR);
+  // jbaileyhandle
+  initializeLivenessVisualizationPass(*PR);
 }
 
 static std::unique_ptr<TargetLoweringObjectFile> createTLOF(const Triple &TT) {
@@ -1402,6 +1404,9 @@ bool GCNPassConfig::addRegAssignAndRewriteFast() {
 }
 
 bool GCNPassConfig::addRegAssignAndRewriteOptimized() {
+  // jbaileyhandle
+  addPass(&LivenessVisualizationID);
+
   if (!usingDefaultRegAlloc())
     report_fatal_error(RegAllocOptNotSupportedMessage);
 

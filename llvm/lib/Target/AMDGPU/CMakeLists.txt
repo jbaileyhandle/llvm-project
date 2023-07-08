@@ -163,6 +163,7 @@ add_llvm_target(AMDGPUCodeGen
   SIShrinkInstructions.cpp
   SISimplifyPredicatedCopies.cpp
   SIWholeQuadMode.cpp
+  LivenessVisualization.cpp
 
   LINK_COMPONENTS
   AMDGPUDesc

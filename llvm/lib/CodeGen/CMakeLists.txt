@@ -101,7 +101,6 @@ add_llvm_component_library(LLVMCodeGen
   LiveIntervals.cpp
   LiveInterval.cpp
   LiveIntervalUnion.cpp
-  LivenessVisualization.cpp
   LivePhysRegs.cpp
   LiveRangeCalc.cpp
   LiveIntervalCalc.cpp

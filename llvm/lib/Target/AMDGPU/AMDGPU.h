@@ -364,6 +364,10 @@ void initializeAMDGPUSetWavePriorityPass(PassRegistry &);
 void initializeGCNRewritePartialRegUsesPass(llvm::PassRegistry &);
 extern char &GCNRewritePartialRegUsesID;
 
+// jbaileyhandle
+void initializeLivenessVisualizationPass(PassRegistry &);
+extern char &LivenessVisualizationID;
+
 namespace AMDGPU {
 enum TargetIndex {
   TI_CONSTDATA_START,
