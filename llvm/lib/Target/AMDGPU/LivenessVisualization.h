@@ -99,7 +99,6 @@ class VirtRegMap;
         }
 
         // TODO: Move some of this to private?
-        const SlotIndex si_;
         float percent_vector_live_registers_;
         std::vector<Register> live_virtual_vector_registers_;
         std::vector<Register> live_virtual_scalar_registers_;
@@ -108,10 +107,14 @@ class VirtRegMap;
         std::vector<Register> live_vector_registers_;
         std::vector<Register> live_scalar_registers_;
         std::vector<Register> live_registers_;
-        const MachineInstr * const mi_;
+        std::set<Register> read_registers_;
+        std::set<Register> write_registers_;
+
         std::string mi_str_;
         std::string src_location_;
 
+        const SlotIndex si_;
+        const MachineInstr * const mi_;
         const GraphBB *graph_bb_;
         const LivenessVisualization *LVpass_;
 
@@ -124,6 +127,8 @@ class VirtRegMap;
         void addLiveVirtRegs();
         void addLivePhysRegs();
         void addCombinedRegs();
+        void addReadRegs();
+        void addWriteRegs();
 
         // Constructor helper to save instruction string
         void addInstructionStr();

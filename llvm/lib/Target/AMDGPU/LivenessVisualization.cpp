@@ -165,6 +165,8 @@ void LivenessVisualization::SlotIndexInfo::addRegisters() {
     addLiveVirtRegs();
     addLivePhysRegs();
     addCombinedRegs();
+    addReadRegs();
+    addWriteRegs();
 }
 
 void LivenessVisualization::SlotIndexInfo::addLiveVirtRegs() {
@@ -213,6 +215,39 @@ void LivenessVisualization::SlotIndexInfo::addCombinedRegs() {
     live_scalar_registers_.insert(live_scalar_registers_.end(), live_virtual_scalar_registers_.begin(), live_virtual_scalar_registers_.end());
     live_registers_.insert(live_registers_.end(), live_scalar_registers_.begin(), live_scalar_registers_.end());
     live_registers_.insert(live_registers_.end(), live_vector_registers_.begin(), live_vector_registers_.end());
+}
+
+void LivenessVisualization::SlotIndexInfo::addReadRegs() {
+    if(mi_ == nullptr) {
+        return;
+    }
+    for(auto reg : live_vector_registers_) {
+        bool read = mi_->readsRegister(reg, LVpass_->member_vars_.TRI_);
+        if(read) {
+            read_registers_.insert(reg);
+        }
+    }
+
+    // Strangely, this method misses some register reads,
+    // as the reads do not show up in returned uses()...
+    /*
+    for (const MachineOperand &use : mi_->uses()) {
+        if (!use.isReg()) {
+            return;
+        }
+        read_registers_.insert(use.getReg());
+    }
+    */
+}
+
+void LivenessVisualization::SlotIndexInfo::addWriteRegs() {
+    if(mi_ == nullptr) {
+        return;
+    }
+    for (const MachineOperand &def : mi_->defs()) {
+        assert(def.isReg());
+        write_registers_.insert(def.getReg());
+    }
 }
 
 LivenessVisualization::GraphBB::GraphBB(LivenessVisualization *LVpass, const MachineBasicBlock *MBB) {
@@ -376,8 +411,8 @@ void LivenessVisualization::GraphBB::setMaxLiveVectorRegs() {
 char LivenessVisualization::SlotIndexInfo::getRegUsageSymbol(Register reg) const {
     assert(mi_ != nullptr);
     bool live = std::find(live_registers_.begin(), live_registers_.end(), reg) != live_registers_.end();
-    bool read = mi_->readsRegister(reg, LVpass_->member_vars_.TRI_);
-    bool write = mi_->modifiesRegister(reg, LVpass_->member_vars_.TRI_);
+    bool read = (read_registers_.find(reg) != read_registers_.end());
+    bool write = (write_registers_.find(reg) != write_registers_.end());
 
     if(read && write) {
         return 'X';
