@@ -75,6 +75,7 @@ using namespace llvm;
 #define SLOT_COL_WIDTH 6
 #define PERCENT_PEAK_COL_WIDTH 6
 #define NUM_LIVE_REGS_COL_WIDTH 6
+#define REG_USAGE_TRUNC_LENGTH 6
 #define REG_USAGE_COL_WIDTH 6
 #define SRC_COL_WIDTH 30
 #define ASM_COL_WIDTH 45
@@ -170,17 +171,20 @@ void LivenessVisualization::SlotIndexInfo::addLiveVirtRegs() {
 
     for(unsigned i = 0; i < LVpass_->member_vars_.MRI_->getNumVirtRegs(); ++i) {
         Register reg = Register::index2VirtReg(i);
-        LLT reg_type = LVpass_->member_vars_.MRI_->getType(reg);
-        //const RegisterBank *Bank = getRegBank(reg, *(LVpass_->member_vars_.MRI_), *(LVpass_->member_vars_.TRI_));
 
         if(LVpass_->member_vars_.LIA_->hasInterval(reg)) {
             const LiveInterval *interval = &(LVpass_->member_vars_.LIA_->getInterval(reg));
             if(interval->liveAt(si_)) {
-                if(reg_type.isScalar()) {
+                if(LVpass_->isSGPR(reg)) {
                     live_virtual_scalar_registers_.push_back(reg);
-                } else if(reg_type.isVector()) {
+                } else if(LVpass_->isVGPR(reg)) {
                     live_virtual_vector_registers_.push_back(reg);
                 }
+                /* 
+                } else if (LVpass_->isAGPR(reg)) {
+                    live_virtual_vector_registers_.push_back(reg);
+                }
+                */
             }
         }
     }
@@ -191,12 +195,11 @@ void LivenessVisualization::SlotIndexInfo::addLivePhysRegs() {
     for(unsigned reg=0; reg < LVpass_->member_vars_.TRI_->getNumRegUnits(); ++reg) {
         // See https://llvm.org/doxygen/LiveIntervals_8h_source.html#l00387
         LiveRange &range = LVpass_->member_vars_.LIA_->getRegUnit(reg);
-        LLT reg_type = LVpass_->member_vars_.MRI_->getType(reg);
 
         if(range.liveAt(si_)) {
-            if(reg_type.isScalar()) {
+            if(LVpass_->isSGPR(reg)) {
                 live_physical_scalar_registers_.push_back(reg);
-            } else if(reg_type.isVector()) {
+            } else if(LVpass_->isVGPR(reg)) {
                 live_physical_vector_registers_.push_back(reg);
             }
         }
@@ -397,7 +400,7 @@ std::string LivenessVisualization::GraphBB::getLinearReportHeaderStr() const {
     sstream << std::right << std::setw(PERCENT_PEAK_COL_WIDTH) << "\%peak" << " | ";
     sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << "#live" << " | ";
     for(Register reg : live_vector_regs_in_BB_) {
-        sstream << std::setw(REG_USAGE_COL_WIDTH) << LVpass_->getRegString(reg);
+        sstream << std::setw(REG_USAGE_COL_WIDTH) << LVpass_->getRegString(reg).substr(0, REG_USAGE_TRUNC_LENGTH);
     }
     sstream << " | ";
     sstream << std::left << std::setw(SRC_COL_WIDTH) << "src" << " | ";
@@ -455,6 +458,87 @@ void LivenessVisualization::emitGraphBBs(std::ofstream &dot_file) const {
     }
 }
 
+// This is how SIRegisterInfo figures out register type.
+// It doesn't really seem to work very well for physical registers for some reason.
+/*
+bool LivenessVisualization::isSGPR(Register reg) const {
+    return member_vars_.SI_TRI_->isSGPRReg(*member_vars_.MRI_, reg);
+}
+
+bool LivenessVisualization::isVGPR(Register reg) const {
+    return member_vars_.SI_TRI_->isVGPR(*member_vars_.MRI_, reg);
+}
+
+bool LivenessVisualization::isAGPR(Register reg) const {
+    return member_vars_.SI_TRI_->isAGPR(*member_vars_.MRI_, reg);
+}
+*/
+
+// This is how AMDGPURegisterBankInfo figures out register type,
+/*
+bool LivenessVisualization::regIsFromRegisterBank(Register reg, unsigned bank_id) const {
+    const RegisterBank *bank = member_vars_.AMD_RBI_->getRegBank(reg, *member_vars_.MRI_, *member_vars_.TRI_);
+    return (bank->getID() == bank_id);
+}
+*/
+
+bool LivenessVisualization::regIsFromRegisterBank(Register reg, unsigned bank_id) const {
+    const RegisterBank *bank = member_vars_.AMD_RBI_->getRegBank(reg, *member_vars_.MRI_, *member_vars_.TRI_);
+    std::string reg_str = getRegString(reg);
+    bool sgpr_search = bank_id == AMDGPU::SGPRRegBankID;
+    bool vgpr_search = bank_id == AMDGPU::VGPRRegBankID;
+    bool has_vgpr_text = reg_str.find("VGPR") != std::string::npos;
+    bool has_sgpr_text = reg_str.find("SGPR") != std::string::npos;
+    bool force_sgpr = reg.isPhysical() && has_sgpr_text;
+    bool force_vgpr = reg.isPhysical() && has_vgpr_text;
+
+    // Cheap hack to get physical registers work properly
+    if(force_sgpr) {
+        assert(!force_vgpr);
+        return sgpr_search;
+    }
+    if(force_vgpr) {
+        assert(!force_sgpr);
+        return vgpr_search;
+    }
+
+    if(bank != nullptr) {
+        return (bank->getID() == bank_id);
+    } else {
+        // Note: Originally, did fall back to SI_TRI_ calls to deal w/
+        // physical registers (which are dropped by getID method, 
+        // which return nullptr). However, I had to correct w/ string searching,
+        // so it's not clear that the alternate method is really necessary.
+        switch(bank_id) {
+            case AMDGPU::SGPRRegBankID:
+                return member_vars_.SI_TRI_->isSGPRReg(*member_vars_.MRI_, reg);
+                break;
+            case AMDGPU::VGPRRegBankID:
+                return member_vars_.SI_TRI_->isVGPR(*member_vars_.MRI_, reg);
+                break;
+            case AMDGPU::AGPRRegBankID:
+                return member_vars_.SI_TRI_->isAGPR(*member_vars_.MRI_, reg);
+                break;
+            default:
+                exit(1);
+        }
+    }
+}
+
+bool LivenessVisualization::isSGPR(Register reg) const {
+    return regIsFromRegisterBank(reg, AMDGPU::SGPRRegBankID);
+}
+
+bool LivenessVisualization::isVGPR(Register reg) const {
+    return regIsFromRegisterBank(reg, AMDGPU::VGPRRegBankID);
+}
+
+bool LivenessVisualization::isAGPR(Register reg) const {
+    return regIsFromRegisterBank(reg, AMDGPU::AGPRRegBankID);
+}
+
+
+
 // MemberVars constructor
 LivenessVisualization::MemberVars::MemberVars(const MachineFunction &fn, LiveIntervals *LIA) {
     MF_ = &fn;
@@ -464,7 +548,9 @@ LivenessVisualization::MemberVars::MemberVars(const MachineFunction &fn, LiveInt
     TRI_ = MF_->getSubtarget().getRegisterInfo();
     TII_ = MF_->getSubtarget().getInstrInfo();
     sanitized_func_name_ = getSanitizedFuncName(MF_);
-    //GCN_Subtarget_ = MF_.getSubtarget<GCNSubtarget>();
+    GCN_ST_ = &MF_->getSubtarget<GCNSubtarget>();
+    AMD_RBI_ = GCN_ST_->getRegBankInfo();
+    SI_TRI_ = GCN_ST_->getRegisterInfo();
 }
 
 bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {

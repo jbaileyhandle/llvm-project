@@ -13,7 +13,7 @@
 #ifndef LLVM_CODEGEN_LIVENESSVISUALIZATION_H
 #define LLVM_CODEGEN_LIVENESSVISUALIZATION_H
 
-//#include "../lib/Target/AMDGPU/GCNSubtarget.h"
+#include "GCNSubtarget.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/IndexedMap.h"
 #include "llvm/ADT/SmallVector.h"
@@ -64,6 +64,11 @@ class VirtRegMap;
 
     // Helper to get register as human readable string
     std::string getRegString(Register reg) const;
+
+    // Helpers for classifying register types
+    bool isSGPR(Register reg) const;
+    bool isVGPR(Register reg) const;
+    bool isAGPR(Register reg) const;
 
     class GraphBB;
 
@@ -247,6 +252,9 @@ class VirtRegMap;
     // Initialize member variables to run pass on a new function.
     void initVarsPerFunction(const MachineFunction &fn);
 
+    // Helper for isScalar, isVector etc.
+    bool regIsFromRegisterBank(Register reg, unsigned bank_id) const;
+
     // Use a struct to hold members so that we don't forget to reset
     // a member for a new function.
     class MemberVars {
@@ -268,7 +276,9 @@ class VirtRegMap;
         const MachineRegisterInfo *MRI_ = nullptr;
         const TargetRegisterInfo *TRI_ = nullptr;
         const TargetInstrInfo *TII_ = nullptr;
-        //const GCNSubtarget GCN_substarget_;
+        const GCNSubtarget *GCN_ST_ = nullptr;
+        const AMDGPURegisterBankInfo *AMD_RBI_ = nullptr;
+        const SIRegisterInfo *SI_TRI_ = nullptr;
     };
 
     MemberVars member_vars_;
