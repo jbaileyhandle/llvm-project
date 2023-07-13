@@ -107,8 +107,8 @@ class VirtRegMap;
         std::vector<Register> live_vector_registers_;
         std::vector<Register> live_scalar_registers_;
         std::vector<Register> live_registers_;
-        std::set<Register> read_registers_;
-        std::set<Register> write_registers_;
+        std::set<Register> read_vector_registers_;
+        std::set<Register> write_vector_registers_;
 
         std::string mi_str_;
         std::string src_location_;
@@ -157,7 +157,7 @@ class VirtRegMap;
 
         // Vector registers that are live in the BB, ordered by first
         // instance of liveness
-        std::vector<Register> getLiveVectorRegsInBB() const {
+        std::set<Register> getLiveVectorRegsInBB() const {
             return live_vector_regs_in_BB_;
         }
 
@@ -218,7 +218,7 @@ class VirtRegMap;
 
         // Vector registers that are live in the BB, ordered by first
         // instance of liveness
-        std::vector<Register> live_vector_regs_in_BB_;
+        std::set<Register> live_vector_regs_in_BB_;
 
         // The successor nodes of this basic block. 
         std::vector<GraphBB*> children_;

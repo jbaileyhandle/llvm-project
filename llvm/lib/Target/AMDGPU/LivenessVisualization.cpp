@@ -224,7 +224,7 @@ void LivenessVisualization::SlotIndexInfo::addReadRegs() {
     for(auto reg : live_vector_registers_) {
         bool read = mi_->readsRegister(reg, LVpass_->member_vars_.TRI_);
         if(read) {
-            read_registers_.insert(reg);
+            read_vector_registers_.insert(reg);
         }
     }
 
@@ -235,7 +235,7 @@ void LivenessVisualization::SlotIndexInfo::addReadRegs() {
         if (!use.isReg()) {
             return;
         }
-        read_registers_.insert(use.getReg());
+        read_vector_registers_.insert(use.getReg());
     }
     */
 }
@@ -244,9 +244,14 @@ void LivenessVisualization::SlotIndexInfo::addWriteRegs() {
     if(mi_ == nullptr) {
         return;
     }
+    // Have to use this approach here (vs scanning live registers as in addReadRegs)
+    // because 1st definitions of a reg are not considered live at that slot
     for (const MachineOperand &def : mi_->defs()) {
         assert(def.isReg());
-        write_registers_.insert(def.getReg());
+        auto dest_reg = def.getReg();
+        if (LVpass_->isVGPR(dest_reg)) {
+            write_vector_registers_.insert(dest_reg);
+        }
     }
 }
 
@@ -391,13 +396,9 @@ void LivenessVisualization::buildGraphBBs() {
 }
 
 void LivenessVisualization::GraphBB::addLiveVectorRegsInBB() {
-    std::unordered_set<unsigned> enumerated_reg_ids;
     for(const auto &info : si_info_list_) {
         for(Register reg : info.live_vector_registers_) {
-            if(enumerated_reg_ids.find(reg) == enumerated_reg_ids.end()) {
-                enumerated_reg_ids.insert(reg);
-                live_vector_regs_in_BB_.push_back(reg);
-            }
+            live_vector_regs_in_BB_.insert(reg);
         }
     }
 }
@@ -411,8 +412,8 @@ void LivenessVisualization::GraphBB::setMaxLiveVectorRegs() {
 char LivenessVisualization::SlotIndexInfo::getRegUsageSymbol(Register reg) const {
     assert(mi_ != nullptr);
     bool live = std::find(live_registers_.begin(), live_registers_.end(), reg) != live_registers_.end();
-    bool read = (read_registers_.find(reg) != read_registers_.end());
-    bool write = (write_registers_.find(reg) != write_registers_.end());
+    bool read = (read_vector_registers_.find(reg) != read_vector_registers_.end());
+    bool write = (write_vector_registers_.find(reg) != write_vector_registers_.end());
 
     if(read && write) {
         return 'X';
@@ -439,6 +440,7 @@ std::string LivenessVisualization::GraphBB::getLinearReportHeaderStr() const {
     }
     sstream << " | ";
     sstream << std::left << std::setw(SRC_COL_WIDTH) << "src" << " | ";
+    sstream << " Register usage";
 
     return sstream.str();
 }
@@ -459,6 +461,13 @@ std::string LivenessVisualization::SlotIndexInfo::toString() const {
     */
     sstream << std::left << std::setw(SRC_COL_WIDTH) << src_location_ << " | ";
     sstream << std::left << std::setw(ASM_COL_WIDTH) << mi_str_;
+    sstream << " | ";
+    for(auto reg : read_vector_registers_) {
+        sstream << "read " << LVpass_->getRegString(reg) << ", ";
+    }
+    for(auto reg : write_vector_registers_) {
+        sstream << "write " << LVpass_->getRegString(reg) << ", ";
+    }
 
     return sstream.str();
 }
