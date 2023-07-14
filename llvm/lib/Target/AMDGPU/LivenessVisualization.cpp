@@ -286,21 +286,19 @@ SlotIndex LivenessVisualization::GraphBB::getEndIdx() const {
 void LivenessVisualization::GraphBB::addChildren(std::unordered_map<const MachineBasicBlock*, GraphBB>& mbb_to_gbb) {
     for(const MachineBasicBlock* successor_bb : MBB_->successors()) {
         assert(mbb_to_gbb.find(successor_bb) != mbb_to_gbb.end());
-        children_.push_back(&mbb_to_gbb.at(successor_bb));
+        GraphBB *child = &mbb_to_gbb.at(successor_bb);
+        children_.push_back(child);
+        child->addParent(this);
     }
 }
 
+bool LivenessVisualization::GraphBB::dominates(const GraphBB *other) const {
+    const MachineBasicBlock *other_mbb = other->getMBB();
+    return LVpass_->member_vars_.DT_->dominates(MBB_, other_mbb);
+}
 
-std::vector<LivenessVisualization::GraphBB::RegSegment> LivenessVisualization::GraphBB::getLivePhysRegsAtSlotIndex(const SlotIndex si) {
-    std::vector<RegSegment> live_phys_registers;
-
-    for(unsigned reg=0; reg < LVpass_->member_vars_.TRI_->getNumRegUnits(); ++reg) {
-        LiveRange &range = LVpass_->member_vars_.LIA_->getRegUnit(reg);
-        if(range.liveAt(si)) {
-            live_phys_registers.push_back(RegSegment(reg, range.getSegmentContaining(si)));
-        }
-    }
-    return live_phys_registers;
+bool LivenessVisualization::GraphBB::isDominatedBy(const GraphBB *other) const {
+    return other->dominates(this);
 }
 
 int LivenessVisualization::GraphBB::getMaxVectorRegistersLive() const {
@@ -335,7 +333,7 @@ void LivenessVisualization::GraphBB::emitXdotConnections(std::ofstream &dot_file
 }
 
 void LivenessVisualization::GraphBB::emitXdotNode(std::ofstream &dot_file) const {
-    std::string linear_report = getLinearReport(name_, "\\l");
+    std::string linear_report = getLinearReport(name_, false);
     dot_file << "\t" << name_ << "[shape=box; fontname=\"Courier New\", label=\"" << getSanitizedXdotLabelStr(linear_report) << "\"; " << getHotspotAttr() << "]\n";
 }
 
@@ -349,6 +347,8 @@ void LivenessVisualization::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
   AU.addRequired<LiveIntervals>();
   AU.addPreserved<LiveIntervals>();
+  AU.addRequired<MachineDominatorTree>();
+  AU.addPreserved<MachineDominatorTree>();
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
@@ -393,6 +393,63 @@ void LivenessVisualization::buildGraphBBs() {
         GraphBB& gbb = member_vars_.mbb_to_gbb_.at(&MBB);
         gbb.markHotspot(member_vars_.function_max_vector_registers_live_);
     }
+
+    // Generate breadth-first ordering
+    setGbbLevels();
+}
+
+void LivenessVisualization::setGbbLevels() {
+    // Find entry block
+    const MachineBasicBlock *entry_mbb = nullptr;
+    for (const MachineBasicBlock &MBB : *(member_vars_.MF_)) {
+        if(MBB.isEntryBlock()) {
+            entry_mbb = &MBB;
+            break;
+        }
+    }
+
+    // Initialize entry gbb
+    assert(entry_mbb != nullptr);
+    GraphBB *entry_gbb = &member_vars_.mbb_to_gbb_.at(entry_mbb);
+    entry_gbb->setLevel(0);
+
+    std::queue<GraphBB *> queue;
+    for(GraphBB *child : entry_gbb->getChildren()) {
+        queue.push(child);
+    }
+
+    // Use modified dijkstra's algorithm to assign levels
+    int max_level = 0;
+    while(!queue.empty()) {
+        GraphBB *gbb = queue.front();
+        queue.pop();
+
+        int init_level = gbb->getLevel();
+        std::vector<int> parent_levels;
+        for(GraphBB *parent : gbb->getParents()) {
+            parent_levels.push_back(parent->getLevel());
+        }
+        gbb->setLevel(*std::max_element(parent_levels.begin(), parent_levels.end()) + 1);
+        int max_parent_level = *std::max_element(parent_levels.begin(), parent_levels.end());
+        int new_level = gbb->getLevel();
+
+        max_level = std::max(max_level, new_level);
+        if(new_level != init_level) {
+            for(GraphBB *child : gbb->getChildren()) {
+                // Don't loop back on back edges
+                if(!child->dominates(gbb)) {
+                    queue.push(child);
+                }
+            }
+        }
+    }
+
+    // Put Gbbs in map by level
+    member_vars_.level_to_gbbs_.resize(max_level + 1);
+    for (const MachineBasicBlock &MBB : *(member_vars_.MF_)) {
+        GraphBB *gbb = &member_vars_.mbb_to_gbb_.at(&MBB);
+        member_vars_.level_to_gbbs_[gbb->getLevel()].push_back(gbb);
+    }
 }
 
 void LivenessVisualization::GraphBB::addLiveVectorRegsInBB() {
@@ -428,40 +485,44 @@ char LivenessVisualization::SlotIndexInfo::getRegUsageSymbol(Register reg) const
     }
 }
 
-std::string LivenessVisualization::GraphBB::getLinearReportHeaderStr() const {
+std::string LivenessVisualization::GraphBB::getLinearReportHeaderStr(bool text_version) const {
     std::stringstream sstream;
     std::string dummy;
 
     sstream << std::right << std::setw(SLOT_COL_WIDTH) << "slot" << " | ";
     sstream << std::right << std::setw(PERCENT_PEAK_COL_WIDTH) << "\%peak" << " | ";
-    sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << "#live" << " | ";
-    for(Register reg : live_vector_regs_in_BB_) {
-        sstream << std::setw(REG_USAGE_COL_WIDTH) << LVpass_->getRegString(reg).substr(0, REG_USAGE_TRUNC_LENGTH);
+    if(!text_version) {
+        sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << "#live" << " | ";
+        for(Register reg : live_vector_regs_in_BB_) {
+            sstream << std::setw(REG_USAGE_COL_WIDTH) << LVpass_->getRegString(reg).substr(0, REG_USAGE_TRUNC_LENGTH);
+        }
+        sstream << " | ";
+        sstream << std::left << std::setw(SRC_COL_WIDTH) << "src" << " | ";
     }
-    sstream << " | ";
-    sstream << std::left << std::setw(SRC_COL_WIDTH) << "src" << " | ";
     sstream << " Register usage";
 
     return sstream.str();
 }
 
-std::string LivenessVisualization::SlotIndexInfo::toString() const {
+std::string LivenessVisualization::SlotIndexInfo::toString(bool text_version) const {
     std::stringstream sstream;
 
     sstream << std::right << std::setw(SLOT_COL_WIDTH) << objPtrToString(&si_) << " | ";
     sstream << std::right << std::setw(PERCENT_PEAK_COL_WIDTH-1) << std::fixed << std::setprecision(0) << percent_vector_live_registers_*100.0 << "% | ";
-    sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << live_vector_registers_.size() << " | ";
-    for(Register reg : graph_bb_->getLiveVectorRegsInBB()) {
-        sstream << std::setw(REG_USAGE_COL_WIDTH) << getRegUsageSymbol(reg);
+    if(!text_version) {
+        sstream << std::right << std::setw(NUM_LIVE_REGS_COL_WIDTH) << live_vector_registers_.size() << " | ";
+        for(Register reg : graph_bb_->getLiveVectorRegsInBB()) {
+            sstream << std::setw(REG_USAGE_COL_WIDTH) << getRegUsageSymbol(reg);
+        }
+        sstream << " | ";
+        /*
+        std::string mi_str_copy = mi_str_;
+        mi_str_copy.resize(std::min(mi_str_copy.size(), 200 - sstream.str().size()));
+        */
+        sstream << std::left << std::setw(SRC_COL_WIDTH) << src_location_ << " | ";
+        sstream << std::left << std::setw(ASM_COL_WIDTH) << mi_str_;
+        sstream << " | ";
     }
-    sstream << " | ";
-    /*
-    std::string mi_str_copy = mi_str_;
-    mi_str_copy.resize(std::min(mi_str_copy.size(), 200 - sstream.str().size()));
-    */
-    sstream << std::left << std::setw(SRC_COL_WIDTH) << src_location_ << " | ";
-    sstream << std::left << std::setw(ASM_COL_WIDTH) << mi_str_;
-    sstream << " | ";
     for(auto reg : read_vector_registers_) {
         sstream << "read " << LVpass_->getRegString(reg) << ", ";
     }
@@ -472,33 +533,34 @@ std::string LivenessVisualization::SlotIndexInfo::toString() const {
     return sstream.str();
 }
 
-std::string LivenessVisualization::GraphBB::getLinearReport(std::string title, std::string newline) const {
+std::string LivenessVisualization::GraphBB::getLinearReport(std::string title, bool text_version) const {
+    std::string newline = text_version ? "\n" : "\\l";
+
     std::stringstream linear_report;
     linear_report << title << newline;
-    linear_report << getLinearReportHeaderStr() << newline;
+    linear_report << getLinearReportHeaderStr(text_version) << newline;
     for(const auto &info : si_info_list_) {
         if(info.mi_ != nullptr) {
-            std::string si_str = info.toString();
+            std::string si_str = info.toString(text_version);
             linear_report << si_str << newline;
         }
     }
     return linear_report.str();
 }
 
-void LivenessVisualization::GraphBB::emitTextReport() const {
+void LivenessVisualization::GraphBB::emitTextReport(std::ofstream &text_file) const {
     std::string file_name = LVpass_->member_vars_.sanitized_func_name_ + "--" + name_ + "_linearReport.txt";
-    std::ofstream linear_file(file_name);
-    std::string linear_report = getLinearReport(file_name, "\n");
-    linear_file << linear_report;
+    std::string linear_report = getLinearReport(name_, true);
+    text_file << linear_report << "\n";
 }
 
-void LivenessVisualization::emitGraphBBs(std::ofstream &dot_file) const {
-    for (const MachineBasicBlock &MBB : *(member_vars_.MF_)) {
-        //assert(mbb_to_gbb_.find(&MBB) != mbb_to_gbb_.end());
-        const GraphBB &gbb = member_vars_.mbb_to_gbb_.find(&MBB)->second;
-        gbb.emitXdotConnections(dot_file);
-        gbb.emitXdotNode(dot_file);
-        gbb.emitTextReport();
+void LivenessVisualization::emitGraphBBs(std::ofstream &dot_file, std::ofstream &text_file) const {
+    for(auto &gbb_vect : member_vars_.level_to_gbbs_) {
+        for(GraphBB *gbb : gbb_vect) {
+            gbb->emitXdotConnections(dot_file);
+            gbb->emitXdotNode(dot_file);
+            gbb->emitTextReport(text_file);
+        }
     }
 }
 
@@ -581,13 +643,12 @@ bool LivenessVisualization::isAGPR(Register reg) const {
     return regIsFromRegisterBank(reg, AMDGPU::AGPRRegBankID);
 }
 
-
-
 // MemberVars constructor
-LivenessVisualization::MemberVars::MemberVars(const MachineFunction &fn, LiveIntervals *LIA) {
+LivenessVisualization::MemberVars::MemberVars(const MachineFunction &fn, LiveIntervals *LIA, MachineDominatorTree *DT) {
     MF_ = &fn;
-    MRI_ = &MF_->getRegInfo();
     LIA_ = LIA;
+    DT_ = DT;
+    MRI_ = &MF_->getRegInfo();
     indexes_ = LIA_->getSlotIndexes();
     TRI_ = MF_->getSubtarget().getRegisterInfo();
     TII_ = MF_->getSubtarget().getInstrInfo();
@@ -605,17 +666,21 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
     }
 
     // Init variables.
-    member_vars_ = MemberVars(fn, &getAnalysis<LiveIntervals>());
+    member_vars_ = MemberVars(fn, &getAnalysis<LiveIntervals>(), &getAnalysis<MachineDominatorTree>());
+
+    outs() << "\n\nFunction: " << member_vars_.MF_->getName() << "\n";
 
     // Open dot file
     std::ofstream dot_file;
     dot_file.open(member_vars_.sanitized_func_name_+ ".dot");
     dot_file << "digraph {\n";
 
-    outs() << "\n\nFunction: " << member_vars_.MF_->getName() << "\n";
+    // Open text file
+    std::ofstream text_file;
+    text_file.open(member_vars_.sanitized_func_name_+ ".txt");
 
     buildGraphBBs();
-    emitGraphBBs(dot_file);
+    emitGraphBBs(dot_file, text_file);
 
     dot_file << "}\n";
 

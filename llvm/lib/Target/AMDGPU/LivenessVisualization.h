@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <fstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace llvm {
@@ -80,7 +81,7 @@ class VirtRegMap;
         // Return a string representing the SlotIndexInfo.
         // "registers" indicates for which registers to report register
         // liveness.
-        std::string toString() const;
+        std::string toString(bool text_version) const;
 
         // For the register "reg" at this slot index, return
         // ' ' if the register is not live
@@ -143,6 +144,40 @@ class VirtRegMap;
         // Link this GraphBB to its children GraphBB's
         void addChildren(std::unordered_map<const MachineBasicBlock*, GraphBB>& mbb_to_gbb);
 
+        // Return true if this GraphBB dominates other.
+        bool dominates(const GraphBB *other) const;
+
+        // Return true if this GraphBB is dominated by other.
+        bool isDominatedBy(const GraphBB *other) const;
+
+        // Get vector of this GraphBB's children
+        std::vector<GraphBB*> getChildren() const {
+            return children_;
+        }
+
+        // Gets the MachineBasicBlock
+        const MachineBasicBlock *getMBB() const {
+            return MBB_;
+        }
+
+        // Get vector of this GraphBB's parents 
+        std::vector<GraphBB*> getParents() const {
+            return parents_;
+        }
+
+        // Add a parent.
+        void addParent(GraphBB *parent) {
+            parents_.push_back(parent);
+        }
+
+        // Level accessors
+        int getLevel() {
+            return level_;
+        }
+        void setLevel(int new_level) {
+            level_ = new_level;
+        }
+
         // Mark register usage as percent of max
         void markHotspot(int function_max_vector_registers_live);
 
@@ -150,10 +185,10 @@ class VirtRegMap;
         void emitXdotConnections(std::ofstream& dot_file) const;
 
         // Write a linear / text report showing register liveness for the BB.
-        void emitTextReport() const;
+        void emitTextReport(std::ofstream &text_file) const;
 
         // Add node descriptor to descriptor.
-        void emitXdotNode(std::ofstream& dot_file) const;
+        void emitXdotNode(std::ofstream &dot_file) const;
 
         // Vector registers that are live in the BB, ordered by first
         // instance of liveness
@@ -172,17 +207,10 @@ class VirtRegMap;
         // Generate a string showing register liveness in the BB.
         // title is placed in the first line of the stirng.
         // newline is inserted between each line.
-        std::string getLinearReport(std::string title, std::string newline) const;
+        std::string getLinearReport(std::string title, bool text_version=false) const;
 
         // Return max_vector_registers_live_
         int getMaxVectorRegistersLive() const;
-
-        class RegSegment {
-        public:
-            RegSegment(const unsigned reg, const LiveRange::Segment *segment): reg_(reg), segment_(segment) {}
-            unsigned reg_;
-            const LiveRange::Segment *segment_;
-        };
 
     private:
 
@@ -198,11 +226,8 @@ class VirtRegMap;
         // Return an empty string if this BB is not a hotspot.
         std::string getHotspotAttr() const;
 
-        // Return physical registers that are live at the SlotIndex.
-        std::vector<RegSegment> getLivePhysRegsAtSlotIndex(const SlotIndex);
-
         // Helper function to generate header of register portion of linear report
-        std::string getLinearReportHeaderStr() const;
+        std::string getLinearReportHeaderStr(bool text_version=false) const;
 
         // Return an xdot-friendly name for the basic block.
         std::string getSanitizedMBBName() const;
@@ -222,6 +247,11 @@ class VirtRegMap;
 
         // The successor nodes of this basic block. 
         std::vector<GraphBB*> children_;
+
+        // The predecessor nodes of this basic block.
+        std::vector<GraphBB*> parents_;
+
+        int level_ = -1;
 
         // Unique name of the basic block.
         std::string name_;
@@ -247,9 +277,12 @@ class VirtRegMap;
   private:
     // Build up the GraphBBs.
     void buildGraphBBs();
+    
+    // Assign levels to Gbbs.
+    void setGbbLevels();
 
     // Emit the GraphBBs to dot_file.
-    void emitGraphBBs(std::ofstream &dot_file) const;
+    void emitGraphBBs(std::ofstream &dot_file, std::ofstream &text_file) const;
 
     // Get the name of the function, modified cleanliness.
     static std::string getSanitizedFuncName(const MachineFunction *fn);
@@ -265,11 +298,13 @@ class VirtRegMap;
     class MemberVars {
     public:
         MemberVars() {}
-        MemberVars(const MachineFunction &fn, LiveIntervals *LIA);
+        MemberVars(const MachineFunction &fn, LiveIntervals *LIA, MachineDominatorTree *DT);
 
         // Map MachineBasicBlock's of the function to the GraphBB's
         // representing the basic blocks in the dot graph.
         std::unordered_map<const MachineBasicBlock*, GraphBB> mbb_to_gbb_;
+        std::vector<std::vector<GraphBB*>> level_to_gbbs_;
+        int max_gbb_level_ = 0;
 
         // Greatest number of vector registers live at any point in the function.
         int function_max_vector_registers_live_ = 0;
@@ -278,6 +313,7 @@ class VirtRegMap;
         LiveIntervals *LIA_ = nullptr;
         SlotIndexes *indexes_ = nullptr;
         const MachineFunction *MF_ = nullptr;
+        const MachineDominatorTree *DT_ = nullptr;
         const MachineRegisterInfo *MRI_ = nullptr;
         const TargetRegisterInfo *TRI_ = nullptr;
         const TargetInstrInfo *TII_ = nullptr;
