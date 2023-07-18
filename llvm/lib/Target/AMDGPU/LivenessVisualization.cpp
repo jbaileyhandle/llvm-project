@@ -77,6 +77,7 @@ using namespace llvm;
 #define NUM_LIVE_REGS_COL_WIDTH 6
 #define REG_USAGE_TRUNC_LENGTH 6
 #define REG_USAGE_COL_WIDTH 6
+#define REG_RW_WIDTH  50
 #define SRC_COL_WIDTH 30
 #define ASM_COL_WIDTH 45
 
@@ -430,7 +431,6 @@ void LivenessVisualization::setGbbLevels() {
             parent_levels.push_back(parent->getLevel());
         }
         gbb->setLevel(*std::max_element(parent_levels.begin(), parent_levels.end()) + 1);
-        int max_parent_level = *std::max_element(parent_levels.begin(), parent_levels.end());
         int new_level = gbb->getLevel();
 
         max_level = std::max(max_level, new_level);
@@ -497,9 +497,9 @@ std::string LivenessVisualization::GraphBB::getLinearReportHeaderStr(bool text_v
             sstream << std::setw(REG_USAGE_COL_WIDTH) << LVpass_->getRegString(reg).substr(0, REG_USAGE_TRUNC_LENGTH);
         }
         sstream << " | ";
-        sstream << std::left << std::setw(SRC_COL_WIDTH) << "src" << " | ";
     }
-    sstream << " Register usage";
+    sstream << std::left << std::setw(REG_RW_WIDTH) << "Reg R/W" << " | ";
+    sstream << std::left << std::setw(SRC_COL_WIDTH) << "src";
 
     return sstream.str();
 }
@@ -519,16 +519,18 @@ std::string LivenessVisualization::SlotIndexInfo::toString(bool text_version) co
         std::string mi_str_copy = mi_str_;
         mi_str_copy.resize(std::min(mi_str_copy.size(), 200 - sstream.str().size()));
         */
-        sstream << std::left << std::setw(SRC_COL_WIDTH) << src_location_ << " | ";
-        sstream << std::left << std::setw(ASM_COL_WIDTH) << mi_str_;
-        sstream << " | ";
     }
+
+    std::stringstream usage_sstream;
     for(auto reg : read_vector_registers_) {
-        sstream << "read " << LVpass_->getRegString(reg) << ", ";
+        usage_sstream << "read " << LVpass_->getRegString(reg) << ", ";
     }
     for(auto reg : write_vector_registers_) {
-        sstream << "write " << LVpass_->getRegString(reg) << ", ";
+        usage_sstream << "write " << LVpass_->getRegString(reg) << ", ";
     }
+    sstream << std::left << std::setw(REG_RW_WIDTH) << usage_sstream.str() << " | ";
+    sstream << std::left << std::setw(SRC_COL_WIDTH) << src_location_ << " | ";
+    sstream << std::left << std::setw(ASM_COL_WIDTH) << mi_str_;
 
     return sstream.str();
 }
