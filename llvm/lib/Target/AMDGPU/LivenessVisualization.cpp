@@ -679,7 +679,7 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
 
     // Open text file
     std::ofstream text_file;
-    text_file.open(member_vars_.sanitized_func_name_+ ".txt");
+    text_file.open(member_vars_.sanitized_func_name_+ ".linear_reg_report");
 
     buildGraphBBs();
     emitGraphBBs(dot_file, text_file);
