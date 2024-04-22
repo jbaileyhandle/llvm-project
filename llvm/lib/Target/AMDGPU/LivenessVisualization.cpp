@@ -354,7 +354,7 @@ void LivenessVisualization::getAnalysisUsage(AnalysisUsage &AU) const {
 }
 
 bool LivenessVisualization::doInitialization(Module &M) {
-    printf("LivenessVisualization doInitialization\n");
+    // printf("LivenessVisualization doInitialization\n");
 
     MachineFunctionPass::doInitialization(M);
     return false;
@@ -670,16 +670,16 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
     // Init variables.
     member_vars_ = MemberVars(fn, &getAnalysis<LiveIntervals>(), &getAnalysis<MachineDominatorTree>());
 
-    outs() << "\n\nFunction: " << member_vars_.MF_->getName() << "\n";
+    outs() << "\n\nLivenessVisualization @ Function: " << member_vars_.MF_->getName() << "\n";
 
     // Open dot file
     std::ofstream dot_file;
-    dot_file.open(member_vars_.sanitized_func_name_+ ".dot");
+    dot_file.open(member_vars_.sanitized_func_name_+ ".jbaile_lv_dot");
     dot_file << "digraph {\n";
 
     // Open text file
     std::ofstream text_file;
-    text_file.open(member_vars_.sanitized_func_name_+ ".linear_reg_report");
+    text_file.open(member_vars_.sanitized_func_name_+ ".jbaile_lv_linear_reg_report");
 
     buildGraphBBs();
     emitGraphBBs(dot_file, text_file);
@@ -690,7 +690,7 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
 }
 
 bool LivenessVisualization::doFinalization(Module &M) {
-    printf("LivenessVisualization doFinalization\n");
+    // printf("LivenessVisualization doFinalization\n");
     MachineFunctionPass::doFinalization(M);
     return false;
 }
