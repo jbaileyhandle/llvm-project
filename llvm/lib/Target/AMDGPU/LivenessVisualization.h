@@ -277,12 +277,14 @@ class VirtRegMap;
   private:
     // Build up the GraphBBs.
     void buildGraphBBs();
-    
+
     // Assign levels to Gbbs.
     void setGbbLevels();
 
     // Emit the GraphBBs to dot_file.
     void emitGraphBBs(std::ofstream &dot_file, std::ofstream &text_file) const;
+
+    void emit_assembly(const MachineFunction &fn) const;
 
     // Get the name of the function, modified cleanliness.
     static std::string getSanitizedFuncName(const MachineFunction *fn);

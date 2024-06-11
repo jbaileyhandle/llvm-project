@@ -96,11 +96,45 @@ INITIALIZE_PASS_END(LivenessVisualization, "livenessvisualization",
                 "Live value visualization", false, false)
 
 template <typename T>
-std::string objPtrToString(T *input) {
+std::string objPtrToString(const T *input) {
     std::string str;
     raw_string_ostream ostream(str);
     ostream << *input;
     return str;
+}
+
+// Get machine instruction location string
+std::string getMachineInstrSrcLocation(const MachineInstr *mi) {
+    assert(mi != nullptr);
+    std::string src_location_str;
+    raw_string_ostream mi_ostream(src_location_str);
+
+    // Add location info.
+    if(mi->getDebugLoc().isImplicitCode()) {
+        mi_ostream << "ImplicitCode";
+    } else {
+        mi->getDebugLoc().print(mi_ostream);
+    }
+
+    return src_location_str;
+}
+
+// Return string for machine instruction mi
+std::string getMachineInstrStr(const MachineInstr* mi) {
+    assert(mi != nullptr);
+    std::string mi_str = objPtrToString(mi);
+    mi_str.erase(std::remove(mi_str.begin(), mi_str.end(), '\n'), mi_str.end());
+    return mi_str;
+}
+
+// Return string for machine instruction mi, excluding debug info
+std::string getMachineInstrStrWithoutDebugInfo(const MachineInstr* mi) {
+    std::string mi_str = getMachineInstrStr(mi);
+    size_t debug_pos = mi_str.find("debug-location");
+    if(debug_pos != std::string::npos) {
+        mi_str = mi_str.substr(0, debug_pos);
+    }
+    return mi_str;
 }
 
 // Get a modified version of str which is safe to emit as an xdot label.
@@ -139,25 +173,14 @@ LivenessVisualization::SlotIndexInfo::SlotIndexInfo(SlotIndex si, const GraphBB 
 // Constructor helper to save string of source locatoin of slot index
 void LivenessVisualization::SlotIndexInfo::addInstructionLocationStr() {
     if(mi_ != nullptr) {
-        std::string mi_str;
-        raw_string_ostream mi_ostream(mi_str);
-
-        // Add location info.
-        if(mi_->getDebugLoc().isImplicitCode()) {
-            mi_ostream << "ImplicitCode";
-        } else {
-            mi_->getDebugLoc().print(mi_ostream);
-        }
-        src_location_ = mi_str;
+        src_location_ = getMachineInstrSrcLocation(mi_);
     }
 }
 
 // Constructor helper to save instruction string
 void LivenessVisualization::SlotIndexInfo::addInstructionStr() {
     if(mi_ != nullptr) {
-        std::string mi_str = objPtrToString(mi_);
-        mi_str.erase(std::remove(mi_str.begin(), mi_str.end(), '\n'), mi_str.end());
-        mi_str_ = mi_str;
+        mi_str_ = getMachineInstrStr(mi_);
     }
 }
 
@@ -566,6 +589,26 @@ void LivenessVisualization::emitGraphBBs(std::ofstream &dot_file, std::ofstream 
     }
 }
 
+void::LivenessVisualization::emit_assembly(const MachineFunction &fn) const {
+    // Open files
+    std::ofstream assembly_file;
+    assembly_file.open(member_vars_.sanitized_func_name_+ ".jbaile_assembly");
+    std::ofstream assembly_without_debug_info_file;
+    assembly_without_debug_info_file.open(member_vars_.sanitized_func_name_+ ".jbaile_assembly_without_debug_info");
+
+    // Traverse BBs in order in which they are / will be laid out
+    for(unsigned block_num = 0; block_num < fn.getNumBlockIDs(); block_num++) {
+        MachineBasicBlock *mbb = fn.getBlockNumbered(block_num);
+        assert(mbb != nullptr);
+
+        for(auto mi_itr = mbb->instr_begin(); mi_itr != mbb->instr_end(); ++mi_itr) {
+            const MachineInstr &mi = *mi_itr;
+            assembly_file << getMachineInstrStr(&mi) << "\n";
+            assembly_without_debug_info_file << getMachineInstrStrWithoutDebugInfo(&mi) << "\n";
+        }
+    }
+}
+
 // This is how SIRegisterInfo figures out register type.
 // It doesn't really seem to work very well for physical registers for some reason.
 /*
@@ -685,6 +728,10 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
     emitGraphBBs(dot_file, text_file);
 
     dot_file << "}\n";
+
+
+    // Emit assembly
+    emit_assembly(fn);
 
     return false;
 }
