@@ -597,12 +597,8 @@ void::LivenessVisualization::emit_assembly(const MachineFunction &fn) const {
     assembly_without_debug_info_file.open(member_vars_.sanitized_func_name_+ ".jbaile_assembly_without_debug_info");
 
     // Traverse BBs in order in which they are / will be laid out
-    for(unsigned block_num = 0; block_num < fn.getNumBlockIDs(); block_num++) {
-        MachineBasicBlock *mbb = fn.getBlockNumbered(block_num);
-        assert(mbb != nullptr);
-
-        for(auto mi_itr = mbb->instr_begin(); mi_itr != mbb->instr_end(); ++mi_itr) {
-            const MachineInstr &mi = *mi_itr;
+    for(const auto &mbb : fn) {
+        for(const auto &mi : mbb) {
             assembly_file << getMachineInstrStr(&mi) << "\n";
             assembly_without_debug_info_file << getMachineInstrStrWithoutDebugInfo(&mi) << "\n";
         }
