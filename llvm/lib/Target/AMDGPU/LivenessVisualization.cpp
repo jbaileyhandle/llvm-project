@@ -137,6 +137,38 @@ std::string getMachineInstrStrWithoutDebugInfo(const MachineInstr* mi) {
     return mi_str;
 }
 
+// Grab opcode from MachineInstr
+// Uses heuristic / assumption that first word starting w/ a
+// capital letter is the opcode
+std::string getMachineInstrOpcode(const MachineInstr* mi) {
+    std::string mi_str = getMachineInstrStr(mi);
+    std::istringstream stream(mi_str);
+    std::string opcode;
+
+    while (stream >> opcode) {
+        if (!opcode.empty() && isupper(static_cast<unsigned char>(opcode[0]))) {
+            return opcode;
+        }
+    }
+
+    // If no word that starts with a capital letter is found, return an empty string.
+    return "";
+}
+
+// Grab opcode + debug location from MachineInstr
+std::string getMachineInstrOpcodeAndDebugLocation(const MachineInstr* mi) {
+    std::string opcode = getMachineInstrOpcode(mi);
+    std::string mi_str = getMachineInstrStr(mi);
+
+    size_t debug_pos = mi_str.find("debug-location");
+    if(debug_pos == std::string::npos) {
+        return opcode; 
+    }
+
+    return opcode + ",\t" + mi_str.substr(debug_pos);
+
+}
+
 // Get a modified version of str which is safe to emit as an xdot label.
 std::string getSanitizedXdotLabelStr(const std::string& str) {
     std::string cpy = str;
@@ -592,15 +624,21 @@ void LivenessVisualization::emitGraphBBs(std::ofstream &dot_file, std::ofstream 
 void::LivenessVisualization::emit_assembly(const MachineFunction &fn) const {
     // Open files
     std::ofstream assembly_file;
-    assembly_file.open(member_vars_.sanitized_func_name_+ ".jbaile_assembly");
     std::ofstream assembly_without_debug_info_file;
+    std::ofstream assembly_opcode_file;
+    std::ofstream assembly_opcode_debug_file;
+    assembly_file.open(member_vars_.sanitized_func_name_+ ".jbaile_assembly");
     assembly_without_debug_info_file.open(member_vars_.sanitized_func_name_+ ".jbaile_assembly_without_debug_info");
+    assembly_opcode_file.open(member_vars_.sanitized_func_name_+ ".jbaile_assembly_opcodes");
+    assembly_opcode_debug_file.open(member_vars_.sanitized_func_name_+ ".jbaile_assembly_opcodes_debug");
 
     // Traverse BBs in order in which they are / will be laid out
     for(const auto &mbb : fn) {
         for(const auto &mi : mbb) {
             assembly_file << getMachineInstrStr(&mi) << "\n";
             assembly_without_debug_info_file << getMachineInstrStrWithoutDebugInfo(&mi) << "\n";
+            assembly_opcode_file << getMachineInstrOpcode(&mi) << "\n";
+            assembly_opcode_debug_file << getMachineInstrOpcodeAndDebugLocation(&mi) << "\n";
         }
     }
 }
