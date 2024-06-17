@@ -382,15 +382,19 @@ std::string LivenessVisualization::GraphBB::getHotspotAttr() const {
     return attr_str;
 }
 
-void LivenessVisualization::GraphBB::emitXdotConnections(std::ofstream &dot_file) const {
+void LivenessVisualization::GraphBB::emitXdotConnections(std::ofstream &dot_file, std::ofstream &asm_dot_file) const {
     for(GraphBB* child : children_) {
         dot_file << "\t" << name_ << " -> " << child->name_ << "\n";
+        asm_dot_file << "\t" << name_ << " -> " << child->name_ << "\n";
     }
 }
 
-void LivenessVisualization::GraphBB::emitXdotNode(std::ofstream &dot_file) const {
+void LivenessVisualization::GraphBB::emitXdotNode(std::ofstream &dot_file, std::ofstream &asm_dot_file) const {
     std::string linear_report = getLinearReport(name_, false);
     dot_file << "\t" << name_ << "[shape=box; fontname=\"Courier New\", label=\"" << getSanitizedXdotLabelStr(linear_report) << "\"; " << getHotspotAttr() << "]\n";
+
+    std::string asm_text = getAsmBlockText(name_);
+    asm_dot_file << "\t" << name_ << "[shape=box; fontname=\"Courier New\", label=\"" << getSanitizedXdotLabelStr(asm_text) << "\"; " << "]\n";
 }
 
 LivenessVisualization::LivenessVisualization() : MachineFunctionPass(ID) {
@@ -559,6 +563,7 @@ std::string LivenessVisualization::GraphBB::getLinearReportHeaderStr(bool text_v
     return sstream.str();
 }
 
+
 std::string LivenessVisualization::SlotIndexInfo::toString(bool text_version) const {
     std::stringstream sstream;
 
@@ -590,6 +595,25 @@ std::string LivenessVisualization::SlotIndexInfo::toString(bool text_version) co
     return sstream.str();
 }
 
+std::string LivenessVisualization::SlotIndexInfo::toAsmString() const {
+    std::stringstream sstream;
+    sstream << std::left << std::setw(SRC_COL_WIDTH) << src_location_ << " | ";
+    sstream << std::left << std::setw(ASM_COL_WIDTH) << mi_str_;
+    return sstream.str();
+}
+
+std::string LivenessVisualization::GraphBB::getAsmBlockText(std::string title) const {
+    std::string newline = "\\l";
+    std::stringstream block_text;
+    block_text << title << newline;
+    for(const auto &info : si_info_list_) {
+        if(info.mi_ != nullptr) {
+            block_text << info.toAsmString() << newline;
+        }
+    }
+    return block_text.str();
+}
+
 std::string LivenessVisualization::GraphBB::getLinearReport(std::string title, bool text_version) const {
     std::string newline = text_version ? "\n" : "\\l";
 
@@ -611,11 +635,11 @@ void LivenessVisualization::GraphBB::emitTextReport(std::ofstream &text_file) co
     text_file << linear_report << "\n";
 }
 
-void LivenessVisualization::emitGraphBBs(std::ofstream &dot_file, std::ofstream &text_file) const {
+void LivenessVisualization::emitGraphBBs(std::ofstream &dot_file, std::ofstream &asm_dot_file, std::ofstream &text_file) const {
     for(auto &gbb_vect : member_vars_.level_to_gbbs_) {
         for(GraphBB *gbb : gbb_vect) {
-            gbb->emitXdotConnections(dot_file);
-            gbb->emitXdotNode(dot_file);
+            gbb->emitXdotConnections(dot_file, asm_dot_file);
+            gbb->emitXdotNode(dot_file, asm_dot_file);
             gbb->emitTextReport(text_file);
         }
     }
@@ -754,15 +778,20 @@ bool LivenessVisualization::runOnMachineFunction(MachineFunction &fn) {
     dot_file.open(member_vars_.sanitized_func_name_+ ".jbaile_lv_dot");
     dot_file << "digraph {\n";
 
+    // Open asm dot file
+    std::ofstream asm_dot_file;
+    asm_dot_file.open(member_vars_.sanitized_func_name_+ ".jbaile_asm_dot");
+    asm_dot_file << "digraph {\n";
+
     // Open text file
     std::ofstream text_file;
     text_file.open(member_vars_.sanitized_func_name_+ ".jbaile_lv_linear_reg_report");
 
     buildGraphBBs();
-    emitGraphBBs(dot_file, text_file);
+    emitGraphBBs(dot_file, asm_dot_file, text_file);
 
     dot_file << "}\n";
-
+    asm_dot_file << "}\n";
 
     // Emit assembly
     emit_assembly(fn);

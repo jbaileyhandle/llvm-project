@@ -82,6 +82,8 @@ class VirtRegMap;
         // "registers" indicates for which registers to report register
         // liveness.
         std::string toString(bool text_version) const;
+        
+        std::string toAsmString() const;
 
         // For the register "reg" at this slot index, return
         // ' ' if the register is not live
@@ -182,13 +184,13 @@ class VirtRegMap;
         void markHotspot(int function_max_vector_registers_live);
 
         // Add text descriptor of connections to children to descriptor.
-        void emitXdotConnections(std::ofstream& dot_file) const;
+        void emitXdotConnections(std::ofstream& dot_file, std::ofstream& asm_dot_file) const;
 
         // Write a linear / text report showing register liveness for the BB.
         void emitTextReport(std::ofstream &text_file) const;
 
         // Add node descriptor to descriptor.
-        void emitXdotNode(std::ofstream &dot_file) const;
+        void emitXdotNode(std::ofstream &dot_file, std::ofstream &asm_dot_file) const;
 
         // Vector registers that are live in the BB, ordered by first
         // instance of liveness
@@ -208,6 +210,9 @@ class VirtRegMap;
         // title is placed in the first line of the stirng.
         // newline is inserted between each line.
         std::string getLinearReport(std::string title, bool text_version=false) const;
+
+        // Genearte a string containing assembly of the block
+        std::string getAsmBlockText(std::string title) const;
 
         // Return max_vector_registers_live_
         int getMaxVectorRegistersLive() const;
@@ -282,7 +287,7 @@ class VirtRegMap;
     void setGbbLevels();
 
     // Emit the GraphBBs to dot_file.
-    void emitGraphBBs(std::ofstream &dot_file, std::ofstream &text_file) const;
+    void emitGraphBBs(std::ofstream &dot_file, std::ofstream &asm_dot_file, std::ofstream &text_file) const;
 
     void emit_assembly(const MachineFunction &fn) const;
 
