@@ -62,6 +62,14 @@
 #include "llvm/Transforms/Vectorize/LoadStoreVectorizer.h"
 #include <optional>
 
+//======================================================================
+// jbaile
+//======================================================================
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+//======================================================================
+
 using namespace llvm;
 using namespace llvm::PatternMatch;
 
@@ -1163,13 +1171,41 @@ MachineFunctionInfo *R600TargetMachine::createMachineFunctionInfo(
 ScheduleDAGInstrs *GCNPassConfig::createMachineScheduler(
   MachineSchedContext *C) const {
   const GCNSubtarget &ST = C->MF->getSubtarget<GCNSubtarget>();
-  if (ST.enableSIScheduler())
-    return createSIMachineScheduler(C);
 
-  if (EnableMaxIlpSchedStrategy)
-    return createGCNMaxILPMachineScheduler(C);
+  //=========================================================
+  // jbaile
+  //=========================================================
+  std::ifstream misched_config_file("misched.txt");
+  if(misched_config_file) {
 
-  return createGCNMaxOccupancyMachineScheduler(C);
+      std::string line;
+      assert(std::getline(misched_config_file, line) && "Expected a line in misched.txt");
+
+      std::istringstream iss(line);
+      std::string misched, extra;
+      assert((iss >> misched) && "Expected a word in first line of misched.txt");
+      assert(!(iss >> extra) && "Expected exactly one word in first line of misched.txt");
+
+      if(misched == "max-ilp") {
+          return createGCNMaxILPMachineScheduler(C);
+      } else if(misched == "max-occupancy") {
+          return createGCNMaxOccupancyMachineScheduler(C);
+      }
+
+      assert(false && "Valid scheduler not specified in misched.txt");
+
+  } else {
+
+      if (ST.enableSIScheduler()) {
+        return createSIMachineScheduler(C);
+      }
+
+      if (EnableMaxIlpSchedStrategy) {
+        return createGCNMaxILPMachineScheduler(C);
+      }
+
+      return createGCNMaxOccupancyMachineScheduler(C);
+  }
 }
 
 bool GCNPassConfig::addPreISel() {

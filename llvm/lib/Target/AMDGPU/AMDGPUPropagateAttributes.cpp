@@ -36,6 +36,20 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
+
+//========================================================
+// jbaile
+//========================================================
+#include <cxxabi.h>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+
+namespace {
+    const std::string waves_per_eu_attr = "amdgpu-waves-per-eu";
+}
+//========================================================
+
 #define DEBUG_TYPE "amdgpu-propagate-attributes"
 
 using namespace llvm;
@@ -114,6 +128,12 @@ class AMDGPUPropagateAttributes {
 
   // Propagate attributes from Roots.
   bool process();
+
+  //========================================================
+  // jbaile
+  //========================================================
+  bool process_misched_config_file(Module &M);
+  //========================================================
 
 public:
   AMDGPUPropagateAttributes(const TargetMachine *TM, bool AllowClone) :
@@ -200,6 +220,87 @@ bool AMDGPUPropagateAttributes::process(Function &F) {
   return process();
 }
 
+//===========================================================
+// jbaile
+//===========================================================
+std::string demangle(const std::string &mangled_name) {
+    int status = 0;
+
+    char *demangled = abi::__cxa_demangle(mangled_name.c_str(), nullptr, nullptr, &status);
+    std::string result = (status == 0 && demangled) ? demangled : mangled_name;
+    std::free(demangled);
+    return result;
+}
+
+bool get_function_maximum_waves_per_eu(const Function &F, int *max_waves_per_eu) {
+    if(!F.hasFnAttribute(waves_per_eu_attr)) {
+        return false;
+    }
+
+    std::string existing_attr_str = F.getFnAttribute(waves_per_eu_attr).getValueAsString().str();
+    size_t comma_pos = existing_attr_str.find(',');
+    if(comma_pos == std::string::npos) {
+        return false;
+    }
+
+    *max_waves_per_eu = std::stoi(existing_attr_str.substr(comma_pos+1));
+    return true;
+}
+
+bool AMDGPUPropagateAttributes::process_misched_config_file(Module &M) {
+  bool changed = false;
+
+  std::ifstream misched_config_file("misched.txt");
+  if(misched_config_file) {
+
+      // Skip scheduler line
+      std::string line;
+      assert(std::getline(misched_config_file, line) && "Expected a scheduler line in misched.txt");
+
+      // Read in function config lines
+      std::unordered_map<std::string, int> function_name_to_config_waves_per_eu;
+      while(std::getline(misched_config_file, line)) {
+          std::istringstream iss(line);
+          std::string function_name;
+          int config_waves_per_eu;
+
+          std::getline(iss, function_name, '\t');
+          assert(!function_name.empty() && "Function name field in misched.txt was empty");
+          assert((iss >> config_waves_per_eu) && "<desired_waves_per_eu> field in misched.txt was empty");
+          assert((function_name_to_config_waves_per_eu.find(function_name) == function_name_to_config_waves_per_eu.end()) && "Duplicate function name in misched.txt");
+          function_name_to_config_waves_per_eu[function_name] = config_waves_per_eu;
+      }
+
+      // Update function attributes
+      for (auto &F : M.functions()) {
+
+          // This function has a config in file
+          std::string demangled_name = demangle(F.getName().str());
+          if(function_name_to_config_waves_per_eu.find(demangled_name) != function_name_to_config_waves_per_eu.end()) {
+              int config_waves_per_eu = function_name_to_config_waves_per_eu.at(demangled_name);
+
+              // Clear old attribute
+              F.removeFnAttr(waves_per_eu_attr);
+
+              // Get previous maximum waves per eu. Default to 10 if no prior setting (max hardware supported)
+              int exisitng_fn_max_waves_per_eu;
+              bool result = get_function_maximum_waves_per_eu(F, &exisitng_fn_max_waves_per_eu);
+              if(!result) {
+                 exisitng_fn_max_waves_per_eu = 10;
+              }
+
+              // Set new attribute
+              std::string new_waves_per_eu_pair = std::to_string(config_waves_per_eu) + "," + std::to_string(exisitng_fn_max_waves_per_eu);
+              F.addFnAttr(waves_per_eu_attr, new_waves_per_eu_pair);
+              changed = true;
+          }
+      }
+  }
+
+    return changed;
+}
+//===========================================================
+
 bool AMDGPUPropagateAttributes::process() {
   bool Changed = false;
   SmallSet<Function *, 32> NewRoots;
@@ -207,6 +308,12 @@ bool AMDGPUPropagateAttributes::process() {
 
   assert(!Roots.empty());
   Module &M = *(*Roots.begin())->getParent();
+
+    //===========================================================
+    // jbaile
+    //===========================================================
+  Changed |= process_misched_config_file(M);
+    //===========================================================
 
   do {
     Roots.insert(NewRoots.begin(), NewRoots.end());
