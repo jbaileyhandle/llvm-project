@@ -264,7 +264,7 @@ bool AMDGPUPropagateAttributes::process_misched_config_file(Module &M) {
           std::string function_name;
           int config_waves_per_eu;
 
-          std::getline(iss, function_name, '\t');
+          std::getline(iss, function_name, '/');
           assert(!function_name.empty() && "Function name field in misched.txt was empty");
           assert((iss >> config_waves_per_eu) && "<desired_waves_per_eu> field in misched.txt was empty");
           assert((function_name_to_config_waves_per_eu.find(function_name) == function_name_to_config_waves_per_eu.end()) && "Duplicate function name in misched.txt");
