@@ -1190,6 +1190,10 @@ ScheduleDAGInstrs *GCNPassConfig::createMachineScheduler(
           return createGCNMaxILPMachineScheduler(C);
       } else if(misched == "max-occupancy") {
           return createGCNMaxOccupancyMachineScheduler(C);
+      } else if(misched == "iterative-max-ilp") {
+          return createIterativeILPMachineScheduler(C);
+      } else if(misched == "iterative-max-occupancy") {
+          return createIterativeGCNMaxOccupancyMachineScheduler(C);
       }
 
       assert(false && "Valid scheduler not specified in misched.txt");
