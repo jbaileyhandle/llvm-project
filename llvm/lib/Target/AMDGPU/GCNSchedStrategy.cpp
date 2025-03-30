@@ -49,7 +49,16 @@ const unsigned ScheduleMetrics::ScaleFactor = 100;
 
 GCNSchedStrategy::GCNSchedStrategy(const MachineSchedContext *C)
     : GenericScheduler(C), TargetOccupancy(0), MF(nullptr),
-      HasHighPressure(false) {}
+      HasHighPressure(false) {
+         // TODO jbaile added by gpu on gpu sched. Make configurable?
+         SIMachineFunctionInfo *MFI;
+         MFI =
+           const_cast<SIMachineFunctionInfo *>(C->MF->getInfo<SIMachineFunctionInfo>());
+         MFI->setInitialOccupancy();
+         #ifdef DEBUG_RESET_OCCUPANCY
+           printf("Occ before AMD: %d\n", MFI->getOccupancy());
+         #endif
+      }
 
 void GCNSchedStrategy::initialize(ScheduleDAGMI *DAG) {
   GenericScheduler::initialize(DAG);

@@ -234,6 +234,7 @@ void initializeMachinePostDominatorTreePass(PassRegistry&);
 void initializeMachineRegionInfoPassPass(PassRegistry&);
 void initializeMachineSanitizerBinaryMetadataPass(PassRegistry &);
 void initializeMachineSchedulerPass(PassRegistry&);
+void initializeMachineSchedulerOptSchedPass(PassRegistry&);
 void initializeMachineSinkingPass(PassRegistry&);
 void initializeMachineTraceMetricsPass(PassRegistry&);
 void initializeMachineUniformityInfoPrinterPassPass(PassRegistry &);

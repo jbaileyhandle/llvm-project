@@ -402,6 +402,12 @@ public:
 
 } // namespace callable_detail
 
+/// Test whether \p RangeOrContainer is empty. Similar to C++17 std::empty.
+template <typename T>
+constexpr bool empty(const T &RangeOrContainer) {
+  return adl_begin(RangeOrContainer) == adl_end(RangeOrContainer);
+}
+
 /// Returns true if the given container only contains a single element.
 template <typename ContainerTy> bool hasSingleElement(ContainerTy &&C) {
   auto B = std::begin(C), E = std::end(C);

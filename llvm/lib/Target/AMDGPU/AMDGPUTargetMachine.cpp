@@ -61,6 +61,7 @@
 #include "llvm/Transforms/Utils/SimplifyLibCalls.h"
 #include "llvm/Transforms/Vectorize/LoadStoreVectorizer.h"
 #include <optional>
+#include "OptSched/lib/Wrapper/AMDGPU/GCNOptSched.h"
 
 //======================================================================
 // jbaile
@@ -351,6 +352,11 @@ static cl::opt<bool> EnablePromoteKernelArguments(
     "amdgpu-enable-promote-kernel-arguments",
     cl::desc("Enable promotion of flat kernel pointer arguments to global"),
     cl::Hidden, cl::init(true));
+
+static cl::opt<bool> UseOptSched(
+     "use-opt-sched",
+     cl::desc("Use OptSched machine scheduler"), cl::init(true),
+     cl::Hidden);
 
 static cl::opt<bool> EnableMaxIlpSchedStrategy(
     "amdgpu-enable-max-ilp-scheduling-strategy",
@@ -939,6 +945,13 @@ public:
   createMachineScheduler(MachineSchedContext *C) const override;
 
   ScheduleDAGInstrs *
+   createAMDScheduler(MachineSchedContext *C) const override;
+ 
+   ScheduleDAGInstrs *
+   createOptSchedScheduler(MachineSchedContext *C) const override;
+ 
+
+  ScheduleDAGInstrs *
   createPostMachineScheduler(MachineSchedContext *C) const override {
     ScheduleDAGMI *DAG = new GCNPostScheduleDAGMILive(
         C, std::make_unique<PostGenericScheduler>(C),
@@ -1168,6 +1181,15 @@ MachineFunctionInfo *R600TargetMachine::createMachineFunctionInfo(
 // GCN Pass Setup
 //===----------------------------------------------------------------------===//
 
+ static ScheduleDAGInstrs *createOptSchedGCN(MachineSchedContext *C) {
+   ScheduleDAGMILive *DAG = new llvm::opt_sched::ScheduleDAGOptSchedGCN(
+       C, std::make_unique<GCNMaxOccupancySchedStrategy>(C));
+   DAG->addMutation(createLoadClusterDAGMutation(DAG->TII, DAG->TRI));
+   DAG->addMutation(createAMDGPUMacroFusionDAGMutation());
+   DAG->addMutation(createAMDGPUExportClusteringDAGMutation());
+   return DAG;
+ }
+
 ScheduleDAGInstrs *GCNPassConfig::createMachineScheduler(
   MachineSchedContext *C) const {
   const GCNSubtarget &ST = C->MF->getSubtarget<GCNSubtarget>();
@@ -1175,6 +1197,12 @@ ScheduleDAGInstrs *GCNPassConfig::createMachineScheduler(
   //=========================================================
   // jbaile
   //=========================================================
+
+  // TODO integrate OptScheduler
+  /*
+   if (UseOptSched)
+     return createOptSchedGCN(C);
+  */
   std::ifstream misched_config_file("misched.txt");
   if(misched_config_file) {
 
@@ -1211,6 +1239,16 @@ ScheduleDAGInstrs *GCNPassConfig::createMachineScheduler(
       return createGCNMaxOccupancyMachineScheduler(C);
   }
 }
+
+ ScheduleDAGInstrs *GCNPassConfig::createAMDScheduler(
+   MachineSchedContext *C) const {
+   return createGCNMaxOccupancyMachineScheduler(C);
+ }
+
+ScheduleDAGInstrs *GCNPassConfig::createOptSchedScheduler(
+   MachineSchedContext *C) const {
+   return createOptSchedGCN(C);
+ }
 
 bool GCNPassConfig::addPreISel() {
   AMDGPUPassConfig::addPreISel();
@@ -1350,11 +1388,28 @@ void GCNPassConfig::addFastRegAlloc() {
 void GCNPassConfig::addOptimizedRegAlloc() {
   // Allow the scheduler to run before SIWholeQuadMode inserts exec manipulation
   // instructions that cause scheduling barriers.
+
+  // jbaile gpu on gpu people removed these e.g. they're moving passing around
+  // w/ respect to MachineSchedulerID vs MachineSchedulerID
+  // TODO configurable?
+  //====================================================================
   insertPass(&MachineSchedulerID, &SIWholeQuadModeID);
   insertPass(&MachineSchedulerID, &SIPreAllocateWWMRegsID);
+  //====================================================================
+
+  // jbaile
+  // gpu on gpu people added this - should we make it configurable?
+  // TODO yes
+  //====================================================================
+  insertPass(&MachineSchedulerOptSchedID, &SIWholeQuadModeID);
+  insertPass(&MachineSchedulerOptSchedID, &SIPreAllocateWWMRegsID);
+  //====================================================================
 
   if (OptExecMaskPreRA)
-    insertPass(&MachineSchedulerID, &SIOptimizeExecMaskingPreRAID);
+    // jbaile gpu on gpu replaced MachineSchedulerID with MachineSchedulerOptSchedID
+    // TODO should make configurable
+    // insertPass(&MachineSchedulerID, &SIOptimizeExecMaskingPreRAID);
+    insertPass(&MachineSchedulerOptSchedID, &SIOptimizeExecMaskingPreRAID);
 
   if (EnableRewritePartialRegUses)
     insertPass(&RenameIndependentSubregsID, &GCNRewritePartialRegUsesID);
@@ -1365,7 +1420,9 @@ void GCNPassConfig::addOptimizedRegAlloc() {
   // This is not an essential optimization and it has a noticeable impact on
   // compilation time, so we only enable it from O2.
   if (TM->getOptLevel() > CodeGenOpt::Less)
-    insertPass(&MachineSchedulerID, &SIFormMemoryClausesID);
+    // TODO jbaile make configurable, see above
+    // insertPass(&MachineSchedulerID, &SIFormMemoryClausesID);
+    insertPass(&MachineSchedulerOptSchedID, &SIFormMemoryClausesID);
 
   // FIXME: when an instruction has a Killed operand, and the instruction is
   // inside a bundle, seems only the BUNDLE instruction appears as the Kills of

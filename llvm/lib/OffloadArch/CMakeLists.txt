@@ -35,4 +35,6 @@ if(NOT WIN32)
   target_link_libraries(LLVMOffloadArch PRIVATE dl)
 endif()
 
+target_link_libraries(LLVMOffloadArch PRIVATE -ldl)
+
 add_subdirectory(offload-arch)

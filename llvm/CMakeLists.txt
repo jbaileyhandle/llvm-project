@@ -49,6 +49,26 @@ project(LLVM
   VERSION ${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}.${LLVM_VERSION_PATCH}
   LANGUAGES C CXX ASM)
 
+####################################################################
+# OptSched
+####################################################################
+
+set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH};/opt/rocm/lib/cmake")
+set(CMAKE_CXX_STANDARD "17" CACHE STRING "" FORCE)
+
+set(AMDGPU_TARGETS "$ENV{AMDGPU_ARCH}" CACHE STRING "AMD GPU targets to compile for" FORCE)
+find_package(hip REQUIRED CONFIG PATHS /opt/rocm)
+include_directories("/opt/rocm/include")
+
+message(STATUS "HIP_COMPILER: ${HIP_COMPILER}")
+message(STATUS "HIP_CXX_COMPILER: ${HIP_CXX_COMPILER}")
+message(STATUS "HIP_LIB: ${HIP_LIBRARIES}")
+
+find_package(hiprand REQUIRED CONFIG PATHS /opt/rocm/)
+include_directories("/opt/rocm/hiprand/include" "/opt/rocm/rocrand/include")
+
+####################################################################
+
 if (NOT DEFINED CMAKE_INSTALL_LIBDIR AND DEFINED LLVM_LIBDIR_SUFFIX)
   # Must go before `include(GNUInstallDirs)`.
   set(CMAKE_INSTALL_LIBDIR "lib${LLVM_LIBDIR_SUFFIX}")
