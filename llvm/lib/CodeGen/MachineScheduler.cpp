@@ -21,6 +21,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/LiveInterval.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -422,17 +423,31 @@ ScheduleDAGInstrs *MachineScheduler::createMachineScheduler() {
   if (Ctor != useDefaultMachineSched)
     return Ctor(this);
 
-   // Get the default scheduler set by the target for this function.
-  // jbaile: gpu on gpu people changed this from:
-  // ScheduleDAGInstrs *Scheduler = PassConfig->createMachineScheduler(this);
-  // Why? Should I make this configurable
-   ScheduleDAGInstrs *Scheduler = PassConfig->createAMDScheduler(this);
-   if (Scheduler)
-     return Scheduler;
 
-   // Default to GenericScheduler.
-   return createGenericSchedLive(this);
- }
+  // jbaile config
+  // TODO: Switch on/off for host vs GPU code?
+  const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
+  if(config.IsAcoOptSched()) {
+
+     // Get the default scheduler set by the target for this function.
+     ScheduleDAGInstrs *Scheduler = PassConfig->createAMDScheduler(this);
+     if (Scheduler)
+       return Scheduler;
+
+     // Default to GenericScheduler.
+     return createGenericSchedLive(this);
+
+  } else {
+
+    // Get the default scheduler set by the target for this function.
+    ScheduleDAGInstrs *Scheduler = PassConfig->createMachineScheduler(this);
+    if (Scheduler)
+      return Scheduler;
+
+    // Default to GenericScheduler.
+    return createGenericSchedLive(this);
+  }
+}
 
  ScheduleDAGInstrs *MachineSchedulerOptSched::createMachineSchedulerOptSched() {
    ScheduleDAGInstrs *Scheduler = PassConfig->createOptSchedScheduler(this);

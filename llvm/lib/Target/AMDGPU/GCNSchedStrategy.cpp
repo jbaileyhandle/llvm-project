@@ -26,6 +26,7 @@
 #include "GCNSchedStrategy.h"
 #include "AMDGPUIGroupLP.h"
 #include "SIMachineFunctionInfo.h"
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/RegisterClassInfo.h"
 
 #define DEBUG_TYPE "machine-scheduler"
@@ -50,14 +51,18 @@ const unsigned ScheduleMetrics::ScaleFactor = 100;
 GCNSchedStrategy::GCNSchedStrategy(const MachineSchedContext *C)
     : GenericScheduler(C), TargetOccupancy(0), MF(nullptr),
       HasHighPressure(false) {
-         // TODO jbaile added by gpu on gpu sched. Make configurable?
-         SIMachineFunctionInfo *MFI;
-         MFI =
-           const_cast<SIMachineFunctionInfo *>(C->MF->getInfo<SIMachineFunctionInfo>());
-         MFI->setInitialOccupancy();
-         #ifdef DEBUG_RESET_OCCUPANCY
-           printf("Occ before AMD: %d\n", MFI->getOccupancy());
-         #endif
+
+         // jbaile config
+         const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
+         if(config.IsAcoOptSched()) {
+             SIMachineFunctionInfo *MFI;
+             MFI =
+               const_cast<SIMachineFunctionInfo *>(C->MF->getInfo<SIMachineFunctionInfo>());
+             MFI->setInitialOccupancy();
+             #ifdef DEBUG_RESET_OCCUPANCY
+               printf("Occ before AMD: %d\n", MFI->getOccupancy());
+             #endif
+         }
       }
 
 void GCNSchedStrategy::initialize(ScheduleDAGMI *DAG) {

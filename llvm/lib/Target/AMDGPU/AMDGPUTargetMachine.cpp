@@ -34,6 +34,7 @@
 #include "TargetInfo/AMDGPUTargetInfo.h"
 #include "Utils/AMDGPUBaseInfo.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/GlobalISel/CSEInfo.h"
 #include "llvm/CodeGen/GlobalISel/IRTranslator.h"
 #include "llvm/CodeGen/GlobalISel/InstructionSelect.h"
@@ -999,6 +1000,14 @@ public:
 
 AMDGPUPassConfig::AMDGPUPassConfig(LLVMTargetMachine &TM, PassManagerBase &PM)
     : TargetPassConfig(TM, PM) {
+  /*
+  MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
+  config.debugPrint();
+  llvm::outs() << "Howdy====================================\n";
+  llvm::outs().flush();
+  exit(1);
+  */
+
   // Exceptions and StackMaps are not supported, so these passes will never do
   // anything.
   disablePass(&StackMapLivenessID);
@@ -1162,6 +1171,7 @@ bool AMDGPUPassConfig::addGCPasses() {
 
 llvm::ScheduleDAGInstrs *
 AMDGPUPassConfig::createMachineScheduler(MachineSchedContext *C) const {
+
   const GCNSubtarget &ST = C->MF->getSubtarget<GCNSubtarget>();
   ScheduleDAGMILive *DAG = createGenericSchedLive(C);
   DAG->addMutation(createLoadClusterDAGMutation(DAG->TII, DAG->TRI));
@@ -1197,30 +1207,23 @@ ScheduleDAGInstrs *GCNPassConfig::createMachineScheduler(
   //=========================================================
   // jbaile
   //=========================================================
+  const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
+  // TODO - I don't think this actually does anything
+  if(config.IsAcoOptSched()) {
+    if (UseOptSched) {
+        return createOptSchedGCN(C);
+    }
+  }
 
-  // TODO integrate OptScheduler
-  /*
-   if (UseOptSched)
-     return createOptSchedGCN(C);
-  */
-  std::ifstream misched_config_file("misched.txt");
-  if(misched_config_file) {
+  if(config.HasConfig()) {
 
-      std::string line;
-      assert(std::getline(misched_config_file, line) && "Expected a line in misched.txt");
-
-      std::istringstream iss(line);
-      std::string misched, extra;
-      assert((iss >> misched) && "Expected a word in first line of misched.txt");
-      assert(!(iss >> extra) && "Expected exactly one word in first line of misched.txt");
-
-      if(misched == "max-ilp") {
+      if(config.GetScheduler() == MachineInstrSchedulerConfig::Scheduler::MaxIlp) {
           return createGCNMaxILPMachineScheduler(C);
-      } else if(misched == "max-occupancy") {
+      } else if(config.GetScheduler() == MachineInstrSchedulerConfig::Scheduler::MaxOccupancy) {
           return createGCNMaxOccupancyMachineScheduler(C);
-      } else if(misched == "iterative-max-ilp") {
+      } else if(config.GetScheduler() == MachineInstrSchedulerConfig::Scheduler::IterativeMaxIlp) {
           return createIterativeILPMachineScheduler(C);
-      } else if(misched == "iterative-max-occupancy") {
+      } else if(config.GetScheduler() == MachineInstrSchedulerConfig::Scheduler::IterativeMaxOccupancy) {
           return createIterativeGCNMaxOccupancyMachineScheduler(C);
       }
 
@@ -1389,27 +1392,24 @@ void GCNPassConfig::addOptimizedRegAlloc() {
   // Allow the scheduler to run before SIWholeQuadMode inserts exec manipulation
   // instructions that cause scheduling barriers.
 
-  // jbaile gpu on gpu people removed these e.g. they're moving passing around
-  // w/ respect to MachineSchedulerID vs MachineSchedulerID
-  // TODO configurable?
-  //====================================================================
-  insertPass(&MachineSchedulerID, &SIWholeQuadModeID);
-  insertPass(&MachineSchedulerID, &SIPreAllocateWWMRegsID);
-  //====================================================================
 
-  // jbaile
-  // gpu on gpu people added this - should we make it configurable?
-  // TODO yes
-  //====================================================================
-  insertPass(&MachineSchedulerOptSchedID, &SIWholeQuadModeID);
-  insertPass(&MachineSchedulerOptSchedID, &SIPreAllocateWWMRegsID);
-  //====================================================================
+  // jbaile config
+  // Don't know that this actually matters, but why not...
+  const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
+  if(config.IsAcoOptSched()) {
+      insertPass(&MachineSchedulerOptSchedID, &SIWholeQuadModeID);
+      insertPass(&MachineSchedulerOptSchedID, &SIPreAllocateWWMRegsID);
+  } else {
+      insertPass(&MachineSchedulerID, &SIWholeQuadModeID);
+      insertPass(&MachineSchedulerID, &SIPreAllocateWWMRegsID);
+  }
 
   if (OptExecMaskPreRA)
-    // jbaile gpu on gpu replaced MachineSchedulerID with MachineSchedulerOptSchedID
-    // TODO should make configurable
-    // insertPass(&MachineSchedulerID, &SIOptimizeExecMaskingPreRAID);
-    insertPass(&MachineSchedulerOptSchedID, &SIOptimizeExecMaskingPreRAID);
+    if(config.IsAcoOptSched()) {
+        insertPass(&MachineSchedulerOptSchedID, &SIOptimizeExecMaskingPreRAID);
+    } else {
+        insertPass(&MachineSchedulerID, &SIOptimizeExecMaskingPreRAID);
+    }
 
   if (EnableRewritePartialRegUses)
     insertPass(&RenameIndependentSubregsID, &GCNRewritePartialRegUsesID);
@@ -1420,9 +1420,12 @@ void GCNPassConfig::addOptimizedRegAlloc() {
   // This is not an essential optimization and it has a noticeable impact on
   // compilation time, so we only enable it from O2.
   if (TM->getOptLevel() > CodeGenOpt::Less)
-    // TODO jbaile make configurable, see above
-    // insertPass(&MachineSchedulerID, &SIFormMemoryClausesID);
-    insertPass(&MachineSchedulerOptSchedID, &SIFormMemoryClausesID);
+
+    if(config.IsAcoOptSched()) {
+        insertPass(&MachineSchedulerOptSchedID, &SIFormMemoryClausesID);
+    } else {
+        insertPass(&MachineSchedulerID, &SIFormMemoryClausesID);
+    }
 
   // FIXME: when an instruction has a Killed operand, and the instruction is
   // inside a bundle, seems only the BUNDLE instruction appears as the Kills of

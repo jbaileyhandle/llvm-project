@@ -17,6 +17,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/CallGraphSCCPass.h"
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/Analysis/ScopedNoAliasAA.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Analysis/TypeBasedAliasAnalysis.h"
@@ -1478,7 +1479,13 @@ void TargetPassConfig::addOptimizedRegAlloc() {
 
   // PreRA instruction scheduling.
   addPass(&MachineSchedulerID);
-  addPass(&MachineSchedulerOptSchedID);
+
+
+  // jbaile config
+  const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
+  if(config.IsAcoOptSched()) {
+      addPass(&MachineSchedulerOptSchedID);
+  }
 
   if (addRegAssignAndRewriteOptimized()) {
     // Perform stack slot coloring and post-ra machine LICM.
