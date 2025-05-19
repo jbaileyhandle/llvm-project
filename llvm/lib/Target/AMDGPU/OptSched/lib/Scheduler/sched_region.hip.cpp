@@ -24,6 +24,12 @@
 #include "llvm/Support/FileSystem.h"
 #include <hiprand/hiprand_kernel.h>
 
+//======================================================================
+// jbaile
+//======================================================================
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+//======================================================================
+
 extern bool OPTSCHED_gPrintSpills;
 
 using namespace llvm::opt_sched;
@@ -225,11 +231,12 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
   unsigned long randSeed = (unsigned long) schedIni.GetInt("RANDOM_SEED");
   bool devACOEnabled = schedIni.GetBool("DEV_ACO");
   int numBlocks;
-  if (devACOEnabled && dataDepGraph_->GetInstCnt() >= REGION_MIN_SIZE)
+  if (devACOEnabled && dataDepGraph_->GetInstCnt() >= REGION_MIN_SIZE) {
     numBlocks = schedIni.GetBool("ACO_MANY_ANTS_ENABLED") && dataDepGraph_->GetInstCnt() > MANY_ANT_MIN_SIZE ?
                 schedIni.GetInt("ACO_MANY_ANTS_PER_ITERATION_BLOCKS") : schedIni.GetInt("ACO_DEVICE_ANT_PER_ITERATION_BLOCKS");
-  else
+  } else {
     numBlocks = schedIni.GetInt("HOST_ANTS");
+  }
 
   if (AcoSchedulerEnabled) {
     AcoBeforeEnum = schedIni.GetBool("ACO_BEFORE_ENUM");
@@ -484,6 +491,8 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
   Logger::Info("Sched Lwr Bound: %d", schedLwrBound_);
   Logger::Info("Loop Depth: %d", loopDepth);
 
+    Logger::Info("jbaile AcoBeforeEnum: %d", AcoBeforeEnum);
+
   if (AcoBeforeEnum && 
       (REGION_MAX_EDGE_CNT > 0 &&
        dataDepGraph_->GetEdgeCnt() > REGION_MAX_EDGE_CNT /*||
@@ -524,9 +533,18 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
     bestCost_ = hurstcCost_;
   }
 
-  if (AcoBeforeEnum && !isLstOptml) {
+  // ===================================================================
+  // jbaile
+  // ===================================================================
+  const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
+  bool mis_override_heuristic = mis_config.HasAcoOption(MachineInstrSchedulerConfig::AcoOption::RunRegardlessOfHeurisitcOutcome);
+
+  if (mis_override_heuristic || (AcoBeforeEnum && !isLstOptml)) {
+  //======================================================================
+
     AcoStart = Utilities::GetProcessorTime();
     AcoSchedule = new InstSchedule(machMdl_, dataDepGraph_, vrfySched_);
+
 
     rslt = runACO(AcoSchedule, lstSched, false, randSeed, numBlocks, devACOEnabled);
     if (rslt != RES_SUCCESS) {
@@ -540,6 +558,7 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
       delete AcoSchedule;
       return rslt;
     }
+    llvm::report_fatal_error("jbaile Stop short of run!");
 
     AcoTime = Utilities::GetProcessorTime() - AcoStart;
     stats::AcoTime.Record(AcoTime);
@@ -561,6 +580,8 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
       bestCost_ = AcoScheduleCost_;
     }
   }
+
+  llvm::report_fatal_error("jbaile skipped run!");
 
   // If an optimal schedule was found then it should have already
   // been taken care of when optimality was discovered.
@@ -1098,6 +1119,7 @@ FUNC_RESULT SchedRegion::runACO(InstSchedule *ReturnSched,
   // to fit in device memory
   Logger::Info("This DDG has %d edges", dataDepGraph_->GetEdgeCnt());
   Logger::Info("CP Distance: %d", dataDepGraph_->GetRootInst()->GetCrntLwrBound(DIR_BKWRD) + 1);
+  // TODO disable min size?
   if (devACOEnabled && dataDepGraph_->GetInstCnt() >= REGION_MIN_SIZE) {
     // Allocate and Copy data to device for parallel ACO
     size_t memSize;
@@ -1133,42 +1155,63 @@ FUNC_RESULT SchedRegion::runACO(InstSchedule *ReturnSched,
     hiprandState_t *dev_states;
     memSize = sizeof(hiprandState_t) * numThreads;
     gpuErrchk(hipMalloc(&dev_states, memSize));
+    Logger::Info("jbaile arg InitCurand => %x", InitCurand);
+    Logger::Info("jbaile arg numBlocks => %x", InitCurand);
+    Logger::Info("jbaile arg NUMTHREADSPERBLOCK => %x", NUMTHREADSPERBLOCK);
+    Logger::Info("jbaile arg dev_states => %x", dev_states);
+    Logger::Info("jbaile arg dataDepGraph_->GetInstCnt() => %x", dataDepGraph_->GetInstCnt());
     hipLaunchKernelGGL(InitCurand, numBlocks, NUMTHREADSPERBLOCK, 0, 0, dev_states,
                                                   randSeed == 0 ? unsigned(time(NULL)) : randSeed,
                                                   dataDepGraph_->GetInstCnt());
+
+    Logger::Info("jbaile About to make new ACOScheduler");
     ACOScheduler *AcoSchdulr = new ACOScheduler(
         dataDepGraph_, machMdl_, abslutSchedUprBound_, enumPrirts_,
         vrfySched_, IsPostBB, numBlocks, (SchedRegion *)dev_rgn, dev_DDG,
         dev_machMdl_, dev_states);
+    Logger::Info("jbaile About to AcoSchdulr->setInitialSched");
     AcoSchdulr->setInitialSched(InitSched);
     // Alloc dev arrays for parallel ACO
+    Logger::Info("jbaile About to AcoSchdulr->AllocDevArraysForParallelACO");
     AcoSchdulr->AllocDevArraysForParallelACO();
     // Copy ACOScheduler to device
     ACOScheduler *dev_AcoSchdulr;
     memSize = sizeof(ACOScheduler);
+    Logger::Info("jbaile About to allocate dev_AcoSchdulr");
     gpuErrchk(hipMallocManaged(&dev_AcoSchdulr, memSize));
+    Logger::Info("jbaile About to memCpy dev_AcoSchdulr");
     gpuErrchk(hipMemcpy(dev_AcoSchdulr, AcoSchdulr, memSize,
                          hipMemcpyHostToDevice));
+    Logger::Info("jbaile About to CopyPointersToDevice");
     AcoSchdulr->CopyPointersToDevice(dev_AcoSchdulr);
     // Make sure mallocManaged memory is copied to device before kernel start
     memSize = sizeof(DataDepGraph);
+    Logger::Info("jbaile About to CopyPointersToDevice dev_AcoSchdulr");
+    AcoSchdulr->CopyPointersToDevice(dev_AcoSchdulr);
     gpuErrchk(hipMemPrefetchAsync(dev_DDG, memSize, 0));
     memSize = sizeof(BBWithSpill);
+    Logger::Info("jbaile About to hipMemPrefetchAsync dev_rgn");
     gpuErrchk(hipMemPrefetchAsync(dev_rgn, memSize, 0));
 
     // FindSchedule
+    Logger::Info("jbaile About to AcoSchdulr->FindSchedule");
     Rslt = AcoSchdulr->FindSchedule(ReturnSched, this, dev_AcoSchdulr);
 
+    Logger::Info("jbaile About to dev_AcoSchdulr->FreeDevicePointers");
     dev_AcoSchdulr->FreeDevicePointers();
+    Logger::Info("jbaile About to free dev_AcoSchdulr");
     hipFree(dev_AcoSchdulr);
     delete AcoSchdulr;
+    Logger::Info("jbaile About to dev_rgn->FreeDevicePointers");
     dev_rgn->FreeDevicePointers(numThreads);
     hipFree(dev_rgn);
+    Logger::Info("jbaile About to dev_DDG->FreeDevicePointers");
     dev_DDG->FreeDevicePointers(numThreads);
     hipFree(dev_DDG);
     hipFree(dev_states);
     // For some reason crashed OptSched to have this in the destructor
     // so call to delete it here
+    Logger::Info("jbaile About to dataDepGraph_->FreeDevEdges");
     dataDepGraph_->FreeDevEdges();
     // Ocasionally BBWithSpill deletes an empty pointer, which causes the next
     // kernel to report an invalid argument error after execution even

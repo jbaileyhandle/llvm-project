@@ -44,6 +44,12 @@
 #include <chrono>
 #include <string>
 
+//======================================================================
+// jbaile
+//======================================================================
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+//======================================================================
+
 #define DEBUG_TYPE "optsched"
 
 using namespace llvm::opt_sched;
@@ -913,12 +919,36 @@ void ScheduleDAGOptSched::loadOptSchedConfig() {
     OccupancyLimitSource = parseOccLimit(schedIni.GetString("OCCUPANCY_LIMIT_SOURCE"));
 
   DeviceACOEnabled = schedIni.GetInt("DEV_ACO");
+
+
+  //======================================================================================
+  // jbaile
+  //======================================================================================
+  const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
+  const MachineInstrSchedulerConfig::FunctionConfig *func_config =  mis_config.GetFunctionConfigFromMangledFunctionSignature(C->MF->getFunction().getName());
+  Logger::Info("********** Waka waka **********");
+  if((func_config != nullptr) && func_config->waves_per_eu_.has_value()) {
+      OccupancyLimit = func_config->waves_per_eu_.value();
+      ShouldLimitOccupancy = true;
+      OccupancyLimitSource = OCC_LIMIT_TYPE::OLT_FILE;
+  }
+  //======================================================================================
 }
 
 bool ScheduleDAGOptSched::isOptSchedEnabled() const {
+  // ===================================================================
+  // jbaile
+  // ===================================================================
+    const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
+    if(mis_config.HasAcoOption(MachineInstrSchedulerConfig::AcoOption::RunOnAllFunctions)) {
+        return true;
+    }
+  // ===================================================================
+
   // check scheduler ini file to see if optsched is enabled
   auto optSchedOption =
       SchedulerOptions::getInstance().GetString("USE_OPT_SCHED");
+
   if (optSchedOption == "YES") {
     return true;
   } else if (optSchedOption == "HOT_ONLY") {

@@ -3,6 +3,8 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <set>
 #include <vector>
 
 #include "llvm/IR/Function.h"
@@ -20,6 +22,22 @@ class MachineInstrSchedulerConfig {
             IterativeMaxIlp,
             AcoOptSched
         };
+        enum class AcoOption{
+            RunOnAllFunctions,
+            RunRegardlessOfHeurisitcOutcome,
+            InvalidOption
+        };
+
+        // A class to represent per-function configuration info
+        class FunctionConfig {
+            public:
+                std::string ToString() const;
+
+                FunctionConfig(const std::vector<std::string> &tokens);
+                std::string func_signature_;
+                std::optional<int> waves_per_eu_;
+        };
+
 
         // Return true if there is scheduler configuration
         bool HasConfig() const;
@@ -29,6 +47,11 @@ class MachineInstrSchedulerConfig {
         
         // Return true if we have configuration information for function
         bool HasFunctionConfig(const Function &function) const;
+        bool HasFunctionConfigForMangledFunctionSignature(const llvm::StringRef &mangled_signature) const;
+
+        // Return the FunctionConfig for the function with a given mangled signature
+        // Return nullptr if not found
+        const FunctionConfig *GetFunctionConfigFromMangledFunctionSignature(const llvm::StringRef &mangled_signature) const;
 
         // If there is a configuration for function, set waves per eu attribute
         // for the function based on the configuration
@@ -41,6 +64,9 @@ class MachineInstrSchedulerConfig {
         // is the configured scheduler
         bool IsAcoOptSched() const;
 
+        // Return true if option is set
+        bool HasAcoOption(AcoOption option) const;
+
         // Debug printing stuff
         void DebugPrint() const;
         std::string ToString() const;
@@ -51,9 +77,11 @@ class MachineInstrSchedulerConfig {
         // Return the configurd scheduler as a string
         std::string GetSchedulerAsString() const;
 
+        // Return the string-equivalnet of the ACO option
+        std::string GetAcoOptionAsString(AcoOption option) const;
+
         // Return the FunctionConfig for the function with a given demangled signature
         // Return nullptr if not found
-        class FunctionConfig;
         const FunctionConfig *GetFunctionConfigFromDemangledFunctionSignature(const std::string &demangled_signature) const;
 
         // Return the FunctionConfig for the function with a given mangled signature
@@ -71,19 +99,16 @@ class MachineInstrSchedulerConfig {
         // Get the configuration for a function
         const FunctionConfig *GetFunctionConfig(const Function &function) const;
 
-        // A class to represent per-function configuration info
-        class FunctionConfig {
-            public:
-                std::string ToString() const;
+        // Set options for ACO scheduler
+        void InitAcoOptions(const std::vector<std::string> &options);
 
-                FunctionConfig(const std::vector<std::string> &tokens);
-                std::string func_signature_;
-                int waves_per_eu_;
-        };
+        // Conert a string to the corresponding AcoOption
+        AcoOption GetAcoOptionFromString(const std::string &str);
 
         bool has_config_ = false;
         Scheduler mi_scheduler_ = Scheduler::Default;
         std::unordered_map<std::string, FunctionConfig> demangled_func_signature_to_config_;
+        std::set<AcoOption> aco_options_;
         inline static const std::unordered_map<Scheduler, std::string> scheduler_to_str_ {
             {Scheduler::Default, "Default"},
             {Scheduler::MaxOccupancy, "MaxOccupancy"},
@@ -91,6 +116,11 @@ class MachineInstrSchedulerConfig {
             {Scheduler::IterativeMaxOccupancy, "IterativeMaxOccupancy"},
             {Scheduler::IterativeMaxIlp, "IterativeMaxIlp"},
             {Scheduler::AcoOptSched, "AcoOptSched"}
+        };
+        inline static const std::unordered_map<AcoOption, std::string> aco_option_to_str_ {
+            {AcoOption::InvalidOption, "InvalidOption"},
+            {AcoOption::RunOnAllFunctions, "RunOnAllFunctions"},
+            {AcoOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"}
         };
 
 

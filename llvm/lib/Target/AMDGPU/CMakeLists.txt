@@ -242,7 +242,11 @@ include_directories("OptSched/include" "OptSched/lib")
          ${OPTSCHED_TARGET_DEPS})
 
 
- SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -save-temps -fgpu-rdc")
+ # One of these mprintf-kind=buffered is probably redundant.
+ # Remove one once it's easier to test
+ SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -save-temps -fgpu-rdc -mprintf-kind=buffered")
+ target_compile_options(LLVMAMDGPUCodeGen PRIVATE -mprintf-kind=buffered)
+ 
  target_link_options(LLVMAMDGPUCodeGen PRIVATE -fgpu-rdc --hip-link)
  target_link_libraries(LLVMAMDGPUCodeGen PRIVATE ${HIP_LIBRARIES})
 

@@ -1482,10 +1482,12 @@ void TargetPassConfig::addOptimizedRegAlloc() {
 
 
   // jbaile config
+  //===================================================================================
   const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
   if(config.IsAcoOptSched()) {
       addPass(&MachineSchedulerOptSchedID);
   }
+  //===================================================================================
 
   if (addRegAssignAndRewriteOptimized()) {
     // Perform stack slot coloring and post-ra machine LICM.

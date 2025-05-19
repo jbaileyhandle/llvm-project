@@ -34,7 +34,6 @@
 #include "TargetInfo/AMDGPUTargetInfo.h"
 #include "Utils/AMDGPUBaseInfo.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
-#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/GlobalISel/CSEInfo.h"
 #include "llvm/CodeGen/GlobalISel/IRTranslator.h"
 #include "llvm/CodeGen/GlobalISel/InstructionSelect.h"
@@ -67,9 +66,7 @@
 //======================================================================
 // jbaile
 //======================================================================
-#include <cstdio>
-#include <fstream>
-#include <sstream>
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 //======================================================================
 
 using namespace llvm;
@@ -1391,7 +1388,6 @@ void GCNPassConfig::addFastRegAlloc() {
 void GCNPassConfig::addOptimizedRegAlloc() {
   // Allow the scheduler to run before SIWholeQuadMode inserts exec manipulation
   // instructions that cause scheduling barriers.
-
 
   // jbaile config
   // Don't know that this actually matters, but why not...

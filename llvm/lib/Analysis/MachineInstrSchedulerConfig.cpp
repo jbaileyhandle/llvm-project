@@ -18,7 +18,8 @@ namespace {
 
     // Split a string according to delimiter
     // Return split strings as a vector
-    std::vector<std::string> Split(const std::string &input, char delimiter='/') {
+    std::vector<std::string> SplitByDelimter(const std::string &input, char delimiter='/') {
+
         std::vector<std::string> tokens;
         std::stringstream ss(input);
         std::string token;
@@ -27,6 +28,17 @@ namespace {
                 tokens.push_back(token);
             }
         }
+        return tokens;
+    }
+
+    // Split a string according to whitespace 
+    // Return split strings as a vector
+    std::vector<std::string> SplitByWhitespace(const std::string &input) {
+        std::istringstream stream(input);
+        std::vector<std::string> tokens{
+            std::istream_iterator<std::string>{stream},
+            std::istream_iterator<std::string>{}
+        };
         return tokens;
     }
 
@@ -41,8 +53,8 @@ namespace {
         return result;
     }
 
-    // Return the function's configured maximum waves per eu
-    std::optional<int> GetFunctionExistingMaximumWavesPerEu(const Function &F) {
+    // Return the function's configured minimum + maximum waves per eu
+    std::optional<std::pair<int, int>> GetFunctionExistingWavesPerEu(const Function &F) {
         if(!F.hasFnAttribute(waves_per_eu_attr)) {
             return std::nullopt;
         }
@@ -53,12 +65,35 @@ namespace {
             return std::nullopt;
         }
 
-        return std::stoi(existing_attr_str.substr(comma_pos+1));
+        return std::make_pair(std::stoi(existing_attr_str.substr(0,comma_pos)), std::stoi(existing_attr_str.substr(comma_pos+1)));
+    }
+
+    // Return the function's configured maximum waves per eu
+    std::optional<int> GetFunctionExistingMaximumWavesPerEu(const Function &F) {
+        std::optional<std::pair<int, int>> min_max = GetFunctionExistingWavesPerEu(F);
+        if(min_max.has_value()) {
+            return min_max->second;
+        }
+        return std::nullopt;
     }
 
     int GetOrInferFunctionExistingMaximumWavesPerEU(const Function &function) {
         std::optional<int> existing_maximum_waves_per_eu = GetFunctionExistingMaximumWavesPerEu(function);
         return existing_maximum_waves_per_eu.value_or(10);
+    }
+
+    // Return the function's configured minimum waves per eu
+    std::optional<int> GetFunctionExistingMinimumWavesPerEu(const Function &F) {
+        std::optional<std::pair<int, int>> min_max = GetFunctionExistingWavesPerEu(F);
+        if(min_max.has_value()) {
+            return min_max->first;
+        }
+        return std::nullopt;
+    }
+
+    int GetOrInferFunctionExistingMinimumWavesPerEU(const Function &function) {
+        std::optional<int> existing_minimum_waves_per_eu = GetFunctionExistingMinimumWavesPerEu(function);
+        return existing_minimum_waves_per_eu.value_or(1);
     }
 
 } // end namespace
@@ -76,10 +111,40 @@ bool MachineInstrSchedulerConfig::IsAcoOptSched() const {
     return mi_scheduler_ == Scheduler::AcoOptSched;
 }
 
+bool MachineInstrSchedulerConfig::HasAcoOption(MachineInstrSchedulerConfig::AcoOption option) const {
+    return (aco_options_.find(option) != aco_options_.end());
+}
+
 MachineInstrSchedulerConfig::Scheduler MachineInstrSchedulerConfig::GetScheduler() const {
-    assert(Scheduler != config);
     return mi_scheduler_;
 }
+
+MachineInstrSchedulerConfig::AcoOption MachineInstrSchedulerConfig::GetAcoOptionFromString(const std::string &str) {
+    AcoOption option = AcoOption::InvalidOption;
+    llvm::StringRef str_ref_option(str);
+
+    option = StringSwitch<AcoOption>(llvm::StringRef(str))
+        .Case("RunOnAllFunctions", AcoOption::RunOnAllFunctions)
+        .Case("RunRegardlessOfHeurisitcOutcome", AcoOption::RunRegardlessOfHeurisitcOutcome)
+        .Default(AcoOption::InvalidOption);
+
+    if(option == AcoOption::InvalidOption) {
+        if(mi_scheduler_ == Scheduler::InvalidOption) {
+            llvm::report_fatal_error("Invalid machine instruction scheduler: " + str_ref_option);
+        }
+    }
+    return option;
+}
+
+void MachineInstrSchedulerConfig::InitAcoOptions(const std::vector<std::string> &options) {
+    if(mi_scheduler_ != Scheduler::AcoOptSched) {
+        return;
+    }
+    for(const auto &option : options) {
+        aco_options_.insert(GetAcoOptionFromString(option));
+    }
+}
+
 
 MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
     std::ifstream misched_config_file("misched.txt");
@@ -89,8 +154,7 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
         // Parse 1st line
         std::string line;
         std::getline(misched_config_file, line);
-        std::vector<std::string> first_line_tokens = Split(line);
-        assert((first_line_tokens.length() == 1) && Expected exactly one word in first line of misched.txt);
+        std::vector<std::string> first_line_tokens = SplitByWhitespace(line);
         std::string misched = first_line_tokens[0];
 
         // Set scheduler
@@ -107,6 +171,9 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
             llvm::report_fatal_error("Invalid machine instruction scheduler: " + misched_ref);
         }
 
+        // If ACO, record options
+        InitAcoOptions(std::vector<std::string>(first_line_tokens.begin()+1, first_line_tokens.end()));
+
         // Read in per-func info
         while(std::getline(misched_config_file, line)) {
 
@@ -116,7 +183,7 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
             }
 
             // Make per-line config object && register
-            std::vector<std::string> func_tokens = Split(line);
+            std::vector<std::string> func_tokens = SplitByDelimter(line);
             if(demangled_func_signature_to_config_.find(func_tokens[0]) != demangled_func_signature_to_config_.end()) {
                 llvm::report_fatal_error("In processing misched, found duplicate function configurations");
             }
@@ -140,6 +207,10 @@ const MachineInstrSchedulerConfig::FunctionConfig *MachineInstrSchedulerConfig::
     return GetFunctionConfigFromDemangledFunctionSignature(demangled_name);
 }
 
+const MachineInstrSchedulerConfig::FunctionConfig *MachineInstrSchedulerConfig::GetFunctionConfigFromMangledFunctionSignature(const llvm::StringRef &mangled_signature) const {
+    return GetFunctionConfigFromMangledFunctionSignature(mangled_signature.str());
+}
+
 bool MachineInstrSchedulerConfig::HasFunctionConfigForDemangledFunctionSignature(const std::string &demangled_signature) const {
     auto name_config_itr = demangled_func_signature_to_config_.find(demangled_signature);
     return name_config_itr != demangled_func_signature_to_config_.end();
@@ -148,6 +219,10 @@ bool MachineInstrSchedulerConfig::HasFunctionConfigForDemangledFunctionSignature
 bool MachineInstrSchedulerConfig::HasFunctionConfigForMangledFunctionSignature(const std::string &mangled_signature) const {
     std::string demangled_name = DemangleFunctionSignature(mangled_signature);
     return HasFunctionConfigForDemangledFunctionSignature(demangled_name);
+}
+
+bool MachineInstrSchedulerConfig::HasFunctionConfigForMangledFunctionSignature(const llvm::StringRef &mangled_signature) const {
+    return HasFunctionConfigForMangledFunctionSignature(mangled_signature.str());
 }
 
 bool MachineInstrSchedulerConfig::HasFunctionConfig(const Function &function) const {
@@ -159,13 +234,21 @@ const MachineInstrSchedulerConfig::FunctionConfig *MachineInstrSchedulerConfig::
 }
 
 void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Function &function) const {
+    // ACO configurations use a different mechanism to control register pressure / occupancy
+    if(IsAcoOptSched()) {
+        return;
+    }
     if(!HasFunctionConfig(function)) {
         return;
     }
+    const std::optional<int> &minimum_waves_per_eu_opt = GetFunctionConfig(function)->waves_per_eu_;
+    if(!minimum_waves_per_eu_opt.has_value()) {
+        return;
+    }
 
+    // TODO: A kernel must speicfy maximum threaeds per block to unlock >64 registers per thread. Do we want to force this here?
     /*
-    TODO: Do we actually want to preserve maximum waves per eu? Maybe! A kernel
-    must speicfy maximum waves per eu to unlock >64 registers per thread.
+    TODO: Do we actually want to preserve maximum waves per eu? Maybe! 
     But the question is - do we want to overwrite the perscribed maximum_waves_per_eu
     with something else? Possibilities:
     maximum_waves_per_eu = maximum_waves_per_eu form attribute
@@ -174,8 +257,8 @@ void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Fu
     or
     maximum_waves_per_eu = minimum_waves_per_eu
     */
+    int minimum_waves_per_eu = minimum_waves_per_eu_opt.value();
     int maximum_waves_per_eu = GetOrInferFunctionExistingMaximumWavesPerEU(function);
-    int minimum_waves_per_eu = GetFunctionConfig(function)->waves_per_eu_;
     maximum_waves_per_eu = std::max(minimum_waves_per_eu, maximum_waves_per_eu);
 
     // Clear old attribute
@@ -188,12 +271,16 @@ void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Fu
 
 MachineInstrSchedulerConfig::FunctionConfig::FunctionConfig(const std::vector<std::string> &tokens) {
     func_signature_ = std::move(tokens[0]);
-    waves_per_eu_ = std::stoi(tokens[1]);
+    if(tokens.size() > 1) {
+        waves_per_eu_ = std::stoi(tokens[1]);
+    }
 }
 
 std::string MachineInstrSchedulerConfig::FunctionConfig::ToString() const {
     std::string result = "\t" + func_signature_ +  "\n";
-    result += "\t\twaves_per_eu_:" + std::to_string(waves_per_eu_) + "\n";
+    if(waves_per_eu_.has_value()) {
+        result += "\t\twaves_per_eu_:" + std::to_string(waves_per_eu_.value()) + "\n";
+    }
     return result;
 }
 
@@ -201,12 +288,29 @@ std::string MachineInstrSchedulerConfig::GetSchedulerAsString() const {
     return scheduler_to_str_.at(mi_scheduler_);
 }
 
+std::string MachineInstrSchedulerConfig::GetAcoOptionAsString(AcoOption option) const {
+    return aco_option_to_str_.at(option);
+}
+
 std::string MachineInstrSchedulerConfig::ToString() const {
     std::string result;
+
+    // Scheduler
     result += "Scheduler: " + GetSchedulerAsString() + "\n";
+
+    // ACO options
+    if(IsAcoOptSched()) {
+        result += "\tACO options:\n";
+        for(const auto option : aco_options_) {
+            result += "\t\t" + GetAcoOptionAsString(option) + "\n";
+        }
+    }
+
+    // Per-func options
     for(const auto &signature_config : demangled_func_signature_to_config_) {
         result += signature_config.second.ToString();
     }
+
     return result;
 }
 

@@ -985,6 +985,8 @@ void reduceToBestSched(InstSchedule **dev_schedules, int *blockBestIndex,
 // select which pheromone update scheme to use
 #define PHER_UPDATE_SCHEME ONE_PER_ITER
 
+#define DEBUG_ACO_CRASH_LOCATIONS
+
 __device__ int globalBestIndex, dev_noImprovement, dev_schedsUsed, dev_schedsFound;
 __device__ pheromone_t dev_totalPherInTable;
 __device__ bool lowerBoundSchedFound, isGlobalBest;
@@ -1218,6 +1220,9 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
 				       ACOScheduler *dev_AcoSchdulr) {
   rgn_ = region;
 
+
+  Logger::Info("jbaile about to get settings"); 
+
   // get settings
   Config &schedIni = SchedulerOptions::getInstance();
   bool IsFirst = !rgn_->IsSecondPass();
@@ -1244,11 +1249,13 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
   if (dev_AcoSchdulr)
     dev_AcoSchdulr->noImprovementMax = noImprovementMax;
 
+  Logger::Info("jbaile about to compute the relative maximum score inverse"); 
   // compute the relative maximum score inverse
   ScRelMax = rgn_->GetHeuristicCost();
 
   // initialize pheromone
   // for this, we need the cost of the pure heuristic schedule
+  Logger::Info("jbaile about to initialize pheromone"); 
   int pheromone_size = (count_ + 1) * count_;
   for (int i = 0; i < pheromone_size; i++)
     pheromone_[i] = 1;
@@ -1261,6 +1268,8 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
   InstCount TargetSC = InitialSchedule ? InitialSchedule->GetSpillCost()
                                         : heuristicSched->GetSpillCost();  
 
+  Logger::Info("jbaile about to init bestSchedule"); 
+
 #if USE_ACS
   initialValue_ = 2.0 / ((double)count_ * heuristicCost);
 #else
@@ -1270,6 +1279,8 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
     pheromone_[i] = initialValue_;
   std::cerr << "initialValue_" << initialValue_ << std::endl;
   InstSchedule *bestSchedule = InitialSchedule;
+
+  Logger::Info("About to compare init and heuristic schedule"); 
 
   // check if heuristic schedule is better than the initial
   // schedule passed from the list scheduler
@@ -1290,6 +1301,7 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
   int iterations = 0;
   InstSchedule *iterationBest = nullptr;
 
+  Logger::Info("About to set some best stalls stuff"); 
   // set bestStallsValue to max of lower bound or critical path distance
   InstCount bestStallsValue = std::max(dataDepGraph_->GetSchedLwrBound(), dataDepGraph_->GetRootInst()->GetCrntLwrBound(DIR_BKWRD) + 1)* 6 / 5 - dataDepGraph_->GetInstCnt();
   if (dev_AcoSchdulr)
@@ -1300,6 +1312,7 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
     SetGlobalBestStalls(std::min(bestStallsValue, bestSchedule->GetCrntLngth() - dataDepGraph_->GetInstCnt()));
   printf("bestStallsValue is: %d, initial sched is: %d\n", bestStallsValue, bestSchedule->GetCrntLngth() - dataDepGraph_->GetInstCnt());
   
+  Logger::Info("About to enter Run ACO if statement"); 
   if (use_dev_ACO && count_ >= REGION_MIN_SIZE) { // Run ACO on device
     size_t memSize;
     // Update pheromones on device
@@ -1366,6 +1379,11 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
     // Make sure managed memory is copied to device before kernel start
     memSize = sizeof(ACOScheduler);
     gpuErrchk(hipMemPrefetchAsync(dev_AcoSchdulr, memSize, 0));
+
+
+
+
+
     Logger::Info("Launching Dev_ACO with %d blocks of %d threads", numBlocks_,
                                                            NUMTHREADSPERBLOCK);
     // Using Cooperative Grid Groups requires launching with
@@ -1381,9 +1399,20 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
     dArgs[4] = (void*)&dev_bestSched;
     dArgs[5] = (void*)&noImprovementMax;
     dArgs[6] = (void*)&dev_blockBestIndex;
+    Logger::Info("jbaile Dev_ACO args"); 
+    Logger::Info("jbaile arg Dev_ACO: %x", Dev_ACO); 
+    Logger::Info("jbaile arg dev_rgn_: %x", dArgs[0]); 
+    Logger::Info("jbaile arg dev_DDG_: %x", dArgs[1]); 
+    Logger::Info("jbaile arg dev_AcoSchdulr: %x", dArgs[2]); 
+    Logger::Info("jbaile arg dev_schedules: %x", dArgs[3]); 
+    Logger::Info("jbaile arg dev_bestSched: %x", dArgs[4]); 
+    Logger::Info("jbaile arg noImprovementMax: %x", dArgs[5]); 
+    Logger::Info("jbaile arg dev_blockBestIndex: %x", dArgs[6]); 
     gpuErrchk(hipLaunchCooperativeKernel((void*)Dev_ACO, gridDim, blockDim, 
                                           dArgs, 0, NULL));
     hipDeviceSynchronize();
+    Logger::Info("jbaile synchronize after hipLaunchCooperativeKernel"); 
+
     Logger::Info("Post Kernel Error: %s", 
                  hipGetErrorString(hipGetLastError()));
     // Copy dev_bestSched back to host
@@ -1698,6 +1727,13 @@ void ACOScheduler::CopyPheromonesToSharedMem(double *s_pheromone) {
   }
 }
 
+// Quick hack to avoid hash collisions for identical format strings
+// when using -mprintf-kind=buffered
+__host__ __device__ void PrintNewline() {
+    printf(" \n"); // Just \n collides with... something.
+    return;
+}
+
 __host__ __device__
 inline void ACOScheduler::UpdateACOReadyList(SchedInstruction *inst) {
   InstCount prdcsrNum, scsrRdyCycle;
@@ -1734,7 +1770,7 @@ inline void ACOScheduler::UpdateACOReadyList(SchedInstruction *inst) {
     }
     #ifdef DEBUG_INSTR_SELECTION
     if (GLOBALTID==0) {
-      printf("\n");
+      PrintNewline();
     }
     #endif
     // Make sure the scores are valid.  The scheduling of an instruction may
@@ -1825,10 +1861,10 @@ void ACOScheduler::PrintPheromone() {
       printf("%.1f ", Pheromone(i, j));
     }
     //std::cerr << std::endl;
-    printf("\n");
+    PrintNewline();
   }
   //std::cerr << std::endl;
-  printf("\n");
+  PrintNewline();
 }
 
 #ifndef NDEBUG
@@ -1867,7 +1903,7 @@ void PrintSchedule(InstSchedule *schedule) {
     printf("%d ", instNum);
     instNum = schedule->GetNxtInst(cycleNum, slotNum);
   }
-  printf("\n");
+  PrintNewline();
   schedule->ResetInstIter();
 }
 

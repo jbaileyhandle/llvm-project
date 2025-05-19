@@ -56,13 +56,17 @@ project(LLVM
 set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH};/opt/rocm/lib/cmake")
 set(CMAKE_CXX_STANDARD "17" CACHE STRING "" FORCE)
 
-set(AMDGPU_TARGETS "$ENV{AMDGPU_ARCH}" CACHE STRING "AMD GPU targets to compile for" FORCE)
+#jbaile
+#set(AMDGPU_TARGETS "$ENV{AMDGPU_ARCH}" CACHE STRING "AMD GPU targets to compile for" FORCE)
+set(AMDGPU_TARGETS "gfx906" CACHE STRING "AMD GPU targets to compile for" FORCE)
 find_package(hip REQUIRED CONFIG PATHS /opt/rocm)
 include_directories("/opt/rocm/include")
 
 message(STATUS "HIP_COMPILER: ${HIP_COMPILER}")
 message(STATUS "HIP_CXX_COMPILER: ${HIP_CXX_COMPILER}")
 message(STATUS "HIP_LIB: ${HIP_LIBRARIES}")
+message(STATUS "AMDGPU_TARGETS: ${AMDGPU_TARGETS}")
+
 
 find_package(hiprand REQUIRED CONFIG PATHS /opt/rocm/)
 include_directories("/opt/rocm/hiprand/include" "/opt/rocm/rocrand/include")
@@ -1155,6 +1159,7 @@ add_subdirectory(utils/TableGen)
 add_subdirectory(include)
 
 add_subdirectory(lib)
+
 
 if( LLVM_INCLUDE_UTILS )
   add_subdirectory(utils/FileCheck)

@@ -17,6 +17,12 @@
 #include <algorithm>
 #include <memory>
 
+//======================================================================
+// jbaile
+//======================================================================
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+//======================================================================
+
 using namespace llvm;
 using namespace llvm::opt_sched;
 
@@ -101,6 +107,10 @@ void OptSchedGCNTarget::initRegion(llvm::ScheduleDAGInstrs *DAG_,
   TargetOccupancy =
       shouldLimitWaves(MFI) ? getOccupancyLimit(OccFile) : MFI->getOccupancy();
 
+  Logger::Info(std::string("**********FINDME OccupancyLimit: " + std::to_string(OccupancyLimit)  +  "**********").c_str());
+  Logger::Info(std::string("**********FINDME ShouldLimitOcc: " + std::to_string(ShouldLimitOcc)  +  "**********").c_str());
+  Logger::Info(std::string("**********FINDME LimitTypeParam: " + std::to_string(LimitType)  +  "**********").c_str());
+
   if (TargetOccupancy > MFI->getOccupancy())
     TargetOccupancy = MFI->getOccupancy();
   Logger::Info("TargetOccupancy: %d, RegionStarting: %d", TargetOccupancy, RegionStartingOccupancy);
@@ -136,6 +146,22 @@ int OptSchedGCNTarget::getOccupancyLimit(Config &OccFile) const {
     case OLT_FILE:
       std::string functionName = MF->getFunction().getName().data();
       int limit = OccFile.GetInt(functionName, -1);
+
+      //======================================================================================
+      // jbaile
+      //======================================================================================
+      const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
+      const MachineInstrSchedulerConfig::FunctionConfig *func_config =  mis_config.GetFunctionConfigFromMangledFunctionSignature(MF->getFunction().getName());
+
+      if((func_config != nullptr) && func_config->waves_per_eu_.has_value()) {
+          Logger::Info("******* NEW FORCE LIMIT");
+
+          limit = func_config->waves_per_eu_.value();
+      }
+      //======================================================================================
+
+
+
       int AMDHeur = MFI->isMemoryBound() || MFI->needsWaveLimiter() ? 4 : OCCUnlimited;
       if (limit != -1) {
         Logger::Info("OccupancyLimits: %d, AMDHeur: %d", limit, AMDHeur);
