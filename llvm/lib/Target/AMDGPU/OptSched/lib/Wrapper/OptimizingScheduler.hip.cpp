@@ -926,7 +926,6 @@ void ScheduleDAGOptSched::loadOptSchedConfig() {
   //======================================================================================
   const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
   const MachineInstrSchedulerConfig::FunctionConfig *func_config =  mis_config.GetFunctionConfigFromMangledFunctionSignature(C->MF->getFunction().getName());
-  Logger::Info("********** Waka waka **********");
   if((func_config != nullptr) && func_config->waves_per_eu_.has_value()) {
       OccupancyLimit = func_config->waves_per_eu_.value();
       ShouldLimitOccupancy = true;
@@ -940,6 +939,7 @@ bool ScheduleDAGOptSched::isOptSchedEnabled() const {
   // jbaile
   // ===================================================================
     const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
+    // TODO: Alternatley, check if we have a configuration for the function in question
     if(mis_config.HasAcoOption(MachineInstrSchedulerConfig::AcoOption::RunOnAllFunctions)) {
         return true;
     }

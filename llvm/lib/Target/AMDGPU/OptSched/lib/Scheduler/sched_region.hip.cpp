@@ -491,8 +491,6 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
   Logger::Info("Sched Lwr Bound: %d", schedLwrBound_);
   Logger::Info("Loop Depth: %d", loopDepth);
 
-    Logger::Info("jbaile AcoBeforeEnum: %d", AcoBeforeEnum);
-
   if (AcoBeforeEnum && 
       (REGION_MAX_EDGE_CNT > 0 &&
        dataDepGraph_->GetEdgeCnt() > REGION_MAX_EDGE_CNT /*||
@@ -558,7 +556,6 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
       delete AcoSchedule;
       return rslt;
     }
-    llvm::report_fatal_error("jbaile Stop short of run!");
 
     AcoTime = Utilities::GetProcessorTime() - AcoStart;
     stats::AcoTime.Record(AcoTime);
@@ -580,8 +577,6 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
       bestCost_ = AcoScheduleCost_;
     }
   }
-
-  llvm::report_fatal_error("jbaile skipped run!");
 
   // If an optimal schedule was found then it should have already
   // been taken care of when optimality was discovered.
@@ -1155,42 +1150,29 @@ FUNC_RESULT SchedRegion::runACO(InstSchedule *ReturnSched,
     hiprandState_t *dev_states;
     memSize = sizeof(hiprandState_t) * numThreads;
     gpuErrchk(hipMalloc(&dev_states, memSize));
-    Logger::Info("jbaile arg InitCurand => %x", InitCurand);
-    Logger::Info("jbaile arg numBlocks => %x", InitCurand);
-    Logger::Info("jbaile arg NUMTHREADSPERBLOCK => %x", NUMTHREADSPERBLOCK);
-    Logger::Info("jbaile arg dev_states => %x", dev_states);
-    Logger::Info("jbaile arg dataDepGraph_->GetInstCnt() => %x", dataDepGraph_->GetInstCnt());
     hipLaunchKernelGGL(InitCurand, numBlocks, NUMTHREADSPERBLOCK, 0, 0, dev_states,
                                                   randSeed == 0 ? unsigned(time(NULL)) : randSeed,
                                                   dataDepGraph_->GetInstCnt());
 
-    Logger::Info("jbaile About to make new ACOScheduler");
     ACOScheduler *AcoSchdulr = new ACOScheduler(
         dataDepGraph_, machMdl_, abslutSchedUprBound_, enumPrirts_,
         vrfySched_, IsPostBB, numBlocks, (SchedRegion *)dev_rgn, dev_DDG,
         dev_machMdl_, dev_states);
-    Logger::Info("jbaile About to AcoSchdulr->setInitialSched");
     AcoSchdulr->setInitialSched(InitSched);
     // Alloc dev arrays for parallel ACO
-    Logger::Info("jbaile About to AcoSchdulr->AllocDevArraysForParallelACO");
     AcoSchdulr->AllocDevArraysForParallelACO();
     // Copy ACOScheduler to device
     ACOScheduler *dev_AcoSchdulr;
     memSize = sizeof(ACOScheduler);
-    Logger::Info("jbaile About to allocate dev_AcoSchdulr");
     gpuErrchk(hipMallocManaged(&dev_AcoSchdulr, memSize));
-    Logger::Info("jbaile About to memCpy dev_AcoSchdulr");
     gpuErrchk(hipMemcpy(dev_AcoSchdulr, AcoSchdulr, memSize,
                          hipMemcpyHostToDevice));
-    Logger::Info("jbaile About to CopyPointersToDevice");
     AcoSchdulr->CopyPointersToDevice(dev_AcoSchdulr);
     // Make sure mallocManaged memory is copied to device before kernel start
     memSize = sizeof(DataDepGraph);
-    Logger::Info("jbaile About to CopyPointersToDevice dev_AcoSchdulr");
     AcoSchdulr->CopyPointersToDevice(dev_AcoSchdulr);
     gpuErrchk(hipMemPrefetchAsync(dev_DDG, memSize, 0));
     memSize = sizeof(BBWithSpill);
-    Logger::Info("jbaile About to hipMemPrefetchAsync dev_rgn");
     gpuErrchk(hipMemPrefetchAsync(dev_rgn, memSize, 0));
 
     // FindSchedule
