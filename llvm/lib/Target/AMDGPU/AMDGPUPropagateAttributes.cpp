@@ -226,6 +226,10 @@ bool AMDGPUPropagateAttributes::process_misched_config_file(Module &M) {
   bool changed = false;
 
   const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
+  if(mis_config.IsAcoOptSched()) {
+      return false;
+  }
+
   if(mis_config.HasConfig()) {
       // Update function attributes
       for (auto &F : M.functions()) {
