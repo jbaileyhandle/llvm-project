@@ -181,12 +181,12 @@ std::string getSanitizedXdotLabelStr(const std::string& str) {
 }
 
 std::string LivenessVisualization::GraphBB::getSanitizedMBBName() const {
-    std::string name = MBB_->getFullName();
-    for(char& character : name) {
-        if(!isalnum(character) && character != '_') {
-            character = '_';
-        }
+    //std::string name = MBB_->getFullName();
+    int id = MBB_->getNumber();
+    if(MBB_->getParent()->getNumBlockIDs() == 0 || id < 0) {
+        llvm::report_fatal_error("MBBs in function are not properly numbered for liveness visualization");
     }
+    std::string name = std::to_string(id);
     return name;
 }
 
