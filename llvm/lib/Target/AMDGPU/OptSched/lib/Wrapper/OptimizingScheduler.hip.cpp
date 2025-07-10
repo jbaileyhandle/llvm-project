@@ -69,8 +69,33 @@ constexpr struct {
     {"SC", LSH_SC},   {"LS", LSH_LS},   {"LLVM", LSH_LLVM},
 };
 
+
+// =====================================================================
+// Jbaile - changed to look for config within repo instead of system
+// =====================================================================
+// Given a file path, get the directory of the file
+const char* getDirPath() {
+    constexpr const char * path =  __FILE__;
+    const char* lastSlash = path;
+        for (const char* p = path; *p; ++p) {
+            if (*p == '/' || *p == '\\') {
+                lastSlash = p;
+            }
+        }
+
+        static char buffer[1024]{};
+        std::size_t len = lastSlash - path;
+        for (std::size_t i = 0; i < len; ++i) {
+            buffer[i] = path[i];
+        }
+
+        strcpy(&buffer[len], "/../../optsched-cfg/");
+        return buffer;
+}
+
 // Default path to the the configuration directory for opt-sched.
-static constexpr const char *DEFAULT_CFG_DIR = "~/.optsched-cfg/";
+static const char *DEFAULT_CFG_DIR = getDirPath();
+// =====================================================================
 
 // Default path to the scheduler options configuration file for opt-sched.
 static constexpr const char *DEFAULT_CFGS_FNAME = "/sched.ini";
