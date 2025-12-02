@@ -9,6 +9,9 @@ Last Update:  Mar. 2011
 #ifndef OPTSCHED_BASIC_DATA_DEP_H
 #define OPTSCHED_BASIC_DATA_DEP_H
 
+#include <atomic>
+#include <cstdint>
+
 #include "opt-sched/Scheduler/OptSchedDDGWrapperBase.h"
 #include "opt-sched/Scheduler/buffers.h"
 #include "opt-sched/Scheduler/defines.h"
@@ -681,6 +684,17 @@ public:
 // 4-issue machine is slot #9
 class InstSchedule {
 private:
+
+  // jbaile
+  //==========================================================
+  static inline std::atomic<std::int64_t> id_counter_ = 0;
+  int64_t GetAndIncIdCounter();
+  // TODO(jbaile): When not debuggign, remove call to GetAndIncIdCounter
+  // for perofrmance (entaila atmoic)
+  int64_t id_ = GetAndIncIdCounter();
+  //==========================================================
+
+
   int issuRate_;
 
   // The total number of instructions to be scheduled
@@ -731,6 +745,14 @@ private:
 
   // The schedule's spill cost according to the cost function used
   InstCount spillCost_;
+
+  // jbaile
+  //========================================================================
+  // The schedule's VGPR count (0 if VGPR is not the occupancy 
+  // limiter or occupnacy target is already met)
+  InstCount occ_score_;
+  InstCount occupancy_;
+  //========================================================================
 
   // The normalized spill cost (absolute Spill Cost - lower bound of spill cost)
   InstCount NormSpillCost;
@@ -804,6 +826,23 @@ public:
   InstCount GetExecCost() const;
   __host__ __device__
   void SetSpillCost(InstCount cost);
+
+  //===============================================================
+  // jbaile
+  //===============================================================
+  __host__ __device__
+  void SetOccScore(InstCount cost);
+  __host__ __device__
+  InstCount GetOccScore() const;
+  __host__ __device__
+  void SetOccupancy(InstCount occ);
+  __host__ __device__
+  InstCount GetOccupancy() const;
+  __host__ __device__
+  int64_t GetId() const;
+  std::string GetStr() const;
+  //===============================================================
+
   __host__ __device__
   InstCount GetSpillCost() const;
   __host__ __device__

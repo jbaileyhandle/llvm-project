@@ -8,6 +8,8 @@
 #include <cassert>
 #include <iomanip>
 
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
 using namespace llvm::opt_sched;
 
 MachineModel::MachineModel(const string &modelFile) {

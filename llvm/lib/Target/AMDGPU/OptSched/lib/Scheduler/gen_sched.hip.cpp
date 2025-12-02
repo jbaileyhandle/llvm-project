@@ -7,6 +7,9 @@
 #include "opt-sched/Scheduler/bb_spill.h"
 #include "opt-sched/Scheduler/dev_defines.h"
 
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
+
 using namespace llvm::opt_sched;
 
 __host__ __device__

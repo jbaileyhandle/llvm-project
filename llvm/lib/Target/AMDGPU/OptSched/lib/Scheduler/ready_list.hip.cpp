@@ -5,6 +5,9 @@
 #include "opt-sched/Scheduler/cuda_lnkd_lst.cuh"
 #include "opt-sched/Scheduler/dev_defines.h"
 
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
+
 using namespace llvm::opt_sched;
 
 // pre-compute region info

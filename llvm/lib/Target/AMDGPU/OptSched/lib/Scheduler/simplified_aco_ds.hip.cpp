@@ -10,6 +10,9 @@
 #include <utility>
 //aco simplified ds impl
 
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
+
 using namespace llvm::opt_sched;
 
 //use the log message macro to make GPU porting easier

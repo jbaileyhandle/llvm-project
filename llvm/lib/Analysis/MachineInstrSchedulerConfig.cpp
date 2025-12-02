@@ -126,12 +126,11 @@ MachineInstrSchedulerConfig::AcoOption MachineInstrSchedulerConfig::GetAcoOption
     option = StringSwitch<AcoOption>(llvm::StringRef(str))
         .Case("RunOnAllFunctions", AcoOption::RunOnAllFunctions)
         .Case("RunRegardlessOfHeurisitcOutcome", AcoOption::RunRegardlessOfHeurisitcOutcome)
+        .Case("UseContinuousOccupancyScore", AcoOption::UseContinuousOccupancyScore)
         .Default(AcoOption::InvalidOption);
 
     if(option == AcoOption::InvalidOption) {
-        if(mi_scheduler_ == Scheduler::InvalidOption) {
-            llvm::report_fatal_error("Invalid machine instruction scheduler: " + str_ref_option);
-        }
+        llvm::report_fatal_error("Invalid AcoOption: " + str_ref_option);
     }
     return option;
 }
@@ -184,10 +183,21 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
 
             // Make per-line config object && register
             std::vector<std::string> func_tokens = SplitByDelimter(line);
-            if(demangled_func_signature_to_config_.find(func_tokens[0]) != demangled_func_signature_to_config_.end()) {
+            std::string demangled_func_signature;
+            if(func_tokens[0] == "d" || func_tokens[0] == "D") {
+                demangled_func_signature = func_tokens[1];
+            } else if (func_tokens[0] == "m" || func_tokens[0] == "M") {
+                demangled_func_signature = DemangleFunctionSignature(func_tokens[1]);
+            } else {
+                llvm::report_fatal_error("First field of function config in misched.txt must indicate mangled (m/M) or demangled (d/D) function name");
+            }
+
+            if(demangled_func_signature_to_config_.find(demangled_func_signature) != demangled_func_signature_to_config_.end()) {
                 llvm::report_fatal_error("In processing misched, found duplicate function configurations");
             }
-            demangled_func_signature_to_config_.emplace(func_tokens[0], func_tokens);
+            demangled_func_signature_to_config_.emplace(std::piecewise_construct,
+                std::forward_as_tuple(demangled_func_signature), 
+                std::forward_as_tuple(demangled_func_signature, func_tokens));
         }
     }
 
@@ -269,10 +279,10 @@ void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Fu
     function.addFnAttr(waves_per_eu_attr, new_waves_per_eu_pair);
 }
 
-MachineInstrSchedulerConfig::FunctionConfig::FunctionConfig(const std::vector<std::string> &tokens) {
-    func_signature_ = std::move(tokens[0]);
-    if(tokens.size() > 1) {
-        waves_per_eu_ = std::stoi(tokens[1]);
+MachineInstrSchedulerConfig::FunctionConfig::FunctionConfig(const std::string &demangled_signature, const std::vector<std::string> &tokens) {
+    func_signature_ = std::move(demangled_signature);
+    if(tokens.size() > 2 && !tokens[2].empty()) {
+        waves_per_eu_ = std::stoi(tokens[2]);
     }
 }
 

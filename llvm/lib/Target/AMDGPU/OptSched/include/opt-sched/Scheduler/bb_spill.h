@@ -182,9 +182,21 @@ public:
 	      MachineModel *dev_machMdl);
   ~BBWithSpill();
 
-  __device__
+  __device__ __host__
   InstCount getAMDGPUCost(unsigned * PRP, unsigned TargetOccupancy,
                                unsigned MaxOccLDS, int16_t regTypeCnt);
+  //===============================================================
+  // jbaile
+  //===============================================================
+  static inline constexpr int OCC_SCORE_OCC_MULTIPLIER = 1000;
+  static inline constexpr int OCC_SCORE_MAX_SCORE = 10 * 1000;
+  __device__ __host__
+  InstCount getAmdGpuOccScore(const InstCount *PRP, 
+          const unsigned TargetOccupancy, const unsigned MaxOccLDS);
+  __device__ __host__
+  InstCount getAmdGpuOccupancy(const InstCount *PRP, 
+          const unsigned TargetOccupancy, const unsigned MaxOccLDS);
+  //===============================================================
 
   InstCount CmputCostLwrBound();
   InstCount CmputExecCostLwrBound();

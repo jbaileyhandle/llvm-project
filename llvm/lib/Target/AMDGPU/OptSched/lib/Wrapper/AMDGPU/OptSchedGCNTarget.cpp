@@ -107,12 +107,9 @@ void OptSchedGCNTarget::initRegion(llvm::ScheduleDAGInstrs *DAG_,
   TargetOccupancy =
       shouldLimitWaves(MFI) ? getOccupancyLimit(OccFile) : MFI->getOccupancy();
 
-  Logger::Info(std::string("**********FINDME OccupancyLimit: " + std::to_string(OccupancyLimit)  +  "**********").c_str());
-  Logger::Info(std::string("**********FINDME ShouldLimitOcc: " + std::to_string(ShouldLimitOcc)  +  "**********").c_str());
-  Logger::Info(std::string("**********FINDME LimitTypeParam: " + std::to_string(LimitType)  +  "**********").c_str());
-
   if (TargetOccupancy > MFI->getOccupancy())
     TargetOccupancy = MFI->getOccupancy();
+
   Logger::Info("TargetOccupancy: %d, RegionStarting: %d", TargetOccupancy, RegionStartingOccupancy);
 
   LLVM_DEBUG(dbgs() << "Region starting occupancy is "
@@ -154,12 +151,10 @@ int OptSchedGCNTarget::getOccupancyLimit(Config &OccFile) const {
       const MachineInstrSchedulerConfig::FunctionConfig *func_config =  mis_config.GetFunctionConfigFromMangledFunctionSignature(MF->getFunction().getName());
 
       if((func_config != nullptr) && func_config->waves_per_eu_.has_value()) {
-          Logger::Info("******* NEW FORCE LIMIT");
-
+          Logger::Info("******* NEW FORCE LIMIT: %d", func_config->waves_per_eu_.value());
           limit = func_config->waves_per_eu_.value();
       }
       //======================================================================================
-
 
 
       int AMDHeur = MFI->isMemoryBound() || MFI->needsWaveLimiter() ? 4 : OCCUnlimited;
@@ -201,6 +196,7 @@ InstCount OptSchedGCNTarget::getCost(const llvm::SmallVectorImpl<unsigned> &PRP)
   auto Occ =
       getAdjustedOccupancy(ST, PRP[OptSchedDDGWrapperGCN::VGPR32],
                            PRP[OptSchedDDGWrapperGCN::SGPR32], MaxOccLDS);
+
   // RP cost is the difference between the minimum allowed occupancy for the
   // function, and the current occupancy.
   return Occ >= TargetOccupancy ? 0 : TargetOccupancy - Occ;

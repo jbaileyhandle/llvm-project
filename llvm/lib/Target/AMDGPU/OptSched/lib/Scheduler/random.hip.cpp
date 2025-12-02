@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cstring>
 
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
+
 using namespace llvm::opt_sched;
 
 // Magic numbers used in the generator formula.

@@ -18,6 +18,10 @@
 #include "llvm/Support/Debug.h"
 #include <hip/hip_runtime.h>
 
+
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
+
 // only print pressure if enabled by sched.ini
 extern bool OPTSCHED_gPrintSpills;
 
@@ -2968,6 +2972,13 @@ void InstSchedule::Copy(InstSchedule *src) {
   totalStalls_ = src->totalStalls_;
   unnecessaryStalls_ = src->unnecessaryStalls_;
   isZeroPerp_ = src->isZeroPerp_;
+
+  // jbaile
+  // ==================================================================
+  id_ = src->GetId();
+  occ_score_ = src->GetOccScore();
+  occupancy_ = src->GetOccupancy();
+  // ==================================================================
 }
 
 __host__ __device__
@@ -3297,6 +3308,34 @@ InstCount InstSchedule::GetExecCost() const { return execCost_; }
 
 __host__ __device__
 void InstSchedule::SetSpillCost(InstCount cost) { spillCost_ = cost; }
+
+//===============================================================
+// jbaile
+//===============================================================
+__host__ __device__
+void InstSchedule::SetOccScore(InstCount score) { occ_score_ = score; }
+__host__ __device__
+InstCount InstSchedule::GetOccScore() const { return occ_score_; }
+__host__ __device__
+void InstSchedule::SetOccupancy(InstCount occ) { occupancy_ = occ; }
+__host__ __device__
+InstCount InstSchedule::GetOccupancy() const { return occupancy_; }
+
+
+int64_t InstSchedule::GetAndIncIdCounter() {
+    return id_counter_.fetch_add(1, std::memory_order_relaxed);
+}
+
+__host__ __device__
+int64_t InstSchedule::GetId() const {
+    return id_;
+}
+std::string InstSchedule::GetStr() const {
+    std::string str(100, '\0');
+    snprintf(str.data(), 100, "sched(ID: %ld, OccScore: %d, Occ: %d, Cost: %d, SpillCost: %d)", GetId(), GetOccScore(), GetOccupancy(), GetCost(), GetSpillCost());
+    return str;
+}
+//===============================================================
 
 __host__ __device__
 InstCount InstSchedule::GetSpillCost() const { return spillCost_; }

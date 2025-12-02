@@ -16,6 +16,14 @@
 #include <sstream>
 #include <hiprand/hiprand_kernel.h>
 
+//======================================================================
+// jbaile
+//======================================================================
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+//======================================================================
+
+
 using namespace llvm::opt_sched;
 namespace cg = cooperative_groups;
 
@@ -150,7 +158,8 @@ pheromone_t ACOScheduler::Score(InstCount FromId, InstCount ToId, HeurType ToHeu
 __host__ __device__
 bool ACOScheduler::shouldReplaceSchedule(InstSchedule *OldSched,
                                          InstSchedule *NewSched,
-                                         bool IsGlobal, InstCount RPTarget) {
+                                         bool IsGlobal, InstCount RPTarget, bool use_continuous_occ_score) {
+
   // return true if the old schedule is null (eg:there is no old schedule)
   // return false if the new schedule is is NULL
   if (!NewSched) {
@@ -174,13 +183,25 @@ bool ACOScheduler::shouldReplaceSchedule(InstSchedule *OldSched,
   bool isSecondPass = rgn_->IsSecondPass(); 
 #endif
   if (!IsTwoPassEn || !isSecondPass) {
+
+    //TODO(jbaile): Make configurable
+    // ============================================================================================
+    if(use_continuous_occ_score) {
+        InstCount NewScore, OldScore;
+        NewScore = NewSched->GetOccScore();
+        OldScore = OldSched->GetOccScore();
+        return (NewScore > OldScore);
+    }
+    // ============================================================================================
+
     InstCount NewCost = (!IsTwoPassEn) ? NewSched->GetCost() : NewSched->GetNormSpillCost();
     InstCount OldCost = (!IsTwoPassEn) ? OldSched->GetCost() : OldSched->GetNormSpillCost();
 
-    if (NewCost < OldCost)
+    if (NewCost < OldCost) {
       return true;
-    else
+    } else {
       return false;
+    }
   }
   else {
     #ifdef __HIP_DEVICE_COMPILE__
@@ -624,8 +645,9 @@ InstSchedule *ACOScheduler::FindOneSchedule(InstCount RPTarget,
         InstCount closeToRPCheck = RPTarget - 2 < RPTarget * 9 / 10 ? RPTarget - 2 : RPTarget * 9 / 10;
         closeToRPTarget = ((BBWithSpill *)dev_rgn_)->GetCrntSpillCost() >= closeToRPCheck;
       }
-      else
+      else {
         closeToRPTarget = ((BBWithSpill *)dev_rgn_)->closeToRPConstraint();
+      }
       
       #ifdef DEBUG_CLOSE_TO_OCCUPANCY
       if (GLOBALTID == 0) {
@@ -898,14 +920,14 @@ InstSchedule *ACOScheduler::FindOneSchedule(InstCount RPTarget,
 
 // Reduce to only index of best schedule per 2 blocks in output array
 __inline__ __device__
-void reduceToBestSchedPerBlock(InstSchedule **dev_schedules, int *blockBestIndex, ACOScheduler *dev_AcoSchdulr, InstCount RPTarget) {
+void reduceToBestSchedPerBlock(InstSchedule **dev_schedules, int *blockBestIndex, ACOScheduler *dev_AcoSchdulr, InstCount RPTarget, bool use_continuous_occ_score) {
   __shared__ int sdata[NUMTHREADSPERBLOCK];
   uint gtid = GLOBALTID;
   uint tid = hipThreadIdx_x;
   int blockSize = NUMTHREADSPERBLOCK;
   
   // load candidate schedules into smem
-  if (dev_AcoSchdulr->shouldReplaceSchedule(dev_schedules[gtid * 2], dev_schedules[gtid * 2 + 1], false, RPTarget))
+  if (dev_AcoSchdulr->shouldReplaceSchedule(dev_schedules[gtid * 2], dev_schedules[gtid * 2 + 1], false, RPTarget, use_continuous_occ_score))
     sdata[tid] = gtid * 2 + 1;
   else
     sdata[tid] = gtid * 2;
@@ -916,7 +938,7 @@ void reduceToBestSchedPerBlock(InstSchedule **dev_schedules, int *blockBestIndex
     if (tid%(2*s) == 0) {
       if (dev_AcoSchdulr->shouldReplaceSchedule(
           dev_schedules[sdata[tid]], 
-          dev_schedules[sdata[tid + s]], false, RPTarget))
+          dev_schedules[sdata[tid + s]], false, RPTarget, use_continuous_occ_score))
         sdata[tid] = sdata[tid + s];
     }
     __syncthreads();
@@ -932,7 +954,7 @@ void reduceToBestSchedPerBlock(InstSchedule **dev_schedules, int *blockBestIndex
 // should be in blockBestIndex[0]
 __inline__ __device__
 void reduceToBestSched(InstSchedule **dev_schedules, int *blockBestIndex,
-                       ACOScheduler *dev_AcoSchdulr, int numBlocks, InstCount RPTarget) {
+                       ACOScheduler *dev_AcoSchdulr, int numBlocks, InstCount RPTarget, bool use_continuous_occ_score) {
   __shared__ int sBestIndex[NUMBLOCKSMANYANTS/4];
   uint tid = hipThreadIdx_x;
   int index, sBestIndex1, sBestIndex2;
@@ -942,7 +964,7 @@ void reduceToBestSched(InstSchedule **dev_schedules, int *blockBestIndex,
   // will have to load in more than one value
   while (tid < numBlocks/4) {
     if (dev_AcoSchdulr->shouldReplaceSchedule(dev_schedules[blockBestIndex[tid * 2]], 
-                                              dev_schedules[blockBestIndex[tid * 2 + 1]], false, RPTarget))
+                                              dev_schedules[blockBestIndex[tid * 2 + 1]], false, RPTarget, use_continuous_occ_score))
       sBestIndex[tid] = blockBestIndex[tid * 2 + 1];
     else
       sBestIndex[tid] = blockBestIndex[tid * 2];
@@ -964,7 +986,7 @@ void reduceToBestSched(InstSchedule **dev_schedules, int *blockBestIndex,
         sBestIndex2 = sBestIndex[index + s];
         if (dev_AcoSchdulr->shouldReplaceSchedule(
             dev_schedules[sBestIndex1],
-            dev_schedules[sBestIndex2], false, RPTarget))
+            dev_schedules[sBestIndex2], false, RPTarget, use_continuous_occ_score))
           sBestIndex[index] = sBestIndex2;
       }
       tid += hipBlockDim_x;
@@ -994,7 +1016,7 @@ __launch_bounds__(NUMTHREADSPERBLOCK, 1)
 Dev_ACO(SchedRegion *dev_rgn, DataDepGraph *dev_DDG,
             ACOScheduler *dev_AcoSchdulr, InstSchedule **dev_schedules,
             InstSchedule *dev_bestSched, int noImprovementMax, 
-            int *blockBestIndex) {
+            int *blockBestIndex, bool use_continuous_occ_score) {
   #ifdef DEBUG_ACO_CRASH_LOCATIONS
     if (hipThreadIdx_x == 0) {
       printf("Crash very beginning\n");
@@ -1052,7 +1074,7 @@ Dev_ACO(SchedRegion *dev_rgn, DataDepGraph *dev_DDG,
     globalBestIndex = INVALID_VALUE;
     // reduce dev_schedules to 1 best schedule per block
     if (GLOBALTID < dev_AcoSchdulr->GetNumThreads()/2)
-      reduceToBestSchedPerBlock(dev_schedules, blockBestIndex, dev_AcoSchdulr, RPTarget);
+      reduceToBestSchedPerBlock(dev_schedules, blockBestIndex, dev_AcoSchdulr, RPTarget, use_continuous_occ_score);
 
     threadGroup.sync();
     #ifdef DEBUG_ACO_CRASH_LOCATIONS
@@ -1062,7 +1084,7 @@ Dev_ACO(SchedRegion *dev_rgn, DataDepGraph *dev_DDG,
     #endif
     // one block to reduce blockBest schedules to one best schedule
     if (hipBlockIdx_x == 0)
-      reduceToBestSched(dev_schedules, blockBestIndex, dev_AcoSchdulr, dev_AcoSchdulr->GetNumBlocks(), RPTarget);
+      reduceToBestSched(dev_schedules, blockBestIndex, dev_AcoSchdulr, dev_AcoSchdulr->GetNumBlocks(), RPTarget, use_continuous_occ_score);
 
     threadGroup.sync();
 
@@ -1081,7 +1103,7 @@ Dev_ACO(SchedRegion *dev_rgn, DataDepGraph *dev_DDG,
       if (globalBestIndex != INVALID_VALUE &&
           dev_AcoSchdulr->shouldReplaceSchedule(dev_bestSched, 
                                                 dev_schedules[globalBestIndex], 
-                                                true, RPTarget)) {
+                                                true, RPTarget, use_continuous_occ_score)) {
         #ifdef DEBUG_0_PERP
           InstCount NewCost = dev_schedules[globalBestIndex]->GetExecCost();
           InstCount OldCost = dev_bestSched->GetExecCost();
@@ -1216,6 +1238,14 @@ Dev_ACO(SchedRegion *dev_rgn, DataDepGraph *dev_DDG,
 FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
                                        SchedRegion *region,
 				       ACOScheduler *dev_AcoSchdulr) {
+  // ==========================================================
+  // jbaile
+  // ==========================================================
+  const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
+  bool use_continuous_occ_score = mis_config.HasAcoOption(MachineInstrSchedulerConfig::AcoOption::UseContinuousOccupancyScore);
+  // ==========================================================
+
+
   rgn_ = region;
 
   // get settings
@@ -1274,12 +1304,18 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
   // check if heuristic schedule is better than the initial
   // schedule passed from the list scheduler
   if (shouldReplaceSchedule(InitialSchedule, heuristicSched,
-                                /*IsGlobal=*/true, InitialSchedule->GetSpillCost())) {
+                                /*IsGlobal=*/true, InitialSchedule->GetSpillCost(), use_continuous_occ_score)) {
     bestSchedule = std::move(heuristicSched);
+#ifndef __HIP_DEVICE_COMPILE__
+    // Logger::Info("====> FindSchedule:: bestSchedule is heuristicSched %s\n", heuristicSched->GetStr().data());
+#endif
     printf("Heuristic schedule is better\n");
   }
   else {
     bestSchedule = std::move(InitialSchedule);
+#ifndef __HIP_DEVICE_COMPILE__
+    // Logger::Info("====> FindSchedule:: bestSchedule is InitialSchedule %s\n", bestSchedule->GetStr().data());
+#endif
     printf("Initial schedule is better\n");
   }
   if (bestSchedule) {
@@ -1373,7 +1409,7 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
     // of void pointers to host memory locations of the arguments
     dim3 gridDim(numBlocks_);
     dim3 blockDim(NUMTHREADSPERBLOCK);
-    void *dArgs[7];
+    void *dArgs[8];
     dArgs[0] = (void*)&dev_rgn_;
     dArgs[1] = (void*)&dev_DDG_;
     dArgs[2] = (void*)&dev_AcoSchdulr;
@@ -1381,8 +1417,10 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
     dArgs[4] = (void*)&dev_bestSched;
     dArgs[5] = (void*)&noImprovementMax;
     dArgs[6] = (void*)&dev_blockBestIndex;
+    dArgs[7] = (void*)&use_continuous_occ_score;
     gpuErrchk(hipLaunchCooperativeKernel((void*)Dev_ACO, gridDim, blockDim, 
                                           dArgs, 0, NULL));
+
     hipDeviceSynchronize();
     Logger::Info("Post Kernel Error: %s", 
                  hipGetErrorString(hipGetLastError()));
@@ -1405,15 +1443,18 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
   } else { // Run ACO on cpu
     Logger::Info("Running host ACO with %d ants per iteration", numThreads_);
     InstCount RPTarget;
-    if (!((BBWithSpill *)rgn_)->needsSLIL())
+    if (!((BBWithSpill *)rgn_)->needsSLIL()) {
       RPTarget = bestSchedule->GetSpillCost();
-    else
+    } else {
+      llvm::report_fatal_error("jbaile doesn't think you should be here\n");
       RPTarget = MaxRPTarget;
+    }
     #ifdef CHECK_DIFFERENT_SCHEDULES
       std::unordered_map<string, int> schedMap;
       int diffSchedCount = 0;
     #endif
     while (noImprovement < noImprovementMax) {
+      // dbgs() << "\t\t====> Another iteration of ACO beginning. noImprovement = " << noImprovement << ", noImprovementMax = " << noImprovementMax << ", RPTarget = " << RPTarget << "\n";
       iterations++;
       iterationBest = nullptr;
       for (int i = 0; i < numThreads_; i++) {
@@ -1444,23 +1485,37 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
 
         if (print_aco_trace)
           PrintSchedule(schedule);
-        if (shouldReplaceSchedule(iterationBest, schedule, false, RPTarget)) {
+        if (shouldReplaceSchedule(iterationBest, schedule, false, RPTarget, use_continuous_occ_score)) {
           if (iterationBest)
             delete iterationBest;          
           iterationBest = schedule;
+#ifndef __HIP_DEVICE_COMPILE__
+          // dbgs() << "\t\t\t\t====> FindSchedule:: iterationBest is " << iterationBest->GetStr().data() << "\n";
+#endif
         } else {
             if (schedule)
               delete schedule;
         }
       }
+      // dbgs() << "\t\t\t=====> Finished one iteration\n";
+      /*
+      if(iterationBest == nullptr) {
+          // dbgs() << "\t\t\t=====> iterationBest was nullptr\n";
+      } else {
+          // dbgs() << "\t\t\t=====> iterationBest was " << iterationBest->GetStr().data() << "\n";
+      }
+      */
 #if !USE_ACS
       if (iterationBest)
         UpdatePheromone(iterationBest, false);
 #endif
-      if (shouldReplaceSchedule(bestSchedule, iterationBest, true, RPTarget)) {
+      if (shouldReplaceSchedule(bestSchedule, iterationBest, true, RPTarget, use_continuous_occ_score)) {
         if (bestSchedule && bestSchedule != InitialSchedule)
           delete bestSchedule;
         bestSchedule = std::move(iterationBest);
+#ifndef __HIP_DEVICE_COMPILE__
+        // dbgs() << "\t\t\t=====> FindSchedule:: bestSchedule is iterationBest " << bestSchedule->GetStr().data() << "\n";
+#endif
         if (!((BBWithSpill *)rgn_)->needsSLIL())
           RPTarget = bestSchedule->GetSpillCost();
 
@@ -1495,11 +1550,14 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
       UpdatePheromone(bestSchedule, false);
 #endif
     }
+    // dbgs() << "\t====> Terminated ACO iterations. noImprovement = " << noImprovement << ", noImprovementMax = " << noImprovementMax << "\n";
+
     Logger::Info("%d ants terminated early", numAntsTerminated_);
     #ifdef CHECK_DIFFERENT_SCHEDULES
     Logger::Info("%d different schedules for %d total ants", diffSchedCount, (iterations + 1) * numThreads_ - numAntsTerminated_);
     #endif
   } // End run on CPU
+  // dbgs() << "\t\t=====> FindSchedule refinement over.  bestSchedule " << bestSchedule->GetStr() << "\n";
 
   printf("Best schedule: ");
   printf("Absolute RP Cost: %d, Length: %d, Cost: ", bestSchedule->GetSpillCost(), bestSchedule->GetCrntLngth());
@@ -1698,13 +1756,6 @@ void ACOScheduler::CopyPheromonesToSharedMem(double *s_pheromone) {
   }
 }
 
-// Quick hack to avoid hash collisions for identical format strings
-// when using -mprintf-kind=buffered
-__host__ __device__ void PrintNewline() {
-    printf(" \n"); // Just \n collides with... something.
-    return;
-}
-
 __host__ __device__
 inline void ACOScheduler::UpdateACOReadyList(SchedInstruction *inst) {
   InstCount prdcsrNum, scsrRdyCycle;
@@ -1741,7 +1792,7 @@ inline void ACOScheduler::UpdateACOReadyList(SchedInstruction *inst) {
     }
     #ifdef DEBUG_INSTR_SELECTION
     if (GLOBALTID==0) {
-      PrintNewline();
+      printf("\n");
     }
     #endif
     // Make sure the scores are valid.  The scheduling of an instruction may
@@ -1832,10 +1883,10 @@ void ACOScheduler::PrintPheromone() {
       printf("%.1f ", Pheromone(i, j));
     }
     //std::cerr << std::endl;
-    PrintNewline();
+    printf("\n");
   }
   //std::cerr << std::endl;
-  PrintNewline();
+  printf("\n");
 }
 
 #ifndef NDEBUG
@@ -1874,7 +1925,7 @@ void PrintSchedule(InstSchedule *schedule) {
     printf("%d ", instNum);
     instNum = schedule->GetNxtInst(cycleNum, slotNum);
   }
-  PrintNewline();
+  printf("\n");
   schedule->ResetInstIter();
 }
 

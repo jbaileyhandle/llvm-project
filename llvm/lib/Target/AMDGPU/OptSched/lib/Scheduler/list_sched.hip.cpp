@@ -6,6 +6,8 @@
 #include "opt-sched/Scheduler/stats.h"
 #include "opt-sched/Scheduler/bb_spill.h"
 
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
 using namespace llvm::opt_sched;
 
 __host__

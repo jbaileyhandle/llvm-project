@@ -44,11 +44,14 @@
 #include <chrono>
 #include <string>
 
+
 //======================================================================
 // jbaile
 //======================================================================
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
 //======================================================================
+
 
 #define DEBUG_TYPE "optsched"
 
@@ -92,10 +95,10 @@ const char* getDirPath() {
         strcpy(&buffer[len], "/../../optsched-cfg/");
         return buffer;
 }
+// =====================================================================
 
 // Default path to the the configuration directory for opt-sched.
 static const char *DEFAULT_CFG_DIR = getDirPath();
-// =====================================================================
 
 // Default path to the scheduler options configuration file for opt-sched.
 static constexpr const char *DEFAULT_CFGS_FNAME = "/sched.ini";
@@ -741,6 +744,8 @@ void ScheduleDAGOptSched::schedule() {
                                      IsEasy, NormBestCost, BestSchedLngth,
                                      NormHurstcCost, HurstcSchedLngth, Sched,
                                      FilterByPerp, blocksToKeep(schedIni), depth);
+  // TODO(jbaile): look here
+  // Logger::Info("==> region->FindOptimalSchedule returns %s\n", Sched->GetStr().data());
 
   if ((!(Rslt == RES_SUCCESS || Rslt == RES_TIMEOUT) || Sched == NULL)) {
     LLVM_DEBUG(
@@ -945,16 +950,17 @@ void ScheduleDAGOptSched::loadOptSchedConfig() {
 
   DeviceACOEnabled = schedIni.GetInt("DEV_ACO");
 
-
   //======================================================================================
   // jbaile
   //======================================================================================
   const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
   const MachineInstrSchedulerConfig::FunctionConfig *func_config =  mis_config.GetFunctionConfigFromMangledFunctionSignature(C->MF->getFunction().getName());
   if((func_config != nullptr) && func_config->waves_per_eu_.has_value()) {
-      OccupancyLimit = func_config->waves_per_eu_.value();
       ShouldLimitOccupancy = true;
       OccupancyLimitSource = OCC_LIMIT_TYPE::OLT_FILE;
+      // I'm pretty sure this last part doesn't actually do anything, but conservativley
+      // setting it anyway
+      OccupancyLimit = func_config->waves_per_eu_.value();
   }
   //======================================================================================
 }
@@ -963,17 +969,21 @@ bool ScheduleDAGOptSched::isOptSchedEnabled() const {
   // ===================================================================
   // jbaile
   // ===================================================================
+    // If we've configured for all functions to compile w/ OptSched
+    // Or we have specifically configured this fucntion
+    // Then OptSched should be enabled
     const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
-    // TODO: Alternatley, check if we have a configuration for the function in question
-    if(mis_config.HasAcoOption(MachineInstrSchedulerConfig::AcoOption::RunOnAllFunctions)) {
+    const MachineInstrSchedulerConfig::FunctionConfig *func_config =  mis_config.GetFunctionConfigFromMangledFunctionSignature(C->MF->getFunction().getName());
+    bool function_has_config = func_config != nullptr;
+    if(function_has_config || mis_config.HasAcoOption(MachineInstrSchedulerConfig::AcoOption::RunOnAllFunctions)) {
         return true;
     }
   // ===================================================================
 
+
   // check scheduler ini file to see if optsched is enabled
   auto optSchedOption =
       SchedulerOptions::getInstance().GetString("USE_OPT_SCHED");
-
   if (optSchedOption == "YES") {
     return true;
   } else if (optSchedOption == "HOT_ONLY") {
@@ -1220,6 +1230,7 @@ void ScheduleDAGOptSched::scheduleOptSchedMinRP() {
 }
 
 void ScheduleDAGOptSched::scheduleOptSchedBalanced() {
+
   SecondPass = true;
   LatencyPrecision = LTP_ROUGH;
 

@@ -6,6 +6,8 @@
 #include "opt-sched/Scheduler/dev_defines.h"
 #include <cstdio>
 
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
 using namespace llvm::opt_sched;
 
 __host__

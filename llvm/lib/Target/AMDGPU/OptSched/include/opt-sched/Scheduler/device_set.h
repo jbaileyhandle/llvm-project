@@ -1,6 +1,8 @@
 //  (VLAD) Created my own class to replace SmallPtrSet in Register class
 //  since SmallPtrSet is not supported on device
 
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
 template <typename T>
 class DevicePtrSet {
   public:

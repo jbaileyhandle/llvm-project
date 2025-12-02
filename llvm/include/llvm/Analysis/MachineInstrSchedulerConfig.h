@@ -25,6 +25,7 @@ class MachineInstrSchedulerConfig {
         enum class AcoOption{
             RunOnAllFunctions,
             RunRegardlessOfHeurisitcOutcome,
+            UseContinuousOccupancyScore,
             InvalidOption
         };
 
@@ -33,7 +34,7 @@ class MachineInstrSchedulerConfig {
             public:
                 std::string ToString() const;
 
-                FunctionConfig(const std::vector<std::string> &tokens);
+                FunctionConfig(const std::string &demangled_signature, const std::vector<std::string> &tokens);
                 std::string func_signature_;
                 std::optional<int> waves_per_eu_;
         };
@@ -120,7 +121,8 @@ class MachineInstrSchedulerConfig {
         inline static const std::unordered_map<AcoOption, std::string> aco_option_to_str_ {
             {AcoOption::InvalidOption, "InvalidOption"},
             {AcoOption::RunOnAllFunctions, "RunOnAllFunctions"},
-            {AcoOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"}
+            {AcoOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"},
+            {AcoOption::UseContinuousOccupancyScore, "UseContinuousOccupancyScore"}
         };
 
 

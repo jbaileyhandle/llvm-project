@@ -28,6 +28,7 @@
 // jbaile
 //======================================================================
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
 //======================================================================
 
 extern bool OPTSCHED_gPrintSpills;
@@ -231,12 +232,11 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
   unsigned long randSeed = (unsigned long) schedIni.GetInt("RANDOM_SEED");
   bool devACOEnabled = schedIni.GetBool("DEV_ACO");
   int numBlocks;
-  if (devACOEnabled && dataDepGraph_->GetInstCnt() >= REGION_MIN_SIZE) {
+  if (devACOEnabled && dataDepGraph_->GetInstCnt() >= REGION_MIN_SIZE)
     numBlocks = schedIni.GetBool("ACO_MANY_ANTS_ENABLED") && dataDepGraph_->GetInstCnt() > MANY_ANT_MIN_SIZE ?
                 schedIni.GetInt("ACO_MANY_ANTS_PER_ITERATION_BLOCKS") : schedIni.GetInt("ACO_DEVICE_ANT_PER_ITERATION_BLOCKS");
-  } else {
+  else
     numBlocks = schedIni.GetInt("HOST_ANTS");
-  }
 
   if (AcoSchedulerEnabled) {
     AcoBeforeEnum = schedIni.GetBool("ACO_BEFORE_ENUM");
@@ -358,7 +358,11 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
     // Compute cost for Heuristic list scheduler, this must be called before
     // calling GetCost() on the InstSchedule instance.
     CmputNormCost_(lstSched, CCM_DYNMC, hurstcExecCost, true);
+
+    //TODO(jbaile): Use different measure for 1st, 2nd pass?
     hurstcCost_ = lstSched->GetCost();
+    // hurstcCost_ = IsSecondPass() ? lstSched->GetCost() : lstSched->GetRPCost();
+
     InstCount maxIndependentInstructions = 0;
     std::string readyListUB = schedIni.GetString("ACO_READY_LIST_UB");
     if (readyListUB == "NO" || readyListUB == "MIN_DEGREE") {
@@ -536,15 +540,20 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
   // ===================================================================
   const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
   bool mis_override_heuristic = mis_config.HasAcoOption(MachineInstrSchedulerConfig::AcoOption::RunRegardlessOfHeurisitcOutcome);
+  if(mis_override_heuristic) {
+      // TODO: Do I really want to do this? Or would it better to just override switch?
+      // isLstOptml is later used of decision making of init vs ACO solution (seems weird...)
+      isLstOptml = false;
+  }
 
-  if (mis_override_heuristic || (AcoBeforeEnum && !isLstOptml)) {
-  //======================================================================
-
+  if (AcoBeforeEnum && !isLstOptml) {
     AcoStart = Utilities::GetProcessorTime();
     AcoSchedule = new InstSchedule(machMdl_, dataDepGraph_, vrfySched_);
 
-
     rslt = runACO(AcoSchedule, lstSched, false, randSeed, numBlocks, devACOEnabled);
+    //TODO(jbaile): modify / delete
+    // Logger::Info("==> runACO returns %s\n", AcoSchedule->GetStr().data());
+
     if (rslt != RES_SUCCESS) {
       Logger::Fatal("ACO scheduling failed");
       if (lstSchdulr)
@@ -564,6 +573,8 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
 
     AcoScheduleLength_ = AcoSchedule->GetCrntLngth();
     AcoScheduleCost_ = AcoSchedule->GetCost();
+    //TODO(jbaile): Use different measure for 1st, 2nd pass?
+    // AcoScheduleCost_ = IsSecondPass() ? AcoSchedule->GetCost() : AcoSchedule->GetRPCost();
 
     // If ACO is run then that means either:
     // 1.) Heuristic was not run
@@ -601,6 +612,7 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
       // schedules and use the one that's better as the input (initialSched) for
       // B&B.
     } else {
+      //TODO(jbaile): See above - use different measure for 1st vs 2nd pass?
       bestSched_ = AcoScheduleCost_ < hurstcCost_ ? AcoSchedule : lstSched;
       bestSched = bestSched_;
       bestSchedLngth_ = bestSched_->GetCrntLngth();
@@ -1114,7 +1126,6 @@ FUNC_RESULT SchedRegion::runACO(InstSchedule *ReturnSched,
   // to fit in device memory
   Logger::Info("This DDG has %d edges", dataDepGraph_->GetEdgeCnt());
   Logger::Info("CP Distance: %d", dataDepGraph_->GetRootInst()->GetCrntLwrBound(DIR_BKWRD) + 1);
-  // TODO disable min size?
   if (devACOEnabled && dataDepGraph_->GetInstCnt() >= REGION_MIN_SIZE) {
     // Allocate and Copy data to device for parallel ACO
     size_t memSize;
@@ -1153,7 +1164,6 @@ FUNC_RESULT SchedRegion::runACO(InstSchedule *ReturnSched,
     hipLaunchKernelGGL(InitCurand, numBlocks, NUMTHREADSPERBLOCK, 0, 0, dev_states,
                                                   randSeed == 0 ? unsigned(time(NULL)) : randSeed,
                                                   dataDepGraph_->GetInstCnt());
-
     ACOScheduler *AcoSchdulr = new ACOScheduler(
         dataDepGraph_, machMdl_, abslutSchedUprBound_, enumPrirts_,
         vrfySched_, IsPostBB, numBlocks, (SchedRegion *)dev_rgn, dev_DDG,
@@ -1170,30 +1180,23 @@ FUNC_RESULT SchedRegion::runACO(InstSchedule *ReturnSched,
     AcoSchdulr->CopyPointersToDevice(dev_AcoSchdulr);
     // Make sure mallocManaged memory is copied to device before kernel start
     memSize = sizeof(DataDepGraph);
-    AcoSchdulr->CopyPointersToDevice(dev_AcoSchdulr);
     gpuErrchk(hipMemPrefetchAsync(dev_DDG, memSize, 0));
     memSize = sizeof(BBWithSpill);
     gpuErrchk(hipMemPrefetchAsync(dev_rgn, memSize, 0));
 
     // FindSchedule
-    Logger::Info("jbaile About to AcoSchdulr->FindSchedule");
     Rslt = AcoSchdulr->FindSchedule(ReturnSched, this, dev_AcoSchdulr);
 
-    Logger::Info("jbaile About to dev_AcoSchdulr->FreeDevicePointers");
     dev_AcoSchdulr->FreeDevicePointers();
-    Logger::Info("jbaile About to free dev_AcoSchdulr");
     hipFree(dev_AcoSchdulr);
     delete AcoSchdulr;
-    Logger::Info("jbaile About to dev_rgn->FreeDevicePointers");
     dev_rgn->FreeDevicePointers(numThreads);
     hipFree(dev_rgn);
-    Logger::Info("jbaile About to dev_DDG->FreeDevicePointers");
     dev_DDG->FreeDevicePointers(numThreads);
     hipFree(dev_DDG);
     hipFree(dev_states);
     // For some reason crashed OptSched to have this in the destructor
     // so call to delete it here
-    Logger::Info("jbaile About to dataDepGraph_->FreeDevEdges");
     dataDepGraph_->FreeDevEdges();
     // Ocasionally BBWithSpill deletes an empty pointer, which causes the next
     // kernel to report an invalid argument error after execution even
@@ -1204,6 +1207,7 @@ FUNC_RESULT SchedRegion::runACO(InstSchedule *ReturnSched,
     ACOScheduler *AcoSchdulr = 
         new ACOScheduler(dataDepGraph_, machMdl_, abslutSchedUprBound_,
                          enumPrirts_, vrfySched_, IsPostBB, numBlocks);
+    // dbgs() << "\t\t\t\t====>:For AcoSchdulr, set Initchedule %s" << InitSched->GetStr().data() << "\n";
     AcoSchdulr->setInitialSched(InitSched);
     Rslt = AcoSchdulr->FindSchedule(ReturnSched, this);
     delete AcoSchdulr;

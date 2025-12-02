@@ -22,6 +22,8 @@
 #include <utility>
 #include <hip/hip_runtime.h>
 
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
 extern bool OPTSCHED_gPrintSpills; 
 
 using namespace llvm::opt_sched;
@@ -474,6 +476,14 @@ InstCount BBWithSpill::CmputCost_(InstSchedule *sched, COST_COMP_MODE compMode,
   sched->SetSpillCosts(spillCosts_);
   sched->SetPeakRegPressures(peakRegPressures_);
   sched->SetSpillCost(crntSpillCost_);
+  //===============================================================
+  // jbaile
+  //===============================================================
+  InstCount occ_score = getAmdGpuOccScore(peakRegPressures_, TargetOccupancy_, MaxOccLDS_);
+  sched->SetOccScore(occ_score);
+  InstCount occ = getAmdGpuOccupancy(peakRegPressures_, TargetOccupancy_, MaxOccLDS_);
+  sched->SetOccupancy(occ);
+  //===============================================================
   return cost;
 }
 
@@ -499,6 +509,7 @@ InstCount BBWithSpill::Dev_CmputCost_(InstSchedule *sched, COST_COMP_MODE compMo
   cost += dev_crntSpillCost_[GLOBALTID] * SCW_;
   sched->Dev_SetSpillCosts(dev_spillCosts_);
   sched->Dev_SetPeakRegPressures(dev_peakRegPressures_);
+  // TODO(jbaile): Set my cost here
   sched->SetSpillCost(dev_crntSpillCost_[GLOBALTID]);
   return cost;
 }
@@ -1175,7 +1186,7 @@ InstCount BBWithSpill::CmputCostForFunction(SPILL_COST_FUNCTION SpillCF) {
   }
 }
 
-__device__
+__host__ __device__
 static unsigned getOccupancyWithNumVGPRs(unsigned VGPRs) {
   // approximation from llvm/lib/Target/AMDGPUSubtarget.cpp
   // from this llvm commit fd08dcb9db0df6dc1aaf329f790cc4a7af9e0a91
@@ -1200,7 +1211,7 @@ static unsigned getOccupancyWithNumVGPRs(unsigned VGPRs) {
   return 1;
 }
 
-__device__
+__host__ __device__
 static unsigned getOccupancyWithNumSGPRs(unsigned SGPRs) {
   // copied from llvm/lib/Target/AMDGPU/AMDGPUSubtarget.cpp
   if (SGPRs <= 80)
@@ -1212,7 +1223,7 @@ static unsigned getOccupancyWithNumSGPRs(unsigned SGPRs) {
   return 7;
 }
 
-__device__
+__host__ __device__
 static unsigned getAdjustedOccupancy(unsigned VGPRCount, unsigned SGPRCount,
                                      unsigned MaxOccLDS) {
   unsigned MaxOccVGPR = getOccupancyWithNumVGPRs(VGPRCount);
@@ -1234,16 +1245,124 @@ static unsigned getAdjustedOccupancy(unsigned VGPRCount, unsigned SGPRCount,
     return MaxOccSGPR;
 }
 
-__device__
+// TODO(jbaile): Do we need / want device?
+__device__ __host__
 InstCount BBWithSpill::getAMDGPUCost(unsigned * PRP, unsigned TargetOccupancy,
                                unsigned MaxOccLDS, int16_t regTypeCnt) {
+#if defined(__HIP_DEVICE_COMPILE__)
   auto Occ =
       getAdjustedOccupancy(PRP[OptSchedDDGWrapperGCN::VGPR32*numThreads_+GLOBALTID],
                            PRP[OptSchedDDGWrapperGCN::SGPR32*numThreads_+GLOBALTID], MaxOccLDS);
+#else
+  auto Occ =
+      getAdjustedOccupancy(PRP[OptSchedDDGWrapperGCN::VGPR32],
+                           PRP[OptSchedDDGWrapperGCN::SGPR32], MaxOccLDS);
+#endif 
+
   // RP cost is the difference between the minimum allowed occupancy for the
   // function, and the current occupancy.
   return Occ >= TargetOccupancy ? 0 : TargetOccupancy - Occ;
 }
+
+//================================================================================
+// jbaile
+//================================================================================
+
+// Returns a score for a given number of registers, which combines occupancy :: <percent registers until next higher occupancy >
+// Where a higher score indicates higher occupancy + being closer to next highest occupancy
+// Takes as input a stairstep pattern of occupnacy increments for the given occupancy type
+__device__ __host__
+static int getRegScore(unsigned num_reg, const int *steps, const int num_steps) {
+  
+  int prev_step = 0;
+  int floor = 0;
+  int ceil = steps[1];
+  int occ = 10;
+  if(num_reg != 0) {
+      for(int idx = 0; idx < num_steps; ++idx) {
+          int step = steps[idx];
+          if(num_reg <= step) {
+              ceil = step+1;
+              floor = prev_step;
+              occ = 11 - idx;
+              break;
+          }
+          
+          prev_step = step;
+      }
+  }
+  
+  int score = (BBWithSpill::OCC_SCORE_OCC_MULTIPLIER*(ceil - num_reg)) / (ceil - floor);
+  score += BBWithSpill::OCC_SCORE_OCC_MULTIPLIER*occ;
+
+  // Do I want to cap? I guess so.
+  score = std::min(BBWithSpill::OCC_SCORE_MAX_SCORE, score);
+  return score;
+}
+
+__host__ __device__
+static int getVgprRegScore(unsigned num_reg) {
+  int steps[] = {0, 24, 28, 32, 36, 40, 48, 64, 84, 128, 256};
+  return getRegScore(num_reg, steps, 11);
+}
+
+__host__ __device__
+static int getSgprRegScore(unsigned num_reg) {
+  // Max usable is probably actually 104, but added buffer
+  int steps[] = {0, 80, 88, 100, 104};
+  return getRegScore(num_reg, steps, 5);
+}
+
+// Return an occupancy socre that is continuous, rather than stairstep.
+// Higher is better.
+__host__ __device__
+static int getRawOccupancyScore(unsigned VGPRCount, unsigned SGPRCount,
+                                     unsigned MaxOccLDS) {
+  int vgpr_score = getVgprRegScore(VGPRCount);
+  int sgpr_score = getSgprRegScore(SGPRCount);
+  int lds_score = MaxOccLDS * BBWithSpill::OCC_SCORE_OCC_MULTIPLIER;
+  
+  int final_score = std::min(std::min(vgpr_score, sgpr_score), lds_score);
+  return final_score;
+}
+
+
+// If Occupancy meets target, 0, else adjusted RP
+// TODO(jbaile): Current approach doesn't really account for SGPR pressure.
+// We should find which is more pressured and return <count of reg type> / <max of reg type> as a float
+__host__ __device__
+InstCount BBWithSpill::getAmdGpuOccScore(const InstCount *PRP, const unsigned TargetOccupancy, const unsigned MaxOccLDS) {
+#if defined(__HIP_DEVICE_COMPILE__)
+  auto Occ =
+      getAdjustedOccupancy(PRP[OptSchedDDGWrapperGCN::VGPR32*numThreads_+GLOBALTID],
+                           PRP[OptSchedDDGWrapperGCN::SGPR32*numThreads_+GLOBALTID], MaxOccLDS);
+    auto occ_score = getRawOccupancyScore(PRP[OptSchedDDGWrapperGCN::VGPR32*numThreads_+GLOBALTID],
+                           PRP[OptSchedDDGWrapperGCN::SGPR32*numThreads_+GLOBALTID], MaxOccLDS);
+#else
+  auto Occ =
+      getAdjustedOccupancy(PRP[OptSchedDDGWrapperGCN::VGPR32],
+                           PRP[OptSchedDDGWrapperGCN::SGPR32], MaxOccLDS);
+    auto occ_score = getRawOccupancyScore(PRP[OptSchedDDGWrapperGCN::VGPR32],
+                           PRP[OptSchedDDGWrapperGCN::SGPR32], MaxOccLDS);
+#endif 
+
+  return Occ >= TargetOccupancy ? OCC_SCORE_MAX_SCORE : occ_score;
+}
+
+__host__ __device__
+InstCount BBWithSpill::getAmdGpuOccupancy(const InstCount *PRP, const unsigned TargetOccupancy, const unsigned MaxOccLDS) {
+#if defined(__HIP_DEVICE_COMPILE__)
+  auto Occ =
+      getAdjustedOccupancy(PRP[OptSchedDDGWrapperGCN::VGPR32*numThreads_+GLOBALTID],
+                           PRP[OptSchedDDGWrapperGCN::SGPR32*numThreads_+GLOBALTID], MaxOccLDS);
+#else
+  auto Occ =
+      getAdjustedOccupancy(PRP[OptSchedDDGWrapperGCN::VGPR32],
+                           PRP[OptSchedDDGWrapperGCN::SGPR32], MaxOccLDS);
+#endif 
+    return Occ;
+}
+//================================================================================
 
 __host__ __device__
 unsigned BBWithSpill::closeOccupancyWithNumVGPRs(unsigned VGPRs) {

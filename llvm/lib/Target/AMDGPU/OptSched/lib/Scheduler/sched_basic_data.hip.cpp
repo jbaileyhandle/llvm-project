@@ -6,6 +6,10 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/ErrorHandling.h"
 
+
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
+
 using namespace llvm::opt_sched;
 
 SPILL_COST_FUNCTION llvm::opt_sched::ParseSCFName(const std::string &name) {

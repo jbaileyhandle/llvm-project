@@ -2,6 +2,8 @@
 #include "opt-sched/Scheduler/dev_defines.h"
 #include "llvm/ADT/STLExtras.h"
 
+#include "opt-sched/Scheduler/jbaile_printf_override.h"
+
 using namespace llvm::opt_sched;
 
 __host__ __device__
