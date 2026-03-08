@@ -54,7 +54,7 @@ GCNSchedStrategy::GCNSchedStrategy(const MachineSchedContext *C)
 
          // jbaile config
          const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
-         if(config.IsAcoOptSched()) {
+         if(config.IsOptSched()) {
              SIMachineFunctionInfo *MFI;
              MFI =
                const_cast<SIMachineFunctionInfo *>(C->MF->getInfo<SIMachineFunctionInfo>());

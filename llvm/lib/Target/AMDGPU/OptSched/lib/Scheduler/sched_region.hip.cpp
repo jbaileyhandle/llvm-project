@@ -243,6 +243,27 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
     AcoAfterEnum = schedIni.GetBool("ACO_AFTER_ENUM");
   }
 
+  // ===================================================================
+  // jbaile - Enforce mutual exclusivity between ACO and BnB.
+  // Our config overrides sched.ini regardless of what it says.
+  // AcoBeforeEnum/AcoAfterEnum may have been set above from sched.ini
+  // and are checked independently of AcoSchedulerEnabled downstream
+  // (lines ~549, ~735), so we must explicitly clear them for BnB.
+  // ===================================================================
+  {
+    const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
+    if(mis_config.IsAcoOptSched()) {
+        AcoSchedulerEnabled = true;
+        BbSchedulerEnabled = false;
+    } else if(mis_config.IsBnbOptSched()) {
+        BbSchedulerEnabled = true;
+        AcoSchedulerEnabled = false;
+        AcoBeforeEnum = false;
+        AcoAfterEnum = false;
+    }
+  }
+  // ===================================================================
+
   if (!HeuristicSchedulerEnabled && !AcoBeforeEnum) {
     // Abort if ACO and heuristic algorithms are disabled.
     Logger::Fatal(
@@ -539,7 +560,7 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
   // jbaile
   // ===================================================================
   const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
-  bool mis_override_heuristic = mis_config.HasAcoOption(MachineInstrSchedulerConfig::AcoOption::RunRegardlessOfHeurisitcOutcome);
+  bool mis_override_heuristic = mis_config.HasOptSchedOption(MachineInstrSchedulerConfig::OptSchedOption::RunRegardlessOfHeurisitcOutcome);
   if(mis_override_heuristic) {
       // TODO: Do I really want to do this? Or would it better to just override switch?
       // isLstOptml is later used of decision making of init vs ACO solution (seems weird...)

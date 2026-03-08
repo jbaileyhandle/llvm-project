@@ -1206,7 +1206,7 @@ ScheduleDAGInstrs *GCNPassConfig::createMachineScheduler(
   //=========================================================
   const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
   // TODO - I don't think this actually does anything
-  if(config.IsAcoOptSched()) {
+  if(config.IsOptSched()) {
     if (UseOptSched) {
         return createOptSchedGCN(C);
     }
@@ -1392,7 +1392,7 @@ void GCNPassConfig::addOptimizedRegAlloc() {
   // jbaile config
   // Don't know that this actually matters, but why not...
   const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
-  if(config.IsAcoOptSched()) {
+  if(config.IsOptSched()) {
       insertPass(&MachineSchedulerOptSchedID, &SIWholeQuadModeID);
       insertPass(&MachineSchedulerOptSchedID, &SIPreAllocateWWMRegsID);
   } else {

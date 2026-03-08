@@ -427,7 +427,7 @@ ScheduleDAGInstrs *MachineScheduler::createMachineScheduler() {
   // jbaile config
   // TODO: Switch on/off for host vs GPU code?
   const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
-  if(config.IsAcoOptSched()) {
+  if(config.IsOptSched()) {
 
      // Get the default scheduler set by the target for this function.
      ScheduleDAGInstrs *Scheduler = PassConfig->createAMDScheduler(this);

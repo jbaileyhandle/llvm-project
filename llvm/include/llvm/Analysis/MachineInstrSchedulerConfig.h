@@ -20,9 +20,10 @@ class MachineInstrSchedulerConfig {
             MaxIlp,
             IterativeMaxOccupancy,
             IterativeMaxIlp,
-            AcoOptSched
+            AcoOptSched,
+            BnbOptSched
         };
-        enum class AcoOption{
+        enum class OptSchedOption{
             RunOnAllFunctions,
             RunRegardlessOfHeurisitcOutcome,
             UseContinuousOccupancyScore,
@@ -61,12 +62,17 @@ class MachineInstrSchedulerConfig {
         // Return the configured scheduler
         Scheduler GetScheduler() const;
 
-        // Return true if any variant of the AcoOptSched
-        // is the configured scheduler
+        // Return true if AcoOptSched is the configured scheduler
         bool IsAcoOptSched() const;
 
+        // Return true if BnbOptSched is the configured scheduler
+        bool IsBnbOptSched() const;
+
+        // Return true if any OptSched variant (ACO or BnB) is the configured scheduler
+        bool IsOptSched() const;
+
         // Return true if option is set
-        bool HasAcoOption(AcoOption option) const;
+        bool HasOptSchedOption(OptSchedOption option) const;
 
         // Debug printing stuff
         void DebugPrint() const;
@@ -78,8 +84,8 @@ class MachineInstrSchedulerConfig {
         // Return the configurd scheduler as a string
         std::string GetSchedulerAsString() const;
 
-        // Return the string-equivalnet of the ACO option
-        std::string GetAcoOptionAsString(AcoOption option) const;
+        // Return the string-equivalent of the OptSched option
+        std::string GetOptSchedOptionAsString(OptSchedOption option) const;
 
         // Return the FunctionConfig for the function with a given demangled signature
         // Return nullptr if not found
@@ -100,29 +106,30 @@ class MachineInstrSchedulerConfig {
         // Get the configuration for a function
         const FunctionConfig *GetFunctionConfig(const Function &function) const;
 
-        // Set options for ACO scheduler
-        void InitAcoOptions(const std::vector<std::string> &options);
+        // Set options for OptSched scheduler (ACO or BnB)
+        void InitOptSchedOptions(const std::vector<std::string> &options);
 
-        // Conert a string to the corresponding AcoOption
-        AcoOption GetAcoOptionFromString(const std::string &str);
+        // Convert a string to the corresponding OptSchedOption
+        OptSchedOption GetOptSchedOptionFromString(const std::string &str);
 
         bool has_config_ = false;
         Scheduler mi_scheduler_ = Scheduler::Default;
         std::unordered_map<std::string, FunctionConfig> demangled_func_signature_to_config_;
-        std::set<AcoOption> aco_options_;
+        std::set<OptSchedOption> optsched_options_;
         inline static const std::unordered_map<Scheduler, std::string> scheduler_to_str_ {
             {Scheduler::Default, "Default"},
             {Scheduler::MaxOccupancy, "MaxOccupancy"},
             {Scheduler::MaxIlp, "MaxIlp"},
             {Scheduler::IterativeMaxOccupancy, "IterativeMaxOccupancy"},
             {Scheduler::IterativeMaxIlp, "IterativeMaxIlp"},
-            {Scheduler::AcoOptSched, "AcoOptSched"}
+            {Scheduler::AcoOptSched, "AcoOptSched"},
+            {Scheduler::BnbOptSched, "BnbOptSched"}
         };
-        inline static const std::unordered_map<AcoOption, std::string> aco_option_to_str_ {
-            {AcoOption::InvalidOption, "InvalidOption"},
-            {AcoOption::RunOnAllFunctions, "RunOnAllFunctions"},
-            {AcoOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"},
-            {AcoOption::UseContinuousOccupancyScore, "UseContinuousOccupancyScore"}
+        inline static const std::unordered_map<OptSchedOption, std::string> optsched_option_to_str_ {
+            {OptSchedOption::InvalidOption, "InvalidOption"},
+            {OptSchedOption::RunOnAllFunctions, "RunOnAllFunctions"},
+            {OptSchedOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"},
+            {OptSchedOption::UseContinuousOccupancyScore, "UseContinuousOccupancyScore"}
         };
 
 

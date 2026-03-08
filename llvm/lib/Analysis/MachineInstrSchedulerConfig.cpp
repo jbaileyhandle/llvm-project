@@ -111,36 +111,44 @@ bool MachineInstrSchedulerConfig::IsAcoOptSched() const {
     return mi_scheduler_ == Scheduler::AcoOptSched;
 }
 
-bool MachineInstrSchedulerConfig::HasAcoOption(MachineInstrSchedulerConfig::AcoOption option) const {
-    return (aco_options_.find(option) != aco_options_.end());
+bool MachineInstrSchedulerConfig::IsBnbOptSched() const {
+    return mi_scheduler_ == Scheduler::BnbOptSched;
+}
+
+bool MachineInstrSchedulerConfig::IsOptSched() const {
+    return IsAcoOptSched() || IsBnbOptSched();
+}
+
+bool MachineInstrSchedulerConfig::HasOptSchedOption(MachineInstrSchedulerConfig::OptSchedOption option) const {
+    return (optsched_options_.find(option) != optsched_options_.end());
 }
 
 MachineInstrSchedulerConfig::Scheduler MachineInstrSchedulerConfig::GetScheduler() const {
     return mi_scheduler_;
 }
 
-MachineInstrSchedulerConfig::AcoOption MachineInstrSchedulerConfig::GetAcoOptionFromString(const std::string &str) {
-    AcoOption option = AcoOption::InvalidOption;
+MachineInstrSchedulerConfig::OptSchedOption MachineInstrSchedulerConfig::GetOptSchedOptionFromString(const std::string &str) {
+    OptSchedOption option = OptSchedOption::InvalidOption;
     llvm::StringRef str_ref_option(str);
 
-    option = StringSwitch<AcoOption>(llvm::StringRef(str))
-        .Case("RunOnAllFunctions", AcoOption::RunOnAllFunctions)
-        .Case("RunRegardlessOfHeurisitcOutcome", AcoOption::RunRegardlessOfHeurisitcOutcome)
-        .Case("UseContinuousOccupancyScore", AcoOption::UseContinuousOccupancyScore)
-        .Default(AcoOption::InvalidOption);
+    option = StringSwitch<OptSchedOption>(llvm::StringRef(str))
+        .Case("RunOnAllFunctions", OptSchedOption::RunOnAllFunctions)
+        .Case("RunRegardlessOfHeurisitcOutcome", OptSchedOption::RunRegardlessOfHeurisitcOutcome)
+        .Case("UseContinuousOccupancyScore", OptSchedOption::UseContinuousOccupancyScore)
+        .Default(OptSchedOption::InvalidOption);
 
-    if(option == AcoOption::InvalidOption) {
-        llvm::report_fatal_error("Invalid AcoOption: " + str_ref_option);
+    if(option == OptSchedOption::InvalidOption) {
+        llvm::report_fatal_error("Invalid OptSchedOption: " + str_ref_option);
     }
     return option;
 }
 
-void MachineInstrSchedulerConfig::InitAcoOptions(const std::vector<std::string> &options) {
-    if(mi_scheduler_ != Scheduler::AcoOptSched) {
+void MachineInstrSchedulerConfig::InitOptSchedOptions(const std::vector<std::string> &options) {
+    if(!IsOptSched()) {
         return;
     }
     for(const auto &option : options) {
-        aco_options_.insert(GetAcoOptionFromString(option));
+        optsched_options_.insert(GetOptSchedOptionFromString(option));
     }
 }
 
@@ -164,14 +172,15 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
             .Case("IterativeMaxOccupancy", Scheduler::IterativeMaxOccupancy)
             .Case("IterativeMaxIlp", Scheduler::IterativeMaxIlp)
             .Case("AcoOptSched", Scheduler::AcoOptSched)
+            .Case("BnbOptSched", Scheduler::BnbOptSched)
             .Default(Scheduler::InvalidOption);
 
         if(mi_scheduler_ == Scheduler::InvalidOption) {
             llvm::report_fatal_error("Invalid machine instruction scheduler: " + misched_ref);
         }
 
-        // If ACO, record options
-        InitAcoOptions(std::vector<std::string>(first_line_tokens.begin()+1, first_line_tokens.end()));
+        // If OptSched (ACO or BnB), record options
+        InitOptSchedOptions(std::vector<std::string>(first_line_tokens.begin()+1, first_line_tokens.end()));
 
         // Read in per-func info
         while(std::getline(misched_config_file, line)) {
@@ -244,8 +253,8 @@ const MachineInstrSchedulerConfig::FunctionConfig *MachineInstrSchedulerConfig::
 }
 
 void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Function &function) const {
-    // ACO configurations use a different mechanism to control register pressure / occupancy
-    if(IsAcoOptSched()) {
+    // OptSched configurations use a different mechanism to control register pressure / occupancy
+    if(IsOptSched()) {
         return;
     }
     if(!HasFunctionConfig(function)) {
@@ -298,8 +307,8 @@ std::string MachineInstrSchedulerConfig::GetSchedulerAsString() const {
     return scheduler_to_str_.at(mi_scheduler_);
 }
 
-std::string MachineInstrSchedulerConfig::GetAcoOptionAsString(AcoOption option) const {
-    return aco_option_to_str_.at(option);
+std::string MachineInstrSchedulerConfig::GetOptSchedOptionAsString(OptSchedOption option) const {
+    return optsched_option_to_str_.at(option);
 }
 
 std::string MachineInstrSchedulerConfig::ToString() const {
@@ -308,11 +317,11 @@ std::string MachineInstrSchedulerConfig::ToString() const {
     // Scheduler
     result += "Scheduler: " + GetSchedulerAsString() + "\n";
 
-    // ACO options
-    if(IsAcoOptSched()) {
-        result += "\tACO options:\n";
-        for(const auto option : aco_options_) {
-            result += "\t\t" + GetAcoOptionAsString(option) + "\n";
+    // OptSched options
+    if(IsOptSched()) {
+        result += "\tOptSched options:\n";
+        for(const auto option : optsched_options_) {
+            result += "\t\t" + GetOptSchedOptionAsString(option) + "\n";
         }
     }
 

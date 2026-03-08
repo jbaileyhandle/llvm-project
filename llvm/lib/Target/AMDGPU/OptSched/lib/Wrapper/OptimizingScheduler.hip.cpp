@@ -975,7 +975,7 @@ bool ScheduleDAGOptSched::isOptSchedEnabled() const {
     const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
     const MachineInstrSchedulerConfig::FunctionConfig *func_config =  mis_config.GetFunctionConfigFromMangledFunctionSignature(C->MF->getFunction().getName());
     bool function_has_config = func_config != nullptr;
-    if(function_has_config || mis_config.HasAcoOption(MachineInstrSchedulerConfig::AcoOption::RunOnAllFunctions)) {
+    if(function_has_config || mis_config.HasOptSchedOption(MachineInstrSchedulerConfig::OptSchedOption::RunOnAllFunctions)) {
         return true;
     }
   // ===================================================================

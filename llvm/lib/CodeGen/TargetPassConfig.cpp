@@ -1484,7 +1484,7 @@ void TargetPassConfig::addOptimizedRegAlloc() {
   // jbaile config
   //===================================================================================
   const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
-  if(config.IsAcoOptSched()) {
+  if(config.IsOptSched()) {
       addPass(&MachineSchedulerOptSchedID);
   }
   //===================================================================================
