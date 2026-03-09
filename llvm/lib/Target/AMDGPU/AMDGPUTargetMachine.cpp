@@ -1401,7 +1401,7 @@ void GCNPassConfig::addOptimizedRegAlloc() {
   }
 
   if (OptExecMaskPreRA)
-    if(config.IsAcoOptSched()) {
+    if(config.IsOptSched()) {
         insertPass(&MachineSchedulerOptSchedID, &SIOptimizeExecMaskingPreRAID);
     } else {
         insertPass(&MachineSchedulerID, &SIOptimizeExecMaskingPreRAID);
@@ -1417,7 +1417,7 @@ void GCNPassConfig::addOptimizedRegAlloc() {
   // compilation time, so we only enable it from O2.
   if (TM->getOptLevel() > CodeGenOpt::Less)
 
-    if(config.IsAcoOptSched()) {
+    if(config.IsOptSched()) {
         insertPass(&MachineSchedulerOptSchedID, &SIFormMemoryClausesID);
     } else {
         insertPass(&MachineSchedulerID, &SIFormMemoryClausesID);

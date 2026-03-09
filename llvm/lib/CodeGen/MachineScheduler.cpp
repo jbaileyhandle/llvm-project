@@ -63,11 +63,14 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
+#include <fcntl.h>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
 #include <tuple>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -719,6 +722,51 @@ void MachineSchedulerBase::scheduleRegions(ScheduleDAGInstrs &Scheduler,
 
     MBBRegionsVector MBBRegions;
     getSchedRegions(&*MBB, MBBRegions, Scheduler.doMBBSchedRegionsTopDown());
+
+    // jbaile region stats
+    //===========================================================================
+    // Write scheduling region sizes to CSV file for analysis.
+    // Gated by LLVM_REGION_STATS_FILE env var.
+    {
+      static const char *RegionStatsFile = std::getenv("LLVM_REGION_STATS_FILE");
+      const MachineInstrSchedulerConfig &Config =
+          MachineInstrSchedulerConfig::GetConfig();
+      StringRef ArchName = MF->getTarget().getTargetTriple().getArchName();
+
+      // Only collect when env var is set
+      bool ShouldCollect = (RegionStatsFile != nullptr);
+      // Only collect for pre-RA scheduling (not post-RA)
+      ShouldCollect = ShouldCollect && !FixKillFlags;
+      // Only collect when there are regions to report
+      ShouldCollect = ShouldCollect && !MBBRegions.empty();
+      // Only collect for AMDGCN targets (skip host code in HIP compilation)
+      ShouldCollect = ShouldCollect
+          && (strncmp("amdgcn", ArchName.data(), 6) == 0);
+      // Only collect from the relevant scheduler pass:
+      // When OptSched is configured, collect from MachineSchedulerOptSched.
+      // Otherwise, collect from MachineScheduler (covers MaxOccupancy,
+      // MaxILP, GenericScheduler — all use the same MachineScheduler pass,
+      // differing only in the internal ScheduleDAG strategy).
+      ShouldCollect = ShouldCollect
+          && (Config.IsOptSched()
+              ? (getPassID() == &MachineSchedulerOptSched::ID)
+              : (getPassID() == &MachineScheduler::ID));
+
+      if (ShouldCollect) {
+        std::string Buf;
+        raw_string_ostream OS(Buf);
+        for (const SchedRegion &R : MBBRegions)
+          OS << MF->getName() << ',' << R.NumRegionInstrs << '\n';
+        OS.flush();
+        int FD = ::open(RegionStatsFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (FD >= 0) {
+          ::write(FD, Buf.data(), Buf.size());
+          ::close(FD);
+        }
+      }
+    }
+    //===========================================================================
+
     for (const SchedRegion &R : MBBRegions) {
       MachineBasicBlock::iterator I = R.RegionBegin;
       MachineBasicBlock::iterator RegionEnd = R.RegionEnd;
