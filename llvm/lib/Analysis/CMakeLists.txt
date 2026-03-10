@@ -156,6 +156,7 @@ add_llvm_component_library(LLVMAnalysis
   LINK_COMPONENTS
   BinaryFormat
   Core
+  Demangle
   Object
   ProfileData
   Support

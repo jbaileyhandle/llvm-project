@@ -41,6 +41,10 @@ class MachineInstrSchedulerConfig {
         };
 
 
+        // Demangle a C++ (Itanium ABI) mangled function signature.
+        // Fatal error if demangling fails.
+        static std::string DemangleFunctionSignature(const std::string &mangled_signature);
+
         // Return true if there is scheduler configuration
         bool HasConfig() const;
 

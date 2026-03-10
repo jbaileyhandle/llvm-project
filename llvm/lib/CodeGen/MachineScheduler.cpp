@@ -753,10 +753,13 @@ void MachineSchedulerBase::scheduleRegions(ScheduleDAGInstrs &Scheduler,
               : (getPassID() == &MachineScheduler::ID));
 
       if (ShouldCollect) {
+        std::string FuncName =
+            MachineInstrSchedulerConfig::DemangleFunctionSignature(
+                MF->getName().str());
         std::string Buf;
         raw_string_ostream OS(Buf);
         for (const SchedRegion &R : MBBRegions)
-          OS << MF->getName() << ',' << R.NumRegionInstrs << '\n';
+          OS << FuncName << ',' << R.NumRegionInstrs << '\n';
         OS.flush();
         int FD = ::open(RegionStatsFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (FD >= 0) {

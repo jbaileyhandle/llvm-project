@@ -2,11 +2,12 @@
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/Demangle/Demangle.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/ErrorHandling.h"
 
 #include <cassert>
-#include <cxxabi.h>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -40,17 +41,6 @@ namespace {
             std::istream_iterator<std::string>{}
         };
         return tokens;
-    }
-
-    // Pass in a function's mangled name
-    // Returns de-mangled name
-    std::string DemangleFunctionSignature(const std::string &mangled_signature) {
-        int status = 0;
-
-        char *demangled = abi::__cxa_demangle(mangled_signature.c_str(), nullptr, nullptr, &status);
-        std::string result = (status == 0 && demangled) ? demangled : mangled_signature;
-        std::free(demangled);
-        return result;
     }
 
     // Return the function's configured minimum + maximum waves per eu
@@ -97,6 +87,18 @@ namespace {
     }
 
 } // end namespace
+
+std::string MachineInstrSchedulerConfig::DemangleFunctionSignature(const std::string &mangled_signature) {
+    char *demangled = llvm::itaniumDemangle(mangled_signature);
+    if (!demangled) {
+        // Names not using Itanium mangling (e.g. C symbols, runtime helpers
+        // like __cxa_pure_virtual) are returned unchanged.
+        return mangled_signature;
+    }
+    std::string result(demangled);
+    std::free(demangled);
+    return result;
+}
 
 const MachineInstrSchedulerConfig &MachineInstrSchedulerConfig::GetConfig() {
     static MachineInstrSchedulerConfig mi_config;
