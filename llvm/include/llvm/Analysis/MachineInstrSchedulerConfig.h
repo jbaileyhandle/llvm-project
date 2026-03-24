@@ -21,7 +21,8 @@ class MachineInstrSchedulerConfig {
             IterativeMaxOccupancy,
             IterativeMaxIlp,
             AcoOptSched,
-            BnbOptSched
+            BnbOptSched,
+            HierarchicalScheduler
         };
         enum class OptSchedOption{
             RunOnAllFunctions,
@@ -75,6 +76,9 @@ class MachineInstrSchedulerConfig {
         // Return true if any OptSched variant (ACO or BnB) is the configured scheduler
         bool IsOptSched() const;
 
+        // Return true if HierarchicalScheduler is the configured scheduler
+        bool IsHierarchicalScheduler() const;
+
         // Return true if option is set
         bool HasOptSchedOption(OptSchedOption option) const;
 
@@ -127,7 +131,8 @@ class MachineInstrSchedulerConfig {
             {Scheduler::IterativeMaxOccupancy, "IterativeMaxOccupancy"},
             {Scheduler::IterativeMaxIlp, "IterativeMaxIlp"},
             {Scheduler::AcoOptSched, "AcoOptSched"},
-            {Scheduler::BnbOptSched, "BnbOptSched"}
+            {Scheduler::BnbOptSched, "BnbOptSched"},
+            {Scheduler::HierarchicalScheduler, "HierarchicalScheduler"}
         };
         inline static const std::unordered_map<OptSchedOption, std::string> optsched_option_to_str_ {
             {OptSchedOption::InvalidOption, "InvalidOption"},

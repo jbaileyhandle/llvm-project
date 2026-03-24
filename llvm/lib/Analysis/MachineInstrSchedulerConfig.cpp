@@ -121,6 +121,10 @@ bool MachineInstrSchedulerConfig::IsOptSched() const {
     return IsAcoOptSched() || IsBnbOptSched();
 }
 
+bool MachineInstrSchedulerConfig::IsHierarchicalScheduler() const {
+    return mi_scheduler_ == Scheduler::HierarchicalScheduler;
+}
+
 bool MachineInstrSchedulerConfig::HasOptSchedOption(MachineInstrSchedulerConfig::OptSchedOption option) const {
     return (optsched_options_.find(option) != optsched_options_.end());
 }
@@ -175,6 +179,7 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
             .Case("IterativeMaxIlp", Scheduler::IterativeMaxIlp)
             .Case("AcoOptSched", Scheduler::AcoOptSched)
             .Case("BnbOptSched", Scheduler::BnbOptSched)
+            .Case("HierarchicalScheduler", Scheduler::HierarchicalScheduler)
             .Default(Scheduler::InvalidOption);
 
         if(mi_scheduler_ == Scheduler::InvalidOption) {

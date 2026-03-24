@@ -299,6 +299,17 @@ public:
      return nullptr;
    }
 
+   //========================================================================================
+   // jbaile
+   //========================================================================================
+   /// Create the hierarchical scheduler. Runs as a second pre-RA scheduling
+   /// pass after the normal AMDGPU scheduler.
+   virtual ScheduleDAGInstrs *
+   createHierarchicalScheduler(MachineSchedContext *C) const {
+     return nullptr;
+   }
+   //========================================================================================
+
   /// Similar to createMachineScheduler but used when postRA machine scheduling
   /// is enabled.
   virtual ScheduleDAGInstrs *

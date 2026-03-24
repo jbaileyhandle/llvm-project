@@ -235,6 +235,11 @@ void initializeMachineRegionInfoPassPass(PassRegistry&);
 void initializeMachineSanitizerBinaryMetadataPass(PassRegistry &);
 void initializeMachineSchedulerPass(PassRegistry&);
 void initializeMachineSchedulerOptSchedPass(PassRegistry&);
+//========================================================================================
+// jbaile
+//========================================================================================
+void initializeMachineSchedulerHierarchicalPass(PassRegistry&);
+//========================================================================================
 void initializeMachineSinkingPass(PassRegistry&);
 void initializeMachineTraceMetricsPass(PassRegistry&);
 void initializeMachineUniformityInfoPrinterPassPass(PassRegistry &);

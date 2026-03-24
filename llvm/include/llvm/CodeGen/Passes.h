@@ -145,8 +145,17 @@ namespace llvm {
   /// MachineScheduler - This pass schedules machine instructions.
   extern char &MachineSchedulerID;
 
-  /// MachineScheduler - This pass schedules machine instructions.
+  /// MachineSchedulerOptSched - This pass schedules machine instructions
+  /// using the OptSched combinatorial scheduler.
   extern char &MachineSchedulerOptSchedID;
+
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  /// MachineSchedulerHierarchical - This pass schedules machine instructions
+  /// using the hierarchical scheduler.
+  extern char &MachineSchedulerHierarchicalID;
+  //========================================================================================
 
   /// PostMachineScheduler - This pass schedules machine instructions postRA.
   extern char &PostMachineSchedulerID;

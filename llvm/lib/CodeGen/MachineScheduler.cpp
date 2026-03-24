@@ -244,6 +244,26 @@ class MachineSchedulerOptSched : public MachineSchedulerBase {
    ScheduleDAGInstrs *createMachineSchedulerOptSched();
  };
 
+//========================================================================================
+// jbaile
+//========================================================================================
+/// MachineSchedulerHierarchical runs as a second pre-RA scheduling pass
+/// after the normal AMDGPU scheduler.
+class MachineSchedulerHierarchical : public MachineSchedulerBase {
+public:
+  MachineSchedulerHierarchical();
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+
+  bool runOnMachineFunction(MachineFunction&) override;
+
+  static char ID;
+
+protected:
+  ScheduleDAGInstrs *createMachineSchedulerHierarchical();
+};
+//========================================================================================
+
 /// PostMachineScheduler runs after shortly before code emission.
 class PostMachineScheduler : public MachineSchedulerBase {
 public:
@@ -322,6 +342,7 @@ void MachineSchedulerOptSched::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addPreserved<LiveIntervals>();
   MachineFunctionPass::getAnalysisUsage(AU);
 }
+
 
 char PostMachineScheduler::ID = 0;
 
@@ -570,6 +591,123 @@ bool MachineSchedulerOptSched::runOnMachineFunction(MachineFunction &mf) {
     MF->verify(this, "After machine scheduling2.");
   return true;
 }
+
+//========================================================================================
+// jbaile
+//========================================================================================
+
+// MachineSchedulerHierarchical — pass registration and implementation.
+//
+// This follows the same pattern as MachineSchedulerOptSched above: a thin
+// pass shell that registers with the pass manager, gathers analyses, and
+// delegates to a ScheduleDAGInstrs subclass (ScheduleDAGHierarchicalScheduler,
+// which lives in lib/Target/AMDGPU/HierarchicalScheduler/).
+//
+// The pass is separate from MachineScheduler so that the hierarchical scheduler
+// runs as a second pre-RA scheduling pass after the normal AMDGPU scheduler.
+
+char MachineSchedulerHierarchical::ID = 0;
+
+char &llvm::MachineSchedulerHierarchicalID = MachineSchedulerHierarchical::ID;
+
+INITIALIZE_PASS_BEGIN(MachineSchedulerHierarchical, DEBUG_TYPE,
+                      "Machine Instruction Scheduler Hierarchical", false, false)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
+INITIALIZE_PASS_DEPENDENCY(MachineLoopInfo)
+INITIALIZE_PASS_DEPENDENCY(SlotIndexes)
+INITIALIZE_PASS_DEPENDENCY(LiveIntervals)
+INITIALIZE_PASS_END(MachineSchedulerHierarchical, DEBUG_TYPE,
+                    "Machine Instruction Scheduler Hierarchical", false, false)
+
+MachineSchedulerHierarchical::MachineSchedulerHierarchical()
+    : MachineSchedulerBase(ID) {
+  initializeMachineSchedulerHierarchicalPass(*PassRegistry::getPassRegistry());
+}
+
+// Same analysis requirements as MachineScheduler and MachineSchedulerOptSched.
+void MachineSchedulerHierarchical::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.setPreservesCFG();
+  AU.addRequired<MachineDominatorTree>();
+  AU.addRequired<MachineLoopInfo>();
+  AU.addRequired<AAResultsWrapperPass>();
+  AU.addRequired<TargetPassConfig>();
+  AU.addRequired<SlotIndexes>();
+  AU.addPreserved<SlotIndexes>();
+  AU.addRequired<LiveIntervals>();
+  AU.addPreserved<LiveIntervals>();
+  MachineFunctionPass::getAnalysisUsage(AU);
+}
+
+// Modeled after MachineSchedulerOptSched::runOnMachineFunction.
+bool MachineSchedulerHierarchical::runOnMachineFunction(MachineFunction &mf) {
+  if (skipFunction(mf.getFunction())) {
+    return false;
+  }
+
+  // Only run for AMDGPU targets on gfx906 (skip host code and other chips).
+  // Uses Triple::isAMDGPU() instead of the strncmp approach in OptSched.
+  if (!mf.getTarget().getTargetTriple().isAMDGPU()) {
+    return false;
+  }
+  if (mf.getSubtarget().getCPU() != "gfx906") {
+    return false;
+  }
+
+  // If the user explicitly passed -enable-misched on the command line, respect
+  // that. Otherwise, fall back to the subtarget's default. This is the same
+  // guard used by MachineScheduler and MachineSchedulerOptSched.
+  if (EnableMachineSched.getNumOccurrences()) {
+    if (!EnableMachineSched) {
+      return false;
+    }
+  } else if (!mf.getSubtarget().enableMachineScheduler()) {
+    return false;
+  }
+
+  // Initialize the context of the pass. This populates the MachineSchedContext
+  // fields that the ScheduleDAGInstrs constructor needs.
+  // Same setup as MachineScheduler::runOnMachineFunction.
+  MF = &mf;
+  MLI = &getAnalysis<MachineLoopInfo>();
+  MDT = &getAnalysis<MachineDominatorTree>();
+  PassConfig = &getAnalysis<TargetPassConfig>();
+  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
+  LIS = &getAnalysis<LiveIntervals>();
+
+  if (VerifyScheduling) {
+    LLVM_DEBUG(LIS->dump());
+    MF->verify(this, "Before hierarchical machine scheduling.");
+  }
+  RegClassInfo->runOnMachineFunction(*MF);
+
+  // Create the scheduler (ScheduleDAGHierarchicalScheduler) via the target's
+  // factory method, then run it on all regions.
+  std::unique_ptr<ScheduleDAGInstrs> Scheduler(
+      createMachineSchedulerHierarchical());
+  scheduleRegions(*Scheduler, false);
+
+  LLVM_DEBUG(LIS->dump());
+  if (VerifyScheduling) {
+    MF->verify(this, "After hierarchical machine scheduling.");
+  }
+  return true;
+}
+
+// Factory method. Calls into the target (GCNPassConfig) to create the actual
+// ScheduleDAGHierarchicalScheduler. Falls back to GenericScheduler if the
+// target doesn't provide one.
+ScheduleDAGInstrs *
+MachineSchedulerHierarchical::createMachineSchedulerHierarchical() {
+  ScheduleDAGInstrs *Scheduler =
+      PassConfig->createHierarchicalScheduler(this);
+  if (Scheduler) {
+    return Scheduler;
+  }
+
+  return createGenericSchedLive(this);
+}
+//========================================================================================
 
 bool PostMachineScheduler::runOnMachineFunction(MachineFunction &mf) {
   if (skipFunction(mf.getFunction()))

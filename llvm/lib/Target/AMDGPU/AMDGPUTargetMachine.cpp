@@ -67,6 +67,7 @@
 // jbaile
 //======================================================================
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+#include "HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.h"
 //======================================================================
 
 using namespace llvm;
@@ -947,7 +948,13 @@ public:
  
    ScheduleDAGInstrs *
    createOptSchedScheduler(MachineSchedContext *C) const override;
- 
+
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  ScheduleDAGInstrs *
+  createHierarchicalScheduler(MachineSchedContext *C) const override;
+  //========================================================================================
 
   ScheduleDAGInstrs *
   createPostMachineScheduler(MachineSchedContext *C) const override {
@@ -1250,6 +1257,60 @@ ScheduleDAGInstrs *GCNPassConfig::createOptSchedScheduler(
    return createOptSchedGCN(C);
  }
 
+//========================================================================================
+// jbaile
+//========================================================================================
+
+// Factory function for the hierarchical scheduler. Creates the
+// ScheduleDAGHierarchicalScheduler with GCNMaxOccupancySchedStrategy as the
+// strategy (same strategy used by the normal AMDGPU scheduler and OptSched).
+// The strategy is required by the ScheduleDAGMILive base class constructor,
+// though the hierarchical scheduler does not currently use it.
+//
+// Mutations match createGCNMaxOccupancyMachineScheduler:
+//
+// - LoadClusterDAGMutation: adds weak Cluster edges between loads to nearby
+//   addresses so the downstream SILoadStoreOptimizer can merge them into
+//   wider memory operations.
+//
+// - StoreClusterDAGMutation: same as above but for stores. Only active on
+//   GFX11+ (shouldClusterStores() returns false on gfx906, so this is
+//   effectively a no-op for our current target).
+//
+// - IGroupLPDAGMutation: processes SCHED_BARRIER, SCHED_GROUP_BARRIER, and
+//   IGLP_OPT pseudo-instructions that a programmer may insert into kernel
+//   source code. Adds strong Artificial edges to enforce manually-specified
+//   scheduling constraints.
+//
+// - AMDGPUMacroFusionDAGMutation: clusters instructions that define VCC
+//   (the condition code register) with instructions that consume VCC as src2
+//   (e.g., V_ADDC_U32, V_CNDMASK_B32). Keeping them adjacent allows the
+//   instruction to be shrunk to a shorter VOP2 encoding.
+//
+// - AMDGPUExportClusteringDAGMutation: clusters pixel/vertex shader export
+//   instructions together, with position exports first. Only relevant for
+//   graphics shaders, not compute kernels.
+static ScheduleDAGInstrs *
+createHierarchicalSchedulerGCN(MachineSchedContext *C) {
+  const GCNSubtarget &ST = C->MF->getSubtarget<GCNSubtarget>();
+  ScheduleDAGMILive *DAG = new ScheduleDAGHierarchicalScheduler(
+      C, std::make_unique<GCNMaxOccupancySchedStrategy>(C));
+  DAG->addMutation(createLoadClusterDAGMutation(DAG->TII, DAG->TRI));
+  if (ST.shouldClusterStores()) {
+    DAG->addMutation(createStoreClusterDAGMutation(DAG->TII, DAG->TRI));
+  }
+  DAG->addMutation(createIGroupLPDAGMutation());
+  DAG->addMutation(createAMDGPUMacroFusionDAGMutation());
+  DAG->addMutation(createAMDGPUExportClusteringDAGMutation());
+  return DAG;
+}
+
+ScheduleDAGInstrs *GCNPassConfig::createHierarchicalScheduler(
+    MachineSchedContext *C) const {
+  return createHierarchicalSchedulerGCN(C);
+}
+//========================================================================================
+
 bool GCNPassConfig::addPreISel() {
   AMDGPUPassConfig::addPreISel();
 
@@ -1389,39 +1450,75 @@ void GCNPassConfig::addOptimizedRegAlloc() {
   // Allow the scheduler to run before SIWholeQuadMode inserts exec manipulation
   // instructions that cause scheduling barriers.
 
+  //========================================================================================
   // jbaile config
-  // Don't know that this actually matters, but why not...
+  //========================================================================================
+  //
+  // The following passes must run after all pre-RA scheduling is complete
+  // because they modify the instruction stream or register state in ways
+  // that would interfere with scheduling decisions:
+  //
+  // - SIWholeQuadMode: inserts exec mask save/restore instructions
+  //   (S_WQM, S_AND_SAVEEXEC, etc.) for pixel shader derivative
+  //   computations. These modify the EXEC register, which all VGPR
+  //   instructions implicitly depend on, making them scheduling barriers.
+  //
+  // - SIPreAllocateWWMRegs: pre-allocates physical registers for virtual
+  //   regs used in whole wavefront mode (WWM) regions. Modifies register
+  //   allocation state but does not insert instructions.
+  //
+  // - SIOptimizeExecMaskingPreRA: peephole-optimizes exec mask handling by
+  //   folding/removing redundant V_CNDMASK + V_CMP + S_AND sequences.
+  //   Replaces and removes exec-manipulating instructions.
+  //
+  // - SIFormMemoryClauses: adds implicit-def early-clobber operands to
+  //   instructions in memory clause sequences, preventing the register
+  //   allocator from assigning the same physical register to a pointer
+  //   and a load result within the clause (which would break the hardware
+  //   clause). Only relevant when XNACK is enabled.
+  //
+  // We insert them after whichever scheduler pass runs last.
   const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
-  if(config.IsOptSched()) {
-      insertPass(&MachineSchedulerOptSchedID, &SIWholeQuadModeID);
-      insertPass(&MachineSchedulerOptSchedID, &SIPreAllocateWWMRegsID);
-  } else {
-      insertPass(&MachineSchedulerID, &SIWholeQuadModeID);
-      insertPass(&MachineSchedulerID, &SIPreAllocateWWMRegsID);
+
+  // If the hierarchical scheduler is configured, insert it right after the
+  // normal MachineScheduler pass. This is the "packaged pair" — the normal
+  // AMDGPU scheduler runs first (added by TargetPassConfig::addOptimizedRegAlloc),
+  // then our scheduler runs immediately after it.
+  if (config.IsHierarchicalScheduler()) {
+      insertPass(&MachineSchedulerID, &MachineSchedulerHierarchicalID);
   }
 
-  if (OptExecMaskPreRA)
-    if(config.IsOptSched()) {
-        insertPass(&MachineSchedulerOptSchedID, &SIOptimizeExecMaskingPreRAID);
-    } else {
-        insertPass(&MachineSchedulerID, &SIOptimizeExecMaskingPreRAID);
-    }
+  // Determine which pass ID is the last pre-RA scheduler in the pipeline.
+  const char *last_sched_pass_id;
+  if (config.IsHierarchicalScheduler()) {
+      last_sched_pass_id = &MachineSchedulerHierarchicalID;
+  } else if (config.IsOptSched()) {
+      last_sched_pass_id = &MachineSchedulerOptSchedID;
+  } else {
+      last_sched_pass_id = &MachineSchedulerID;
+  }
 
-  if (EnableRewritePartialRegUses)
-    insertPass(&RenameIndependentSubregsID, &GCNRewritePartialRegUsesID);
+  insertPass(last_sched_pass_id, &SIWholeQuadModeID);
+  insertPass(last_sched_pass_id, &SIPreAllocateWWMRegsID);
 
-  if (isPassEnabled(EnablePreRAOptimizations))
-    insertPass(&RenameIndependentSubregsID, &GCNPreRAOptimizationsID);
+  if (OptExecMaskPreRA) {
+      insertPass(last_sched_pass_id, &SIOptimizeExecMaskingPreRAID);
+  }
+
+  if (EnableRewritePartialRegUses) {
+      insertPass(&RenameIndependentSubregsID, &GCNRewritePartialRegUsesID);
+  }
+
+  if (isPassEnabled(EnablePreRAOptimizations)) {
+      insertPass(&RenameIndependentSubregsID, &GCNPreRAOptimizationsID);
+  }
 
   // This is not an essential optimization and it has a noticeable impact on
   // compilation time, so we only enable it from O2.
-  if (TM->getOptLevel() > CodeGenOpt::Less)
-
-    if(config.IsOptSched()) {
-        insertPass(&MachineSchedulerOptSchedID, &SIFormMemoryClausesID);
-    } else {
-        insertPass(&MachineSchedulerID, &SIFormMemoryClausesID);
-    }
+  if (TM->getOptLevel() > CodeGenOpt::Less) {
+      insertPass(last_sched_pass_id, &SIFormMemoryClausesID);
+  }
+  //========================================================================================
 
   // FIXME: when an instruction has a Killed operand, and the instruction is
   // inside a bundle, seems only the BUNDLE instruction appears as the Kills of

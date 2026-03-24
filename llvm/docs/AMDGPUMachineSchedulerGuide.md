@@ -12,6 +12,8 @@
 8. [AMDGPU Schedulers](#8-amdgpu-schedulers)
 9. [How the Schedule is Communicated Downstream](#9-how-the-schedule-is-communicated-downstream)
 
+10. [The HierarchicalScheduler](#10-the-hierarchicalscheduler)
+
 **Appendices:**
 
 - [A. Memory Dependencies and Alias Analysis](#appendix-a-memory-dependencies-and-alias-analysis)
@@ -20,6 +22,12 @@
 - [D. The SILoadStoreOptimizer](#appendix-d-the-siloadstoreoptimizer)
 - [E. Pre-RA vs Post-RA Scheduling](#appendix-e-pre-ra-vs-post-ra-scheduling)
 - [F. OptSched's Register Pressure Tracking (BBWithSpill)](#appendix-f-optscheds-register-pressure-tracking-bbwithspill)
+- [G. Manual Scheduling Hints (SCHED_BARRIER)](#appendix-g-manual-scheduling-hints)
+- [H. Asynchronous Memory and s_waitcnt](#appendix-h-asynchronous-memory-and-s_waitcnt)
+- [I. Memory Clauses](#appendix-i-memory-clauses)
+- [J. Post-Scheduling Passes](#appendix-j-post-scheduling-passes)
+- [K. The -misched Registry](#appendix-k-the--misched-registry)
+- [L. SIScheduleDAGMI (Older Hierarchical Scheduler)](#appendix-l-sischeduledag-mi-older-hierarchical-scheduler)
 
 ---
 
@@ -703,11 +711,11 @@ schedule():
 
 | Mutation                          | Description |
 |-----------------------------------|-------------|
-| `LoadClusterDAGMutation`          | Adds Cluster edges between loads to nearby addresses |
-| `StoreClusterDAGMutation`         | Same for stores (conditional on `ST.shouldClusterStores()`) |
-| `IGroupLPDAGMutation`            | Groups instructions for latency hiding (e.g., keeping VMEM loads together) |
-| `AMDGPUMacroFusionDAGMutation`   | Keeps instruction pairs the hardware can fuse into one operation |
-| `AMDGPUExportClusteringDAGMutation` | Clusters export (pixel shader output) instructions together |
+| `LoadClusterDAGMutation`          | Adds weak Cluster edges between loads to nearby addresses, enabling the downstream `SILoadStoreOptimizer` to merge them into wider memory operations. (Generic LLVM code in `MachineScheduler.cpp`.) |
+| `StoreClusterDAGMutation`         | Same as above but for stores. Only active on GFX11+ (`shouldClusterStores()` returns false on older chips like gfx906). |
+| `IGroupLPDAGMutation`            | Processes `SCHED_BARRIER`, `SCHED_GROUP_BARRIER`, and `IGLP_OPT` pseudo-instructions that a programmer may insert into kernel source code (via `__builtin_amdgcn_sched_barrier()` etc.). Adds strong Artificial edges to enforce manually-specified scheduling constraints. See [Appendix G](#appendix-g-manual-scheduling-hints). |
+| `AMDGPUMacroFusionDAGMutation`   | Clusters instructions that define VCC (the condition code register) with instructions that consume VCC as `src2` (e.g., `V_ADDC_U32`, `V_CNDMASK_B32`). Keeping them adjacent allows the instruction to be shrunk to a shorter VOP2 encoding. (`AMDGPUMacroFusion.cpp`.) |
+| `AMDGPUExportClusteringDAGMutation` | Clusters pixel/vertex shader export instructions together, with position exports ordered first. Removes unnecessary barrier edges between exports, then adds strong Barrier + weak Cluster edges to keep them adjacent. Only relevant for graphics shaders, not compute kernels. (`AMDGPUExportClustering.cpp`.) |
 
 ### 7.2 Mutations used by ScheduleDAGOptSched
 
@@ -1208,3 +1216,311 @@ MachineBasicBlock (linear list of MachineInstrs)
                ▼
 MachineBasicBlock (same instrs, new order)
 ```
+
+---
+
+## 10. The HierarchicalScheduler
+
+The `ScheduleDAGHierarchicalScheduler` is a custom AMDGPU scheduler that runs
+as a second pre-RA scheduling pass after the normal AMDGPU scheduler
+(`GCNMaxOccupancySchedStrategy`). It is currently a no-op — the scheduling
+logic will be implemented later.
+
+### 10.1 Architecture
+
+The scheduler has three components:
+
+```
+THE PASS (generic — lives in lib/CodeGen/MachineScheduler.cpp)
+MachineSchedulerHierarchical
+│
+│  Target-independent pass shell. Knows nothing about AMDGPU.
+│  Registered with LLVM's pass manager. When the pass manager calls
+│  runOnMachineFunction(), it:
+│
+│    1. Gathers analyses (LiveIntervals, AliasAnalysis, etc.)
+│    2. Asks the factory for a scheduler:
+│         PassConfig->createHierarchicalScheduler(this)
+│    3. Calls scheduleRegions(scheduler), which:
+│         - Calls scheduler.schedule() once per region
+│         - Calls scheduler.finalizeSchedule() once at the end
+│
+│  The pass must live in MachineScheduler.cpp because it inherits from
+│  MachineSchedulerBase and uses scheduleRegions(), INITIALIZE_PASS,
+│  EnableMachineSched, etc. — all defined in that file's anonymous namespace.
+│
+│  Calls into ─────────────────────────────────────────────┐
+└──────────────────────────────────────────────────────────┼───────────┘
+                                                           │
+                                                           ▼
+THE FACTORY (AMDGPU-specific — lives in AMDGPUTargetMachine.cpp)
+createHierarchicalSchedulerGCN()
+GCNPassConfig::createHierarchicalScheduler()
+│
+│  Knows about AMDGPU. Creates the scheduler with:
+│    - GCNMaxOccupancySchedStrategy (required by ScheduleDAGMILive)
+│    - AMDGPU-specific mutations:
+│        LoadCluster, StoreCluster (gfx11+), IGroupLP,
+│        MacroFusion, ExportClustering
+│
+│  Connected to the pass via a virtual method on TargetPassConfig
+│  that GCNPassConfig overrides. This is how the generic pass gets
+│  an AMDGPU-specific scheduler without knowing about AMDGPU.
+│
+│  Creates and returns ────────────────────────────────────┐
+└──────────────────────────────────────────────────────────┼───────────┘
+                                                           │
+                                                           ▼
+THE SCHEDULER (AMDGPU-specific — lives in
+    lib/Target/AMDGPU/HierarchicalScheduler/)
+ScheduleDAGHierarchicalScheduler
+│
+│  Inherits from ScheduleDAGMILive. This is where our scheduling
+│  logic will live.
+│
+│  schedule():          Called once per region by scheduleRegions().
+│                       Records the region boundaries in regions_.
+│
+│  finalizeSchedule():  Called once after all regions are recorded.
+│                       Currently a no-op — TODO.
+└──────────────────────────────────────────────────────────────────────
+```
+
+### 10.2 Pipeline position
+
+The pass is inserted into the AMDGPU pipeline via `insertPass` in
+`GCNPassConfig::addOptimizedRegAlloc()`, guaranteeing it runs immediately
+after the normal `MachineScheduler` pass:
+
+```
+MachineScheduler                         (GCNMaxOccupancySchedStrategy)
+    ↓
+MachineSchedulerHierarchical             (our pass — no-op for now)
+    ↓
+SIWholeQuadMode
+SIPreAllocateWWMRegs
+SIOptimizeExecMaskingPreRA
+SIFormMemoryClauses
+    ↓
+Register Allocation
+    ↓
+PostMachineScheduler
+```
+
+### 10.3 Configuration
+
+Enabled by setting the first line of `misched.txt` to `HierarchicalScheduler`.
+This is read by `MachineInstrSchedulerConfig`, which provides
+`IsHierarchicalScheduler()`.
+
+Currently restricted to `gfx906` (Radeon VII) via a check in
+`MachineSchedulerHierarchical::runOnMachineFunction()`.
+
+### 10.4 Files
+
+| File | Role |
+|------|------|
+| `lib/CodeGen/MachineScheduler.cpp` | Pass shell (class, registration, `runOnMachineFunction`) |
+| `lib/CodeGen/CodeGen.cpp` | Pass initialization registration |
+| `lib/Target/AMDGPU/AMDGPUTargetMachine.cpp` | Factory function, pipeline insertion, pass ordering |
+| `lib/Target/AMDGPU/HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.h` | Scheduler class declaration |
+| `lib/Target/AMDGPU/HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.cpp` | Scheduler implementation |
+| `include/llvm/CodeGen/TargetPassConfig.h` | `createHierarchicalScheduler` virtual method |
+| `include/llvm/CodeGen/Passes.h` | `MachineSchedulerHierarchicalID` extern declaration |
+| `include/llvm/InitializePasses.h` | `initializeMachineSchedulerHierarchicalPass` declaration |
+| `include/llvm/Analysis/MachineInstrSchedulerConfig.h` | `HierarchicalScheduler` enum + `IsHierarchicalScheduler()` |
+
+---
+
+## Appendix G: Manual Scheduling Hints
+
+*AMDGPU-specific.*
+
+AMDGPU provides intrinsics that allow programmers to manually constrain
+instruction scheduling from kernel source code:
+
+- **`__builtin_amdgcn_sched_barrier(mask)`** — Prevents instructions of the
+  types specified by `mask` from being reordered across this point.
+
+- **`__builtin_amdgcn_sched_group_barrier(mask, size, sync_id)`** — Defines a
+  group of `size` instructions matching `mask`. Groups with the same `sync_id`
+  are ordered sequentially. This lets the programmer specify interleaving
+  patterns (e.g., "4 VMEM loads, then 8 VALU ops, then 4 more VMEM loads").
+
+These lower to `SCHED_BARRIER` and `SCHED_GROUP_BARRIER` pseudo-instructions,
+which `IGroupLPDAGMutation` processes during the mutation phase. The mutation
+adds **strong Artificial edges** — these are hard constraints that the scheduler
+cannot violate.
+
+This mechanism is intended for hand-tuning critical kernels where the programmer
+knows the optimal instruction pattern better than the compiler's heuristics
+(e.g., software pipelining for inter-wavefront latency hiding).
+
+---
+
+## Appendix H: Asynchronous Memory and s_waitcnt
+
+*AMDGPU-specific.*
+
+On AMDGPU, memory load operations (VMEM, SMEM, LDS) are **asynchronous**. When
+a load is issued, execution continues immediately — the result arrives later.
+The hardware tracks outstanding operations using counters (`vmcnt` for VMEM,
+`lgkmcnt` for LDS/SMEM, etc.).
+
+`s_waitcnt vmcnt(N)` means "stall until at most N VMEM operations are still
+outstanding." This is how the compiler ensures a load result is ready before it
+is used.
+
+**`s_waitcnt` instructions are NOT present during scheduling.** They are
+inserted very late in the pipeline by the `SIInsertWaitcnts` pass, which runs
+in `addPreEmitPass()` — after both pre-RA and post-RA scheduling. The
+scheduler models load latencies through DAG edges, not through explicit wait
+instructions.
+
+ALU operations (VALU, SALU) are synchronous and do not require wait
+instructions.
+
+---
+
+## Appendix I: Memory Clauses
+
+*AMDGPU-specific. This topic needs further exploration — the interaction
+between memory clauses and load clustering (Appendix C/D) is not fully
+understood.*
+
+A **memory clause** (or "soft clause") is a hardware optimization where a
+sequence of adjacent same-type memory instructions (all VMEM or all SMEM)
+are issued as a batch without the hardware checking for completion between them.
+All loads in the clause are in-flight simultaneously, so their latencies
+overlap.
+
+Clause formation is **positional** — the hardware looks at adjacency in the
+instruction stream, not at data dependencies. If a non-memory instruction
+appears between two loads, the hardware breaks the clause. This is one reason
+load clustering matters: it ensures loads end up adjacent so the hardware can
+batch them.
+
+### Clause-breaking register conflicts (XNACK)
+
+When XNACK is enabled (a hardware mode for retrying memory accesses on page
+faults), an additional constraint applies: if a load in a clause writes its
+result to a register that a later load in the same clause uses as a pointer,
+the hardware must break the clause (because it may need the pointer again for
+a retry).
+
+`SIFormMemoryClauses` prevents this by adding `implicit-def early-clobber`
+operands to instructions within the clause. This tells the register allocator
+that the pointer register is "in use" throughout the clause, forcing the
+allocator to assign the pointer and load results to different physical
+registers.
+
+**Note:** The exact relationship between scheduler-level load clustering
+(which adds DAG edges to encourage adjacency) and `SIFormMemoryClauses`
+(which constrains register allocation to preserve clauses) deserves further
+investigation.
+
+---
+
+## Appendix J: Post-Scheduling Passes
+
+*AMDGPU-specific.*
+
+The following passes run after all pre-RA scheduling is complete. They are
+inserted after whichever scheduler pass runs last
+(`MachineScheduler`, `MachineSchedulerOptSched`, or
+`MachineSchedulerHierarchical`).
+
+| Pass | What it does |
+|------|-------------|
+| **SIWholeQuadMode** | Inserts exec mask save/restore instructions (`S_WQM`, `S_AND_SAVEEXEC`, etc.) for pixel shader derivative computations. These modify the EXEC register, which all VGPR instructions implicitly depend on, making them scheduling barriers. |
+| **SIPreAllocateWWMRegs** | Pre-allocates physical registers for virtual registers used in whole wavefront mode (WWM) regions. Modifies register allocation state but does not insert instructions. |
+| **SIOptimizeExecMaskingPreRA** | Peephole-optimizes exec mask handling by folding/removing redundant `V_CNDMASK` + `V_CMP` + `S_AND` sequences into `S_ANDN2`. May reduce the number of exec-manipulating instructions. |
+| **SIFormMemoryClauses** | Adds `implicit-def early-clobber` operands to instructions in memory clause sequences, preventing the register allocator from creating clause-breaking register conflicts. Only relevant when XNACK is enabled. See [Appendix I](#appendix-i-memory-clauses). |
+
+---
+
+## Appendix K: The -misched Registry
+
+The `-misched` command-line option (`-mllvm -misched=<name>`) overrides which
+scheduler the `MachineScheduler` pass uses. Schedulers register via
+`MachineSchedRegistry`:
+
+```cpp
+static MachineSchedRegistry
+    GCNMaxOccupancySchedRegistry("gcn-max-occupancy",
+                                 "Run GCN scheduler to maximize occupancy",
+                                 createGCNMaxOccupancyMachineScheduler);
+```
+
+AMDGPU-registered schedulers include `si`, `gcn-max-occupancy`, `gcn-max-ilp`,
+`gcn-iterative-max-occupancy-experimental`, `gcn-iterative-minreg`,
+`gcn-iterative-ilp`, `optsched`, and `gcn-optsched`.
+
+**Important:** `-misched` only affects the single `MachineScheduler` pass. It
+swaps out which `ScheduleDAGInstrs` that pass creates. It does NOT affect
+second-pass schedulers like `MachineSchedulerOptSched` or
+`MachineSchedulerHierarchical`.
+
+This means that if OptSched is configured via `misched.txt` AND selected via
+`-misched=gcn-optsched`, OptSched could run twice — once inside the
+`MachineScheduler` pass and once as its own `MachineSchedulerOptSched` pass.
+Even without `-misched`, the config-based setup may already run OptSched in
+both passes depending on how `createMachineScheduler` is configured.
+
+---
+
+## Appendix L: SIScheduleDAGMI (Older Hierarchical Scheduler)
+
+*AMDGPU-specific. This section is based on reading the source code
+(`SIMachineScheduler.h/cpp`) but has not been deeply verified. Further
+exploration is needed to fully understand the coloring heuristics and
+performance tradeoffs.*
+
+`SIScheduleDAGMI` is an older AMDGPU scheduler that uses a two-level
+hierarchical approach. It is still available via `-misched=si` but is no
+longer the default (replaced by `GCNMaxOccupancySchedStrategy`).
+
+### Approach
+
+**Level 1 — Partition instructions into blocks:**
+`SIScheduleBlockCreator` assigns a "color" to each SUnit, grouping them into
+`SIScheduleBlock` objects. The coloring algorithm is organized around
+high-latency instructions (e.g., texture fetches):
+- High-latency instructions get their own reserved colors
+- Other instructions are colored based on their dependency relationships to
+  the high-latency groups
+- Various merging/splitting heuristics refine the groups
+
+Three block creation variants:
+- `LatenciesAlone`: each high-latency instruction = its own block
+- `LatenciesGrouped`: nearby high-latency instructions grouped together
+- `LatenciesAlonePlusConsecutive`: alone + forced consecutive ordering
+
+**Level 2 — Schedule at two granularities:**
+1. **Inter-block scheduling** (`SIScheduleBlockScheduler`): A list scheduler
+   over blocks (not instructions). Picks blocks based on register pressure,
+   latency, and high-latency block positions.
+2. **Intra-block scheduling** (`SIScheduleBlock::schedule()`): Within each
+   block, a local list scheduler with its own `pickNode()` and register
+   pressure tracking.
+
+### Trial-and-error
+
+The scheduler tries multiple combinations of block creation and scheduling
+variants, evaluates each by VGPR usage, and keeps the best result. It backs
+up the DAG state between trials. If VGPR usage exceeds 180, it tries
+additional variants; if it exceeds 200, even more.
+
+### Post-processing
+
+After choosing the best variant, `moveLowLatencies()` moves low-latency
+instructions (LDS accesses) closer to their users.
+
+### Key observations
+
+- Operates on a **single region** (overrides `schedule()`, not
+  `finalizeSchedule()`) — no cross-region view.
+- The block-based decomposition is a practical implementation of hierarchical
+  scheduling, relevant to the design of `ScheduleDAGHierarchicalScheduler`.
+- The trial-and-error approach is brute-force but effective — it explores
+  the space of decompositions rather than relying on a single heuristic.

@@ -194,6 +194,7 @@ add_llvm_target(AMDGPUCodeGen
   OptSched/lib/Wrapper/AMDGPU/GCNOptSched.cpp
   OptSched/lib/Wrapper/AMDGPU/OptSchedGCNTarget.cpp
   OptSched/lib/Wrapper/AMDGPU/OptSchedDDGWrapperGCN.cpp
+  HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.cpp
 
   LINK_COMPONENTS
   AMDGPUDesc
