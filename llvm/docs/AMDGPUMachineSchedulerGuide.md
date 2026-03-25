@@ -85,6 +85,24 @@ An SUnit becomes **ready** to schedule when `NumPredsLeft == 0` (top-down) or
 `WeakSuccsLeft`) are tracked separately and do **not** affect readiness (see
 [Appendix C](#appendix-c-weak-vs-strong-edges-and-clustering)).
 
+`NumPredsLeft` is initialized during `buildSchedGraph` — each call to
+`SUnit::addPred` increments it for strong edges. By the time the DAG is built,
+`NumPredsLeft` reflects the total number of strong predecessors.
+
+In addition to the `SUnits` vector, `ScheduleDAG` has two special boundary
+nodes:
+
+- **`EntrySU`** — represents "everything before the region." Instructions that
+  use values defined before the region have `EntrySU` as a predecessor.
+- **`ExitSU`** — represents "everything after the region." Instructions whose
+  results are live-out have `ExitSU` as a successor. Also, instructions with
+  latency but no in-region users get an artificial edge to `ExitSU` to model
+  the latency of their results being consumed later.
+
+These are **not** in the `SUnits` vector — they are separate members of
+`ScheduleDAG`. They have edges (they participate in the DAG) but should never
+be scheduled. `isBoundaryNode()` returns true for both.
+
 ### 2.2 SDep (Scheduling Dependency)
 
 An `SDep` is a **directed edge** in the DAG. Defined in
@@ -1223,8 +1241,7 @@ MachineBasicBlock (same instrs, new order)
 
 The `ScheduleDAGHierarchicalScheduler` is a custom AMDGPU scheduler that runs
 as a second pre-RA scheduling pass after the normal AMDGPU scheduler
-(`GCNMaxOccupancySchedStrategy`). It is currently a no-op — the scheduling
-logic will be implemented later.
+(`GCNMaxOccupancySchedStrategy`).
 
 ### 10.1 Architecture
 
@@ -1274,15 +1291,25 @@ GCNPassConfig::createHierarchicalScheduler()
 THE SCHEDULER (AMDGPU-specific — lives in
     lib/Target/AMDGPU/HierarchicalScheduler/)
 ScheduleDAGHierarchicalScheduler
+(namespace: llvm::hierarchical_scheduler)
 │
-│  Inherits from ScheduleDAGMILive. This is where our scheduling
-│  logic will live.
+│  Inherits from ScheduleDAGMILive. This is where scheduling logic
+│  lives.
 │
 │  schedule():          Called once per region by scheduleRegions().
-│                       Records the region boundaries in regions_.
+│                       Records the region as a RegionInfo object.
 │
 │  finalizeSchedule():  Called once after all regions are recorded.
-│                       Currently a no-op — TODO.
+│                       Checks config and dispatches to the configured
+│                       scheduler (e.g., RunMaliciousScheduler).
+│
+│  Key infrastructure:
+│    RegionInfo          — read-only wrapper around region boundaries
+│    BeginRegion/EndRegion — sets up ScheduleDAGMILive state for replay
+│    ProcessRegion(region, action) — template that wraps
+│         BeginRegion/action/EndRegion with return value forwarding
+│    ApplyScheduleOrder  — moves MachineInstrs to match a computed order
+│    RunMaliciousScheduler — iterates regions, builds DAGs, scores, applies
 └──────────────────────────────────────────────────────────────────────
 ```
 
@@ -1295,7 +1322,7 @@ after the normal `MachineScheduler` pass:
 ```
 MachineScheduler                         (GCNMaxOccupancySchedStrategy)
     ↓
-MachineSchedulerHierarchical             (our pass — no-op for now)
+MachineSchedulerHierarchical             (our pass)
     ↓
 SIWholeQuadMode
 SIPreAllocateWWMRegs
@@ -1310,25 +1337,94 @@ PostMachineScheduler
 ### 10.3 Configuration
 
 Enabled by setting the first line of `misched.txt` to `HierarchicalScheduler`.
+Options follow on the same line (like OptSched options):
+
+```
+HierarchicalScheduler MaliciousScheduler
+```
+
 This is read by `MachineInstrSchedulerConfig`, which provides
-`IsHierarchicalScheduler()`.
+`IsHierarchicalScheduler()` and `HasHierarchicalSchedulerOption()`.
 
 Currently restricted to `gfx906` (Radeon VII) via a check in
 `MachineSchedulerHierarchical::runOnMachineFunction()`.
 
-### 10.4 Files
+### 10.4 The MaliciousScheduler
+
+A deliberately bad list scheduler used as an experimental baseline.
+Enabled via the `MaliciousScheduler` config option. It aims to maximize
+register pressure and minimize latency hiding.
+
+**Flow per region:**
+
+```
+ProcessRegion(region, [&]() {
+    buildSchedGraph(AA);                    // build DAG with alias analysis
+    order = ComputeMaliciousSchedule(SUnits);  // score and pick
+    ApplyScheduleOrder(region, order);      // move MachineInstrs
+});
+```
+
+**Scoring heuristic** (higher = preferred, worse for performance):
+
+| Points | Condition |
+|--------|-----------|
+| +0     | Base |
+| +2     | Just-scheduled instruction is a predecessor/producer of this candidate (favors back-to-back dependencies — bad for latency hiding) |
+| +1     | This instruction is NOT the last consumer of any input register (favors keeping live ranges open — increases register pressure) |
+
+**List scheduler pattern:**
+
+1. `InitReadyList` — all SUnits with `NumPredsLeft == 0`
+2. `FindBestCandidate` — score each ready SUnit, pick highest
+3. `ScheduleInstruction` — mark as scheduled, remove from ready list
+4. `ReleaseSuccessors` — decrement `NumPredsLeft` for strong successors,
+   add to ready list if they become ready
+5. Repeat until ready list is empty
+
+Only Data edges (SDep::Data) are used for the "last consumer" check, since
+only Data edges represent true register value flow. Anti/Output edges are
+ordering constraints that don't create live ranges. Weak edges are skipped
+in `ReleaseSuccessors` since they don't affect `NumPredsLeft`. Boundary
+nodes (`EntrySU`/`ExitSU`) are skipped since they are not real instructions.
+
+### 10.5 Region replay and debug instructions
+
+When `finalizeSchedule()` replays recorded regions, it must re-enter each
+region to set up `ScheduleDAGMILive` state (`BB`, `RegionBegin`, `RegionEnd`,
+`CurrentTop`, `CurrentBottom`). The `BeginRegion`/`EndRegion` methods handle
+this by calling `startBlock`/`enterRegion` and `exitRegion`/`finishBlock`.
+
+`CurrentTop` and `CurrentBottom` are NOT set by `enterRegion` — they are
+normally set by `initQueues()` inside `schedule()`. During replay, we set
+them manually in `BeginRegion`.
+
+Scheduling regions may contain **debug instructions** (`DBG_VALUE` etc.)
+interspersed with real instructions. Debug instructions don't get SUnits —
+they're skipped during DAG building. `NextIfDebug` (a local copy of a
+static helper from `MachineScheduler.cpp`) advances iterators past debug
+instructions. After all real instructions are placed, `placeDebugValues()`
+repositions debug instructions next to the real instructions they're
+associated with.
+
+### 10.6 Files
 
 | File | Role |
 |------|------|
 | `lib/CodeGen/MachineScheduler.cpp` | Pass shell (class, registration, `runOnMachineFunction`) |
 | `lib/CodeGen/CodeGen.cpp` | Pass initialization registration |
-| `lib/Target/AMDGPU/AMDGPUTargetMachine.cpp` | Factory function, pipeline insertion, pass ordering |
-| `lib/Target/AMDGPU/HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.h` | Scheduler class declaration |
+| `lib/CodeGen/TargetPassConfig.cpp` | Pipeline integration (OptSched pass insertion) |
+| `lib/Target/AMDGPU/AMDGPUTargetMachine.cpp` | Factory, pipeline insertion (`insertPass`), pass ordering |
+| `lib/Target/AMDGPU/HierarchicalScheduler/CMakeLists.txt` | Build config (separate `LLVMAMDGPUHierarchicalScheduler` library) |
+| `lib/Target/AMDGPU/HierarchicalScheduler/RegionInfo.h` | Read-only region boundary wrapper |
+| `lib/Target/AMDGPU/HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.h` | Scheduler class (region recording, replay, `ProcessRegion` template) |
 | `lib/Target/AMDGPU/HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.cpp` | Scheduler implementation |
+| `lib/Target/AMDGPU/HierarchicalScheduler/MaliciousScheduler.h` | Malicious scheduler interface |
+| `lib/Target/AMDGPU/HierarchicalScheduler/MaliciousScheduler.cpp` | Malicious scheduler implementation (scoring, list scheduling) |
 | `include/llvm/CodeGen/TargetPassConfig.h` | `createHierarchicalScheduler` virtual method |
 | `include/llvm/CodeGen/Passes.h` | `MachineSchedulerHierarchicalID` extern declaration |
 | `include/llvm/InitializePasses.h` | `initializeMachineSchedulerHierarchicalPass` declaration |
-| `include/llvm/Analysis/MachineInstrSchedulerConfig.h` | `HierarchicalScheduler` enum + `IsHierarchicalScheduler()` |
+| `include/llvm/Analysis/MachineInstrSchedulerConfig.h` | `HierarchicalScheduler` enum, options, `IsHierarchicalScheduler()` |
 
 ---
 

@@ -1293,7 +1293,7 @@ ScheduleDAGInstrs *GCNPassConfig::createOptSchedScheduler(
 static ScheduleDAGInstrs *
 createHierarchicalSchedulerGCN(MachineSchedContext *C) {
   const GCNSubtarget &ST = C->MF->getSubtarget<GCNSubtarget>();
-  ScheduleDAGMILive *DAG = new ScheduleDAGHierarchicalScheduler(
+  ScheduleDAGMILive *DAG = new hierarchical_scheduler::ScheduleDAGHierarchicalScheduler(
       C, std::make_unique<GCNMaxOccupancySchedStrategy>(C));
   DAG->addMutation(createLoadClusterDAGMutation(DAG->TII, DAG->TRI));
   if (ST.shouldClusterStores()) {

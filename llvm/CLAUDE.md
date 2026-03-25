@@ -35,6 +35,8 @@
 - When writing new code, explain what each part does and why.
 - Don't proceed to the next step without confirmation when the user is reviewing.
 - Cite sources when making claims about conventions or best practices.
+- Do not add "Co-Authored-By: Claude" or similar to commit messages. It is not
+  informative and creates clutter.
 
 ## Build
 

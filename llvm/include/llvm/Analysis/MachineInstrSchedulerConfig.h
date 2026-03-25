@@ -30,6 +30,10 @@ class MachineInstrSchedulerConfig {
             UseContinuousOccupancyScore,
             InvalidOption
         };
+        enum class HierarchicalSchedulerOption {
+            MaliciousScheduler,
+            InvalidOption
+        };
 
         // A class to represent per-function configuration info
         class FunctionConfig {
@@ -82,6 +86,9 @@ class MachineInstrSchedulerConfig {
         // Return true if option is set
         bool HasOptSchedOption(OptSchedOption option) const;
 
+        // Return true if HierarchicalScheduler option is set
+        bool HasHierarchicalSchedulerOption(HierarchicalSchedulerOption option) const;
+
         // Debug printing stuff
         void DebugPrint() const;
         std::string ToString() const;
@@ -120,10 +127,17 @@ class MachineInstrSchedulerConfig {
         // Convert a string to the corresponding OptSchedOption
         OptSchedOption GetOptSchedOptionFromString(const std::string &str);
 
+        // Set options for HierarchicalScheduler
+        void InitHierarchicalSchedulerOptions(const std::vector<std::string> &options);
+
+        // Convert a string to the corresponding HierarchicalSchedulerOption
+        HierarchicalSchedulerOption GetHierarchicalSchedulerOptionFromString(const std::string &str);
+
         bool has_config_ = false;
         Scheduler mi_scheduler_ = Scheduler::Default;
         std::unordered_map<std::string, FunctionConfig> demangled_func_signature_to_config_;
         std::set<OptSchedOption> optsched_options_;
+        std::set<HierarchicalSchedulerOption> hierarchical_scheduler_options_;
         inline static const std::unordered_map<Scheduler, std::string> scheduler_to_str_ {
             {Scheduler::Default, "Default"},
             {Scheduler::MaxOccupancy, "MaxOccupancy"},
@@ -139,6 +153,10 @@ class MachineInstrSchedulerConfig {
             {OptSchedOption::RunOnAllFunctions, "RunOnAllFunctions"},
             {OptSchedOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"},
             {OptSchedOption::UseContinuousOccupancyScore, "UseContinuousOccupancyScore"}
+        };
+        inline static const std::unordered_map<HierarchicalSchedulerOption, std::string> hierarchical_scheduler_option_to_str_ {
+            {HierarchicalSchedulerOption::InvalidOption, "InvalidOption"},
+            {HierarchicalSchedulerOption::MaliciousScheduler, "MaliciousScheduler"}
         };
 
 

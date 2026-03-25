@@ -129,6 +129,30 @@ bool MachineInstrSchedulerConfig::HasOptSchedOption(MachineInstrSchedulerConfig:
     return (optsched_options_.find(option) != optsched_options_.end());
 }
 
+bool MachineInstrSchedulerConfig::HasHierarchicalSchedulerOption(MachineInstrSchedulerConfig::HierarchicalSchedulerOption option) const {
+    return (hierarchical_scheduler_options_.find(option) != hierarchical_scheduler_options_.end());
+}
+
+MachineInstrSchedulerConfig::HierarchicalSchedulerOption MachineInstrSchedulerConfig::GetHierarchicalSchedulerOptionFromString(const std::string &str) {
+    HierarchicalSchedulerOption option = StringSwitch<HierarchicalSchedulerOption>(llvm::StringRef(str))
+        .Case("MaliciousScheduler", HierarchicalSchedulerOption::MaliciousScheduler)
+        .Default(HierarchicalSchedulerOption::InvalidOption);
+
+    if (option == HierarchicalSchedulerOption::InvalidOption) {
+        llvm::report_fatal_error("Invalid HierarchicalSchedulerOption: " + llvm::StringRef(str));
+    }
+    return option;
+}
+
+void MachineInstrSchedulerConfig::InitHierarchicalSchedulerOptions(const std::vector<std::string> &options) {
+    if (!IsHierarchicalScheduler()) {
+        return;
+    }
+    for (const auto &option : options) {
+        hierarchical_scheduler_options_.insert(GetHierarchicalSchedulerOptionFromString(option));
+    }
+}
+
 MachineInstrSchedulerConfig::Scheduler MachineInstrSchedulerConfig::GetScheduler() const {
     return mi_scheduler_;
 }
@@ -188,6 +212,9 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
 
         // If OptSched (ACO or BnB), record options
         InitOptSchedOptions(std::vector<std::string>(first_line_tokens.begin()+1, first_line_tokens.end()));
+
+        // If HierarchicalScheduler, record options
+        InitHierarchicalSchedulerOptions(std::vector<std::string>(first_line_tokens.begin()+1, first_line_tokens.end()));
 
         // Read in per-func info
         while(std::getline(misched_config_file, line)) {

@@ -194,10 +194,10 @@ add_llvm_target(AMDGPUCodeGen
   OptSched/lib/Wrapper/AMDGPU/GCNOptSched.cpp
   OptSched/lib/Wrapper/AMDGPU/OptSchedGCNTarget.cpp
   OptSched/lib/Wrapper/AMDGPU/OptSchedDDGWrapperGCN.cpp
-  HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.cpp
 
   LINK_COMPONENTS
   AMDGPUDesc
+  AMDGPUHierarchicalScheduler
   AMDGPUInfo
   AMDGPUUtils
   Analysis
@@ -226,6 +226,7 @@ add_llvm_target(AMDGPUCodeGen
 
 add_subdirectory(AsmParser)
 add_subdirectory(Disassembler)
+add_subdirectory(HierarchicalScheduler)
 add_subdirectory(MCA)
 add_subdirectory(MCTargetDesc)
 add_subdirectory(TargetInfo)

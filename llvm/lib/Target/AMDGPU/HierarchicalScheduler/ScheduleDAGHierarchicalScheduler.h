@@ -15,22 +15,18 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_H
 
+#include "RegionInfo.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineScheduler.h"
+#include <type_traits>
 
 namespace llvm {
+namespace hierarchical_scheduler {
 
 class ScheduleDAGHierarchicalScheduler : public ScheduleDAGMILive {
-  // Recorded regions from the per-region schedule() calls.
-  // Each entry is a (RegionBegin, RegionEnd) pair.
-  SmallVector<
-      std::pair<MachineBasicBlock::iterator, MachineBasicBlock::iterator>, 32>
-      regions_;
-
-  // The number of regions seen so far (used as a region counter).
-  int region_number_ = 0;
-
-  // Whether finalizeSchedule() has started replaying regions.
-  bool scheduling_started_ = false;
+  // Regions recorded during schedule() for later processing in
+  // finalizeSchedule().
+  SmallVector<RegionInfo, 32> regions_;
 
 public:
   ScheduleDAGHierarchicalScheduler(MachineSchedContext *C,
@@ -40,11 +36,48 @@ public:
   // processing in finalizeSchedule().
   void schedule() override;
 
-  // Called once after all regions have been visited. This is where the
-  // actual hierarchical scheduling logic will be implemented.
+  // Called once after all regions have been visited. Dispatches to the
+  // configured scheduling algorithm (e.g., MaliciousScheduler).
   void finalizeSchedule() override;
+
+  // Run the malicious scheduler over all recorded regions. For each region,
+  // builds the DAG, computes the malicious schedule, and applies it.
+  void RunMaliciousScheduler();
+
+protected:
+  // Apply a computed schedule order to the given region. Physically moves
+  // MachineInstrs to match the order given by |scheduled_units|.
+  // Must be called within a BeginRegion/EndRegion pair.
+  void ApplyScheduleOrder(
+      const RegionInfo &region,
+      const std::vector<SUnit *> &scheduled_units);
+
+  // Set up ScheduleDAGMILive state for the given region so that
+  // moveInstruction() and other inherited methods work correctly.
+  // Calls startBlock and enterRegion.
+  void BeginRegion(const RegionInfo &region);
+
+  // Clean up after scheduling a region.
+  // Calls exitRegion and finishBlock.
+  void EndRegion(const RegionInfo &region);
+
+  // Process a region by calling BeginRegion, the provided action, then
+  // EndRegion. Returns whatever the action returns.
+  template <typename F>
+  auto ProcessRegion(const RegionInfo &region, F action) {
+    BeginRegion(region);
+    if constexpr (std::is_void_v<decltype(action())>) {
+      action();
+      EndRegion(region);
+    } else {
+      auto result = action();
+      EndRegion(region);
+      return result;
+    }
+  }
 };
 
+} // namespace hierarchical_scheduler
 } // namespace llvm
 
 #endif // LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_H
