@@ -9,6 +9,7 @@
 
 #include "ScheduleDAGHierarchicalScheduler.h"
 #include "MaliciousScheduler.h"
+#include "ScheduleGraph.h"
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/Support/Debug.h"
@@ -65,6 +66,8 @@ void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
           MachineInstrSchedulerConfig::HierarchicalSchedulerOption::
               MaliciousScheduler)) {
     RunMaliciousScheduler();
+  } else {
+    RunHierarchicalScheduler();
   }
 
   ScheduleDAGMILive::finalizeSchedule();
@@ -87,6 +90,27 @@ void ScheduleDAGHierarchicalScheduler::RunMaliciousScheduler() {
       llvm::outs() << "  Malicious scheduled region with " << order.size()
                    << " instructions\n";
       ApplyScheduleOrder(region, order);
+    });
+  }
+}
+
+// Main hierarchical scheduling path. Builds the LLVM DAG and our
+// ScheduleGraph for each region. Currently does not reorder instructions —
+// this is where the hierarchical scheduling algorithm will be implemented.
+void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
+  llvm::outs() << "RunHierarchicalScheduler: processing " << regions_.size()
+               << " regions\n";
+
+  for (auto &region : regions_) {
+    ProcessRegion(region, [&]() {
+      buildSchedGraph(AA);
+      ScheduleGraph graph =
+          ScheduleGraph::BuildFromSUnits(SUnits, EntrySU, ExitSU);
+
+      // TODO: Remove this temporary print.
+      llvm::outs() << "  Region: " << region.GetNumInstrs()
+                   << " instrs, graph: " << graph.Size()
+                   << " nodes (" << graph.LeafSize() << " leaves)\n";
     });
   }
 }

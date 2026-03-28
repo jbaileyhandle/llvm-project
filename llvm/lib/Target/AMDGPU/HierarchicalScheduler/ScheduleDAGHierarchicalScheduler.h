@@ -44,6 +44,11 @@ public:
   // builds the DAG, computes the malicious schedule, and applies it.
   void RunMaliciousScheduler();
 
+  // Main hierarchical scheduling path. Builds the LLVM DAG and our
+  // ScheduleGraph for each region. Currently a no-op for scheduling — this
+  // is where the hierarchical algorithm will be implemented.
+  void RunHierarchicalScheduler();
+
 protected:
   // Apply a computed schedule order to the given region. Physically moves
   // MachineInstrs to match the order given by |scheduled_units|.
