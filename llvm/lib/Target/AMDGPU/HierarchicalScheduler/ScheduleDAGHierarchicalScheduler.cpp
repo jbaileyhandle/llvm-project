@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ScheduleDAGHierarchicalScheduler.h"
+#include "DominatorTree.h"
 #include "MaliciousScheduler.h"
 #include "ScheduleGraph.h"
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
@@ -116,12 +117,34 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
                    << " nodes (" << graph.LeafSize() << " leaves)"
                    << ", topo order size: " << graph.TopoOrder().size()
                    << "\n";
-      // Print topo order for the first region only to avoid flooding output.
+      // Print details for the first region only to avoid flooding output.
       if (&region == &regions_.front()) {
         llvm::outs() << "  First region topo order:\n";
         for (ScheduleNode *node : graph.TopoOrder()) {
           llvm::outs() << "    " << node->ToString() << "\n";
         }
+
+        // Dump EntrySU/ExitSU edges from the LLVM DAG.
+        llvm::outs() << "  EntrySU succs (" << EntrySU.Succs.size() << "):";
+        for (const SDep &dep : EntrySU.Succs) {
+          llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+        }
+        llvm::outs() << "\n";
+        llvm::outs() << "  EntrySU preds (" << EntrySU.Preds.size() << "):";
+        for (const SDep &dep : EntrySU.Preds) {
+          llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+        }
+        llvm::outs() << "\n";
+        llvm::outs() << "  ExitSU succs (" << ExitSU.Succs.size() << "):";
+        for (const SDep &dep : ExitSU.Succs) {
+          llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+        }
+        llvm::outs() << "\n";
+        llvm::outs() << "  ExitSU preds (" << ExitSU.Preds.size() << "):";
+        for (const SDep &dep : ExitSU.Preds) {
+          llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+        }
+        llvm::outs() << "\n";
       }
     });
   }
@@ -167,6 +190,10 @@ void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
     }
   }
   llvm::outs() << "\n";
+
+  // Build dominator tree from the reduced graph.
+  DominatorTree dom_tree = DominatorTree::Build(reduced);
+  llvm::outs() << "  Dominator tree:\n" << dom_tree.ToString(test_graph);
 
   // Cycle detection verified: BuildTestDAGWithCycle() +
   // ComputeTopologicalOrder() fires report_fatal_error with graph ToString.
