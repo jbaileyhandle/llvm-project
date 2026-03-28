@@ -38,7 +38,9 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/ScheduleDAG.h"
 #include <cassert>
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -113,17 +115,17 @@ struct ScheduleEdge {
 ///
 /// Note: assert() is compiled out in release builds (NDEBUG is defined),
 /// so the GetSUnit/GetSubgraph checks have zero cost in production. They
-/// exist only to catch misuse during development and debug builds. Our
-/// CMakeLists.txt uses -UNDEBUG to keep asserts enabled for this library
-/// even in release builds.
+/// exist only to catch misuse during development and debug builds.
 class ScheduleNode {
 public:
   /// Create a leaf node wrapping a single SUnit.
-  explicit ScheduleNode(SUnit *su) : content_(su) {}
+  explicit ScheduleNode(SUnit *su);
+
+  /// Create a leaf node with a debug name (for test DAGs without real SUnits).
+  ScheduleNode(SUnit *su, std::string debug_name);
 
   /// Create a group node owning a subgraph.
-  explicit ScheduleNode(std::unique_ptr<ScheduleGraph> subgraph)
-      : content_(std::move(subgraph)) {}
+  explicit ScheduleNode(std::unique_ptr<ScheduleGraph> subgraph);
 
   bool IsLeaf() const {
     return std::holds_alternative<SUnit *>(content_);
@@ -163,10 +165,29 @@ public:
   /// total number of leaf nodes across all subgraphs.
   int LeafSize() const;
 
+  /// Topological index. Set by ScheduleGraph::ComputeTopologicalOrder().
+  /// -1 means not yet computed.
+  int GetTopoIndex() const { return topo_index_; }
+  void SetTopoIndex(int index) { topo_index_ = index; }
+
+  /// Universally unique ID across all ScheduleNode and ScheduleGraph
+  /// instances. Assigned from a shared counter at construction time.
+  int64_t GetId() const { return id_; }
+
+  /// Human-readable description of this node. Format:
+  ///   Leaf with instruction:  "[3] S_LOAD_DWORD ..."
+  ///   Leaf with debug name:   "[7:A]"
+  ///   Leaf with null SUnit:   "[7]"
+  ///   Group node:             "[12:graph(5)]"  (5 = subgraph size)
+  std::string ToString() const;
+
 private:
+  int64_t id_;
   std::variant<SUnit *, std::unique_ptr<ScheduleGraph>> content_;
   SmallVector<ScheduleEdge> succs_;
   SmallVector<ScheduleEdge> preds_;
+  int topo_index_ = -1;
+  std::string debug_name_;
 };
 
 /// A graph of ScheduleNodes. Used at every level of the hierarchy:
@@ -177,7 +198,9 @@ private:
 /// ensures node pointers (stored in edges) remain stable.
 class ScheduleGraph {
 public:
-  ScheduleGraph() = default;
+  ScheduleGraph();
+
+  int64_t GetId() const { return id_; }
 
   /// Build a leaf-level graph by copying the dependency structure from an
   /// existing SUnit DAG. Each SUnit becomes a leaf ScheduleNode, and SDep
@@ -188,6 +211,51 @@ public:
   static ScheduleGraph BuildFromSUnits(MutableArrayRef<SUnit> sunits,
                                        SUnit &entry_su, SUnit &exit_su);
 
+  /// Build a synthetic test DAG with known structure for testing algorithms
+  /// like topological sort, transitive reduction, and dominator trees.
+  /// Does not depend on LLVM SUnits — nodes are leaves wrapping nullptr.
+  ///
+  /// 7 nodes (A-H, no B), 9 edges (all kData):
+  ///
+  ///              A
+  ///            / | \
+  ///           /  |  \
+  ///          /   |   \
+  ///         v    |    v
+  ///        H     |     C
+  ///        |     |   /  \
+  ///        |     v  v    v
+  ///        |      D      E
+  ///        |       \    /
+  ///        |        v  v
+  ///        |         F
+  ///         \       /
+  ///          \     /
+  ///           v   v
+  ///             G
+  ///
+  static ScheduleGraph BuildTestDAG();
+
+  /// Build a synthetic test DAG that contains a cycle, for testing that
+  /// ComputeTopologicalOrder correctly detects it and calls
+  /// report_fatal_error.
+  ///
+  /// Structure (3 nodes, 3 edges — cycle between B and C):
+  ///
+  ///     A
+  ///     |
+  ///     v
+  ///     B <---.
+  ///     |     |
+  ///     v     |
+  ///     C ----'
+  ///
+  /// Edges: A→B, B→C, C→B
+  static ScheduleGraph BuildTestDAGWithCycle();
+
+  /// Human-readable identifier for this graph. Format: "graph[ID]"
+  std::string ToString() const;
+
   /// Access the node list.
   MutableArrayRef<ScheduleNode> Nodes() { return nodes_; }
   ArrayRef<ScheduleNode> Nodes() const { return nodes_; }
@@ -196,8 +264,24 @@ public:
   /// Total number of leaf nodes across all levels of the hierarchy.
   int LeafSize() const;
 
+  /// Compute topological order using Kahn's algorithm (iterative BFS-based).
+  /// Populates topo_order_ and sets topo_index_ on each node. Also serves
+  /// as a cycle check: asserts if the graph contains a cycle (not all nodes
+  /// are reachable).
+  ///
+  /// If include_weak_edges is false (the default), only strong edges
+  /// constrain the ordering. If true, weak edges (Cluster, Weak) also
+  /// count as predecessors that must be scheduled first.
+  void ComputeTopologicalOrder(bool include_weak_edges = false);
+
+  /// Access the computed topological order. Only valid after
+  /// ComputeTopologicalOrder() has been called.
+  ArrayRef<ScheduleNode *> TopoOrder() const { return topo_order_; }
+
 private:
+  int64_t id_;
   std::vector<ScheduleNode> nodes_;
+  SmallVector<ScheduleNode *> topo_order_;
 };
 
 } // namespace hierarchical_scheduler

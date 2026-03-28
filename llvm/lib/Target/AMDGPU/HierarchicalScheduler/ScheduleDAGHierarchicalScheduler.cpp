@@ -101,18 +101,50 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   llvm::outs() << "RunHierarchicalScheduler: processing " << regions_.size()
                << " regions\n";
 
+  RunTestDAGShakedown();
+
   for (auto &region : regions_) {
     ProcessRegion(region, [&]() {
       buildSchedGraph(AA);
       ScheduleGraph graph =
           ScheduleGraph::BuildFromSUnits(SUnits, EntrySU, ExitSU);
+      graph.ComputeTopologicalOrder();
 
-      // TODO: Remove this temporary print.
+      // TODO: Remove these temporary prints.
       llvm::outs() << "  Region: " << region.GetNumInstrs()
                    << " instrs, graph: " << graph.Size()
-                   << " nodes (" << graph.LeafSize() << " leaves)\n";
+                   << " nodes (" << graph.LeafSize() << " leaves)"
+                   << ", topo order size: " << graph.TopoOrder().size()
+                   << "\n";
+      // Print topo order for the first region only to avoid flooding output.
+      if (&region == &regions_.front()) {
+        llvm::outs() << "  First region topo order:\n";
+        for (ScheduleNode *node : graph.TopoOrder()) {
+          llvm::outs() << "    " << node->ToString() << "\n";
+        }
+      }
     });
   }
+}
+
+// Exercises graph algorithms on a synthetic test DAG with known structure.
+// Will be extended as we add new algorithms (transitive reduction, dominator
+// trees, etc.).
+void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
+  ScheduleGraph test_graph = ScheduleGraph::BuildTestDAG();
+  test_graph.ComputeTopologicalOrder();
+
+  llvm::outs() << "  Test DAG topo order:";
+  for (ScheduleNode *node : test_graph.TopoOrder()) {
+    llvm::outs() << " " << node->ToString();
+  }
+  llvm::outs() << "\n";
+
+  // Cycle detection verified: BuildTestDAGWithCycle() +
+  // ComputeTopologicalOrder() fires report_fatal_error with graph ToString.
+  // Uncomment to re-test:
+  // ScheduleGraph cyclic = ScheduleGraph::BuildTestDAGWithCycle();
+  // cyclic.ComputeTopologicalOrder();
 }
 
 // Set up ScheduleDAGMILive state for the given region. Calls startBlock and

@@ -49,6 +49,10 @@ public:
   // is where the hierarchical algorithm will be implemented.
   void RunHierarchicalScheduler();
 
+  // Exercises graph algorithms on a synthetic test DAG with known structure.
+  // Extended as new algorithms are added.
+  void RunTestDAGShakedown();
+
 protected:
   // Apply a computed schedule order to the given region. Physically moves
   // MachineInstrs to match the order given by |scheduled_units|.
