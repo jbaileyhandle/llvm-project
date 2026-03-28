@@ -140,6 +140,34 @@ void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
   }
   llvm::outs() << "\n";
 
+  // Count original edges.
+  int original_edge_count = 0;
+  for (const ScheduleNode &node : test_graph.Nodes()) {
+    original_edge_count += node.NumSuccs();
+  }
+
+  ReducedGraph reduced = test_graph.ComputeTransitiveReduction();
+
+  // Count reduced edges.
+  int reduced_edge_count = 0;
+  for (int topo_idx = 0; topo_idx < reduced.size; ++topo_idx) {
+    reduced_edge_count += static_cast<int>(reduced.succs[topo_idx].size());
+  }
+
+  llvm::outs() << "  Transitive reduction: " << original_edge_count
+               << " edges -> " << reduced_edge_count << " edges\n";
+
+  // Print the reduced edges using node names from the original graph.
+  llvm::outs() << "  Reduced edges:";
+  for (int topo_idx = 0; topo_idx < reduced.size; ++topo_idx) {
+    ScheduleNode *from = test_graph.TopoOrder()[topo_idx];
+    for (int succ_topo_idx : reduced.succs[topo_idx]) {
+      ScheduleNode *to = test_graph.TopoOrder()[succ_topo_idx];
+      llvm::outs() << " " << from->ToString() << "->" << to->ToString();
+    }
+  }
+  llvm::outs() << "\n";
+
   // Cycle detection verified: BuildTestDAGWithCycle() +
   // ComputeTopologicalOrder() fires report_fatal_error with graph ToString.
   // Uncomment to re-test:

@@ -5,6 +5,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ScheduleGraph.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -196,6 +197,65 @@ void ScheduleGraph::ComputeTopologicalOrder(bool include_weak_edges) {
     std::string msg = "Cycle detected in " + ToString();
     report_fatal_error(llvm::StringRef(msg));
   }
+
+  // Sort each node's successor list by ascending topo index. Required by
+  // the transitive reduction algorithm (process closest successors first).
+  for (ScheduleNode &node : nodes_) {
+    node.SortSuccsByTopoIndex();
+  }
+
+  topo_sorted_ = true;
+}
+
+ReducedGraph ScheduleGraph::ComputeTransitiveReduction() const {
+  if (!topo_sorted_) {
+    std::string msg = "ComputeTransitiveReduction called on " + ToString() +
+                      " before ComputeTopologicalOrder";
+    report_fatal_error(llvm::StringRef(msg));
+  }
+
+  int num_nodes = Size();
+
+  // One BitVector per node, each of size num_nodes. reachable[i] tracks
+  // which nodes are reachable from the node at topo index i (including
+  // itself).
+  std::vector<BitVector> reachable(num_nodes, BitVector(num_nodes, false));
+  for (int topo_idx = 0; topo_idx < num_nodes; ++topo_idx) {
+    reachable[topo_idx].set(topo_idx);
+  }
+
+  ReducedGraph reduced(num_nodes);
+
+  // Process nodes in reverse topo order (sinks first, sources last).
+  // For each node, iterate its successors in ascending topo order (closest
+  // first, guaranteed by SortSuccsByTopoIndex in ComputeTopologicalOrder).
+  //
+  // If a successor is already in our reachable set, it means we can reach
+  // it through a closer successor we already processed — the direct edge
+  // is redundant. Otherwise, the edge is essential: we keep it and merge
+  // the successor's reachable set into ours.
+  for (int curr_topo_idx = num_nodes - 1; curr_topo_idx >= 0;
+       --curr_topo_idx) {
+    ScheduleNode *curr_node = topo_order_[curr_topo_idx];
+
+    for (const ScheduleEdge &succ_edge : curr_node->Succs()) {
+      int succ_topo_idx = succ_edge.node_->GetTopoIndex();
+
+      if (reachable[curr_topo_idx].test(succ_topo_idx)) {
+        // Already reachable via a closer path — edge is redundant.
+        continue;
+      }
+
+      // Essential edge — keep it in the reduced graph.
+      reduced.succs[curr_topo_idx].push_back(succ_topo_idx);
+      reduced.preds[succ_topo_idx].push_back(curr_topo_idx);
+
+      // Merge the successor's reachable set into ours.
+      reachable[curr_topo_idx] |= reachable[succ_topo_idx];
+    }
+  }
+
+  return reduced;
 }
 
 ScheduleGraph

@@ -35,6 +35,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULEGRAPH_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/ScheduleDAG.h"
 #include <cassert>
@@ -49,6 +50,7 @@ namespace hierarchical_scheduler {
 
 class ScheduleGraph;
 class ScheduleNode;
+struct ReducedGraph;
 
 /// An edge between two ScheduleNodes. Stores the full edge kind (mirroring
 /// LLVM's SDep::Kind and SDep::OrderKind) so no information is lost during
@@ -160,6 +162,16 @@ public:
 
   int NumPreds() const { return static_cast<int>(preds_.size()); }
   int NumSuccs() const { return static_cast<int>(succs_.size()); }
+
+  /// Sort successor edges by ascending topo index of the destination node.
+  /// Called by ComputeTopologicalOrder after topo indices are assigned.
+  /// Required by the transitive reduction algorithm (process closest
+  /// successors first).
+  void SortSuccsByTopoIndex() {
+    llvm::sort(succs_, [](const ScheduleEdge &a, const ScheduleEdge &b) {
+      return a.node_->GetTopoIndex() < b.node_->GetTopoIndex();
+    });
+  }
 
   /// For leaf nodes, returns 1. For group nodes, recursively counts the
   /// total number of leaf nodes across all subgraphs.
@@ -278,10 +290,49 @@ public:
   /// ComputeTopologicalOrder() has been called.
   ArrayRef<ScheduleNode *> TopoOrder() const { return topo_order_; }
 
+  /// Whether ComputeTopologicalOrder() has been called.
+  bool IsTopoSorted() const { return topo_sorted_; }
+
+  /// Compute the transitive reduction of this graph. Returns a lightweight
+  /// ReducedGraph (adjacency lists indexed by topo index). Requires topo
+  /// sort to have been computed first.
+  ///
+  /// Uses a single-pass algorithm: iterate nodes in reverse topo order,
+  /// process successors in ascending topo order (closest first). If a
+  /// successor is already reachable via a previously processed closer
+  /// path, the direct edge is redundant and discarded.
+  ///
+  /// Each edge is visited once. For each kept edge, we OR two BitVectors
+  /// of size V (V/64 word operations). For sparse DAGs with E ~ kV edges
+  /// (k = average degree), this gives ~kV^2/64 total word operations.
+  /// Temporary space: one BitVector per node = V^2/8 bytes total.
+  ReducedGraph ComputeTransitiveReduction() const;
+
 private:
   int64_t id_;
   std::vector<ScheduleNode> nodes_;
-  SmallVector<ScheduleNode *> topo_order_;
+  std::vector<ScheduleNode *> topo_order_;
+  bool topo_sorted_ = false;
+};
+
+/// Lightweight adjacency-list representation produced by transitive
+/// reduction. Indexed by topological index for O(1) access. Does not
+/// own nodes — references back to the original ScheduleGraph's nodes
+/// via node_map.
+///
+/// Storage is O(V + E_reduced). The outer std::vector is sized to the
+/// number of nodes; each inner SmallVector holds only the edges that
+/// survived the reduction (SmallVector because most nodes have few
+/// successors, so inline storage avoids per-node heap allocation).
+struct ReducedGraph {
+  int size;                                // number of nodes
+  std::vector<SmallVector<int>> succs;     // succs[topo_idx] = successor topo indices
+  std::vector<SmallVector<int>> preds;     // preds[topo_idx] = predecessor topo indices
+
+  /// Construct with a given number of nodes. Allocates empty adjacency
+  /// lists of the specified size.
+  explicit ReducedGraph(int num_nodes)
+      : size(num_nodes), succs(num_nodes), preds(num_nodes) {}
 };
 
 } // namespace hierarchical_scheduler
