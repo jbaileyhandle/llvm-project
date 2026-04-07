@@ -3,6 +3,7 @@ add_llvm_component_library(LLVMAMDGPUHierarchicalScheduler
   MaliciousScheduler.cpp
   ScheduleGraph.cpp
   DominatorTree.cpp
+  RegisterTracker.cpp
 
   LINK_COMPONENTS
   Analysis

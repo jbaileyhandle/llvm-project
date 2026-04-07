@@ -23,6 +23,8 @@
 namespace llvm {
 namespace hierarchical_scheduler {
 
+class ScheduleGraph;
+
 class ScheduleDAGHierarchicalScheduler : public ScheduleDAGMILive {
   // Regions recorded during schedule() for later processing in
   // finalizeSchedule().
@@ -52,6 +54,10 @@ public:
   // Exercises graph algorithms on a synthetic test DAG with known structure.
   // Extended as new algorithms are added.
   void RunTestDAGShakedown();
+
+  // Tests RegisterTracker on the first region: schedules instructions in
+  // topo order and prints pressure at each step.
+  void RunRegisterTrackerShakedown(ScheduleGraph &graph);
 
 protected:
   // Apply a computed schedule order to the given region. Physically moves

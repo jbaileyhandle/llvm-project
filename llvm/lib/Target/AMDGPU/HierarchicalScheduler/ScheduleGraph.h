@@ -37,7 +37,9 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/CodeGen/Register.h"
 #include "llvm/CodeGen/ScheduleDAG.h"
+#include "llvm/CodeGen/SlotIndexes.h"
 #include <cassert>
 #include <cstdint>
 #include <memory>
@@ -46,8 +48,13 @@
 #include <vector>
 
 namespace llvm {
+
+class LiveIntervals;
+class MachineRegisterInfo;
+
 namespace hierarchical_scheduler {
 
+class DominatorTree;
 class ScheduleGraph;
 class ScheduleNode;
 struct ReducedGraph;
@@ -193,11 +200,26 @@ public:
   ///   Group node:             "[12:graph(5)]"  (5 = subgraph size)
   std::string ToString() const;
 
+  /// Registers defined and used by this node. Populated during graph
+  /// construction from MachineInstr (leaf nodes), LiveIntervals
+  /// (entry/exit nodes), or subgraph boundaries (group nodes, future).
+  ArrayRef<Register> RegDefs() const { return reg_defs_; }
+  ArrayRef<Register> RegUses() const { return reg_uses_; }
+  void AddRegDef(Register reg) { reg_defs_.push_back(reg); }
+  void AddRegUse(Register reg) { reg_uses_.push_back(reg); }
+
+  /// Extract virtual register defs/uses from this node's MachineInstr
+  /// and store them in reg_defs_/reg_uses_. Skips physical registers and
+  /// undef uses. No-op for nodes without a MachineInstr.
+  void ExtractRegInfo();
+
 private:
   int64_t id_;
   std::variant<SUnit *, std::unique_ptr<ScheduleGraph>> content_;
   SmallVector<ScheduleEdge> succs_;
   SmallVector<ScheduleEdge> preds_;
+  SmallVector<Register> reg_defs_;
+  SmallVector<Register> reg_uses_;
   int topo_index_ = -1;
   std::string debug_name_;
 };
@@ -212,16 +234,36 @@ class ScheduleGraph {
 public:
   ScheduleGraph();
 
+  // Destructor defined in .cpp because unique_ptr<DominatorTree> needs
+  // the full DominatorTree definition to destroy, which is only available
+  // in the .cpp (forward-declared here to avoid circular includes).
+  ~ScheduleGraph();
+
+  // Explicitly defaulted move operations — required because declaring a
+  // destructor suppresses implicit move generation.
+  ScheduleGraph(ScheduleGraph &&) = default;
+  ScheduleGraph &operator=(ScheduleGraph &&) = default;
+
   int64_t GetId() const { return id_; }
 
   /// Build a leaf-level graph by copying the dependency structure from an
   /// existing SUnit DAG. Each SUnit becomes a leaf ScheduleNode, and SDep
-  /// edges are translated to ScheduleEdges. Boundary nodes (EntrySU,
-  /// ExitSU) are included as leaf nodes — they anchor live-in/live-out
-  /// dependencies and may be useful for analysis, though they should not
-  /// be scheduled.
+  /// edges are translated to ScheduleEdges.
+  ///
+  /// Creates our own entry and exit nodes rather than using LLVM's
+  /// EntrySU/ExitSU. The entry node defines all live-in registers and
+  /// has edges to all root nodes (no predecessors among real instructions).
+  /// The exit node uses all live-out registers and has edges from all
+  /// leaf nodes (no successors among real instructions).
+  ///
+  /// Live-in/live-out information comes from LiveIntervals. Register
+  /// defs/uses are extracted from MachineInstrs and stored on each node
+  /// for use by the RegisterTracker.
   static ScheduleGraph BuildFromSUnits(MutableArrayRef<SUnit> sunits,
-                                       SUnit &entry_su, SUnit &exit_su);
+                                       const LiveIntervals &lis,
+                                       const MachineRegisterInfo &mri,
+                                       SlotIndex region_begin_idx,
+                                       SlotIndex region_end_idx);
 
   /// Build a synthetic test DAG with known structure for testing algorithms
   /// like topological sort, transitive reduction, and dominator trees.
@@ -293,9 +335,8 @@ public:
   /// Whether ComputeTopologicalOrder() has been called.
   bool IsTopoSorted() const { return topo_sorted_; }
 
-  /// Compute the transitive reduction of this graph. Returns a lightweight
-  /// ReducedGraph (adjacency lists indexed by topo index). Requires topo
-  /// sort to have been computed first.
+  /// Compute the transitive reduction of this graph. Stores the result
+  /// internally. Requires topo sort to have been computed first.
   ///
   /// Uses a single-pass algorithm: iterate nodes in reverse topo order,
   /// process successors in ascending topo order (closest first). If a
@@ -306,19 +347,51 @@ public:
   /// of size V (V/64 word operations). For sparse DAGs with E ~ kV edges
   /// (k = average degree), this gives ~kV^2/64 total word operations.
   /// Temporary space: one BitVector per node = V^2/8 bytes total.
-  ReducedGraph ComputeTransitiveReduction() const;
+  void ComputeTransitiveReduction();
+
+  /// Whether ComputeTransitiveReduction() has been called.
+  bool IsReduced() const { return reduced_graph_ != nullptr; }
+
+  /// Access the reduced graph. Only valid after ComputeTransitiveReduction().
+  const ReducedGraph &GetReducedGraph() const { return *reduced_graph_; }
+
+  /// Compute the dominator tree from the transitively reduced graph.
+  /// Stores the result internally. Requires transitive reduction to have
+  /// been computed first.
+  void ComputeDominatorTree();
+
+  /// Whether ComputeDominatorTree() has been called.
+  bool HasDominatorTree() const { return dom_tree_ != nullptr; }
+
+  /// Access the dominator tree. Only valid after ComputeDominatorTree().
+  const DominatorTree &GetDominatorTree() const { return *dom_tree_; }
+
+  /// Human-readable dump of the dominator tree. Convenience wrapper
+  /// that passes this graph to DominatorTree::ToString for node names.
+  std::string DominatorTreeToString() const;
 
 private:
   int64_t id_;
   std::vector<ScheduleNode> nodes_;
   std::vector<ScheduleNode *> topo_order_;
   bool topo_sorted_ = false;
+
+  std::unique_ptr<ReducedGraph> reduced_graph_;
+  std::unique_ptr<DominatorTree> dom_tree_;
+
+  // --- Construction helpers (used by BuildFromSUnits) ---
+
+  /// Create entry and exit nodes, wire them to root/leaf nodes, and
+  /// populate their register defs/uses from LiveIntervals. Must be called
+  /// after all real instruction nodes and edges are added.
+  void CreateEntryAndExitNodes(const LiveIntervals &lis,
+                               const MachineRegisterInfo &mri,
+                               SlotIndex region_begin_idx,
+                               SlotIndex region_end_idx);
 };
 
 /// Lightweight adjacency-list representation produced by transitive
-/// reduction. Indexed by topological index for O(1) access. Does not
-/// own nodes — references back to the original ScheduleGraph's nodes
-/// via node_map.
+/// reduction. Indexed by topological index for O(1) access.
 ///
 /// Storage is O(V + E_reduced). The outer std::vector is sized to the
 /// number of nodes; each inner SmallVector holds only the edges that

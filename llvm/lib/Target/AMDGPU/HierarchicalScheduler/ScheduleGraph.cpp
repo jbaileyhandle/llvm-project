@@ -5,9 +5,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "ScheduleGraph.h"
+#include "DominatorTree.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <queue>
@@ -75,14 +78,38 @@ int64_t GetAndIncrementScheduleId() {
 // --- ScheduleNode ---
 
 ScheduleNode::ScheduleNode(SUnit *su)
-    : id_(GetAndIncrementScheduleId()), content_(su) {}
+    : id_(GetAndIncrementScheduleId()), content_(su) {
+  ExtractRegInfo();
+}
 
 ScheduleNode::ScheduleNode(SUnit *su, std::string debug_name)
     : id_(GetAndIncrementScheduleId()), content_(su),
-      debug_name_(std::move(debug_name)) {}
+      debug_name_(std::move(debug_name)) {
+  ExtractRegInfo();
+}
 
 ScheduleNode::ScheduleNode(std::unique_ptr<ScheduleGraph> subgraph)
     : id_(GetAndIncrementScheduleId()), content_(std::move(subgraph)) {}
+
+void ScheduleNode::ExtractRegInfo() {
+  if (!IsLeaf()) {
+    return;
+  }
+  SUnit *su = GetSUnit();
+  if (!su || !su->getInstr()) {
+    return;
+  }
+  for (const MachineOperand &mo : su->getInstr()->operands()) {
+    if (!mo.isReg() || !mo.getReg().isVirtual()) {
+      continue;
+    }
+    if (mo.isDef()) {
+      reg_defs_.push_back(mo.getReg());
+    } else if (mo.isUse() && !mo.isUndef()) {
+      reg_uses_.push_back(mo.getReg());
+    }
+  }
+}
 
 std::string ScheduleNode::ToString() const {
   std::string result = "[" + std::to_string(id_);
@@ -130,6 +157,7 @@ int ScheduleNode::LeafSize() const {
 // --- ScheduleGraph ---
 
 ScheduleGraph::ScheduleGraph() : id_(GetAndIncrementScheduleId()) {}
+ScheduleGraph::~ScheduleGraph() = default;
 
 std::string ScheduleGraph::ToString() const {
   return "graph[" + std::to_string(id_) + "](" +
@@ -207,7 +235,7 @@ void ScheduleGraph::ComputeTopologicalOrder(bool include_weak_edges) {
   topo_sorted_ = true;
 }
 
-ReducedGraph ScheduleGraph::ComputeTransitiveReduction() const {
+void ScheduleGraph::ComputeTransitiveReduction() {
   if (!topo_sorted_) {
     std::string msg = "ComputeTransitiveReduction called on " + ToString() +
                       " before ComputeTopologicalOrder";
@@ -224,7 +252,7 @@ ReducedGraph ScheduleGraph::ComputeTransitiveReduction() const {
     reachable[topo_idx].set(topo_idx);
   }
 
-  ReducedGraph reduced(num_nodes);
+  auto reduced = std::make_unique<ReducedGraph>(num_nodes);
 
   // Process nodes in reverse topo order (sinks first, sources last).
   // For each node, iterate its successors in ascending topo order (closest
@@ -247,65 +275,130 @@ ReducedGraph ScheduleGraph::ComputeTransitiveReduction() const {
       }
 
       // Essential edge — keep it in the reduced graph.
-      reduced.succs[curr_topo_idx].push_back(succ_topo_idx);
-      reduced.preds[succ_topo_idx].push_back(curr_topo_idx);
+      reduced->succs[curr_topo_idx].push_back(succ_topo_idx);
+      reduced->preds[succ_topo_idx].push_back(curr_topo_idx);
 
       // Merge the successor's reachable set into ours.
       reachable[curr_topo_idx] |= reachable[succ_topo_idx];
     }
   }
 
-  return reduced;
+  reduced_graph_ = std::move(reduced);
+}
+
+void ScheduleGraph::ComputeDominatorTree() {
+  if (!IsReduced()) {
+    std::string msg = "ComputeDominatorTree called on " + ToString() +
+                      " before ComputeTransitiveReduction";
+    report_fatal_error(llvm::StringRef(msg));
+  }
+
+  dom_tree_ = std::make_unique<DominatorTree>(
+      DominatorTree::Build(*reduced_graph_));
+}
+
+std::string ScheduleGraph::DominatorTreeToString() const {
+  if (!HasDominatorTree()) {
+    return "DominatorTree not computed\n";
+  }
+  return dom_tree_->ToString(*this);
 }
 
 ScheduleGraph
 ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
-                               SUnit &entry_su, SUnit &exit_su) {
+                               const LiveIntervals &lis,
+                               const MachineRegisterInfo &mri,
+                               SlotIndex region_begin_idx,
+                               SlotIndex region_end_idx) {
   ScheduleGraph graph;
 
-  // Reserve space for all SUnits plus the two boundary nodes. This ensures
-  // the vector does not reallocate when we add edges in phase 2, keeping
-  // node pointers stable.
+  // Reserve space for all SUnits plus our own entry and exit nodes.
   graph.nodes_.reserve(sunits.size() + 2);
 
-  // Phase 1: Create a leaf node for each SUnit, plus boundary nodes.
-  // We build a map from SUnit pointer to ScheduleNode pointer so we can
-  // resolve edge targets in phase 2.
+  // Phase 1: Create a leaf node for each SUnit, skipping LLVM's boundary
+  // nodes. Register defs/uses are extracted automatically by the
+  // ScheduleNode constructor.
   DenseMap<const SUnit *, ScheduleNode *> sunit_to_node;
 
   for (SUnit &su : sunits) {
+    if (su.isBoundaryNode()) {
+      continue;
+    }
     graph.nodes_.emplace_back(&su);
     sunit_to_node[&su] = &graph.nodes_.back();
   }
 
-  // Add boundary nodes at the end.
-  graph.nodes_.emplace_back(&entry_su, "EntrySU");
-  sunit_to_node[&entry_su] = &graph.nodes_.back();
-
-  graph.nodes_.emplace_back(&exit_su, "ExitSU");
-  sunit_to_node[&exit_su] = &graph.nodes_.back();
-
-  // Phase 2: Add edges. For each node, translate its SUnit's successor
-  // edges into ScheduleEdges. AddSucc automatically creates the matching
-  // predecessor edge on the target, so we only process Succs to avoid
-  // duplicates.
+  // Phase 2: Add edges between real instruction nodes. Skip edges to/from
+  // LLVM's boundary nodes.
   for (ScheduleNode &node : graph.nodes_) {
     SUnit *su = node.GetSUnit();
+    if (!su) {
+      continue;
+    }
     for (const SDep &sdep : su->Succs) {
       const SUnit *succ_su = sdep.getSUnit();
+      if (succ_su->isBoundaryNode()) {
+        continue;
+      }
 
       auto it = sunit_to_node.find(succ_su);
-      assert(it != sunit_to_node.end() &&
-             "SUnit successor not found in graph — broken DAG?");
+      if (it == sunit_to_node.end()) {
+        continue;
+      }
 
       ScheduleEdge::Kind kind = MapSDepToEdgeKind(sdep);
       int latency = static_cast<int>(sdep.getLatency());
-
       node.AddSucc(ScheduleEdge(it->second, kind, latency));
     }
   }
 
+  // Phase 3: Create entry/exit nodes with edges and live register info.
+  graph.CreateEntryAndExitNodes(lis, mri, region_begin_idx, region_end_idx);
+
   return graph;
+}
+
+void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
+                                            const MachineRegisterInfo &mri,
+                                            SlotIndex region_begin_idx,
+                                            SlotIndex region_end_idx) {
+  nodes_.emplace_back(static_cast<SUnit *>(nullptr), "Entry");
+  ScheduleNode &entry_node = nodes_[nodes_.size() - 1];
+
+  nodes_.emplace_back(static_cast<SUnit *>(nullptr), "Exit");
+  ScheduleNode &exit_node = nodes_[nodes_.size() - 1];
+
+  // Wire entry to all root nodes, exit from all leaf nodes.
+  for (ScheduleNode &node : nodes_) {
+    if (&node == &entry_node || &node == &exit_node) {
+      continue;
+    }
+    if (node.NumPreds() == 0) {
+      entry_node.AddSucc(ScheduleEdge(&node, ScheduleEdge::kArtificial));
+    }
+    if (node.NumSuccs() == 0) {
+      node.AddSucc(ScheduleEdge(&exit_node, ScheduleEdge::kArtificial));
+    }
+  }
+
+  // Populate register defs/uses from LiveIntervals. A register is live-in
+  // if its live interval covers the region start. A register is live-out
+  // if its live interval covers the region end.
+  for (int i = 0, num_virt_regs = mri.getNumVirtRegs(); i < num_virt_regs;
+       ++i) {
+    Register reg = Register::index2VirtReg(i);
+    if (!lis.hasInterval(reg)) {
+      continue;
+    }
+    const LiveInterval &li = lis.getInterval(reg);
+
+    if (li.liveAt(region_begin_idx)) {
+      entry_node.AddRegDef(reg);
+    }
+    if (li.liveAt(region_end_idx)) {
+      exit_node.AddRegUse(reg);
+    }
+  }
 }
 
 ScheduleGraph ScheduleGraph::BuildTestDAG() {

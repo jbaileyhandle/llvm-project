@@ -8,9 +8,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "ScheduleDAGHierarchicalScheduler.h"
-#include "DominatorTree.h"
 #include "MaliciousScheduler.h"
+#include "RegisterTracker.h"
 #include "ScheduleGraph.h"
+#include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/Support/Debug.h"
@@ -107,8 +108,15 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   for (auto &region : regions_) {
     ProcessRegion(region, [&]() {
       buildSchedGraph(AA);
-      ScheduleGraph graph =
-          ScheduleGraph::BuildFromSUnits(SUnits, EntrySU, ExitSU);
+
+      // Get slot indices for region boundaries to query LiveIntervals.
+      SlotIndex region_begin_idx = LIS->getInstructionIndex(*RegionBegin);
+      SlotIndex region_end_idx = RegionEnd == BB->end()
+          ? LIS->getMBBEndIdx(BB)
+          : LIS->getInstructionIndex(*RegionEnd);
+
+      ScheduleGraph graph = ScheduleGraph::BuildFromSUnits(
+          SUnits, *LIS, MF.getRegInfo(), region_begin_idx, region_end_idx);
       graph.ComputeTopologicalOrder();
 
       // TODO: Remove these temporary prints.
@@ -123,6 +131,8 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
         for (ScheduleNode *node : graph.TopoOrder()) {
           llvm::outs() << "    " << node->ToString() << "\n";
         }
+
+        RunRegisterTrackerShakedown(graph);
 
         // Dump EntrySU/ExitSU edges from the LLVM DAG.
         llvm::outs() << "  EntrySU succs (" << EntrySU.Succs.size() << "):";
@@ -169,7 +179,8 @@ void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
     original_edge_count += node.NumSuccs();
   }
 
-  ReducedGraph reduced = test_graph.ComputeTransitiveReduction();
+  test_graph.ComputeTransitiveReduction();
+  const ReducedGraph &reduced = test_graph.GetReducedGraph();
 
   // Count reduced edges.
   int reduced_edge_count = 0;
@@ -191,15 +202,41 @@ void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
   }
   llvm::outs() << "\n";
 
-  // Build dominator tree from the reduced graph.
-  DominatorTree dom_tree = DominatorTree::Build(reduced);
-  llvm::outs() << "  Dominator tree:\n" << dom_tree.ToString(test_graph);
+  // Build dominator tree.
+  test_graph.ComputeDominatorTree();
+  llvm::outs() << "  Dominator tree:\n" << test_graph.DominatorTreeToString();
 
   // Cycle detection verified: BuildTestDAGWithCycle() +
   // ComputeTopologicalOrder() fires report_fatal_error with graph ToString.
   // Uncomment to re-test:
   // ScheduleGraph cyclic = ScheduleGraph::BuildTestDAGWithCycle();
   // cyclic.ComputeTopologicalOrder();
+}
+
+// Tests RegisterTracker by scheduling the first region's instructions in
+// topo order and printing pressure at each step.
+void ScheduleDAGHierarchicalScheduler::RunRegisterTrackerShakedown(
+    ScheduleGraph &graph) {
+  SmallVector<ScheduleNode *> nodes(graph.TopoOrder().begin(),
+                                    graph.TopoOrder().end());
+  RegisterTracker tracker(nodes, MF.getRegInfo(),
+                          *MF.getSubtarget().getRegisterInfo());
+
+  llvm::outs() << "  Register pressure trace (topo order):\n";
+  for (ScheduleNode *node : graph.TopoOrder()) {
+    llvm::outs() << "    " << node->ToString() << "\n";
+    tracker.Schedule(node);
+    llvm::outs() << "      " << tracker.DescribeRegOps(node) << "\n";
+    llvm::outs() << "      -> SGPR="
+                 << tracker.GetCurrentRegisterPressure(RegType::kSGPR)
+                 << " VGPR="
+                 << tracker.GetCurrentRegisterPressure(RegType::kVGPR)
+                 << "\n";
+  }
+  llvm::outs() << "  Peak: SGPR="
+               << tracker.GetPeakRegisterPressure(RegType::kSGPR)
+               << " VGPR="
+               << tracker.GetPeakRegisterPressure(RegType::kVGPR) << "\n";
 }
 
 // Set up ScheduleDAGMILive state for the given region. Calls startBlock and
