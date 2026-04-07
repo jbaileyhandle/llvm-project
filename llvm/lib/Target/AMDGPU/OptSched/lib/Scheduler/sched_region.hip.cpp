@@ -560,7 +560,7 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
   // jbaile
   // ===================================================================
   const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
-  bool mis_override_heuristic = mis_config.HasOptSchedOption(MachineInstrSchedulerConfig::OptSchedOption::RunRegardlessOfHeurisitcOutcome);
+  bool mis_override_heuristic = mis_config.HasSchedulingOption(MachineInstrSchedulerConfig::SchedulerOption::RunRegardlessOfHeurisitcOutcome);
   if(mis_override_heuristic) {
       // TODO: Do I really want to do this? Or would it better to just override switch?
       // isLstOptml is later used of decision making of init vs ACO solution (seems weird...)

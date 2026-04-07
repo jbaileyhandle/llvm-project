@@ -933,7 +933,16 @@ public:
     // allow calls without EnableAMDGPUFunctionCalls if they are marked
     // noinline, so this is always required.
     setRequiresCodeGenSCCOrder(true);
-    substitutePass(&PostRASchedulerID, &PostMachineSchedulerID);
+    //======================================================================
+    // jbaile
+    //======================================================================
+    const auto &config = MachineInstrSchedulerConfig::GetConfig();
+    if (config.IsPostRASchedulingDisabled()) {
+      substitutePass(&PostRASchedulerID, IdentifyingPassPtr());
+    } else {
+      substitutePass(&PostRASchedulerID, &PostMachineSchedulerID);
+    }
+    //======================================================================
   }
 
   GCNTargetMachine &getGCNTargetMachine() const {

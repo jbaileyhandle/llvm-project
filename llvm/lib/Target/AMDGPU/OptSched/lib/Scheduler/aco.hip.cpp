@@ -1242,7 +1242,7 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
   // jbaile
   // ==========================================================
   const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
-  bool use_continuous_occ_score = mis_config.HasOptSchedOption(MachineInstrSchedulerConfig::OptSchedOption::UseContinuousOccupancyScore);
+  bool use_continuous_occ_score = mis_config.HasSchedulingOption(MachineInstrSchedulerConfig::SchedulerOption::UseContinuousOccupancyScore);
   // ==========================================================
 
 

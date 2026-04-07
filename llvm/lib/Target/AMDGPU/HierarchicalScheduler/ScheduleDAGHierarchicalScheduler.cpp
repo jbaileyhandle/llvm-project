@@ -64,8 +64,8 @@ void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
   const MachineInstrSchedulerConfig &config =
       MachineInstrSchedulerConfig::GetConfig();
 
-  if (config.HasHierarchicalSchedulerOption(
-          MachineInstrSchedulerConfig::HierarchicalSchedulerOption::
+  if (config.HasSchedulingOption(
+          MachineInstrSchedulerConfig::SchedulerOption::
               MaliciousScheduler)) {
     RunMaliciousScheduler();
   } else {

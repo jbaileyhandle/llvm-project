@@ -125,60 +125,59 @@ bool MachineInstrSchedulerConfig::IsHierarchicalScheduler() const {
     return mi_scheduler_ == Scheduler::HierarchicalScheduler;
 }
 
-bool MachineInstrSchedulerConfig::HasOptSchedOption(MachineInstrSchedulerConfig::OptSchedOption option) const {
-    return (optsched_options_.find(option) != optsched_options_.end());
+bool MachineInstrSchedulerConfig::HasSchedulingOption(MachineInstrSchedulerConfig::SchedulerOption option) const {
+    return (options_.find(option) != options_.end());
 }
 
-bool MachineInstrSchedulerConfig::HasHierarchicalSchedulerOption(MachineInstrSchedulerConfig::HierarchicalSchedulerOption option) const {
-    return (hierarchical_scheduler_options_.find(option) != hierarchical_scheduler_options_.end());
-}
-
-MachineInstrSchedulerConfig::HierarchicalSchedulerOption MachineInstrSchedulerConfig::GetHierarchicalSchedulerOptionFromString(const std::string &str) {
-    HierarchicalSchedulerOption option = StringSwitch<HierarchicalSchedulerOption>(llvm::StringRef(str))
-        .Case("MaliciousScheduler", HierarchicalSchedulerOption::MaliciousScheduler)
-        .Default(HierarchicalSchedulerOption::InvalidOption);
-
-    if (option == HierarchicalSchedulerOption::InvalidOption) {
-        llvm::report_fatal_error("Invalid HierarchicalSchedulerOption: " + llvm::StringRef(str));
-    }
-    return option;
-}
-
-void MachineInstrSchedulerConfig::InitHierarchicalSchedulerOptions(const std::vector<std::string> &options) {
-    if (!IsHierarchicalScheduler()) {
-        return;
-    }
-    for (const auto &option : options) {
-        hierarchical_scheduler_options_.insert(GetHierarchicalSchedulerOptionFromString(option));
-    }
+bool MachineInstrSchedulerConfig::IsPostRASchedulingDisabled() const {
+    return HasSchedulingOption(SchedulerOption::DisablePostRAScheduling);
 }
 
 MachineInstrSchedulerConfig::Scheduler MachineInstrSchedulerConfig::GetScheduler() const {
     return mi_scheduler_;
 }
 
-MachineInstrSchedulerConfig::OptSchedOption MachineInstrSchedulerConfig::GetOptSchedOptionFromString(const std::string &str) {
-    OptSchedOption option = OptSchedOption::InvalidOption;
-    llvm::StringRef str_ref_option(str);
+MachineInstrSchedulerConfig::SchedulerOption MachineInstrSchedulerConfig::GetSchedulerOptionFromString(const std::string &str) {
+    SchedulerOption option = StringSwitch<SchedulerOption>(llvm::StringRef(str))
+        .Case("DisablePostRAScheduling", SchedulerOption::DisablePostRAScheduling)
+        .Case("RunOnAllFunctions", SchedulerOption::RunOnAllFunctions)
+        .Case("RunRegardlessOfHeurisitcOutcome", SchedulerOption::RunRegardlessOfHeurisitcOutcome)
+        .Case("UseContinuousOccupancyScore", SchedulerOption::UseContinuousOccupancyScore)
+        .Case("MaliciousScheduler", SchedulerOption::MaliciousScheduler)
+        .Default(SchedulerOption::InvalidOption);
 
-    option = StringSwitch<OptSchedOption>(llvm::StringRef(str))
-        .Case("RunOnAllFunctions", OptSchedOption::RunOnAllFunctions)
-        .Case("RunRegardlessOfHeurisitcOutcome", OptSchedOption::RunRegardlessOfHeurisitcOutcome)
-        .Case("UseContinuousOccupancyScore", OptSchedOption::UseContinuousOccupancyScore)
-        .Default(OptSchedOption::InvalidOption);
-
-    if(option == OptSchedOption::InvalidOption) {
-        llvm::report_fatal_error("Invalid OptSchedOption: " + str_ref_option);
+    if (option == SchedulerOption::InvalidOption) {
+        llvm::report_fatal_error("Invalid SchedulerOption: " + llvm::StringRef(str));
     }
     return option;
 }
 
-void MachineInstrSchedulerConfig::InitOptSchedOptions(const std::vector<std::string> &options) {
-    if(!IsOptSched()) {
-        return;
+bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption option, Scheduler scheduler) {
+    switch (option) {
+    // Generic — valid for any scheduler
+    case SchedulerOption::DisablePostRAScheduling:
+        return true;
+    // OptSched-specific
+    case SchedulerOption::RunOnAllFunctions:
+    case SchedulerOption::RunRegardlessOfHeurisitcOutcome:
+    case SchedulerOption::UseContinuousOccupancyScore:
+        return (scheduler == Scheduler::AcoOptSched || scheduler == Scheduler::BnbOptSched);
+    // HierarchicalScheduler-specific
+    case SchedulerOption::MaliciousScheduler:
+        return (scheduler == Scheduler::HierarchicalScheduler);
+    default:
+        return false;
     }
-    for(const auto &option : options) {
-        optsched_options_.insert(GetOptSchedOptionFromString(option));
+}
+
+void MachineInstrSchedulerConfig::InitSchedulerOptions(const std::vector<std::string> &option_strings) {
+    for (const auto &str : option_strings) {
+        SchedulerOption option = GetSchedulerOptionFromString(str);
+        if (!IsValidOptionForScheduler(option, mi_scheduler_)) {
+            llvm::report_fatal_error("Option '" + llvm::StringRef(str) +
+                "' is not valid for scheduler '" + llvm::StringRef(GetSchedulerAsString()) + "'");
+        }
+        options_.insert(option);
     }
 }
 
@@ -210,11 +209,8 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
             llvm::report_fatal_error("Invalid machine instruction scheduler: " + misched_ref);
         }
 
-        // If OptSched (ACO or BnB), record options
-        InitOptSchedOptions(std::vector<std::string>(first_line_tokens.begin()+1, first_line_tokens.end()));
-
-        // If HierarchicalScheduler, record options
-        InitHierarchicalSchedulerOptions(std::vector<std::string>(first_line_tokens.begin()+1, first_line_tokens.end()));
+        // Parse and validate options
+        InitSchedulerOptions(std::vector<std::string>(first_line_tokens.begin()+1, first_line_tokens.end()));
 
         // Read in per-func info
         while(std::getline(misched_config_file, line)) {
@@ -341,8 +337,8 @@ std::string MachineInstrSchedulerConfig::GetSchedulerAsString() const {
     return scheduler_to_str_.at(mi_scheduler_);
 }
 
-std::string MachineInstrSchedulerConfig::GetOptSchedOptionAsString(OptSchedOption option) const {
-    return optsched_option_to_str_.at(option);
+std::string MachineInstrSchedulerConfig::GetSchedulerOptionAsString(SchedulerOption option) const {
+    return option_to_str_.at(option);
 }
 
 std::string MachineInstrSchedulerConfig::ToString() const {
@@ -351,11 +347,11 @@ std::string MachineInstrSchedulerConfig::ToString() const {
     // Scheduler
     result += "Scheduler: " + GetSchedulerAsString() + "\n";
 
-    // OptSched options
-    if(IsOptSched()) {
-        result += "\tOptSched options:\n";
-        for(const auto option : optsched_options_) {
-            result += "\t\t" + GetOptSchedOptionAsString(option) + "\n";
+    // Options
+    if (!options_.empty()) {
+        result += "\tOptions:\n";
+        for (const auto option : options_) {
+            result += "\t\t" + GetSchedulerOptionAsString(option) + "\n";
         }
     }
 

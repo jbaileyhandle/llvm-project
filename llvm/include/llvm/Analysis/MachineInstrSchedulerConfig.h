@@ -24,16 +24,20 @@ class MachineInstrSchedulerConfig {
             BnbOptSched,
             HierarchicalScheduler
         };
-        enum class OptSchedOption{
+        enum class SchedulerOption {
+            // Generic (any scheduler)
+            DisablePostRAScheduling,
+            // OptSched-specific (AcoOptSched, BnbOptSched)
             RunOnAllFunctions,
             RunRegardlessOfHeurisitcOutcome,
             UseContinuousOccupancyScore,
-            InvalidOption
-        };
-        enum class HierarchicalSchedulerOption {
+            // HierarchicalScheduler-specific
             MaliciousScheduler,
+            // Sentinel
             InvalidOption
         };
+
+        static bool IsValidOptionForScheduler(SchedulerOption option, Scheduler scheduler);
 
         // A class to represent per-function configuration info
         class FunctionConfig {
@@ -84,10 +88,10 @@ class MachineInstrSchedulerConfig {
         bool IsHierarchicalScheduler() const;
 
         // Return true if option is set
-        bool HasOptSchedOption(OptSchedOption option) const;
+        bool HasSchedulingOption(SchedulerOption option) const;
 
-        // Return true if HierarchicalScheduler option is set
-        bool HasHierarchicalSchedulerOption(HierarchicalSchedulerOption option) const;
+        // Convenience: return true if post-RA scheduling is disabled
+        bool IsPostRASchedulingDisabled() const;
 
         // Debug printing stuff
         void DebugPrint() const;
@@ -99,8 +103,8 @@ class MachineInstrSchedulerConfig {
         // Return the configurd scheduler as a string
         std::string GetSchedulerAsString() const;
 
-        // Return the string-equivalent of the OptSched option
-        std::string GetOptSchedOptionAsString(OptSchedOption option) const;
+        // Return the string-equivalent of a scheduler option
+        std::string GetSchedulerOptionAsString(SchedulerOption option) const;
 
         // Return the FunctionConfig for the function with a given demangled signature
         // Return nullptr if not found
@@ -121,23 +125,16 @@ class MachineInstrSchedulerConfig {
         // Get the configuration for a function
         const FunctionConfig *GetFunctionConfig(const Function &function) const;
 
-        // Set options for OptSched scheduler (ACO or BnB)
-        void InitOptSchedOptions(const std::vector<std::string> &options);
+        // Parse and validate options from misched.txt tokens
+        void InitSchedulerOptions(const std::vector<std::string> &option_strings);
 
-        // Convert a string to the corresponding OptSchedOption
-        OptSchedOption GetOptSchedOptionFromString(const std::string &str);
-
-        // Set options for HierarchicalScheduler
-        void InitHierarchicalSchedulerOptions(const std::vector<std::string> &options);
-
-        // Convert a string to the corresponding HierarchicalSchedulerOption
-        HierarchicalSchedulerOption GetHierarchicalSchedulerOptionFromString(const std::string &str);
+        // Convert a string to the corresponding SchedulerOption
+        SchedulerOption GetSchedulerOptionFromString(const std::string &str);
 
         bool has_config_ = false;
         Scheduler mi_scheduler_ = Scheduler::Default;
         std::unordered_map<std::string, FunctionConfig> demangled_func_signature_to_config_;
-        std::set<OptSchedOption> optsched_options_;
-        std::set<HierarchicalSchedulerOption> hierarchical_scheduler_options_;
+        std::set<SchedulerOption> options_;
         inline static const std::unordered_map<Scheduler, std::string> scheduler_to_str_ {
             {Scheduler::Default, "Default"},
             {Scheduler::MaxOccupancy, "MaxOccupancy"},
@@ -148,15 +145,13 @@ class MachineInstrSchedulerConfig {
             {Scheduler::BnbOptSched, "BnbOptSched"},
             {Scheduler::HierarchicalScheduler, "HierarchicalScheduler"}
         };
-        inline static const std::unordered_map<OptSchedOption, std::string> optsched_option_to_str_ {
-            {OptSchedOption::InvalidOption, "InvalidOption"},
-            {OptSchedOption::RunOnAllFunctions, "RunOnAllFunctions"},
-            {OptSchedOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"},
-            {OptSchedOption::UseContinuousOccupancyScore, "UseContinuousOccupancyScore"}
-        };
-        inline static const std::unordered_map<HierarchicalSchedulerOption, std::string> hierarchical_scheduler_option_to_str_ {
-            {HierarchicalSchedulerOption::InvalidOption, "InvalidOption"},
-            {HierarchicalSchedulerOption::MaliciousScheduler, "MaliciousScheduler"}
+        inline static const std::unordered_map<SchedulerOption, std::string> option_to_str_ {
+            {SchedulerOption::InvalidOption, "InvalidOption"},
+            {SchedulerOption::DisablePostRAScheduling, "DisablePostRAScheduling"},
+            {SchedulerOption::RunOnAllFunctions, "RunOnAllFunctions"},
+            {SchedulerOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"},
+            {SchedulerOption::UseContinuousOccupancyScore, "UseContinuousOccupancyScore"},
+            {SchedulerOption::MaliciousScheduler, "MaliciousScheduler"}
         };
 
 
