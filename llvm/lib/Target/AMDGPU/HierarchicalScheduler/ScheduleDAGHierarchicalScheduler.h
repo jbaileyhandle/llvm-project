@@ -16,6 +16,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_H
 
 #include "RegionInfo.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineScheduler.h"
 #include <type_traits>
@@ -24,6 +25,7 @@ namespace llvm {
 namespace hierarchical_scheduler {
 
 class ScheduleGraph;
+class ScheduleNode;
 
 class ScheduleDAGHierarchicalScheduler : public ScheduleDAGMILive {
   // Regions recorded during schedule() for later processing in
@@ -58,6 +60,18 @@ public:
   // Tests RegisterTracker on the first region: schedules instructions in
   // topo order and prints pressure at each step.
   void RunRegisterTrackerShakedown(ScheduleGraph &graph);
+
+  // Tests GCNRegisterTracker: schedules in topo order printing pressure
+  // at each step, then unschedules everything and verifies state returns
+  // to zero.
+  void RunGCNRegisterTrackerShakedown(ScheduleGraph &graph);
+
+  // Cross-checks GCNRegisterTracker peak pressure against LLVM's
+  // GCNUpwardRPTracker on the same instruction order. Both trackers
+  // walk the same sequence; any difference is a tracking bug (or the
+  // known whole-register kill overestimate).
+  void VerifyGCNRegisterTracker(ScheduleGraph &graph,
+                                ArrayRef<ScheduleNode *> order);
 
 protected:
   // Apply a computed schedule order to the given region. Physically moves

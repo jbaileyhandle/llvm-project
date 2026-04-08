@@ -6,6 +6,7 @@
 
 #include "ScheduleGraph.h"
 #include "DominatorTree.h"
+#include "GCNRegPressure.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/CodeGen/LiveIntervals.h"
@@ -103,10 +104,13 @@ void ScheduleNode::ExtractRegInfo() {
     if (!mo.isReg() || !mo.getReg().isVirtual()) {
       continue;
     }
+    // Full lane mask as default — the GCNRegisterTracker computes
+    // accurate lane masks directly from the MachineInstr operands,
+    // so these are only used by the old RegisterTracker.
     if (mo.isDef()) {
-      reg_defs_.push_back(mo.getReg());
+      reg_defs_.push_back({mo.getReg(), LaneBitmask::getAll()});
     } else if (mo.isUse() && !mo.isUndef()) {
-      reg_uses_.push_back(mo.getReg());
+      reg_uses_.push_back({mo.getReg(), LaneBitmask::getAll()});
     }
   }
 }
@@ -381,22 +385,27 @@ void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
     }
   }
 
-  // Populate register defs/uses from LiveIntervals. A register is live-in
-  // if its live interval covers the region start. A register is live-out
-  // if its live interval covers the region end.
+  // Populate register defs/uses from LiveIntervals with per-lane
+  // accuracy. getLiveLaneMask queries sub-range liveness to determine
+  // exactly which lanes are live at the given slot index, rather than
+  // treating the whole register as live whenever any lane is.
   for (int i = 0, num_virt_regs = mri.getNumVirtRegs(); i < num_virt_regs;
        ++i) {
     Register reg = Register::index2VirtReg(i);
     if (!lis.hasInterval(reg)) {
       continue;
     }
-    const LiveInterval &li = lis.getInterval(reg);
 
-    if (li.liveAt(region_begin_idx)) {
-      entry_node.AddRegDef(reg);
+    LaneBitmask live_in_mask =
+        getLiveLaneMask(reg, region_begin_idx, lis, mri);
+    if (live_in_mask.any()) {
+      entry_node.AddRegDef(reg, live_in_mask);
     }
-    if (li.liveAt(region_end_idx)) {
-      exit_node.AddRegUse(reg);
+
+    LaneBitmask live_out_mask =
+        getLiveLaneMask(reg, region_end_idx, lis, mri);
+    if (live_out_mask.any()) {
+      exit_node.AddRegUse(reg, live_out_mask);
     }
   }
 }

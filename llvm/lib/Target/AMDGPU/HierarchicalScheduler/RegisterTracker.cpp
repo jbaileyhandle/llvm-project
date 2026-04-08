@@ -51,11 +51,11 @@ void RegisterTracker::ExtractRegOps(ArrayRef<ScheduleNode *> nodes,
     }
 
     InstrRegOps ops;
-    for (Register reg : node->RegDefs()) {
-      ops.defs.push_back(reg);
+    for (const RegWithLaneMask &rm : node->RegDefs()) {
+      ops.defs.push_back(rm.reg);
     }
-    for (Register reg : node->RegUses()) {
-      ops.uses.push_back(reg);
+    for (const RegWithLaneMask &rm : node->RegUses()) {
+      ops.uses.push_back(rm.reg);
     }
     instr_reg_ops_[node] = std::move(ops);
   }

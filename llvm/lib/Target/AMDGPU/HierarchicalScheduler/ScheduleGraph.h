@@ -38,6 +38,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/Register.h"
+#include "llvm/MC/LaneBitmask.h"
 #include "llvm/CodeGen/ScheduleDAG.h"
 #include "llvm/CodeGen/SlotIndexes.h"
 #include <cassert>
@@ -58,6 +59,14 @@ class DominatorTree;
 class ScheduleGraph;
 class ScheduleNode;
 struct ReducedGraph;
+
+/// A register paired with the lane mask indicating which sub-register
+/// lanes are relevant. Used on entry/exit nodes where LiveIntervals
+/// tells us exactly which lanes are live-in or live-out.
+struct RegWithLaneMask {
+  Register reg;
+  LaneBitmask mask;
+};
 
 /// An edge between two ScheduleNodes. Stores the full edge kind (mirroring
 /// LLVM's SDep::Kind and SDep::OrderKind) so no information is lost during
@@ -200,13 +209,19 @@ public:
   ///   Group node:             "[12:graph(5)]"  (5 = subgraph size)
   std::string ToString() const;
 
-  /// Registers defined and used by this node. Populated during graph
-  /// construction from MachineInstr (leaf nodes), LiveIntervals
-  /// (entry/exit nodes), or subgraph boundaries (group nodes, future).
-  ArrayRef<Register> RegDefs() const { return reg_defs_; }
-  ArrayRef<Register> RegUses() const { return reg_uses_; }
-  void AddRegDef(Register reg) { reg_defs_.push_back(reg); }
-  void AddRegUse(Register reg) { reg_uses_.push_back(reg); }
+  /// Registers defined and used by this node, with lane masks
+  /// indicating which sub-register lanes are affected. Populated
+  /// during graph construction from MachineInstr (leaf nodes via
+  /// ExtractRegInfo — full mask), LiveIntervals (entry/exit nodes —
+  /// per-lane mask), or subgraph boundaries (group nodes, future).
+  ArrayRef<RegWithLaneMask> RegDefs() const { return reg_defs_; }
+  ArrayRef<RegWithLaneMask> RegUses() const { return reg_uses_; }
+  void AddRegDef(Register reg, LaneBitmask mask) {
+    reg_defs_.push_back({reg, mask});
+  }
+  void AddRegUse(Register reg, LaneBitmask mask) {
+    reg_uses_.push_back({reg, mask});
+  }
 
   /// Extract virtual register defs/uses from this node's MachineInstr
   /// and store them in reg_defs_/reg_uses_. Skips physical registers and
@@ -218,8 +233,8 @@ private:
   std::variant<SUnit *, std::unique_ptr<ScheduleGraph>> content_;
   SmallVector<ScheduleEdge> succs_;
   SmallVector<ScheduleEdge> preds_;
-  SmallVector<Register> reg_defs_;
-  SmallVector<Register> reg_uses_;
+  SmallVector<RegWithLaneMask> reg_defs_;
+  SmallVector<RegWithLaneMask> reg_uses_;
   int topo_index_ = -1;
   std::string debug_name_;
 };

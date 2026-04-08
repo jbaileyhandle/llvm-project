@@ -9,6 +9,7 @@
 
 #include "ScheduleDAGHierarchicalScheduler.h"
 #include "MaliciousScheduler.h"
+#include "GCNRegisterTracker.h"
 #include "RegisterTracker.h"
 #include "ScheduleGraph.h"
 #include "llvm/CodeGen/LiveIntervals.h"
@@ -133,6 +134,11 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
         }
 
         RunRegisterTrackerShakedown(graph);
+        RunGCNRegisterTrackerShakedown(graph);
+
+        SmallVector<ScheduleNode *> topo_nodes(graph.TopoOrder().begin(),
+                                               graph.TopoOrder().end());
+        VerifyGCNRegisterTracker(graph, topo_nodes);
 
         // Dump EntrySU/ExitSU edges from the LLVM DAG.
         llvm::outs() << "  EntrySU succs (" << EntrySU.Succs.size() << "):";
@@ -237,6 +243,168 @@ void ScheduleDAGHierarchicalScheduler::RunRegisterTrackerShakedown(
                << tracker.GetPeakRegisterPressure(RegType::kSGPR)
                << " VGPR="
                << tracker.GetPeakRegisterPressure(RegType::kVGPR) << "\n";
+}
+
+// Tests GCNRegisterTracker by scheduling the first region's instructions in
+// topo order (printing pressure at each step), then unscheduling everything
+// in reverse order (also printing pressure), and verifying that pressure
+// returns to zero.
+void ScheduleDAGHierarchicalScheduler::RunGCNRegisterTrackerShakedown(
+    ScheduleGraph &graph) {
+  SmallVector<ScheduleNode *> nodes(graph.TopoOrder().begin(),
+                                    graph.TopoOrder().end());
+  GCNRegisterTracker tracker(nodes, MF.getRegInfo(),
+                             *MF.getSubtarget().getRegisterInfo(), *LIS);
+
+  // --- Forward pass: schedule in topo order ---
+  llvm::outs() << "  GCN register pressure trace (topo order):\n";
+  for (ScheduleNode *node : graph.TopoOrder()) {
+    tracker.Schedule(node);
+    llvm::outs() << "    " << node->ToString() << "\n";
+    llvm::outs() << "      " << tracker.DescribeRegOps(node) << "\n";
+    llvm::outs() << "      " << tracker.DescribePressure() << "\n";
+  }
+
+  // --- Reverse pass: unschedule in reverse topo order ---
+  llvm::outs() << "  GCN register pressure trace (unschedule):\n";
+  for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
+    tracker.Unschedule(nodes[i]);
+    llvm::outs() << "    undo " << nodes[i]->ToString() << "\n";
+    llvm::outs() << "      " << tracker.DescribePressure() << "\n";
+  }
+
+  // --- Verify round-trip ---
+  const GCNRegPressure &final_pressure = tracker.GetCurrentPressure();
+  const GCNRegPressure &final_peak = tracker.GetPeakPressure();
+  bool pass = (final_pressure.getSGPRNum() == 0 &&
+               final_pressure.getVGPRNum(false) == 0 &&
+               final_peak.getSGPRNum() == 0 &&
+               final_peak.getVGPRNum(false) == 0 &&
+               tracker.GetLiveRegs().empty());
+  llvm::outs() << "  Round-trip result: "
+               << tracker.DescribePressure()
+               << "  live_regs=" << tracker.GetLiveRegs().size()
+               << (pass ? "  PASS" : "  FAIL") << "\n";
+  if (!pass) {
+    report_fatal_error("GCNRegisterTracker round-trip test failed: "
+                       "state did not return to zero after full unschedule");
+  }
+}
+
+// Cross-check our GCNRegisterTracker against LLVM's GCNUpwardRPTracker
+// on the SAME instruction order. Both trackers process the same sequence
+// of instructions; any peak difference is either:
+//   - The known whole-register kill overestimate (ours >= LLVM's), or
+//   - A bug.
+//
+// We use GCNUpwardRPTracker because its recede() works on arbitrary
+// instruction order (not just BB order). We walk the order backwards
+// with recede(), matching the GCNIterativeScheduler pattern.
+//
+// Entry/exit nodes have no MachineInstr, so they are skipped for LLVM's
+// tracker. Our tracker still processes them (they carry live-in defs
+// and live-out uses). The initial live set that GCNUpwardRPTracker gets
+// from LiveIntervals at the region boundary is equivalent to our exit
+// node's uses, so the peaks should still be comparable.
+void ScheduleDAGHierarchicalScheduler::VerifyGCNRegisterTracker(
+    ScheduleGraph &graph,
+    ArrayRef<ScheduleNode *> order) {
+  const MachineRegisterInfo &mri = MF.getRegInfo();
+
+  // --- Collect MachineInstrs from the order, skipping entry/exit ---
+  SmallVector<MachineInstr *, 32> mis;
+  // Map from MachineInstr* to its index in order for labeling.
+  DenseMap<MachineInstr *, ScheduleNode *> mi_to_node;
+  for (ScheduleNode *node : order) {
+    if (!node->IsLeaf()) {
+      continue;
+    }
+    SUnit *su = node->GetSUnit();
+    if (su && su->getInstr()) {
+      mis.push_back(su->getInstr());
+      mi_to_node[su->getInstr()] = node;
+    }
+  }
+
+  if (mis.empty()) {
+    return;
+  }
+
+  // --- LLVM's tracker: walk order backward, record pressure at each step ---
+  // recede(MI) moves from "after MI" to "before MI". So after receding
+  // MI, getLiveRegs() gives the state BEFORE MI — which is the same as
+  // the state AFTER the previous instruction in forward order.
+  //
+  // To align with our forward tracker (which reports state AFTER each
+  // instruction), we shift by one: LLVM's pressure after receding
+  // mis[i] = our state after mis[i-1]. We record the pre-recede state
+  // (the initial live set from reset) as the "after last instruction"
+  // value.
+  GCNUpwardRPTracker llvm_tracker(*LIS);
+  llvm_tracker.reset(*mis.back());
+
+  // llvm_pressures[i] = pressure after forward instruction mis[i].
+  SmallVector<GCNRegPressure, 32> llvm_pressures(mis.size());
+
+  // Initial state (after reset, before any recede) = state after the
+  // last instruction.
+  llvm_pressures[mis.size() - 1] =
+      llvm::getRegPressure(mri, llvm_tracker.getLiveRegs());
+
+  // Walk backward. After receding mis[i], the live set = state before
+  // mis[i] = state after mis[i-1].
+  for (int i = static_cast<int>(mis.size()) - 1; i >= 0; --i) {
+    llvm_tracker.recede(*mis[i]);
+    if (i > 0) {
+      llvm_pressures[i - 1] =
+          llvm::getRegPressure(mri, llvm_tracker.getLiveRegs());
+    }
+  }
+
+  // --- Our tracker: walk order forward, record pressure at each step ---
+  GCNRegisterTracker tracker(
+      SmallVector<ScheduleNode *>(order.begin(), order.end()),
+      mri, *MF.getSubtarget().getRegisterInfo(), *LIS);
+
+  llvm::outs() << "  Cross-check per-instruction (same order):\n";
+  llvm::outs() << "    " << std::string(60, '-') << "\n";
+
+  int mi_idx = 0;
+  GCNRegPressure our_peak;
+  GCNRegPressure llvm_peak;
+  for (ScheduleNode *node : order) {
+    tracker.Schedule(node);
+
+    SUnit *su = node->IsLeaf() ? node->GetSUnit() : nullptr;
+    bool has_mi = su && su->getInstr();
+
+    if (has_mi && mi_idx < static_cast<int>(llvm_pressures.size())) {
+      const GCNRegPressure &ours = tracker.GetCurrentPressure();
+      const GCNRegPressure &theirs = llvm_pressures[mi_idx];
+      our_peak = max(our_peak, ours);
+      llvm_peak = max(llvm_peak, theirs);
+
+      bool sgpr_match = (ours.getSGPRNum() == theirs.getSGPRNum());
+      bool vgpr_match = (ours.getVGPRNum(false) == theirs.getVGPRNum(false));
+
+      llvm::outs() << "    " << node->ToString() << "\n"
+                   << "      ours: SGPR=" << ours.getSGPRNum()
+                   << " VGPR=" << ours.getVGPRNum(false)
+                   << "  LLVM: SGPR=" << theirs.getSGPRNum()
+                   << " VGPR=" << theirs.getVGPRNum(false);
+      if (!sgpr_match || !vgpr_match) {
+        llvm::outs() << "  <-- DIFF";
+      }
+      llvm::outs() << "\n";
+      mi_idx++;
+    }
+  }
+
+  llvm::outs() << "    " << std::string(60, '-') << "\n"
+               << "    peak ours: SGPR=" << our_peak.getSGPRNum()
+               << " VGPR=" << our_peak.getVGPRNum(false)
+               << "  peak LLVM: SGPR=" << llvm_peak.getSGPRNum()
+               << " VGPR=" << llvm_peak.getVGPRNum(false) << "\n";
 }
 
 // Set up ScheduleDAGMILive state for the given region. Calls startBlock and

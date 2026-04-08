@@ -40,6 +40,13 @@ set(LLVM_TARGET_DEFINITIONS InstCombineTables.td)
 tablegen(LLVM InstCombineTables.inc -gen-searchable-tables)
 add_public_tablegen_target(InstCombineTableGen)
 
+#========================================================================================
+# jbaile
+#========================================================================================
+# Populate HIERARCHICAL_SCHEDULER_SOURCES before add_llvm_target uses it.
+add_subdirectory(HierarchicalScheduler)
+#========================================================================================
+
 add_llvm_target(AMDGPUCodeGen
   AMDGPUAliasAnalysis.cpp
   AMDGPUAlwaysInlinePass.cpp
@@ -194,10 +201,14 @@ add_llvm_target(AMDGPUCodeGen
   OptSched/lib/Wrapper/AMDGPU/GCNOptSched.cpp
   OptSched/lib/Wrapper/AMDGPU/OptSchedGCNTarget.cpp
   OptSched/lib/Wrapper/AMDGPU/OptSchedDDGWrapperGCN.cpp
+  #========================================================================================
+  # jbaile
+  #========================================================================================
+  ${HIERARCHICAL_SCHEDULER_SOURCES}
+  #========================================================================================
 
   LINK_COMPONENTS
   AMDGPUDesc
-  AMDGPUHierarchicalScheduler
   AMDGPUInfo
   AMDGPUUtils
   Analysis
@@ -226,7 +237,6 @@ add_llvm_target(AMDGPUCodeGen
 
 add_subdirectory(AsmParser)
 add_subdirectory(Disassembler)
-add_subdirectory(HierarchicalScheduler)
 add_subdirectory(MCA)
 add_subdirectory(MCTargetDesc)
 add_subdirectory(TargetInfo)

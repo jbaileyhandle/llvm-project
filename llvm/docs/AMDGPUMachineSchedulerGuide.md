@@ -1407,24 +1407,132 @@ instructions. After all real instructions are placed, `placeDebugValues()`
 repositions debug instructions next to the real instructions they're
 associated with.
 
-### 10.6 Files
+### 10.6 Register Pressure Tracking (GCNRegisterTracker)
+
+The HierarchicalScheduler has its own register pressure tracker,
+`GCNRegisterTracker`, built on top of LLVM's AMDGPU-specific
+`GCNRegPressure` infrastructure. This provides accurate sub-register
+and tuple handling without reimplementing pressure arithmetic.
+
+#### Why not use existing trackers?
+
+- **`RegPressureTracker`** (LLVM generic): non-copyable (`SparseSet`),
+  reference members, no undo support. Designed for `pickNode()` loop
+  in a single forward direction.
+- **`GCNUpwardRPTracker`/`GCNDownwardRPTracker`**: require sequential
+  instruction processing. `recede()` can evaluate a tentative complete
+  schedule in reverse, but can't track pressure during incremental
+  forward construction (needed for beam search / BnB).
+- **`BBWithSpill`** (OptSched): whole-register only. Decomposes each
+  LLVM virtual register into individual 32-bit "OptSched registers"
+  with its own type system (one type per register file, weight always
+  1). This loses tuple weight information that `GCNRegPressure` tracks
+  and doesn't use LLVM's liveness data.
+
+#### What GCNRegisterTracker uses from LLVM
+
+- **`GCNRegPressure`**: 7-element array tracking SGPR32, SGPR_TUPLE,
+  VGPR32, VGPR_TUPLE, AGPR32, AGPR_TUPLE counts. Provides
+  `getOccupancy()` and occupancy-aware comparison via `less()`.
+- **`GCNRegPressure::inc(Reg, PrevMask, NewMask, MRI)`**: the core
+  pressure update function. Takes previous and new lane masks for a
+  register and correctly adjusts pressure, handling sub-register
+  partial writes and tuple weights. Reversible: `inc(R, A, B)` followed
+  by `inc(R, B, A)` is a no-op.
+- **`LiveRegSet`** (`DenseMap<unsigned, LaneBitmask>`): tracks which
+  lanes of each register are currently live.
+- **`getLiveLaneMask(Reg, SlotIndex, LIS, MRI)`**: queries LiveIntervals
+  for the exact lanes live at a given program point. Used for
+  entry/exit node construction and use-mask extraction.
+
+#### Pressure model
+
+The tracker supports two pressure models, controlled by the
+`PressureModel` enum:
+
+- **`kAMDGPU`** (current default): defs first, peak, then dying uses
+  removed. Matches `GCNDownwardRPTracker`. The peak at each instruction
+  includes both the new defs and everything already live — conservative,
+  since the hardware needs registers for both inputs and outputs
+  simultaneously.
+- **`kUsesFirst`**: dying uses removed first, then defs, then peak.
+  Matches OptSched. Optimistic — assumes the register allocator can
+  reuse a dying input's physical register for the output.
+
+#### Extraction
+
+Register defs/uses are pre-extracted once at construction into a
+per-node `NodeRegInfo` (deduplicated register + lane mask pairs):
+
+- **Leaf nodes with MachineInstr**: iterates operands. Dead defs
+  (`isDead()`) are filtered. Sub-register defs of the same register
+  are merged (masks ORed). Uses skip `undef` operands (syntactic uses
+  that don't read the register). Lane masks come from
+  `GetDefMask`/`GetUseMask` (local reimplementations of the static
+  helpers in `GCNRegPressure.cpp`).
+- **Entry/exit nodes**: read from `ScheduleNode::RegDefs()`/`RegUses()`,
+  which carry per-lane masks from `getLiveLaneMask()` (set during
+  graph construction in `CreateEntryAndExitNodes`).
+- **Group nodes**: not yet supported (fatal error).
+
+#### Kill detection
+
+Currently **whole-register**: a `DenseMap<unsigned, int>` counts
+remaining uses per register. When the count hits 0, the register
+dies and is removed from the live set. This can overestimate pressure
+when sub-register uses finish at different times — a partially dead
+register is counted as fully live until its last use of any lane.
+
+Upgrading to per-lane kill detection would only change
+`remaining_uses_` and the kill logic in `Schedule`/`Unschedule`.
+
+#### Undo mechanism
+
+Each `Schedule()` call pushes a `ScheduleStep` record:
+
+- **`saved_max`**: peak pressure before this step (7 ints). Can't be
+  reverse-computed since it's a running maximum.
+- **`def_prev_masks`**: for each def, the register's lane mask before
+  the def was added. Allows reversing the `inc()` call.
+- **`kill_masks`**: for each register that died (remaining_uses hit 0),
+  the lane mask it had before being erased from the live set. Needed
+  because the mask was erased and can't be recovered otherwise.
+- Non-killing uses save nothing — `remaining_uses_` is trivially
+  reversed by incrementing.
+
+`Unschedule()` pops the record, restores killed registers, reverses
+def `inc()` calls, and re-increments use counts.
+
+#### Cross-check
+
+`VerifyGCNRegisterTracker` walks the same instruction order with both
+our tracker and LLVM's `GCNUpwardRPTracker`, printing per-instruction
+pressure side by side. This verifies correctness — any difference is
+either the known whole-register kill overestimate or a bug.
+
+### 10.7 Files
 
 | File | Role |
 |------|------|
+| **Pass and pipeline (pre-existing LLVM files)** | |
 | `lib/CodeGen/MachineScheduler.cpp` | Pass shell (class, registration, `runOnMachineFunction`) |
 | `lib/CodeGen/CodeGen.cpp` | Pass initialization registration |
-| `lib/CodeGen/TargetPassConfig.cpp` | Pipeline integration (OptSched pass insertion) |
+| `lib/CodeGen/TargetPassConfig.cpp` | Pipeline integration |
 | `lib/Target/AMDGPU/AMDGPUTargetMachine.cpp` | Factory, pipeline insertion (`insertPass`), pass ordering |
-| `lib/Target/AMDGPU/HierarchicalScheduler/CMakeLists.txt` | Build config (separate `LLVMAMDGPUHierarchicalScheduler` library) |
-| `lib/Target/AMDGPU/HierarchicalScheduler/RegionInfo.h` | Read-only region boundary wrapper |
-| `lib/Target/AMDGPU/HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.h` | Scheduler class (region recording, replay, `ProcessRegion` template) |
-| `lib/Target/AMDGPU/HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.cpp` | Scheduler implementation |
-| `lib/Target/AMDGPU/HierarchicalScheduler/MaliciousScheduler.h` | Malicious scheduler interface |
-| `lib/Target/AMDGPU/HierarchicalScheduler/MaliciousScheduler.cpp` | Malicious scheduler implementation (scoring, list scheduling) |
 | `include/llvm/CodeGen/TargetPassConfig.h` | `createHierarchicalScheduler` virtual method |
 | `include/llvm/CodeGen/Passes.h` | `MachineSchedulerHierarchicalID` extern declaration |
 | `include/llvm/InitializePasses.h` | `initializeMachineSchedulerHierarchicalPass` declaration |
 | `include/llvm/Analysis/MachineInstrSchedulerConfig.h` | `HierarchicalScheduler` enum, options, `IsHierarchicalScheduler()` |
+| **HierarchicalScheduler directory** | |
+| `HierarchicalScheduler/CMakeLists.txt` | Sets `HIERARCHICAL_SCHEDULER_SOURCES` with `PARENT_SCOPE`; files compile as part of AMDGPUCodeGen (not a separate library) so we can call `GCNRegPressure::inc()` etc. without circular link dependencies |
+| `HierarchicalScheduler/RegionInfo.h` | Read-only region boundary wrapper |
+| `HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.h` | Scheduler class (region recording, replay, `ProcessRegion` template) |
+| `HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.cpp` | Scheduler implementation, shakedowns, cross-check verification |
+| `HierarchicalScheduler/MaliciousScheduler.h/.cpp` | Deliberately bad list scheduler for baseline testing |
+| `HierarchicalScheduler/ScheduleGraph.h/.cpp` | Recursive node/edge graph structure (`ScheduleNode`, `ScheduleGraph`, `ScheduleEdge`). Topo sort (Kahn's), transitive reduction, entry/exit nodes with per-lane register info |
+| `HierarchicalScheduler/DominatorTree.h/.cpp` | Dominator tree from transitively reduced DAGs (CHK algorithm) |
+| `HierarchicalScheduler/RegisterTracker.h/.cpp` | Original register pressure tracker (whole-register, custom pressure model). Superseded by `GCNRegisterTracker` but kept for reference |
+| `HierarchicalScheduler/GCNRegisterTracker.h/.cpp` | New register pressure tracker using `GCNRegPressure`/`LiveRegSet` |
 
 ---
 
