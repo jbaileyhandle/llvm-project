@@ -1534,6 +1534,46 @@ either the known whole-register kill overestimate or a bug.
 | `HierarchicalScheduler/RegisterTracker.h/.cpp` | Original register pressure tracker (whole-register, custom pressure model). Superseded by `GCNRegisterTracker` but kept for reference |
 | `HierarchicalScheduler/GCNRegisterTracker.h/.cpp` | New register pressure tracker using `GCNRegPressure`/`LiveRegSet` |
 
+### 10.8 TODOs and Future Work
+
+- **Per-lane kill detection.** Currently, a register dies when its last
+  use of any lane is scheduled. This overestimates pressure when
+  sub-register uses finish at different times (confirmed: 1 VGPR
+  overestimate on the stencil kernel from `%114.sub0` dying before
+  `sub1`). The infrastructure already supports per-lane tracking —
+  `GCNRegPressure::inc()` handles partial lane transitions, and
+  entry/exit nodes store per-lane masks via `getLiveLaneMask()`. The
+  upgrade requires changing `remaining_uses_` from a per-register int
+  to a per-lane count structure, and updating the kill logic in
+  `Schedule`/`Unschedule`. Everything else (pressure computation, undo
+  mechanism, extraction) stays the same.
+
+- **Group node register extraction.** `GCNRegisterTracker` currently
+  reports a fatal error for group nodes (subgraphs). Supporting them
+  requires computing aggregate register effects at subgraph
+  boundaries — which defs are visible outside the group, which uses
+  come from outside. The `AddRegMask` dedup helper is designed to be
+  reusable for this.
+
+- **Dominator tree update.** The dominator tree construction should be
+  updated to account for the custom entry/exit nodes. Currently it
+  operates on the original graph structure without awareness of entry/
+  exit node semantics.
+
+- **Scheduling algorithm.** The core hierarchical scheduling algorithm
+  is not yet implemented — `RunHierarchicalScheduler` currently builds
+  the graph and runs shakedowns but does not reorder instructions.
+  Design direction from prior discussions: partition the graph into
+  subgraphs (using dominator tree subtrees, min-cut, etc.), schedule
+  within subgraphs, schedule among subgraphs, then smooth boundaries
+  with a rolling window. Beam search was ranked highest for the search
+  algorithm (balancing effectiveness with implementation ease).
+
+- **Remove shakedown/debug output.** The current `llvm::outs()` prints
+  throughout the scheduler are for development. They should be removed
+  or moved behind `LLVM_DEBUG` before the scheduler is used in
+  production.
+
 ---
 
 ## Appendix G: Manual Scheduling Hints
