@@ -15,6 +15,7 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/DominatorTree.cpp
   HierarchicalScheduler/RegisterTracker.cpp
   HierarchicalScheduler/GCNRegisterTracker.cpp
+  HierarchicalScheduler/ScheduleLengthTracker.cpp
   PARENT_SCOPE
 )
 

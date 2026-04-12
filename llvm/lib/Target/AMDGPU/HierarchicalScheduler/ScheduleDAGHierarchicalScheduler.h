@@ -53,6 +53,14 @@ public:
   // is where the hierarchical algorithm will be implemented.
   void RunHierarchicalScheduler();
 
+  // Run all shakedowns: synthetic test DAG, then per-region shakedowns
+  // on the first region.
+  void RunAllShakedowns();
+
+  // Run shakedowns on a single region's graph: register trackers,
+  // schedule length tracker, debug dumps.
+  void RunRegionShakedowns(ScheduleGraph &graph);
+
   // Exercises graph algorithms on a synthetic test DAG with known structure.
   // Extended as new algorithms are added.
   void RunTestDAGShakedown();
@@ -72,6 +80,11 @@ public:
   // known whole-register kill overestimate).
   void VerifyGCNRegisterTracker(ScheduleGraph &graph,
                                 ArrayRef<ScheduleNode *> order);
+
+  // Tests ScheduleLengthTracker: schedules in topo order printing
+  // length/bubbles at each step, then unschedules everything and
+  // verifies state returns to zero.
+  void RunScheduleLengthTrackerShakedown(ScheduleGraph &graph);
 
 protected:
   // Apply a computed schedule order to the given region. Physically moves

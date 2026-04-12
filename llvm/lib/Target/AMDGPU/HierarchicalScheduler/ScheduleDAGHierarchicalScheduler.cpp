@@ -10,6 +10,8 @@
 #include "ScheduleDAGHierarchicalScheduler.h"
 #include "MaliciousScheduler.h"
 #include "GCNRegisterTracker.h"
+#include "ScheduleLengthTracker.h"
+#include "GCNSubtarget.h"
 #include "RegisterTracker.h"
 #include "ScheduleGraph.h"
 #include "llvm/CodeGen/LiveIntervals.h"
@@ -97,12 +99,51 @@ void ScheduleDAGHierarchicalScheduler::RunMaliciousScheduler() {
   }
 }
 
-// Main hierarchical scheduling path. Builds the LLVM DAG and our
-// ScheduleGraph for each region. Currently does not reorder instructions —
-// this is where the hierarchical scheduling algorithm will be implemented.
-void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
-  llvm::outs() << "RunHierarchicalScheduler: processing " << regions_.size()
-               << " regions\n";
+// Run all shakedown / validation tests on a single region's graph.
+// Exercises register trackers, schedule length tracker, and prints
+// debug info about LLVM's EntrySU/ExitSU.
+void ScheduleDAGHierarchicalScheduler::RunRegionShakedowns(
+    ScheduleGraph &graph) {
+  llvm::outs() << "  Topo order:\n";
+  for (ScheduleNode *node : graph.TopoOrder()) {
+    llvm::outs() << "    " << node->ToString() << "\n";
+  }
+
+  RunRegisterTrackerShakedown(graph);
+  RunGCNRegisterTrackerShakedown(graph);
+
+  SmallVector<ScheduleNode *> topo_nodes(graph.TopoOrder().begin(),
+                                         graph.TopoOrder().end());
+  VerifyGCNRegisterTracker(graph, topo_nodes);
+  RunScheduleLengthTrackerShakedown(graph);
+
+  // Dump EntrySU/ExitSU edges from the LLVM DAG.
+  llvm::outs() << "  EntrySU succs (" << EntrySU.Succs.size() << "):";
+  for (const SDep &dep : EntrySU.Succs) {
+    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+  }
+  llvm::outs() << "\n";
+  llvm::outs() << "  EntrySU preds (" << EntrySU.Preds.size() << "):";
+  for (const SDep &dep : EntrySU.Preds) {
+    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+  }
+  llvm::outs() << "\n";
+  llvm::outs() << "  ExitSU succs (" << ExitSU.Succs.size() << "):";
+  for (const SDep &dep : ExitSU.Succs) {
+    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+  }
+  llvm::outs() << "\n";
+  llvm::outs() << "  ExitSU preds (" << ExitSU.Preds.size() << "):";
+  for (const SDep &dep : ExitSU.Preds) {
+    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+  }
+  llvm::outs() << "\n";
+}
+
+// Run all shakedowns: synthetic test DAG first, then per-region
+// shakedowns on the first region.
+void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
+  llvm::outs() << "RunAllShakedowns:\n";
 
   RunTestDAGShakedown();
 
@@ -110,7 +151,6 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
     ProcessRegion(region, [&]() {
       buildSchedGraph(AA);
 
-      // Get slot indices for region boundaries to query LiveIntervals.
       SlotIndex region_begin_idx = LIS->getInstructionIndex(*RegionBegin);
       SlotIndex region_end_idx = RegionEnd == BB->end()
           ? LIS->getMBBEndIdx(BB)
@@ -120,50 +160,27 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
           SUnits, *LIS, MF.getRegInfo(), region_begin_idx, region_end_idx);
       graph.ComputeTopologicalOrder();
 
-      // TODO: Remove these temporary prints.
       llvm::outs() << "  Region: " << region.GetNumInstrs()
                    << " instrs, graph: " << graph.Size()
                    << " nodes (" << graph.LeafSize() << " leaves)"
                    << ", topo order size: " << graph.TopoOrder().size()
                    << "\n";
-      // Print details for the first region only to avoid flooding output.
+
+      // Run detailed shakedowns on the first region only.
       if (&region == &regions_.front()) {
-        llvm::outs() << "  First region topo order:\n";
-        for (ScheduleNode *node : graph.TopoOrder()) {
-          llvm::outs() << "    " << node->ToString() << "\n";
-        }
-
-        RunRegisterTrackerShakedown(graph);
-        RunGCNRegisterTrackerShakedown(graph);
-
-        SmallVector<ScheduleNode *> topo_nodes(graph.TopoOrder().begin(),
-                                               graph.TopoOrder().end());
-        VerifyGCNRegisterTracker(graph, topo_nodes);
-
-        // Dump EntrySU/ExitSU edges from the LLVM DAG.
-        llvm::outs() << "  EntrySU succs (" << EntrySU.Succs.size() << "):";
-        for (const SDep &dep : EntrySU.Succs) {
-          llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
-        }
-        llvm::outs() << "\n";
-        llvm::outs() << "  EntrySU preds (" << EntrySU.Preds.size() << "):";
-        for (const SDep &dep : EntrySU.Preds) {
-          llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
-        }
-        llvm::outs() << "\n";
-        llvm::outs() << "  ExitSU succs (" << ExitSU.Succs.size() << "):";
-        for (const SDep &dep : ExitSU.Succs) {
-          llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
-        }
-        llvm::outs() << "\n";
-        llvm::outs() << "  ExitSU preds (" << ExitSU.Preds.size() << "):";
-        for (const SDep &dep : ExitSU.Preds) {
-          llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
-        }
-        llvm::outs() << "\n";
+        RunRegionShakedowns(graph);
       }
     });
   }
+}
+
+// Main hierarchical scheduling path. Currently runs shakedowns only —
+// the actual scheduling algorithm will be implemented here.
+void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
+  llvm::outs() << "RunHierarchicalScheduler: processing " << regions_.size()
+               << " regions\n";
+
+  RunAllShakedowns();
 }
 
 // Exercises graph algorithms on a synthetic test DAG with known structure.
@@ -405,6 +422,62 @@ void ScheduleDAGHierarchicalScheduler::VerifyGCNRegisterTracker(
                << " VGPR=" << our_peak.getVGPRNum(false)
                << "  peak LLVM: SGPR=" << llvm_peak.getSGPRNum()
                << " VGPR=" << llvm_peak.getVGPRNum(false) << "\n";
+}
+
+// Tests ScheduleLengthTracker: schedules in topo order printing length/bubbles
+// at each step, then unschedules everything and verifies state returns to zero.
+void ScheduleDAGHierarchicalScheduler::RunScheduleLengthTrackerShakedown(
+    ScheduleGraph &graph) {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+  ScheduleLengthTracker tracker(graph, st);
+
+  // --- Forward pass: schedule in topo order ---
+  llvm::outs() << "  Schedule length trace (topo order):\n";
+  for (ScheduleNode *node : graph.TopoOrder()) {
+    // Print the instruction.
+    llvm::outs() << "    " << node->ToString() << "\n";
+
+    // Print data dependency predecessors and their edge latencies.
+    for (const ScheduleEdge &edge : node->Preds()) {
+      if (!edge.IsDataEdge()) {
+        continue;
+      }
+      llvm::outs() << "      pred " << edge.node_->ToString()
+                   << "  latency=" << edge.latency_;
+      if (tracker.IsScheduled(edge.node_)) {
+        llvm::outs() << "  pred_cycle="
+                     << tracker.GetScheduledCycle(edge.node_)
+                     << "  ready_at="
+                     << (tracker.GetScheduledCycle(edge.node_) +
+                         edge.latency_);
+      }
+      llvm::outs() << "\n";
+    }
+
+    // Schedule and print resulting state.
+    tracker.Schedule(node);
+    llvm::outs() << "      -> cycle=" << tracker.GetScheduledCycle(node)
+                 << "  " << tracker.Describe() << "\n";
+  }
+
+  // --- Reverse pass: unschedule everything ---
+  llvm::outs() << "  Schedule length trace (unschedule):\n";
+  for (int i = static_cast<int>(graph.TopoOrder().size()) - 1; i >= 0; --i) {
+    tracker.Unschedule();
+    llvm::outs() << "    undo  " << tracker.Describe() << "\n";
+  }
+
+  // --- Verify round-trip ---
+  bool pass = (tracker.GetCurrentCycle() == 0 &&
+               tracker.GetTotalBubbles() == 0 &&
+               tracker.GetNumScheduled() == 0);
+  llvm::outs() << "  Round-trip result: " << tracker.Describe()
+               << (pass ? "  PASS" : "  FAIL") << "\n";
+  if (!pass) {
+    report_fatal_error("ScheduleLengthTracker round-trip test failed: "
+                       "state did not return to zero after full unschedule");
+  }
 }
 
 // Set up ScheduleDAGMILive state for the given region. Calls startBlock and
