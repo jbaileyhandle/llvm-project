@@ -381,6 +381,14 @@ void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
       entry_node.AddSucc(ScheduleEdge(&node, ScheduleEdge::kArtificial));
     }
     if (node.NumSuccs() == 0) {
+      // TODO: LLVM's buildSchedGraph adds an artificial edge from
+      // high-latency leaf instructions to ExitSU with latency =
+      // SU->Latency - 1 (ScheduleDAGInstrs.cpp, line 877). This
+      // ensures cross-region heuristics account for results that
+      // won't be ready for many cycles (e.g., a VMEM load with
+      // latency 80 at the end of a region). We currently use
+      // latency 0, which is fine for within-region schedule length
+      // but may underestimate costs for cross-region analysis.
       node.AddSucc(ScheduleEdge(&exit_node, ScheduleEdge::kArtificial));
     }
   }

@@ -28,6 +28,7 @@
 - [J. Post-Scheduling Passes](#appendix-j-post-scheduling-passes)
 - [K. The -misched Registry](#appendix-k-the--misched-registry)
 - [L. SIScheduleDAGMI (Older Hierarchical Scheduler)](#appendix-l-sischeduledag-mi-older-hierarchical-scheduler)
+- [M. Instruction Latency, Throughput, and Schedule Length](#appendix-m-instruction-latency-throughput-and-schedule-length)
 
 ---
 
@@ -1560,6 +1561,14 @@ either the known whole-register kill overestimate or a bug.
   operates on the original graph structure without awareness of entry/
   exit node semantics.
 
+- **Exit node latency for high-latency leaf instructions.** LLVM's
+  `buildSchedGraph` adds an artificial edge from high-latency leaf
+  instructions (e.g., VMEM loads with no successors in the region)
+  to ExitSU with `latency = SU->Latency - 1`. Our exit node edges
+  all have latency 0. This is fine for within-region schedule length
+  computation but may underestimate costs for cross-region analysis.
+  See `ScheduleDAGInstrs.cpp`, line 877.
+
 - **Scheduling algorithm.** The core hierarchical scheduling algorithm
   is not yet implemented — `RunHierarchicalScheduler` currently builds
   the graph and runs shakedowns but does not reorder instructions.
@@ -1573,6 +1582,27 @@ either the known whole-register kill overestimate or a bug.
   throughout the scheduler are for development. They should be removed
   or moved behind `LLVM_DEBUG` before the scheduler is used in
   production.
+
+- **Verify LLVM's scheduling model latencies for gfx906.** The latency
+  numbers in `SIQuarterSpeedModel` were written in 2015 for early GCN
+  hardware and inherited unchanged when gfx906 was added in 2018.
+  Several values are suspect — most notably `WriteFloatFMA = 16`,
+  which implies FP32 FMA is 16x slower than FP32 add/multiply on
+  gfx906. A 2014 GCN optimization talk (Michal Drobot, "Low Level
+  Optimizations for GCN", Digital Dragons 2014) lists FP32 arithmetic
+  as full-rate and only int32 multiply, FP64, and transcendentals as
+  quarter-rate — FP32 FMA is not in the quarter-rate category.
+  Both the Drobot talk (2014) and the LLVM model (2015) describe
+  the same era of GCN hardware, yet they disagree: Drobot says
+  FP32 arithmetic is full-rate, while the LLVM model gives FP32
+  FMA 16 cycles. Neither source has been verified for gfx906
+  (released 2019), which inherited these numbers unchanged. If
+  FMA is actually full-rate on gfx906, the model's 16-cycle
+  latency is wrong by 16x. Other values (VMEM, LDS, SMEM) may also be
+  approximate. These should be measured experimentally on gfx906
+  hardware. Our scheduler uses `SDep::getLatency()` (which reads
+  these values), so inaccurate latencies directly affect scheduling
+  quality. See Appendix M.6 for details on the model's provenance.
 
 ---
 
@@ -1768,3 +1798,836 @@ instructions (LDS accesses) closer to their users.
   scheduling, relevant to the design of `ScheduleDAGHierarchicalScheduler`.
 - The trial-and-error approach is brute-force but effective — it explores
   the space of decompositions rather than relying on a single heuristic.
+
+---
+
+## Appendix M: Instruction Latency, Throughput, and Schedule Length
+
+This appendix explains how LLVM models instruction timing — how long
+instructions take, when dependent instructions can execute, and how
+fast a sequence of instructions can run. It starts with LLVM's general
+infrastructure, then covers AMDGPU specifics, then OptSched's approach.
+
+### M.1 What "latency" means
+
+When a GPU executes an instruction like `V_ADD_F32 %3, %1, %2`, the
+result (`%3`) is not available instantaneously. There is a delay
+between when the instruction starts executing and when its output can
+be read by another instruction. This delay is the instruction's
+**latency**.
+
+If instruction B depends on instruction A's result (a data dependency),
+B cannot begin executing until A's latency has elapsed. Scheduling B
+too early would read stale data. Scheduling B too late wastes cycles.
+The scheduler's job is to fill the gap between A and B with other
+useful work.
+
+A separate concept is **throughput** — how quickly a pipeline can
+accept new instructions. A pipeline might accept a new instruction
+every cycle (throughput = 1 per cycle) even though each instruction
+takes many cycles to produce its result (latency >> 1). This is called
+**pipelining**. A memory load might have latency = 80 cycles but
+throughput = 1 per cycle: you can issue a new load every cycle, but
+you wait 80 cycles for each result.
+
+### M.2 The .td scheduling model
+
+LLVM defines instruction timing in `.td` (TableGen) files. These are
+declarative descriptions that get compiled into C++ data tables at
+build time. The system has several pieces that build on each other.
+
+#### Piece 1: ProcResource — defining pipelines
+
+A `ProcResource` declares that a processor has a hardware pipeline:
+
+```
+def HWSALU : ProcResource<1>;   // One scalar ALU pipeline
+def HWVALU : ProcResource<1>;   // One vector ALU pipeline
+def HWVMEM : ProcResource<1>;   // One vector memory pipeline
+def HWLGKM : ProcResource<1>;   // One LDS/scalar-memory pipeline
+```
+
+The `<1>` means there is one instance of this pipeline. A processor
+with two independent VALU pipelines would say `ProcResource<2>`.
+
+These just declare that the pipelines exist. They carry no timing
+information.
+
+**File:** `lib/Target/AMDGPU/SISchedule.td` (lines 94–121)
+
+#### Piece 2: SchedWrite and SchedRead — naming output and input types
+
+A `SchedWrite` is a tag for a category of instruction **output**.
+A `SchedRead` is a tag for a category of instruction **input**.
+Neither carries timing information by itself — they are just names:
+
+```
+// Output types (what kind of result the instruction produces):
+def WriteSALU     : SchedWrite;   // "scalar ALU result"
+def Write32Bit    : SchedWrite;   // "32-bit vector ALU result"
+def WriteVMEM     : SchedWrite;   // "vector memory result"
+def WriteFloatFMA : SchedWrite;   // "floating-point FMA result"
+
+// Input types (what kind of operand the instruction reads):
+def MIVGPRRead    : SchedRead;    // "reads a VGPR"
+def MIMFMARead    : SchedRead;    // "reads an MFMA accumulator"
+```
+
+Think of these as enum values. They exist so that instructions,
+timing tables, and latency adjustments can all refer to the same
+names.
+
+**File:** `lib/Target/AMDGPU/SISchedule.td` (lines 19–66)
+
+#### Piece 3: SchedRW on instructions — tagging instructions
+
+Each instruction definition has a `SchedRW` field that holds a list
+of SchedWrite and SchedRead tags. Instructions inherit their `SchedRW`
+from their base class in the `.td` class hierarchy. For example:
+
+```
+// SOPInstructions.td — SOP1_Pseudo is the base class for
+// single-operand scalar ALU instructions:
+class SOP1_Pseudo<...> : SOP_Pseudo<...> {
+    let SchedRW = [WriteSALU];      // Set on the base class
+    // ... other fields ...
+}
+
+// Individual instructions inherit from the base class:
+def S_MOV_B32 : SOP1_Pseudo<"s_mov_b32", ...>;
+def S_NOT_B32 : SOP1_Pseudo<"s_not_b32", ...>;
+// These inherit SchedRW = [WriteSALU] automatically.
+```
+
+Similarly for VALU instructions:
+
+```
+// SIInstrFormats.td — base class for vector ALU instructions:
+class VOP_Pseudo<...> {
+    let SchedRW = [Write32Bit];     // default for VALU
+}
+```
+
+Specific instructions or groups can override with different tags:
+
+```
+// VOP3Instructions.td — FMA instructions override the default:
+let SchedRW = [WriteFloatFMA, WriteSALU] in {
+    // V_FMA_F32 gets [WriteFloatFMA, WriteSALU] instead of [Write32Bit]
+}
+```
+
+An instruction can have multiple tags if it has multiple outputs
+going to different pipelines. `V_FMA_F32` has `[WriteFloatFMA,
+WriteSALU]` because it produces a VALU result (WriteFloatFMA) AND
+writes a scalar status flag (WriteSALU). Each output gets its own
+tag, and dependency edges on each output get the latency of that
+output's tag.
+
+Most instructions have just one SchedWrite tag.
+
+**Files:** `lib/Target/AMDGPU/SOPInstructions.td` (line 49),
+`lib/Target/AMDGPU/SIInstrFormats.td` (line 242),
+`lib/Target/AMDGPU/VOP3Instructions.td`
+
+#### Piece 4: WriteRes — connecting output tags to pipelines and latencies
+
+A `WriteRes` gives a SchedWrite tag its meaning for a specific
+processor. It says: "on this processor, an output tagged X uses
+pipeline Y, and the result is ready after Z cycles":
+
+```
+WriteRes<WriteSALU, [HWSALU]> { let Latency = 1; }
+// "WriteSALU uses the HWSALU pipeline, result ready in 1 cycle"
+
+WriteRes<WriteVMEM, [HWVMEM]> { let Latency = 80; }
+// "WriteVMEM uses the HWVMEM pipeline, result ready in 80 cycles"
+```
+
+Without a WriteRes, a SchedWrite tag is meaningless. Different
+processors can have different WriteRes entries for the same tag —
+that is how `WriteFloatFMA` means 1 cycle on one processor but
+16 cycles on another.
+
+**Convenience wrappers.** The AMDGPU `.td` files define shorthand
+to reduce typing. These are NOT new concepts — they produce WriteRes
+entries with less syntax:
+
+```
+// HWWriteRes: bundles resource + latency into one line
+class HWWriteRes<SchedWrite write, list<ProcResourceKind> resources,
+                 int latency>
+    : WriteRes<write, resources> {
+  let Latency = latency;
+}
+
+// So this:
+def : HWWriteRes<WriteSALU, [HWSALU], 1>;
+// produces exactly:
+// WriteRes<WriteSALU, [HWSALU]> { let Latency = 1; }
+
+// HWVALUWriteRes: even shorter — hardcodes HWVALU as the pipeline
+class HWVALUWriteRes<SchedWrite write, int latency>
+    : HWWriteRes<write, [HWVALU], latency>;
+
+// So this:
+def : HWVALUWriteRes<Write32Bit, 1>;
+// produces exactly:
+// WriteRes<Write32Bit, [HWVALU]> { let Latency = 1; }
+```
+
+Whenever you see `HWWriteRes` or `HWVALUWriteRes` in the `.td` files,
+mentally replace them with the WriteRes they produce.
+
+**File:** `lib/Target/AMDGPU/SISchedule.td` (lines 123–129 for the
+wrappers, lines 141–228 for the per-model timing tables)
+
+#### Piece 5: ReadAdvance — adjusting latency for specific consumers
+
+A `ReadAdvance` modifies the latency that a consumer sees, based on
+the consumer's SchedRead tag. It is the input-side counterpart of
+WriteRes.
+
+WriteRes says: "producing this output takes N cycles." ReadAdvance
+says: "consuming this input takes M extra (or fewer) cycles on top
+of the producer's latency."
+
+```
+def : ReadAdvance<MIVGPRRead, -2>;
+```
+
+This says: any consumer input tagged `MIVGPRRead` adds 2 extra
+cycles of latency beyond what the producer's WriteRes specifies.
+(The sign convention is: positive = consumer can read early,
+reducing latency. Negative = consumer needs extra time, increasing
+latency. AMDGPU's value is -2, meaning 2 extra cycles.)
+
+**Example:** A producer tagged `Write32Bit` has WriteRes latency = 1.
+A consumer tagged `MIVGPRRead` has ReadAdvance = -2. The effective
+edge latency is `1 - (-2) = 3` cycles. The consumer must wait 3
+cycles after the producer, not 1.
+
+This models the cost of forwarding data between pipeline stages.
+Not all consumers have a ReadAdvance — if none is defined, the
+consumer sees the producer's base latency unchanged.
+
+**File:** `lib/Target/AMDGPU/SISchedule.td` (line 170)
+
+#### Piece 6: SchedMachineModel — top-level processor description
+
+A `SchedMachineModel` defines processor-wide characteristics:
+
+```
+class SISchedMachineModel : SchedMachineModel {
+  let IssueWidth = 1;          // Max instructions issued per cycle
+  let MicroOpBufferSize = 1;   // Pipeline buffering depth
+  let PostRAScheduler = 1;     // Enable post-RA scheduling
+  let CompleteModel = 1;       // All instructions have scheduling data
+}
+```
+
+`IssueWidth` is the most important field. It says how many
+instructions a single thread/wavefront can issue per cycle. For all
+AMDGPU targets, this is 1.
+
+Specific processor models inherit from this base. The WriteRes
+entries for each model are defined inside a `let SchedModel = X`
+block, which scopes them to that model:
+
+```
+def SIQuarterSpeedModel : SISchedMachineModel;
+
+let SchedModel = SIQuarterSpeedModel in {
+    defm : SICommonWriteRes;                   // shared entries
+    def : HWVALUWriteRes<WriteFloatFMA, 16>;   // FMA = 16 cycles
+    def : HWVALUWriteRes<WriteDouble,   16>;   // FP64 = 16 cycles
+    // ...
+}
+```
+
+Then each processor chip is assigned to a model:
+
+```
+// GCNProcessors.td:
+def : ProcessorModel<"gfx906", SIQuarterSpeedModel, ...>;
+def : ProcessorModel<"gfx600", SIFullSpeedModel, ...>;
+```
+
+**Files:** `lib/Target/AMDGPU/SISchedule.td` (lines 72–92),
+`lib/Target/AMDGPU/GCNProcessors.td`
+
+#### Putting the pieces together
+
+```
+ProcResource      →  "these pipelines exist"
+SchedWrite        →  "these output type names exist"
+SchedRead         →  "these input type names exist"
+SchedRW           →  "this instruction has these output/input types"
+                     (inherited from base class in .td hierarchy)
+WriteRes          →  "output type X uses pipeline Y, latency Z"
+                     (per processor model)
+ReadAdvance       →  "input type X adjusts latency by N cycles"
+                     (per processor model)
+SchedMachineModel →  "this processor issues 1 instruction per cycle"
+ProcessorModel    →  "gfx906 uses SIQuarterSpeedModel"
+```
+
+At build time, TableGen compiles all of this into C++ lookup tables
+(`AMDGPUGenSubtargetInfo.inc`). At scheduling time, the scheduler
+calls `computeOperandLatency()` which looks up the tables, applies
+the ReadAdvance adjustment, and returns the effective latency for
+a specific producer-output → consumer-input edge.
+
+### M.3 Pipelining and ResourceCycles
+
+Most instructions are **pipelined**: they occupy their pipeline for
+just 1 cycle, even if their result takes many cycles. A VMEM load has
+latency 80 but uses the VMEM pipeline for only 1 cycle — you can
+issue another load the very next cycle, even though the first result
+hasn't arrived yet.
+
+The `ResourceCycles` field on a WriteRes controls how long an
+instruction occupies its pipeline. By default it is 1 (pipelined).
+
+The exception is MFMA matrix operations:
+
+```
+let ResourceCycles = [16] in
+def : HWWriteRes<Write16PassMAI, [HWXDL], 16>;
+```
+
+This MFMA instruction occupies the HWXDL pipeline for 16 cycles AND
+has 16 cycles of result latency. While it's running, no other MFMA
+can start on the XDL pipeline.
+
+Compare with a VMEM load:
+
+```
+def : HWWriteRes<WriteVMEM, [HWVMEM], 80>;
+// ResourceCycles defaults to [1]
+// Pipeline busy for 1 cycle, result ready in 80 cycles
+```
+
+The VMEM load is the key example of ResourceCycles ≠ Latency. The
+pipeline is busy for only 1 cycle (pipelined — fire and forget), but
+the result takes 80 cycles to come back from memory. You can issue
+another load the very next cycle, but you cannot read the result for
+80 cycles.
+
+The scheduler treats pipelined vs non-pipelined resources differently
+based on the pipeline's `BufferSize` (see M.5).
+
+### M.4 How latency reaches the DAG
+
+During scheduling, latency values from the timing tables are attached
+to SDep edges in the dependency DAG. The flow:
+
+```
+Step 1: initSUnits()
+  (ScheduleDAGInstrs.cpp, line 580)
+
+  For each MachineInstr, create an SUnit and set its overall latency:
+
+      SU->Latency = SchedModel.computeInstrLatency(SU->getInstr())
+
+  This looks up the instruction's SchedWrite tag, finds the WriteRes
+  for the current processor model, and returns the latency. For
+  instructions with multiple SchedWrite tags, it returns the maximum.
+
+
+Step 2: buildSchedGraph()
+  (ScheduleDAGInstrs.cpp, lines 273, 442)
+
+  For each data dependency edge (producer → consumer), compute the
+  operand-specific latency:
+
+      SDep Dep(ProducerSU, SDep::Data, Reg)
+      Dep.setLatency(
+          SchedModel.computeOperandLatency(
+              DefMI, DefOpIdx, UseMI, UseOpIdx))
+
+  computeOperandLatency() (TargetSchedule.cpp, line 168) does:
+
+      1. Find which SchedWrite tag corresponds to this specific
+         output operand of the producer
+      2. Look up that tag's WriteRes → get the base latency
+      3. Find which SchedRead tag (if any) corresponds to this
+         specific input operand of the consumer
+      4. Look up that SchedRead's ReadAdvance (if any) → get the
+         adjustment
+      5. Return: base_latency - read_advance
+
+  For example, if the producer is tagged Write32Bit (base latency 1)
+  and the consumer's input is tagged MIVGPRRead (ReadAdvance -2),
+  the edge latency is 1 - (-2) = 3 cycles.
+
+  If the consumer has no ReadAdvance for this input, the edge latency
+  is just the base latency from the WriteRes.
+
+
+Step 3: adjustSchedDependency()
+  (Called immediately after setLatency)
+
+      ST.adjustSchedDependency(
+          ProducerSU, DefOpIdx, ConsumerSU, UseOpIdx, Dep)
+
+  This is a target-specific hook that can override the latency after
+  the general computation. The AMDGPU version (AMDGPUSubtarget.cpp,
+  line 832) adjusts latencies for bundled instructions and fixes VCC
+  implicit operand edge cases. For non-bundled instructions (the
+  common case in pre-RA scheduling), it doesn't change anything.
+```
+
+**Two kinds of latency on an SUnit:**
+
+- `SDep::getLatency()` is the edge-specific latency between one
+  producer output and one consumer input. This is what the scheduler
+  uses to compute ready cycles and schedule length — the critical
+  path is the longest chain of these edge latencies through the DAG.
+- `SU->Latency` is the instruction's overall latency (max across all
+  outputs). It's a convenience field, mainly used for one edge case:
+  when a high-latency instruction has no successors in the region
+  (e.g., a VMEM load whose result is only used in a later region),
+  LLVM adds an artificial edge to ExitSU with `latency =
+  SU->Latency - 1` so the scheduler knows the result won't be
+  available for a while (ScheduleDAGInstrs.cpp, line 877).
+
+### M.5 The scheduling loop and cycle tracking
+
+The scheduler maintains a cycle counter (`CurrCycle`). When it picks
+an instruction to schedule, it checks: can this instruction execute
+now, or does it have to wait?
+
+The core logic is in `SchedBoundary::bumpNode()`
+(`MachineScheduler.cpp`, line 2913):
+
+```
+bumpNode(SUnit *SU):
+    // 1. When is this instruction ready?
+    //    ReadyCycle was computed from predecessor edges:
+    //    for each already-scheduled predecessor P with edge latency L,
+    //      ReadyCycle = max(ReadyCycle, P.scheduled_cycle + L)
+    ReadyCycle = SU->TopReadyCycle
+
+    // 2. Do we need to stall?
+    NextCycle = CurrCycle
+    if ReadyCycle > CurrCycle:
+        NextCycle = ReadyCycle    // can't execute yet — wait
+
+    // 3. Check pipeline resource availability (see below)
+    for each pipeline resource this instruction uses:
+        ResourceAvailCycle = countResource(resource, cycles)
+        NextCycle = max(NextCycle, ResourceAvailCycle)
+
+    // 4. Advance the cycle if needed
+    if NextCycle > CurrCycle:
+        bumpCycle(NextCycle)
+
+    // 5. Issue width check
+    CurrMOps += 1
+    while CurrMOps >= IssueWidth:    // hit the per-cycle limit
+        bumpCycle(++NextCycle)        // move to next cycle
+```
+
+For gfx906 with `IssueWidth = 1`, step 5 fires after every single
+instruction — the cycle advances after each one. The scheduling
+decisions come from step 2: the gap between when the scheduler wants
+to place an instruction and when it's actually ready is a **stall**
+(wasted cycle).
+
+**Pipeline resource tracking (step 3):**
+
+Each pipeline resource (HWVALU, HWSALU, etc.) has a `BufferSize` that
+controls how the scheduler models its availability:
+
+**BufferSize = 1** (HWVALU, HWSALU, HWVMEM, HWLGKM, etc.):
+The pipeline is pipelined and buffered. The scheduler tracks
+producer/consumer stalls via latency edges but does not track whether
+the pipeline itself is busy. It assumes the pipeline always accepts
+new work. For gfx906 with IssueWidth=1, this creates no additional
+constraints — only one instruction issues per cycle anyway, so the
+pipeline can never be double-booked.
+
+**BufferSize = 0** (HWXDL — the MFMA matrix unit):
+The pipeline is unbuffered. The scheduler tracks exactly when the
+resource becomes free using a `ReservedCycles[]` array. If an MFMA
+reserves XDL for 16 cycles (via `ResourceCycles = [16]`), the next
+MFMA must wait until those cycles pass. Other instructions on other
+pipelines can still issue during that time.
+
+**Where this code lives:**
+
+| What | Where |
+|------|-------|
+| `bumpNode()` | `lib/CodeGen/MachineScheduler.cpp:2913` |
+| `bumpCycle()` | `lib/CodeGen/MachineScheduler.cpp:2854` |
+| `countResource()` | `lib/CodeGen/MachineScheduler.cpp:2877` |
+| `SchedBoundary` class | `include/llvm/CodeGen/MachineScheduler.h` |
+| `computeOperandLatency()` | `lib/CodeGen/TargetSchedule.cpp:168` |
+| `computeInstrLatency()` | `lib/CodeGen/TargetSchedule.cpp:257` |
+| `adjustSchedDependency()` | `lib/Target/AMDGPU/AMDGPUSubtarget.cpp:832` |
+
+### M.6 AMDGPU-Specific Details
+
+**gfx906 complete latency table.**
+
+gfx906 uses `SIQuarterSpeedModel`. The full table combines the shared
+`SICommonWriteRes` entries with the quarter-speed overrides. All
+`ResourceCycles` are 1 (pipelined) unless noted.
+
+**Non-VALU instructions:**
+
+| Tag | Pipeline | Latency | Notes |
+|-----|----------|---------|-------|
+| `WriteSALU` | HWSALU | 1 | Scalar ALU |
+| `WriteSMEM` | HWLGKM | 5 | Scalar memory |
+| `WriteLDS` | HWLGKM | 5 | LDS (shared memory). "Can be between 2 and 64" |
+| `WriteVMEM` | HWVMEM | 80 | Global memory |
+| `WriteBranch` | HWBranch | 8 | Branch |
+| `WriteExport` | HWExport | 4 | Pixel export (graphics) |
+| `WriteBarrier` | HWBranch | 500 | Barrier. "XXX: Guessed ???" |
+
+**VALU instructions (shared across models):**
+
+| Tag | Pipeline | Latency | Example instructions |
+|-----|----------|---------|---------------------|
+| `Write32Bit` | HWVALU | 1 | V_ADD_F32, V_MUL_F32, V_SUB_F32, bitwise ops |
+| `WriteFloatCvt` | HWVALU | 4 | Float conversion (not FP64) |
+| `WriteTrans32` | HWVALU | 4 | V_RCP_F32, V_SQRT_F32, V_SIN_F32, V_COS_F32 |
+| `WriteQuarterRate32` | HWVALU | 4 | Other quarter-rate 32-bit ops |
+
+**VALU instructions (quarter-speed specific):**
+
+| Tag | Pipeline | Latency | Example instructions |
+|-----|----------|---------|---------------------|
+| `Write64Bit` | HWVALU | 2 | 64-bit moves, shifts |
+| `WriteIntMul` | HWVALU | 4 | V_MUL_LO_U32, V_MUL_HI_U32 |
+| `WriteFloatFMA` | HWVALU | 16 | V_FMA_F32, V_FMAC_F32. See provenance note below |
+| `WriteDouble` | HWVALU | 16 | V_MUL_F64 |
+| `WriteDoubleAdd` | HWVALU | 8 | V_ADD_F64 |
+| `WriteDoubleCvt` | HWVALU | 4 | FP64 conversion |
+| `WriteTrans64` | HWVALU | 16 | V_RCP_F64, V_SQRT_F64 |
+
+**MFMA instructions (gfx908+, not available on gfx906 hardware):**
+
+| Tag | Pipeline | Latency | ResourceCycles | Instructions |
+|-----|----------|---------|----------------|--------------|
+| `Write2PassMAI` | HWXDL | 2 | **2** | V_MFMA 4x4 |
+| `Write4PassMAI` | HWXDL | 4 | **4** | (gfx940+ only) |
+| `Write8PassMAI` | HWXDL | 8 | **8** | V_MFMA 16x16 |
+| `Write16PassMAI` | HWXDL | 16 | **16** | V_MFMA 32x32 |
+| `Write4PassDGEMM` | HWVALU | 4 | 1 | FP64 matrix multiply (gfx940+) |
+| `Write8PassDGEMM` | HWVALU | 16 | 1 | FP64 matrix multiply (gfx940+) |
+
+MFMA instructions are the only ones with `ResourceCycles > 1`,
+meaning they block the HWXDL pipeline for their full duration
+(`BufferSize = 0`).
+
+**Special:**
+
+| Tag | Pipeline | Latency | Notes |
+|-----|----------|---------|-------|
+| `WriteCopy` | varies | varies | COPY/PRED_COPY — dispatches to Write32Bit, Write64Bit, or WriteSALU based on operand type |
+
+**ReadAdvances (latency adjustments on the consumer side):**
+
+| Tag | Adjustment | Meaning |
+|-----|-----------|---------|
+| `MIVGPRRead` | -2 (adds 2 cycles) | Any consumer reading a VGPR result |
+| `MIMFMARead` | -4 (adds 4 cycles) | MFMA accumulator reads |
+
+All pipelines have `NumUnits = 1` (one instance each).
+All pipelines except HWXDL have `BufferSize = 1` (pipelined).
+HWXDL has `BufferSize = 0` (unbuffered).
+All pipelines except HWXDL have `BufferSize = 1` (pipelined).
+HWXDL has `BufferSize = 0` (unbuffered — blocks for full duration).
+
+ReadAdvance: `MIVGPRRead` adds 2 extra cycles to any edge where a
+consumer reads a VGPR result. `MIMFMARead` adds 4 extra cycles for
+MFMA accumulator reads.
+
+**Quarter-speed vs full-speed.** Both models share all the same
+base definitions (`SICommonWriteRes` — SALU, VMEM, LDS, etc.) and
+the same `IssueWidth = 1`. They override the same seven VALU tags.
+Of those seven, only four actually differ:
+
+| Tag | What it covers | FullSpeed | QuarterSpeed |
+|-----|----------------|-----------|--------------|
+| `WriteFloatFMA` | FP32 fused multiply-add | 1 | 16 |
+| `WriteDouble` | FP64 multiply | 4 | 16 |
+| `WriteDoubleAdd` | FP64 add | 2 | 8 |
+| `WriteTrans64` | FP64 transcendental | 4 | 16 |
+| `Write64Bit` | 64-bit moves/shifts | 2 | 2 (same) |
+| `WriteIntMul` | Integer multiply | 4 | 4 (same) |
+| `WriteDoubleCvt` | FP64 conversion | 4 | 4 (same) |
+
+The origin of the "quarter speed" name is unclear. The FP64 ops
+(WriteDouble, WriteDoubleAdd, WriteTrans64) are consistently 4x
+slower, but WriteFloatFMA goes from 1 to 16 (16x). These may
+reflect different hardware generations with different pipeline
+designs rather than a simple speed scaling factor.
+
+Which model a chip uses is assigned in `GCNProcessors.td`:
+gfx600 (Tahiti) → FullSpeed, gfx906 (Radeon VII) → QuarterSpeed.
+
+**Provenance and accuracy of these numbers.** The scheduling model
+was originally written by Tom Stellard (AMD) in January 2015
+(commit `ae38f30d7b79`, "R600/SI: Define a schedule model"), for
+early GCN (Southern Islands) hardware. The commit message says
+"The schedule model is not complete yet, and could be improved,"
+and the `.td` comment says "The latency numbers are taken from AMD
+Accelerated Parallel Processing guide. They may not be accurate."
+Many original values were rough guesses (Branch=100, VMEM=450,
+SMEM=10, all with "XXX: Guessed ???" comments). Some were improved
+in a 2016 follow-up by Stellard (commit `1d5e6d4bdcc3`: Branch→8,
+VMEM→80, SMEM→5), but the VALU latencies were never revisited.
+
+The original `.td` file also contains the comment "The latency values
+are 1 / (operations / cycle) / 4." This appears to describe how the
+latency numbers were derived from the AMD guide's throughput figures,
+but the formula does not produce the actual numbers in the file
+(e.g., full-rate operations at 1 op/cycle would give 0.25, not 1).
+The formula's meaning is unclear.
+
+When gfx906 was added in April 2018 (commit `0084adc51656` by Matt
+Arsenault, AMD), it was assigned to `SIQuarterSpeedModel` with a
+single line — no gfx906-specific latency tuning or verification.
+The latency numbers gfx906 uses today are inherited unchanged from
+the 2015 model written for earlier hardware.
+
+A contemporaneous external source ([Michal Drobot, "Low Level
+Optimizations for GCN", Digital Dragons 2014](https://michaldrobot.com/wp-content/uploads/2014/05/gcn_alu_opt_digitaldragons2014.pdf))
+lists FP32 arithmetic as full-rate on the same era of GCN hardware,
+with only int32 multiply, FP64, and transcendentals at quarter-rate
+— FP32 FMA is not in the quarter-rate category. This contradicts
+the LLVM model's `WriteFloatFMA = 16` for `SIQuarterSpeedModel`,
+despite both sources describing the same hardware generation.
+Neither has been verified for gfx906 (released 2019), which
+inherited the LLVM model's numbers unchanged. Hardware measurement
+on gfx906 is needed to resolve this.
+
+**IssueWidth = 1.** All AMDGPU models set `IssueWidth = 1`. The
+hardware has independent SALU, VALU, VMEM, LDS pipelines that can
+have instructions in flight simultaneously, but a single wavefront
+issues one instruction per cycle from its instruction stream. The
+parallelism across pipelines comes from the hardware interleaving
+different wavefronts, not from one wavefront issuing to multiple
+pipelines at once.
+
+**MFMA and HWXDL.** MFMA (Matrix Fused Multiply-Add) instructions
+perform small matrix multiplies on the XDL (eXtended Dot-product
+Logic) pipeline. Available on gfx908+ (MI-series accelerators).
+LLVM defines MFMA entries for gfx906's model because gfx906 serves
+as a base for gfx908, but gfx906 hardware does not have an XDL unit.
+
+### M.7 Schedule Length: Post-Hoc Computation
+
+LLVM's GCN scheduler has a simpler way to compute the schedule length
+of a completed instruction ordering. This is
+`GCNSchedStage::getScheduleMetrics()` (`GCNSchedStrategy.cpp`,
+line 1028):
+
+```
+getScheduleMetrics(schedule):
+    CurrCycle = 0
+    ReadyCycles = {}    // map: SUnit → cycle it was scheduled at
+
+    for each SUnit in schedule order:
+        // When is this instruction ready?
+        ReadyCycle = CurrCycle
+        for each predecessor P with a data dependency edge:
+            ReadyCycle = max(ReadyCycle,
+                            ReadyCycles[P] + edge_latency)
+
+        // Record stall (bubble) if we had to wait
+        Bubbles += ReadyCycle - CurrCycle
+
+        // Schedule it
+        ReadyCycles[this_SUnit] = ReadyCycle
+        CurrCycle = ReadyCycle + 1    // IssueWidth = 1
+
+    return ScheduleMetrics(CurrCycle, Bubbles)
+```
+
+This only considers data dependency latencies. It does not model
+resource contention or hazards. For gfx906 with `IssueWidth = 1` and
+all resources pipelined (`BufferSize = 1`), this produces the same
+result as the full `bumpNode()` model for code without MFMA.
+
+**When is `getScheduleMetrics()` used vs `bumpNode()`?**
+
+`bumpNode()` runs **during** scheduling — inside the pick-node loop
+of `GenericScheduler`. Every time the scheduler places an instruction,
+`bumpNode()` updates the cycle counter, resource state, and hazard
+recognizer. It drives real-time scheduling decisions.
+
+`getScheduleMetrics()` runs **after** scheduling — in the GCN
+rescheduling stages. The GCN scheduler sometimes schedules a region,
+then checks whether the result is better than the original ordering.
+`getScheduleMetrics()` evaluates a finished schedule by walking the
+instruction order and computing length + bubbles. If the new schedule
+is worse, the scheduler reverts:
+
+```
+MBefore = getScheduleMetrics(original_order)
+MAfter  = getScheduleMetrics(new_order)
+if new_is_worse:
+    revert to original
+```
+
+**Where this code lives:**
+
+| What | Where |
+|------|-------|
+| `getScheduleMetrics()` | `lib/Target/AMDGPU/GCNSchedStrategy.cpp:1028` |
+| `ScheduleMetrics` struct | `lib/Target/AMDGPU/GCNSchedStrategy.h` |
+| `shouldRevertScheduling()` | `lib/Target/AMDGPU/GCNSchedStrategy.cpp:1100` |
+
+### M.8 OptSched's Latency Model
+
+OptSched has its own machine model config file
+(`optsched-cfg/machine_model.cfg`), separate from LLVM's `.td` model.
+
+**Config format:**
+
+```
+MODEL_NAME: Simple
+ISSUE_RATE: 1
+ISSUE_TYPE_COUNT: 1
+Default 1
+
+DEP_LATENCY_ANTI: 0
+DEP_LATENCY_OUTPUT: 1
+DEP_LATENCY_OTHER: 1
+```
+
+`ISSUE_RATE` is analogous to LLVM's `IssueWidth`. The config format
+supports multiple issue types with per-type slot counts:
+
+```
+ISSUE_RATE: 4
+ISSUE_TYPE_COUNT: 3
+VALU 2
+SALU 1
+VMEM 1
+```
+
+This would model 4 instructions per cycle with 2 VALU slots, 1 SALU
+slot, and 1 VMEM slot. However, the actual config used for AMDGPU
+sets `ISSUE_RATE: 1` with a single "Default" issue type. There are no
+alternate config files in the repository for GCN. The multi-issue
+infrastructure exists (from OptSched's origins as a CPU scheduler)
+but is not exercised for AMDGPU.
+
+**Where latency comes from.** OptSched has three latency modes,
+configured via `LATENCY_PRECISION` in `sched.ini`
+(`OptSchedDDGWrapperBasic.cpp`, line 449):
+
+| Setting | Mode | Source |
+|---------|------|--------|
+| `PRECISE` / `FILE` | `LTP_PRECISE` | Per-opcode latencies from `machine_model.cfg` |
+| `LLVM` / `ROUGH` | `LTP_ROUGH` | LLVM's `SDep::getLatency()` — same values as LLVM's `.td` model |
+| `UNIT` / `UNITY` | `LTP_UNITY` | All latencies = 1 (ignores ILP, schedules only for register pressure) |
+
+The default config sets `LATENCY_PRECISION LLVM`. The `PRECISE` mode
+would read from `machine_model.cfg`, but that file has
+`INST_TYPE_COUNT: 0` — no per-opcode latencies are defined. So for
+GCN, **OptSched uses the exact same latency numbers as LLVM**,
+including any potentially inaccurate values like `WriteFloatFMA = 16`.
+
+**Ready cycle computation** (`sched_basic_data.hip.cpp`, line 683):
+
+```
+PrdcsrSchduld(predecessorIndex, predecessorCycle):
+    // Contribution from this predecessor
+    rdyCyclePerPrdcsr_[predecessorIndex] =
+        predecessorCycle + latencyFromThisPredecessor
+
+    // Ready cycle = latest of all predecessors
+    minRdyCycle_ = max(minRdyCycle_,
+                       rdyCyclePerPrdcsr_[predecessorIndex])
+
+    // Track how many predecessors remain
+    unschduldPrdcsrCnt_--
+    return (unschduldPrdcsrCnt_ == 0)  // true when all done
+```
+
+An instruction can enter the ready list when all predecessors are
+scheduled AND the current cycle >= `minRdyCycle_`.
+
+**Scheduling and NOPs.** OptSched's list scheduler always picks an
+instruction from the ready list if one is available. It never
+voluntarily delays a ready instruction.
+
+The enumerator (branch-and-bound) is different. At each time step,
+it branches on every ready instruction AND on a NOP (empty slot).
+This means it explores orderings where a ready instruction is
+deliberately delayed — for example, waiting a few cycles so that
+two independent results become available at the same time, enabling
+a better ordering later. This is how the enumerator can find
+schedules that a greedy list scheduler would miss.
+
+**Cycles and slots.** OptSched maps cycles and slots to a single
+linear "time" dimension: `time = cycle * issueRate + slot + 1`. With
+`ISSUE_RATE = 1`, this simplifies to `time = cycle + 1`.
+
+**Schedule length as a search bound.** The enumerator uses a target
+schedule length for pruning. It tries to find a feasible schedule of
+that length. If an instruction would miss its deadline (can't fit
+within the target length), that branch is pruned.
+
+**File locations:**
+
+| What | Where |
+|------|-------|
+| Machine model config | `lib/Target/AMDGPU/OptSched/optsched-cfg/machine_model.cfg` |
+| Machine model class | `lib/Target/AMDGPU/OptSched/include/opt-sched/Scheduler/machine_model.h` |
+| Ready cycle logic | `lib/Target/AMDGPU/OptSched/lib/Scheduler/sched_basic_data.hip.cpp:683` |
+| Cycle/slot tracking | `lib/Target/AMDGPU/OptSched/lib/Scheduler/gen_sched.hip.cpp` |
+| Enumerator pruning | `lib/Target/AMDGPU/OptSched/lib/Scheduler/enumerator.cpp:607` |
+
+### M.9 Summary: What This Means for Our Scheduler
+
+**Key insight: for `IssueWidth = 1`, ordering and timing are
+separable.** With one instruction per cycle and no resource
+contention (all pipelines buffered), the schedule length is fully
+determined by the instruction ordering. We can:
+
+1. Pick an ordering using whatever algorithm (beam search, BnB, etc.)
+2. Compute the timing afterward using `getScheduleMetrics()`-style
+   evaluation
+
+The scheduling algorithm doesn't need to track cycles as it builds
+the schedule — it just needs to produce orderings, and the latency
+tracker evaluates them. This is simpler than OptSched's cycle-by-
+cycle approach (which is needed for multi-issue processors where
+resource conflicts within a cycle matter).
+
+**Schedule length computation:**
+
+```
+For each instruction in the chosen order:
+    ready_cycle = max(current_cycle,
+                      max(pred_cycle + edge_latency)
+                          for all scheduled predecessors)
+    this_instruction_cycle = ready_cycle
+    current_cycle = ready_cycle + 1     // IssueWidth = 1
+
+Schedule length = current_cycle after last instruction
+Bubbles = sum of (ready_cycle - previous_current_cycle) at each step
+```
+
+This matches both LLVM's `getScheduleMetrics()` and OptSched's
+ready-cycle computation. Edge latencies are already on our
+`ScheduleEdge::latency_` (copied from `SDep::getLatency()` during
+`BuildFromSUnits`).
+
+**Future extensions:**
+
+- **Multi-issue.** If we target architectures with `IssueWidth > 1`,
+  ordering and timing are no longer separable — two instructions
+  might share a cycle if they use different pipelines, or conflict
+  if they use the same one. We would need cycle/slot tracking like
+  OptSched's model.
+- **Resource contention.** For MFMA-heavy code, we would need to
+  track XDL pipeline reservation (`BufferSize = 0` behavior).
