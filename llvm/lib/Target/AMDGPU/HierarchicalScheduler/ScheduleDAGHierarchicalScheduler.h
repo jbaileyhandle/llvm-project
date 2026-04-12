@@ -86,6 +86,11 @@ public:
   // verifies state returns to zero.
   void RunScheduleLengthTrackerShakedown(ScheduleGraph &graph);
 
+  // Tests ScheduleConstructor: schedules all nodes by always picking
+  // the first ready node, then unschedules everything and verifies
+  // round-trip.
+  void RunScheduleConstructorShakedown(ScheduleGraph &graph);
+
 protected:
   // Apply a computed schedule order to the given region. Physically moves
   // MachineInstrs to match the order given by |scheduled_units|.

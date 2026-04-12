@@ -10,6 +10,7 @@
 #include "ScheduleDAGHierarchicalScheduler.h"
 #include "MaliciousScheduler.h"
 #include "GCNRegisterTracker.h"
+#include "ScheduleConstructor.h"
 #include "ScheduleLengthTracker.h"
 #include "GCNSubtarget.h"
 #include "RegisterTracker.h"
@@ -116,6 +117,7 @@ void ScheduleDAGHierarchicalScheduler::RunRegionShakedowns(
                                          graph.TopoOrder().end());
   VerifyGCNRegisterTracker(graph, topo_nodes);
   RunScheduleLengthTrackerShakedown(graph);
+  RunScheduleConstructorShakedown(graph);
 
   // Dump EntrySU/ExitSU edges from the LLVM DAG.
   llvm::outs() << "  EntrySU succs (" << EntrySU.Succs.size() << "):";
@@ -478,6 +480,60 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleLengthTrackerShakedown(
     report_fatal_error("ScheduleLengthTracker round-trip test failed: "
                        "state did not return to zero after full unschedule");
   }
+}
+
+// Tests ScheduleConstructor: constructs a full schedule by always picking
+// the first node from the ready list, then unschedules everything and
+// verifies round-trip.
+void ScheduleDAGHierarchicalScheduler::RunScheduleConstructorShakedown(
+    ScheduleGraph &graph) {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+  ScheduleConstructor sc(graph, st, MF.getRegInfo(),
+                         *MF.getSubtarget().getRegisterInfo(), *LIS);
+
+  // --- Forward pass: always pick the first ready node ---
+  llvm::outs() << "  ScheduleConstructor trace:\n";
+  while (!sc.IsDone()) {
+    const auto &ready = sc.GetReadyList();
+    if (ready.empty()) {
+      report_fatal_error("ScheduleConstructor: ready list empty before "
+                         "all nodes scheduled");
+    }
+    const ScheduleNode *node = *ready.begin();
+    sc.Schedule(node);
+    llvm::outs() << "    " << node->ToString() << "\n"
+                 << "      " << sc.Describe() << "\n";
+  }
+
+  llvm::outs() << "  ScheduleConstructor (arbitrary): "
+               << sc.Describe() << "\n";
+
+  // --- Reverse pass: unschedule everything ---
+  int num_scheduled = sc.GetNumScheduled();
+  for (int i = 0; i < num_scheduled; ++i) {
+    sc.Unschedule();
+  }
+
+  // --- Verify round-trip ---
+  bool pass = (sc.GetNumScheduled() == 0 &&
+               sc.GetLengthTracker().GetCurrentCycle() == 0 &&
+               sc.GetLengthTracker().GetTotalBubbles() == 0);
+  llvm::outs() << "  ScheduleConstructor round-trip: "
+               << sc.Describe()
+               << (pass ? "  PASS" : "  FAIL") << "\n";
+  if (!pass) {
+    report_fatal_error("ScheduleConstructor round-trip test failed");
+  }
+
+  // --- Second pass: schedule in topo order for comparison ---
+  ScheduleConstructor sc2(graph, st, MF.getRegInfo(),
+                          *MF.getSubtarget().getRegisterInfo(), *LIS);
+  for (ScheduleNode *node : graph.TopoOrder()) {
+    sc2.Schedule(node);
+  }
+  llvm::outs() << "  ScheduleConstructor (topo order): "
+               << sc2.Describe() << "\n";
 }
 
 // Set up ScheduleDAGMILive state for the given region. Calls startBlock and
