@@ -133,8 +133,27 @@ GCNRegisterTracker::GCNRegisterTracker(ArrayRef<ScheduleNode *> nodes,
                                        const TargetRegisterInfo &tri,
                                        const LiveIntervals &lis)
     : mri_(&mri) {
+  CheckForFunctionCalls(nodes);
   ExtractNodeRegInfo(nodes, mri, tri, lis);
   InitRemainingUses();
+}
+
+void GCNRegisterTracker::CheckForFunctionCalls(
+    ArrayRef<ScheduleNode *> nodes) {
+  for (ScheduleNode *node : nodes) {
+    if (!node->IsLeaf()) {
+      continue;
+    }
+    SUnit *su = node->GetSUnit();
+    if (su && su->isCall) {
+      llvm::outs() << "GCNRegisterTracker WARNING: node "
+                   << node->GetId()
+                   << " is a function call. The callee's register "
+                   << "usage is not visible to the scheduler, so "
+                   << "register pressure and occupancy estimates may "
+                   << "be optimistic.\n";
+    }
+  }
 }
 
 void GCNRegisterTracker::ExtractNodeRegInfo(ArrayRef<ScheduleNode *> nodes,

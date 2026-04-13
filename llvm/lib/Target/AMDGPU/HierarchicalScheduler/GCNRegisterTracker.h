@@ -170,6 +170,10 @@ private:
 
   void InitRemainingUses();
 
+  /// Warn if any node is a function call, since the callee's
+  /// register usage is invisible to the scheduler.
+  static void CheckForFunctionCalls(ArrayRef<ScheduleNode *> nodes);
+
   // --- Extraction helpers (per-node-type) ---
 
   /// Dedup helper: find reg in entries and OR in mask, or append.

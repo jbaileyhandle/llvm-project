@@ -29,6 +29,7 @@
 - [K. The -misched Registry](#appendix-k-the--misched-registry)
 - [L. SIScheduleDAGMI (Older Hierarchical Scheduler)](#appendix-l-sischeduledag-mi-older-hierarchical-scheduler)
 - [M. Instruction Latency, Throughput, and Schedule Length](#appendix-m-instruction-latency-throughput-and-schedule-length)
+- [N. Occupancy](#appendix-n-occupancy)
 
 ---
 
@@ -1604,6 +1605,30 @@ either the known whole-register kill overestimate or a bug.
   these values), so inaccurate latencies directly affect scheduling
   quality. See Appendix M.6 for details on the model's provenance.
 
+- **Handle non-inlined function calls.** Currently
+  `GCNRegisterTracker` warns when it encounters a function call
+  node but proceeds without accounting for the callee's register
+  usage (matching LLVM's default behavior). In practice, `hipcc`
+  force-inlines all functions (except those marked `__noinline__`),
+  so this is rarely an issue. If non-inlined calls become common,
+  we could process functions in reverse call graph order and
+  incorporate callee register usage when scheduling callers. See
+  Appendix N.6 for how `AMDGPUResourceUsageAnalysis` propagates
+  register counts through the call graph.
+
+- **Investigate occupancy targeting based on actual launch bounds.**
+  When no `__launch_bounds__` or `amdgpu-waves-per-eu` attributes
+  are specified, the compiler assumes a max workgroup size of 1024
+  and targets max occupancy (10 waves for gfx906). The actual
+  launch bounds may be determinable at compile time by inspecting
+  the host-side callsites (e.g., `hipLaunchKernelGGL` arguments).
+  If so, the scheduler could compute a tighter occupancy target.
+  Another approach: generate multiple versions of the kernel with
+  different occupancy levels (different register budgets) and emit
+  a dispatch function that selects the appropriate version based on
+  runtime launch bounds. See Appendix N.3 for how launch bounds
+  affect occupancy.
+
 ---
 
 ## Appendix G: Manual Scheduling Hints
@@ -2631,3 +2656,560 @@ ready-cycle computation. Edge latencies are already on our
   OptSched's model.
 - **Resource contention.** For MFMA-heavy code, we would need to
   track XDL pipeline reservation (`BufferSize = 0` behavior).
+
+---
+
+## Appendix N: Occupancy
+
+### N.1 What occupancy is
+
+On AMDGPU, multiple wavefronts (waves) can execute on the same
+Execution Unit (EU) simultaneously. The hardware switches between
+waves to hide latency — when one wave stalls waiting for memory or
+a long-latency instruction, another wave can execute. **Occupancy**
+is the number of waves per EU. Higher occupancy = more waves = more
+latency hiding.
+
+Occupancy is limited by three hardware resources. Each wave needs
+registers and LDS, and each EU has a finite supply. If a kernel
+uses too many registers or too much LDS, fewer waves can fit.
+
+### N.2 The three occupancy limits
+
+Occupancy is the **minimum** of three independent limits:
+
+```
+occupancy = min(
+    max_waves_per_EU,           // hardware limit (10 for gfx906)
+    occupancy_from_SGPRs,       // based on peak SGPR count
+    occupancy_from_VGPRs,       // based on peak VGPR count
+    occupancy_from_LDS          // based on LDS usage per workgroup
+)
+```
+
+Each limit is computed by a separate function on `GCNSubtarget`.
+They are combined by `GCNSubtarget::computeOccupancy()`
+(`AMDGPUSubtarget.cpp:697`):
+
+```cpp
+unsigned GCNSubtarget::computeOccupancy(const Function &F,
+                                        unsigned LDSSize,
+                                        unsigned NumSGPRs,
+                                        unsigned NumVGPRs) const {
+  unsigned Occupancy =
+      std::min(getMaxWavesPerEU(),
+               getOccupancyWithLocalMemSize(LDSSize, F));
+  if (NumSGPRs)
+    Occupancy = std::min(Occupancy, getOccupancyWithNumSGPRs(NumSGPRs));
+  if (NumVGPRs)
+    Occupancy = std::min(Occupancy, getOccupancyWithNumVGPRs(NumVGPRs));
+  return Occupancy;
+}
+```
+
+Note: if `NumSGPRs` or `NumVGPRs` is 0, that limit is skipped.
+This matters for the initial occupancy computation (see N.4).
+
+#### SGPR occupancy
+
+`GCNSubtarget::getOccupancyWithNumSGPRs()` (`AMDGPUSubtarget.cpp:637`)
+uses a threshold table. For gfx906 (VOLCANIC_ISLANDS generation):
+
+| SGPRs used | Max waves |
+|------------|-----------|
+| ≤ 80       | 10        |
+| ≤ 88       | 9         |
+| ≤ 100      | 8         |
+| > 100      | 7         |
+
+#### VGPR occupancy
+
+`GCNSubtarget::getOccupancyWithNumVGPRs()` (`AMDGPUSubtarget.cpp:663`)
+delegates to `AMDGPU::IsaInfo::getNumWavesPerEUWithNumVGPRs()`
+(`AMDGPUBaseInfo.cpp:1077`). For gfx906:
+
+- Total VGPRs per EU = 256
+- Allocation granularity = 4
+- Formula: `min(max(256 / alignTo(NumVGPRs, 4), 1), 10)`
+
+| VGPRs used | Rounded | Max waves |
+|------------|---------|-----------|
+| 1–24       | 24      | 10        |
+| 25–28      | 28      | 9         |
+| 29–32      | 32      | 8         |
+| 33–36      | 36      | 7         |
+| 37–40      | 40      | 6         |
+| 41–48      | 48      | 5         |
+| 49–64      | 64      | 4         |
+| 65–84      | 84      | 3         |
+| 85–128     | 128     | 2         |
+| 129–256    | 256     | 1         |
+
+#### LDS occupancy
+
+`AMDGPUSubtarget::getOccupancyWithLocalMemSize()` (`AMDGPUSubtarget.cpp:336`)
+computes how many waves can run on one EU, given a workgroup's LDS
+usage. This is the most complex of the three limits because it
+involves several interacting factors:
+
+```
+// Step 1: How big could a workgroup be?
+MaxWorkGroupSize = getFlatWorkGroupSizes(F).second
+    // From amdgpu-flat-work-group-size attribute.
+    // Default: 1024 for compute kernels.
+
+// Step 2: How many workgroups can physically run on a CU?
+MaxWorkGroupsPerCu = getMaxWorkGroupsPerCU(MaxWorkGroupSize)
+    // Hardware limit — based on wave slots and barrier resources.
+    // (See explanation below.)
+
+// Step 3: How many workgroups' LDS fits in the CU?
+NumGroups = LDSPerCU / LDSPerWorkgroup
+    // LDSPerCU = 65536 (64KB) for gfx906
+    // LDSPerWorkgroup = kernel's __shared__ allocation (fixed per kernel)
+NumGroups = min(MaxWorkGroupsPerCu, NumGroups)
+    // Can't exceed the hardware workgroup limit
+
+// Step 4: How many waves do those workgroups produce?
+MaxGroupNumWaves = ceil(MaxWorkGroupSize / WaveSize)
+    // Each workgroup needs this many waves
+MaxWaves = NumGroups * MaxGroupNumWaves
+    // Total waves across the CU
+
+// Step 5: Divide by EUs to get per-EU occupancy
+MaxWaves = ceil(MaxWaves / EUsPerCU)    // 4 EUs per CU on gfx906
+MaxWaves = min(MaxWaves, MaxWavesPerEU) // cap at 10
+```
+
+**What `getMaxWorkGroupsPerCU` does** (`AMDGPUBaseInfo.cpp:875`):
+This computes a hardware limit on concurrent workgroups, independent
+of LDS. Two constraints:
+
+1. **Wave slots:** Each CU has `MaxWavesPerEU × EUsPerCU` total wave
+   slots (10 × 4 = 40 for gfx906). Each workgroup uses
+   `ceil(MaxWorkGroupSize / WaveSize)` waves. So at most
+   `40 / wavesPerGroup` workgroups can fit.
+
+2. **Barrier resources:** Multi-wave workgroups need a hardware
+   barrier for `__syncthreads()`. gfx906 has 16 barrier slots per CU.
+   Single-wave workgroups (MaxWorkGroupSize ≤ 64) don't need barriers
+   and skip this limit.
+
+   Result: `min(40 / wavesPerGroup, 16)`.
+
+**Worked example — 8KB LDS, `__launch_bounds__(256)`:**
+
+```
+MaxWorkGroupSize = 256
+wavesPerGroup = ceil(256/64) = 4
+MaxWorkGroupsPerCu = min(40/4, 16) = min(10, 16) = 10
+NumGroups = 65536/8192 = 8     (LDS-limited to 8)
+NumGroups = min(10, 8) = 8
+MaxWaves = 8 × 4 = 32 total
+MaxWaves = ceil(32/4) = 8 per EU
+Occupancy from LDS = 8
+```
+
+**Same example, no `__launch_bounds__` (default max = 1024):**
+
+```
+MaxWorkGroupSize = 1024
+wavesPerGroup = ceil(1024/64) = 16
+MaxWorkGroupsPerCu = min(40/16, 16) = min(2, 16) = 2
+NumGroups = 65536/8192 = 8     (LDS could fit 8)
+NumGroups = min(2, 8) = 2      (but only 2 workgroups fit in wave slots)
+MaxWaves = 2 × 16 = 32 total
+MaxWaves = ceil(32/4) = 8 per EU
+Occupancy from LDS = 8
+```
+
+Same result here, but for different reasons: with `__launch_bounds__`
+the limit is LDS (8 groups); without it, the limit is wave slots
+(only 2 groups fit but each produces 16 waves).
+
+**Same example, `__launch_bounds__(64)`:**
+
+```
+MaxWorkGroupSize = 64
+wavesPerGroup = ceil(64/64) = 1
+MaxWorkGroupsPerCu = 40         (single-wave, no barrier limit)
+NumGroups = 65536/8192 = 8
+NumGroups = min(40, 8) = 8
+MaxWaves = 8 × 1 = 8 total
+MaxWaves = ceil(8/4) = 2 per EU
+Occupancy from LDS = 2
+```
+
+Occupancy drops to 2. Each workgroup only produces 1 wave, so even
+though 8 workgroups fit in LDS, they only produce 8 waves total —
+2 per EU.
+
+**Key point:** LDS per workgroup is a fixed property of the kernel
+(from `__shared__` declarations). It doesn't change with workgroup
+size. But the number of waves per workgroup does change, and that
+directly affects occupancy.
+
+### N.3 Launch bounds and workgroup size attributes
+
+The programmer can constrain occupancy via function attributes on
+the kernel. These are **compile-time** — the compiler cannot see the
+actual launch configuration, which is a runtime decision made by the
+host code. If no attributes are specified, the compiler uses defaults.
+
+**`amdgpu-flat-work-group-size`** — sets the min and max workgroup
+size. In HIP, this comes from `__launch_bounds__(maxThreads)` or
+`[[amdgpu::flat_work_group_size(min, max)]]`. Read by
+`AMDGPUSubtarget::getFlatWorkGroupSizes()` (`AMDGPUSubtarget.cpp:400`).
+Default: (1, 1024) for compute kernels.
+
+This feeds into the LDS occupancy calculation (via `MaxWorkGroupSize`,
+see N.2). It also affects `getMaxWorkGroupsPerCU()`, which determines
+how many workgroups can physically run on a CU.
+
+**`amdgpu-waves-per-eu`** — sets the min and max waves per EU. In
+HIP: `[[clang::amdgpu_waves_per_eu(min, max)]]`. Read by
+`AMDGPUSubtarget::getWavesPerEU()` (`AMDGPUSubtarget.cpp:450`).
+Default: (1, 10) for gfx906.
+
+This directly constrains occupancy:
+- The **max** (e.g., 8) caps occupancy. `SIMachineFunctionInfo::
+  getMaxWavesPerEU()` returns `WavesPerEU.second`, and
+  `limitOccupancy()` uses it. Even if register pressure and LDS
+  would allow 10 waves, the compiler targets at most 8.
+- The **min** (e.g., 4) sets a floor for register allocation. The
+  register allocator must leave enough registers for at least 4
+  waves, preventing it from consuming so many registers that
+  occupancy drops below the minimum.
+
+**Why would a programmer limit occupancy?** Higher occupancy isn't
+always better. More concurrent waves means more competition for
+cache and memory bandwidth. For memory-bound kernels, reducing
+occupancy can improve performance by giving each wave more cache
+capacity. The programmer profiles their kernel and sets the sweet
+spot via this attribute.
+
+**Compile-time vs runtime.** The compiler uses the attribute values
+(or defaults) to make scheduling and register allocation decisions.
+At runtime, the kernel could be launched with any workgroup size
+within the declared range. The actual runtime occupancy could differ
+from the compiler's estimate in either direction — for example,
+smaller workgroups produce fewer waves per group (lower occupancy),
+but single-wave workgroups don't need barrier hardware which
+removes one limit (potentially higher occupancy). The compiler's
+decisions are based on the declared range, not the actual launch
+configuration.
+
+### N.4 When occupancy is computed and by whom
+
+Occupancy flows through several owners at different stages of
+compilation:
+
+#### Stage 1: SIMachineFunctionInfo construction
+
+**When:** MachineFunction creation (before any scheduling)
+**Owner:** `SIMachineFunctionInfo` (`SIMachineFunctionInfo.cpp:60-65`)
+**What:**
+
+```cpp
+FlatWorkGroupSizes = ST.getFlatWorkGroupSizes(F);
+WavesPerEU = ST.getWavesPerEU(F);
+Occupancy = ST.computeOccupancy(F, getLDSSize());
+```
+
+Three things happen here. The first two store attribute values as
+fields on `SIMachineFunctionInfo` for use by other parts of the
+compiler (register allocator, code emitter, etc.):
+
+- `FlatWorkGroupSizes` — the (min, max) workgroup size from the
+  `amdgpu-flat-work-group-size` attribute, or (1, 1024) by default.
+- `WavesPerEU` — the (min, max) waves per EU from the
+  `amdgpu-waves-per-eu` attribute, or (1, 10) by default for gfx906.
+
+The third line computes the initial occupancy. `computeOccupancy`
+is called with `NumSGPRs=0` and `NumVGPRs=0` (default parameters),
+so register limits are NOT applied. It computes:
+
+```
+Occupancy = min(getMaxWavesPerEU(),                         // hardware max (10)
+                getOccupancyWithLocalMemSize(LDSSize, F))   // LDS limit
+```
+
+Note: `getMaxWavesPerEU()` here is the **subtarget** method
+(`AMDGPUSubtarget.h:269`), which returns the hardware constant (10
+for gfx906). It does NOT read the `amdgpu-waves-per-eu` attribute.
+And `getOccupancyWithLocalMemSize` does read `amdgpu-flat-work-group-
+size` internally (via `getFlatWorkGroupSizes(F)`), so the workgroup
+size attribute IS accounted for.
+
+At this point, occupancy reflects the hardware max and LDS limit,
+but NOT the `amdgpu-waves-per-eu` attribute cap. That cap is
+applied later.
+
+#### Stage 1b: ISel finalization
+
+**When:** End of instruction selection (`SIISelLowering.cpp:13392`)
+**Owner:** `SIMachineFunctionInfo`
+**What:**
+
+```cpp
+Info->limitOccupancy(MF);
+```
+
+This calls `limitOccupancy(const MachineFunction &MF)` (overload 1),
+which applies two caps:
+
+```cpp
+void SIMachineFunctionInfo::limitOccupancy(const MachineFunction &MF) {
+  limitOccupancy(getMaxWavesPerEU());  // WavesPerEU.second (from attribute)
+  limitOccupancy(ST.getOccupancyWithLocalMemSize(getLDSSize(), ...));
+}
+```
+
+`getMaxWavesPerEU()` here is the **SIMachineFunctionInfo** method
+(`SIMachineFunctionInfo.h:1057`), which returns `WavesPerEU.second`
+— the max from the `amdgpu-waves-per-eu` attribute. This is where
+the attribute cap gets applied to `Occupancy`.
+
+The LDS cap is re-applied as well (redundant with Stage 1, but
+harmless — `limitOccupancy(unsigned)` only decreases, never
+increases).
+
+After this point, `Occupancy` = min(hardware max, LDS limit,
+waves-per-eu attribute max). Still no register pressure.
+
+There is a second overload that takes a plain number:
+
+```cpp
+void limitOccupancy(unsigned Limit) {
+  if (Occupancy > Limit)
+    Occupancy = Limit;
+}
+```
+
+This is how register pressure enters the picture later — the
+scheduler calls it with a register-derived occupancy value (see
+Stage 3).
+
+#### Stage 2: GCN scheduler initialization
+
+**When:** Start of the machine scheduling pass
+**Owner:** `GCNSchedStrategy` (`GCNSchedStrategy.cpp:84`)
+**What:**
+```cpp
+TargetOccupancy = MFI.getOccupancy();
+// = min(hardware max, LDS limit, attribute max). No register info yet.
+SGPRCriticalLimit = ST.getMaxNumSGPRs(TargetOccupancy, true);
+VGPRCriticalLimit = ST.getMaxNumVGPRs(TargetOccupancy);
+```
+
+The scheduler computes register pressure limits *from* the target
+occupancy: "to achieve N waves, we can use at most X SGPRs and Y
+VGPRs." These limits guide scheduling decisions — if a region's
+pressure exceeds the critical limit, the scheduler tries harder to
+reduce it.
+
+#### Stage 3: Per-region scheduling and occupancy tracking
+
+**When:** After each region is scheduled
+**Owner:** `GCNSchedStage::checkScheduling()` (`GCNSchedStrategy.cpp:912`)
+**What:** This is where register pressure finally enters the
+occupancy picture. After scheduling a region, the scheduler measures
+the actual register pressure and converts it to occupancy:
+
+```cpp
+// Measure actual register pressure after scheduling this region
+PressureAfter = getRealRegPressure(RegionIdx);  // GCNDownwardRPTracker
+
+// Convert register pressure to occupancy (register-only, no LDS)
+unsigned RegisterOccupancy = PressureAfter.getOccupancy(ST);
+// = min(ST.getOccupancyWithNumSGPRs(SGPRs),
+//       ST.getOccupancyWithNumVGPRs(VGPRs))
+
+// Combine with target occupancy (which already has LDS + attribute limits)
+WavesAfter = min(TargetOccupancy, RegisterOccupancy);
+```
+
+If `WavesAfter < MinOccupancy`:
+- The schedule is reverted (instructions put back in original order)
+- `DAG.MinOccupancy` is updated — this is the scheduler's working
+  copy, used to compare against future regions within this pass
+- `MFI.limitOccupancy(MinOccupancy)` is called (overload 2, takes
+  `unsigned`) — this writes the new value to
+  `SIMachineFunctionInfo::Occupancy`, the permanent per-function
+  field visible to later passes (register allocator, code emitter)
+
+#### Stage 4: GCNRegPressure::getOccupancy()
+
+**When:** Called whenever someone has a `GCNRegPressure` value and
+needs occupancy
+**Owner:** `GCNRegPressure` (`GCNRegPressure.h:63`)
+**What:**
+```cpp
+unsigned getOccupancy(const GCNSubtarget &ST) const {
+  return std::min(ST.getOccupancyWithNumSGPRs(getSGPRNum()),
+                  ST.getOccupancyWithNumVGPRs(getVGPRNum(...)));
+}
+```
+
+This is a pure register-to-occupancy conversion. It does NOT account
+for LDS or launch bounds — those are already baked into
+`TargetOccupancy` by the time this is called. The GCN scheduler
+always takes `min(TargetOccupancy, PressureAfter.getOccupancy(ST))`
+to combine both.
+
+### N.5 Occupancy is per-kernel, not per-region
+
+A kernel's occupancy is determined by the **worst-case** (highest
+pressure) region across the entire function. If one region uses 64
+VGPRs (occupancy 4) and another uses 24 VGPRs (occupancy 10), the
+kernel runs at occupancy 4 — the hardware allocates registers for
+the worst case at kernel launch time.
+
+The GCN scheduler tracks this via `MinOccupancy` on
+`GCNScheduleDAGMILive` (`GCNSchedStrategy.cpp:481`):
+
+```cpp
+StartingOccupancy(MFI.getOccupancy()), MinOccupancy(StartingOccupancy)
+```
+
+As it schedules each region, if any region would drop occupancy
+below `MinOccupancy`, it either reverts the schedule or updates
+`MinOccupancy` downward.
+
+### N.6 Function calls and inlining
+
+`AMDGPUTargetMachine.cpp` (lines 1073-1075) adds two passes early
+in the pipeline:
+
+```cpp
+// Function calls are not supported, so make sure we inline everything.
+addPass(createAMDGPUAlwaysInlinePass());
+addPass(createAlwaysInlinerLegacyPass());
+```
+
+The first pass (`AMDGPUAlwaysInlinePass`) **marks** functions for
+inlining. It has two modes controlled by the
+`-amdgpu-function-calls` flag (defined in `R600TargetMachine.cpp:34`,
+LLVM default: `true`):
+
+- **`-amdgpu-function-calls=false`**: marks ALL non-declaration
+  functions as `alwaysinline`, except those explicitly marked
+  `__noinline__` (`AMDGPUAlwaysInlinePass.cpp:134-147`).
+- **`-amdgpu-function-calls=true`**: only marks functions that
+  use LDS globals (`AMDGPUAlwaysInlinePass.cpp:125-131`).
+
+The second pass (`AlwaysInlinerLegacyPass`, generic LLVM) does
+the actual inlining of all functions marked `alwaysinline`.
+
+**What `hipcc` does:** `hipcc` passes both
+`-mllvm -amdgpu-function-calls=false` and
+`-mllvm -amdgpu-early-inline-all=true` behind the scenes
+(verified with `hipcc -###`). This overrides the LLVM default
+and forces all functions to be inlined, except those marked
+`__noinline__`. So with `hipcc`, by the time the scheduler runs,
+there are no function calls unless the programmer explicitly
+requested them.
+
+**Impact on occupancy for non-inlined calls:** If a non-inlined
+call survives (via `__noinline__` or other toolchains), the
+scheduler cannot see the callee's register usage. It schedules
+the caller's region based only on the caller's own register
+pressure. The callee's register usage is accounted for later by
+`AMDGPUResourceUsageAnalysis` (`AMDGPUResourceUsageAnalysis.cpp`),
+which walks the call graph and propagates register counts upward:
+the caller's final register count becomes the max of its own
+usage and all callees' usage. This means the scheduler's occupancy
+estimate may be optimistic — the actual occupancy at runtime could
+be lower if a callee uses more registers than the caller.
+
+### N.7 OptSched's occupancy handling
+
+OptSched computes occupancy using the same LLVM functions as the
+GCN scheduler (`getOccupancyWithNumSGPRs`, `getOccupancyWithNumVGPRs`,
+`getOccupancyWithLocalMemSize`), but adds its own configuration
+layer.
+
+**Per-region target occupancy** (`OptSchedGCNTarget::initRegion()`,
+`OptSchedGCNTarget.cpp:92`):
+
+```cpp
+MaxOccLDS = ST->getOccupancyWithLocalMemSize(*MF);
+RegionStartingOccupancy =
+    getAdjustedOccupancy(ST, VGPRCount, SGPRCount, MaxOccLDS);
+TargetOccupancy =
+    shouldLimitWaves(MFI) ? getOccupancyLimit(OccFile) : MFI->getOccupancy();
+```
+
+OptSched computes the region's starting register pressure using
+`GCNDownwardRPTracker` to get VGPRCount and SGPRCount, then computes
+`RegionStartingOccupancy = min(MaxOccLDS, MaxOccVGPR, MaxOccSGPR)`.
+
+**Occupancy limiting:** OptSched has an `occupancy_limits.ini` config
+file (`optsched-cfg/occupancy_limits.ini`) that can set per-function
+occupancy targets. Each line is a function name and a target:
+
+```
+_Z10ilp_kernelPfPKfS1_i 10
+```
+
+OptSched also supports heuristic occupancy limiting: if the function
+is marked `isMemoryBound()` or `needsWaveLimiter()`, it may reduce
+the target to 4 waves.
+
+**Two-pass approach:** OptSched's GCN variant (`ScheduleDAGOptSchedGCN`,
+`GCNOptSched.cpp:64`) runs two scheduling passes:
+1. `OptSchedMaxOcc` — schedule to maximize occupancy (minimize
+   register pressure)
+2. `OptSchedBalanced` — schedule to balance occupancy and ILP
+
+The first pass establishes the best achievable occupancy. The second
+pass tries to reduce schedule length without dropping occupancy below
+the target established by the first pass.
+
+### N.8 File locations
+
+| What | Where |
+|------|-------|
+| `computeOccupancy()` | `lib/Target/AMDGPU/AMDGPUSubtarget.cpp:697` |
+| `getOccupancyWithNumSGPRs()` | `lib/Target/AMDGPU/AMDGPUSubtarget.cpp:637` |
+| `getOccupancyWithNumVGPRs()` | `lib/Target/AMDGPU/AMDGPUSubtarget.cpp:663` → `lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp:1077` |
+| `getOccupancyWithLocalMemSize()` | `lib/Target/AMDGPU/AMDGPUSubtarget.cpp:336` |
+| `getMaxWavesPerEU()` | `lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp:898` (10 for gfx906) |
+| `getTotalNumVGPRs()` | `lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp:1060` (256 for gfx906) |
+| `getVGPRAllocGranule()` | `lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp:1030` (4 for gfx906) |
+| `SIMachineFunctionInfo::Occupancy` | `lib/Target/AMDGPU/SIMachineFunctionInfo.h:267` |
+| `SIMachineFunctionInfo::limitOccupancy()` | `lib/Target/AMDGPU/SIMachineFunctionInfo.cpp:218` |
+| `GCNRegPressure::getOccupancy()` | `lib/Target/AMDGPU/GCNRegPressure.h:63` |
+| `GCNSchedStrategy::TargetOccupancy` | `lib/Target/AMDGPU/GCNSchedStrategy.h:63` |
+| `checkScheduling()` | `lib/Target/AMDGPU/GCNSchedStrategy.cpp:912` |
+| Inlining passes | `lib/Target/AMDGPU/AMDGPUTargetMachine.cpp:1073` |
+| OptSched occupancy config | `lib/Target/AMDGPU/OptSched/optsched-cfg/occupancy_limits.ini` |
+| OptSched target init | `lib/Target/AMDGPU/OptSched/lib/Wrapper/AMDGPU/OptSchedGCNTarget.cpp:92` |
+| OptSched two-pass setup | `lib/Target/AMDGPU/OptSched/lib/Wrapper/AMDGPU/GCNOptSched.cpp:64` |
+
+### N.9 What this means for our scheduler
+
+For our scheduler, we need to:
+
+1. **Read the target occupancy** from `SIMachineFunctionInfo::getOccupancy()`
+   at the start of scheduling. This already accounts for LDS and
+   launch bounds.
+
+2. **Convert register pressure to occupancy** using
+   `GCNRegPressure::getOccupancy(ST)` on our tracker's peak pressure.
+   Our `GCNRegisterTracker` already stores a `GCNRegPressure`, so
+   this is a method call away.
+
+3. **Compare against the target.** The actual occupancy for a schedule
+   is `min(target_occupancy, register_pressure_occupancy)`. If a
+   candidate schedule's register pressure drops occupancy below the
+   target, that's a cost to weigh against any latency improvement.
+
+4. **Track occupancy across regions.** Like the GCN scheduler's
+   `MinOccupancy`, we should track the lowest occupancy across all
+   regions. The kernel's actual occupancy is the minimum.
+
+The occupancy calculation itself doesn't need a new class — it's
+a few calls to existing `GCNSubtarget` and `GCNRegPressure` methods.
+What we need is the logic for deciding how to balance occupancy
+against schedule length, which is a scheduling strategy concern.
