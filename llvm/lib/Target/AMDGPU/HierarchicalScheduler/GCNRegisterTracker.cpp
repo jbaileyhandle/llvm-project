@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "GCNRegisterTracker.h"
+#include "SIMachineFunctionInfo.h"
 #include "SIRegisterInfo.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -135,7 +136,10 @@ void GCNRegisterTracker::ExtractFromGroupNode(const ScheduleNode *node) {
 GCNRegisterTracker::GCNRegisterTracker(ArrayRef<ScheduleNode *> nodes,
                                        const MachineFunction &mf,
                                        const LiveIntervals &lis)
-    : mri_(&mf.getRegInfo()) {
+    : mf_(&mf),
+      st_(&mf.getSubtarget<GCNSubtarget>()),
+      mfi_(mf.getInfo<SIMachineFunctionInfo>()),
+      mri_(&mf.getRegInfo()) {
   CheckForFunctionCalls(mf);
   ExtractNodeRegInfo(nodes, mf.getRegInfo(),
                      *mf.getSubtarget().getRegisterInfo(), lis);
@@ -329,6 +333,26 @@ void GCNRegisterTracker::Unschedule(const ScheduleNode *node) {
   }
 
   max_pressure_ = step.saved_max;
+}
+
+// ============================================================================
+// Occupancy
+// ============================================================================
+
+unsigned GCNRegisterTracker::GetRegisterOccupancy() const {
+  return max_pressure_.getOccupancy(*st_);
+}
+
+unsigned GCNRegisterTracker::GetRegionOccupancy() const {
+  return std::min(mfi_->getOccupancy(), GetRegisterOccupancy());
+}
+
+unsigned GCNRegisterTracker::GetStandaloneRegionOccupancy() const {
+  unsigned occ = st_->computeOccupancy(
+      mf_->getFunction(), mfi_->getLDSSize(),
+      max_pressure_.getSGPRNum(),
+      max_pressure_.getVGPRNum(st_->hasGFX90AInsts()));
+  return std::min(occ, mfi_->getMaxWavesPerEU());
 }
 
 // ============================================================================

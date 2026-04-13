@@ -13,6 +13,7 @@
 #include "ScheduleConstructor.h"
 #include "ScheduleLengthTracker.h"
 #include "GCNSubtarget.h"
+#include "SIMachineFunctionInfo.h"
 #include "RegisterTracker.h"
 #include "ScheduleGraph.h"
 #include "llvm/CodeGen/LiveIntervals.h"
@@ -176,11 +177,24 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   }
 }
 
+// Initialize per-function state. Stores mfi_ and resets occupancy
+// to the pre-GCN-scheduler value so we can aim for the best possible
+// occupancy with our own schedule (same approach as OptSched,
+// GCNOptSched.cpp:58).
+void ScheduleDAGHierarchicalScheduler::InitFunction() {
+  mfi_ = const_cast<SIMachineFunctionInfo *>(
+      MF.getInfo<SIMachineFunctionInfo>());
+  mfi_->resetInitialOccupancy(MF);
+}
+
 // Main hierarchical scheduling path. Currently runs shakedowns only —
 // the actual scheduling algorithm will be implemented here.
 void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
+  InitFunction();
+
   llvm::outs() << "RunHierarchicalScheduler: processing " << regions_.size()
-               << " regions\n";
+               << " regions, target occupancy " << mfi_->getOccupancy()
+               << "\n";
 
   RunAllShakedowns();
 }
@@ -282,6 +296,11 @@ void ScheduleDAGHierarchicalScheduler::RunGCNRegisterTrackerShakedown(
     llvm::outs() << "      " << tracker.DescribeRegOps(node) << "\n";
     llvm::outs() << "      " << tracker.DescribePressure() << "\n";
   }
+
+  llvm::outs() << "  Occupancy: register=" << tracker.GetRegisterOccupancy()
+               << " region=" << tracker.GetRegionOccupancy()
+               << " standalone=" << tracker.GetStandaloneRegionOccupancy()
+               << "\n";
 
   // --- Reverse pass: unschedule in reverse topo order ---
   llvm::outs() << "  GCN register pressure trace (unschedule):\n";

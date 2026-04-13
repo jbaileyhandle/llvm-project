@@ -53,6 +53,7 @@ class GCNSubtarget;
 class LiveIntervals;
 class MachineFunction;
 class MachineRegisterInfo;
+class SIMachineFunctionInfo;
 class TargetRegisterInfo;
 
 namespace hierarchical_scheduler {
@@ -118,9 +119,25 @@ public:
   const GCNRegPressure &GetPeakPressure() const { return max_pressure_; }
   const LiveRegSet &GetLiveRegs() const { return live_regs_; }
 
-  unsigned GetOccupancy(const GCNSubtarget &st) const {
-    return max_pressure_.getOccupancy(st);
-  }
+  /// Occupancy based on peak register pressure only (SGPR and VGPR
+  /// limits). Does NOT account for LDS or launch bounds.
+  unsigned GetRegisterOccupancy() const;
+
+  /// Occupancy for this region, incorporating the function-level
+  /// occupancy limit (MFI.getOccupancy()). After
+  /// resetInitialOccupancy (called at the start of our scheduler),
+  /// this reflects the structural ceiling (hardware max, LDS, launch
+  /// bounds) and any reductions from this scheduler processing other
+  /// regions of the same function.
+  /// Returns min(function_occupancy, register_occupancy).
+  unsigned GetRegionOccupancy() const;
+
+  /// Occupancy for this region, computed from scratch using
+  /// GCNSubtarget::computeOccupancy() with this region's peak
+  /// register pressure, the kernel's LDS usage, and the launch
+  /// bounds attribute. Does NOT incorporate any occupancy limit
+  /// set on the MachineFunction.
+  unsigned GetStandaloneRegionOccupancy() const;
 
   /// Human-readable description of a node's register effects.
   std::string DescribeRegOps(const ScheduleNode *node) const;
@@ -163,6 +180,9 @@ private:
   GCNRegPressure max_pressure_;
   std::vector<ScheduleStep> undo_stack_;
 
+  const MachineFunction *mf_;
+  const GCNSubtarget *st_;
+  const SIMachineFunctionInfo *mfi_;
   const MachineRegisterInfo *mri_;
 
   // --- Construction helpers ---

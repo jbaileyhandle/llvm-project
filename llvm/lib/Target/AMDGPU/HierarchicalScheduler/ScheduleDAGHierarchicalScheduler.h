@@ -22,6 +22,9 @@
 #include <type_traits>
 
 namespace llvm {
+
+class SIMachineFunctionInfo;
+
 namespace hierarchical_scheduler {
 
 class ScheduleGraph;
@@ -31,6 +34,9 @@ class ScheduleDAGHierarchicalScheduler : public ScheduleDAGMILive {
   // Regions recorded during schedule() for later processing in
   // finalizeSchedule().
   SmallVector<RegionInfo, 32> regions_;
+
+  // Per-function state, set by InitFunction().
+  SIMachineFunctionInfo *mfi_ = nullptr;
 
 public:
   ScheduleDAGHierarchicalScheduler(MachineSchedContext *C,
@@ -90,6 +96,11 @@ public:
   // the first ready node, then unschedules everything and verifies
   // round-trip.
   void RunScheduleConstructorShakedown(ScheduleGraph &graph);
+
+  // Initialize per-function state. Called at the start of
+  // RunHierarchicalScheduler / RunMaliciousScheduler. Stores mfi_
+  // and resets occupancy to the pre-GCN-scheduler value.
+  void InitFunction();
 
 protected:
   // Apply a computed schedule order to the given region. Physically moves
