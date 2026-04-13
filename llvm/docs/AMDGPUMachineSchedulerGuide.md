@@ -1592,6 +1592,107 @@ the same approach OptSched uses (`GCNOptSched.cpp:58`).
   occupancy limit set on the MachineFunction. Useful for
   evaluating what a region could achieve independently.
 
+- **`GetContinuousOccupancyScore()`** — smooth version of
+  `GetRegisterOccupancy()`. Integer occupancy is stair-stepped
+  (e.g., on gfx906, 24 VGPRs → 10 waves, 25 VGPRs → 9 waves),
+  which hides incremental progress: two schedules at 25 and 28
+  VGPRs both report occupancy 9 and look identical to a search.
+  The continuous score is `M * occ + M * (ceil - num_regs) /
+  (ceil - floor)`, where `M = kOccScoreMultiplier = 1000`,
+  `ceil`/`floor` are the bracket bounds, and each integer
+  occupancy level is worth `M` points. It's the minimum of the
+  VGPR- and SGPR-dimension scores, uncapped by design — the
+  early-exit check `IsAtOccupancyCeiling()` handles saturation
+  separately, so capping would only collapse the top bracket's
+  resolution without changing any decision.
+
+- **`GetFunctionOccupancyLimit()`** — wraps
+  `MFI->getOccupancy()`, the current function-level clamp
+  (structural ceiling after any reductions from earlier regions).
+
+#### 10.9.1 SGPR ceiling table (why we roll our own)
+
+The continuous score uses `getOccupancyWithNumVGPRs` /
+`getOccupancyWithNumSGPRs` as its classifier (matching
+`GCNRegPressure::getOccupancy` in LLVM itself), and it needs
+bracket boundaries to interpolate. For VGPR, LLVM's
+`getMaxNumVGPRs(occ)` agrees with the classifier and we use it
+directly. For **SGPR, the two functions disagree**, and the
+scheduler's score was initially broken because of it.
+
+The two functions exist for different purposes:
+
+- `getOccupancyWithNumSGPRs(N)` — *"If the program uses N SGPRs,
+  what occupancy does the hardware give you?"* On gfx8+ it's
+  literally a hardcoded if-else table from the hardware docs
+  (`AMDGPUSubtarget.cpp:637`): 80→10, 88→9, 100→8, else→7.
+
+- `getMaxNumSGPRs(wavesPerEU, false)` — *"How many SGPRs should
+  the register allocator budget to reliably achieve `wavesPerEU`?"*
+  Computed as `alignDown(totalSGPRs/waves, granule)` minus
+  trap-handler reservation. Deliberately conservative so the
+  allocator can't overshoot a granule boundary.
+
+On gfx906, `getMaxNumSGPRs(10) = 64` (allocator budget) but
+`getOccupancyWithNumSGPRs(80) = 10` (hardware cliff). An SGPR
+count of 80 is "top of the occ=10 bracket" by the hardware, but
+below the allocator budget's view. Using `getMaxNumSGPRs` as the
+bracket-boundary source in the score helper produced nonsense:
+the classifier put 80 in the occ=10 bracket, the scorer set
+`ceil = 64` for that bracket, yielded `within = 1000*(64-80)/64
+= -250`, and returned `9750` where you'd expect `10000`.
+
+The fix is `GCNRegisterTracker::GetMaxNumSGPRsForOcc(st, occ)`:
+a file-local table built once by walking the classifier from 0
+upward and recording the last `num_regs` at each occupancy
+before it drops. Reachable brackets get real ceilings; the
+bottom (flat) bracket and any unreachable occupancies get the
+sentinel `kNoSGPRCliff = 255`. By construction, this helper
+agrees with the classifier — `getMaxNumSGPRsForOcc(occ)` is
+always the largest N such that `getOccupancyWithNumSGPRs(N) ==
+occ`. VGPR still uses LLVM's `getMaxNumVGPRs` unchanged.
+
+#### 10.9.2 Why we don't correct for reserved SGPRs
+
+The SGPR count tracked by the scheduler is a *virtual register
+count* — it doesn't include VCC, FLAT_SCRATCH, XNACK, trap
+handler SGPRs, or any other reservations. The final physical
+SGPR count after allocation is typically higher, which means
+our classification is optimistic: a schedule we score as
+occ=10 might actually hit occ=9 once reservations are added.
+
+`GCNRegPressure::getOccupancy` in LLVM has the same blind spot
+— it passes VR counts straight to `getOccupancyWithNumSGPRs`
+with no correction. Our score matches that behavior, which
+keeps `GetRegisterOccupancy()` and `GetContinuousOccupancyScore()`
+in sync with each other and with the rest of the compiler.
+
+In principle, a schedule can end up optimizing the wrong
+dimension if reservations shift which of SGPR/VGPR is the
+binding constraint, but in practice this rarely matters: gfx906
+reservations are small (VCC is 2 SGPRs, plus a few more with
+flat scratch / trap handler), and SGPR is almost never the
+limiting factor for occupancy on realistic kernels. See the
+TODO section for a note on revisiting this.
+
+#### 10.9.3 `ScheduleConstructor` comparison interface
+
+`ScheduleConstructor::IsBetterThan(other, metric)` compares two
+schedule-construction states under one of three `ScheduleMetric`
+values:
+
+- `kRegisterOccupancy` — integer register occupancy (higher is
+  better).
+- `kContinuousRegisterOccupancyScore` — smooth occupancy score
+  (higher is better).
+- `kScheduleLength` — current cycle count (lower is better).
+
+`IsBetterThan` is strict: ties return false. `IsAtOccupancyCeiling()`
+returns true when `GetRegisterOccupancy() >= GetFunctionOccupancyLimit()`,
+i.e. when further register improvements cannot raise region
+occupancy — the natural early-exit condition for occupancy-focused
+search.
+
 ### 10.10 Target Architecture (not yet implemented)
 
 The long-term design supports multiple scheduling passes with
@@ -1653,7 +1754,7 @@ Pass 3: RefinementPass
 
 **Implementation approach:** implement example algorithms concretely first, 
 extract common interfaces as patterns emerge. The design above is the target,
-not the starting point.
+not themaxWavesPerEU starting point.
 
 ### 10.11 Files
 
@@ -1710,6 +1811,24 @@ not the starting point.
   updated to account for the custom entry/exit nodes. Currently it
   operates on the original graph structure without awareness of entry/
   exit node semantics.
+
+- **SGPR occupancy scoring and reserved registers (low priority).**
+  Both `GetRegisterOccupancy()` (via `GCNRegPressure::getOccupancy`)
+  and `GetContinuousOccupancyScore()` pass raw virtual-register counts
+  to the hardware classifier. This ignores reserved SGPRs (VCC,
+  FLAT_SCRATCH, XNACK, trap handler), so our SGPR→occupancy mapping
+  is slightly optimistic: a schedule we report as occ=10 might
+  actually land at occ=9 once reservations are added. Could be
+  corrected by adding `getReservedNumSGPRs(MF)` to the SGPR count
+  before looking up the bracket, in both code paths so they stay
+  consistent. Deferred because (1) reservations are small (2–6 SGPRs
+  on gfx906), (2) SGPR is almost never the binding constraint on
+  realistic kernels, so even if the bias flips which dimension the
+  search sees as the min, it rarely changes outcomes, and (3) fixing
+  it would diverge from LLVM's own `GCNRegPressure::getOccupancy`
+  and from every other AMDGPU scheduling heuristic — worth doing
+  only if we have evidence the bias is hurting schedule quality.
+  See section 10.9.2 for the analysis.
 
 - **Exit node latency for high-latency leaf instructions.** LLVM's
   `buildSchedGraph` adds an artificial edge from high-latency leaf
