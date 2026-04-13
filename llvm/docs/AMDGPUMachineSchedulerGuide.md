@@ -1512,7 +1512,154 @@ our tracker and LLVM's `GCNUpwardRPTracker`, printing per-instruction
 pressure side by side. This verifies correctness — any difference is
 either the known whole-register kill overestimate or a bug.
 
-### 10.7 Files
+### 10.7 Schedule Length Tracking (ScheduleLengthTracker)
+
+`ScheduleLengthTracker` tracks schedule length and bubbles (stall
+cycles) during incremental forward schedule construction. It uses
+the `getScheduleMetrics()` model (see Appendix M.7): one instruction
+per cycle (`IssueWidth = 1`), with stalls when a dependency isn't
+ready.
+
+For each scheduled instruction:
+```
+ready_cycle = max(current_cycle,
+                  max(pred.scheduled_cycle + edge.latency)
+                      for all scheduled data-dependency predecessors)
+bubbles += ready_cycle - current_cycle
+scheduled_cycle[node] = ready_cycle
+current_cycle = ready_cycle + 1
+```
+
+Supports do/undo and is fully copyable. Validates at construction
+that `IssueWidth == 1` and no node uses a reserved/unbuffered
+resource (e.g., MFMA on HWXDL). Validation is cached by graph ID.
+
+### 10.8 ScheduleConstructor
+
+`ScheduleConstructor` is a unified interface that wraps
+`GCNRegisterTracker`, `ScheduleLengthTracker`, and a ready list
+into a single object for incremental schedule construction.
+
+**Ready list:** A node is ready when all its strong predecessors
+have been scheduled. Weak edges (cluster hints, etc.) do not block
+readiness. Uses `SmallDenseSet` for O(1) membership checks.
+
+**Usage:**
+```cpp
+ScheduleConstructor sc(graph, st, mf, lis);
+while (!sc.IsDone()) {
+    // pick from sc.GetReadyList() using some strategy
+    sc.Schedule(chosen_node);
+}
+// sc.GetLengthTracker() has length/bubbles
+// sc.GetPressureTracker() has register pressure/occupancy
+```
+
+**Do/undo:** `Schedule()` updates both trackers, the ready list,
+and the schedule order. `Unschedule()` reverses all of these.
+`ReleaseSuccessors`/`UnreleaseSuccessors` handle the pred-count
+bookkeeping for the ready list.
+
+**Copyable** for beam search: all members are value types or
+owning containers.
+
+Currently leaf-only. Group nodes will be handled by a future
+`HierarchicalScheduleConstructor` layer.
+
+### 10.9 Occupancy Handling
+
+At the start of `RunHierarchicalScheduler`, `InitFunction()` calls
+`resetInitialOccupancy()` on the `SIMachineFunctionInfo`. This
+restores `MFI.Occupancy` to the pre-GCN-scheduler value — the
+structural ceiling based on hardware max, LDS, and launch bounds,
+before any scheduler reduced it due to register pressure. This is
+the same approach OptSched uses (`GCNOptSched.cpp:58`).
+
+`GCNRegisterTracker` provides three occupancy query functions:
+
+- **`GetRegisterOccupancy()`** — occupancy from peak register
+  pressure only (SGPR + VGPR limits). Does not account for LDS
+  or launch bounds.
+
+- **`GetRegionOccupancy()`** — `min(MFI.getOccupancy(),
+  register_occupancy)`. Incorporates the function-level ceiling
+  (hardware, LDS, launch bounds) and any reductions from this
+  scheduler processing other regions.
+
+- **`GetStandaloneRegionOccupancy()`** — recomputed from scratch
+  via `GCNSubtarget::computeOccupancy()` with this region's peak
+  pressure, the kernel's LDS, and launch bounds. Ignores any
+  occupancy limit set on the MachineFunction. Useful for
+  evaluating what a region could achieve independently.
+
+### 10.10 Target Architecture (not yet implemented)
+
+The long-term design supports multiple scheduling passes with
+different algorithms and objectives. This is a roadmap, not
+current code.
+
+**Pass types:**
+
+- **ConstructionPass** — builds a schedule from scratch. Configured
+  with a search algorithm, objective function, and group handler.
+
+- **RefinementPass** — takes an existing schedule and improves it
+  by rescheduling portions (rolling window) while replaying the
+  rest. Configured with window size and stride.
+
+**Search algorithms** (each owns its control flow):
+
+- **Greedy** — simple forward loop, pick best ready node per
+  objective.
+- **Beam search** — maintain K copies of the constructor, expand
+  each, keep top K.
+- **BnB/enumerator** — recursive DFS with backtracking, prune via
+  bound checking.
+- **ACO** — N iterations of probabilistic schedule construction,
+  update pheromone trails between iterations.
+
+**Objective functions:** score a schedule and compare two schedules.
+MinPressure, MinLength, Balanced (weighted combination).
+
+**Group handling:** when a group node is picked from the ready list,
+the group's internal nodes are scheduled as a contiguous block
+through the same `ScheduleConstructor` (same pressure/length state,
+no interleaving with outer nodes). Options: schedule now (run a
+search algorithm recursively), replay a cached schedule, or
+cache-or-schedule. Groups may be nested — the same mechanism
+applies recursively.
+
+**Constraints:** a pass can constrain the next pass (e.g., "don't
+drop below occupancy 8"). Derived from the previous pass's result.
+
+**Example multi-pass configuration:**
+```
+Pass 1: ConstructionPass
+    search: BeamSearch(width=8)
+    objective: MinPressure
+    → establishes occupancy target
+
+Pass 2: ConstructionPass
+    search: BeamSearch(width=8)
+    objective: MinLength
+    constraint: occupancy >= pass 1 result
+
+Pass 3: RefinementPass
+    search: Greedy
+    objective: Balanced
+    window: 30 nodes, stride: 15
+    → smooths subgraph boundaries
+```
+
+**Implementation approach:** implement example algorithms concretely first, 
+extract common interfaces as patterns emerge. The design above is the target,
+not the starting point.
+
+### 10.11 Files
+
+| File | Role |
+|------|------|
+| **Pass and pipeline (pre-existing LLVM files)** | |
 
 | File | Role |
 |------|------|
@@ -1534,7 +1681,9 @@ either the known whole-register kill overestimate or a bug.
 | `HierarchicalScheduler/ScheduleGraph.h/.cpp` | Recursive node/edge graph structure (`ScheduleNode`, `ScheduleGraph`, `ScheduleEdge`). Topo sort (Kahn's), transitive reduction, entry/exit nodes with per-lane register info |
 | `HierarchicalScheduler/DominatorTree.h/.cpp` | Dominator tree from transitively reduced DAGs (CHK algorithm) |
 | `HierarchicalScheduler/RegisterTracker.h/.cpp` | Original register pressure tracker (whole-register, custom pressure model). Superseded by `GCNRegisterTracker` but kept for reference |
-| `HierarchicalScheduler/GCNRegisterTracker.h/.cpp` | New register pressure tracker using `GCNRegPressure`/`LiveRegSet` |
+| `HierarchicalScheduler/GCNRegisterTracker.h/.cpp` | Register pressure tracker using `GCNRegPressure`/`LiveRegSet`. Occupancy queries, function call warning |
+| `HierarchicalScheduler/ScheduleLengthTracker.h/.cpp` | Schedule length and bubble tracking (`IssueWidth=1`). Validates no reserved resources |
+| `HierarchicalScheduler/ScheduleConstructor.h/.cpp` | Unified interface wrapping pressure tracker, length tracker, and ready list. Copyable for beam search |
 
 ### 10.8 TODOs and Future Work
 
@@ -1573,11 +1722,11 @@ either the known whole-register kill overestimate or a bug.
 - **Scheduling algorithm.** The core hierarchical scheduling algorithm
   is not yet implemented — `RunHierarchicalScheduler` currently builds
   the graph and runs shakedowns but does not reorder instructions.
-  Design direction from prior discussions: partition the graph into
-  subgraphs (using dominator tree subtrees, min-cut, etc.), schedule
-  within subgraphs, schedule among subgraphs, then smooth boundaries
-  with a rolling window. Beam search was ranked highest for the search
-  algorithm (balancing effectiveness with implementation ease).
+  See section 10.10 for the target architecture (multi-pass with
+  construction and refinement passes, multiple search algorithms,
+  group/subgraph handling). The infrastructure (`ScheduleConstructor`,
+  pressure and length tracking, ready list, do/undo, copyable state)
+  is in place to support this.
 
 - **Remove shakedown/debug output.** The current `llvm::outs()` prints
   throughout the scheduler are for development. They should be removed
