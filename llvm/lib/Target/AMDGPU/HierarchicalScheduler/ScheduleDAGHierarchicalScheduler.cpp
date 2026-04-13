@@ -272,8 +272,7 @@ void ScheduleDAGHierarchicalScheduler::RunGCNRegisterTrackerShakedown(
     ScheduleGraph &graph) {
   SmallVector<ScheduleNode *> nodes(graph.TopoOrder().begin(),
                                     graph.TopoOrder().end());
-  GCNRegisterTracker tracker(nodes, MF.getRegInfo(),
-                             *MF.getSubtarget().getRegisterInfo(), *LIS);
+  GCNRegisterTracker tracker(nodes, MF, *LIS);
 
   // --- Forward pass: schedule in topo order ---
   llvm::outs() << "  GCN register pressure trace (topo order):\n";
@@ -383,7 +382,7 @@ void ScheduleDAGHierarchicalScheduler::VerifyGCNRegisterTracker(
   // --- Our tracker: walk order forward, record pressure at each step ---
   GCNRegisterTracker tracker(
       SmallVector<ScheduleNode *>(order.begin(), order.end()),
-      mri, *MF.getSubtarget().getRegisterInfo(), *LIS);
+      MF, *LIS);
 
   llvm::outs() << "  Cross-check per-instruction (same order):\n";
   llvm::outs() << "    " << std::string(60, '-') << "\n";
@@ -489,8 +488,7 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleConstructorShakedown(
     ScheduleGraph &graph) {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
-  ScheduleConstructor sc(graph, st, MF.getRegInfo(),
-                         *MF.getSubtarget().getRegisterInfo(), *LIS);
+  ScheduleConstructor sc(graph, st, MF, *LIS);
 
   // --- Forward pass: always pick the first ready node ---
   llvm::outs() << "  ScheduleConstructor trace:\n";
@@ -527,8 +525,7 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleConstructorShakedown(
   }
 
   // --- Second pass: schedule in topo order for comparison ---
-  ScheduleConstructor sc2(graph, st, MF.getRegInfo(),
-                          *MF.getSubtarget().getRegisterInfo(), *LIS);
+  ScheduleConstructor sc2(graph, st, MF, *LIS);
   for (ScheduleNode *node : graph.TopoOrder()) {
     sc2.Schedule(node);
   }

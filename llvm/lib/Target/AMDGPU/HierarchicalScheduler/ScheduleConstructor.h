@@ -48,8 +48,7 @@ namespace llvm {
 
 class GCNSubtarget;
 class LiveIntervals;
-class MachineRegisterInfo;
-class TargetRegisterInfo;
+class MachineFunction;
 
 namespace hierarchical_scheduler {
 
@@ -60,8 +59,7 @@ public:
   /// nodes (not yet supported at this level).
   ScheduleConstructor(const ScheduleGraph &graph,
                       const GCNSubtarget &st,
-                      const MachineRegisterInfo &mri,
-                      const TargetRegisterInfo &tri,
+                      const MachineFunction &mf,
                       const LiveIntervals &lis);
 
   /// Schedule a node. The node must be in the ready list.

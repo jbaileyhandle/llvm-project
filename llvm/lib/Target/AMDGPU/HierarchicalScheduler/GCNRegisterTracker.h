@@ -51,6 +51,7 @@ namespace llvm {
 
 class GCNSubtarget;
 class LiveIntervals;
+class MachineFunction;
 class MachineRegisterInfo;
 class TargetRegisterInfo;
 
@@ -90,17 +91,20 @@ public:
     SmallVector<RegMask, 4> uses;
   };
 
-  /// Construct from graph nodes. For leaf nodes with a MachineInstr,
-  /// extracts defs/uses with lane masks. For entry/exit nodes (no MI),
-  /// reads from ScheduleNode::RegDefs()/RegUses() with full lane masks.
+  /// Construct from graph nodes and MachineFunction. Derives
+  /// MachineRegisterInfo and TargetRegisterInfo from the MF.
+  ///
+  /// For leaf nodes with a MachineInstr, extracts defs/uses with
+  /// lane masks. For entry/exit nodes (no MI), reads from
+  /// ScheduleNode::RegDefs()/RegUses().
   ///
   /// LiveIntervals is needed for accurate use-mask extraction on
   /// multi-lane registers.
   ///
   /// Reports fatal error if a group node (subgraph) is encountered.
+  /// Warns if the MachineFunction contains non-inlined function calls.
   GCNRegisterTracker(ArrayRef<ScheduleNode *> nodes,
-                     const MachineRegisterInfo &mri,
-                     const TargetRegisterInfo &tri,
+                     const MachineFunction &mf,
                      const LiveIntervals &lis);
 
   /// Update pressure after scheduling a node. Order depends on the
@@ -170,9 +174,15 @@ private:
 
   void InitRemainingUses();
 
-  /// Warn if any node is a function call, since the callee's
-  /// register usage is invisible to the scheduler.
-  static void CheckForFunctionCalls(ArrayRef<ScheduleNode *> nodes);
+public:
+  /// Warn if the MachineFunction contains any call instructions,
+  /// since the callee's register usage is invisible to the scheduler.
+  /// Call instructions are scheduling boundaries and don't appear
+  /// in the DAG as SUnits, so this checks the MachineFunction
+  /// directly. One warning per function.
+  static void CheckForFunctionCalls(const MachineFunction &mf);
+
+private:
 
   // --- Extraction helpers (per-node-type) ---
 

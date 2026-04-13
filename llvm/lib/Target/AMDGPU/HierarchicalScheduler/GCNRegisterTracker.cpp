@@ -9,6 +9,10 @@
 #include "GCNRegisterTracker.h"
 #include "SIRegisterInfo.h"
 #include "llvm/CodeGen/LiveIntervals.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
+#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
@@ -129,30 +133,29 @@ void GCNRegisterTracker::ExtractFromGroupNode(const ScheduleNode *node) {
 // ============================================================================
 
 GCNRegisterTracker::GCNRegisterTracker(ArrayRef<ScheduleNode *> nodes,
-                                       const MachineRegisterInfo &mri,
-                                       const TargetRegisterInfo &tri,
+                                       const MachineFunction &mf,
                                        const LiveIntervals &lis)
-    : mri_(&mri) {
-  CheckForFunctionCalls(nodes);
-  ExtractNodeRegInfo(nodes, mri, tri, lis);
+    : mri_(&mf.getRegInfo()) {
+  CheckForFunctionCalls(mf);
+  ExtractNodeRegInfo(nodes, mf.getRegInfo(),
+                     *mf.getSubtarget().getRegisterInfo(), lis);
   InitRemainingUses();
 }
 
 void GCNRegisterTracker::CheckForFunctionCalls(
-    ArrayRef<ScheduleNode *> nodes) {
-  for (ScheduleNode *node : nodes) {
-    if (!node->IsLeaf()) {
-      continue;
-    }
-    SUnit *su = node->GetSUnit();
-    if (su && su->isCall) {
-      llvm::outs() << "GCNRegisterTracker WARNING: node "
-                   << node->GetId()
-                   << " is a function call. The callee's register "
-                   << "usage is not visible to the scheduler, so "
-                   << "register pressure and occupancy estimates may "
-                   << "be optimistic.\n";
-    }
+    const MachineFunction &mf) {
+  static DenseSet<const MachineFunction *> warned_functions;
+  if (warned_functions.count(&mf)) {
+    return;
+  }
+  if (mf.getFrameInfo().hasCalls()) {
+    warned_functions.insert(&mf);
+    llvm::outs() << "GCNRegisterTracker WARNING: function "
+                 << mf.getName().str()
+                 << " contains function calls. The callee's register "
+                 << "usage is not visible to the scheduler, so "
+                 << "register pressure and occupancy estimates may "
+                 << "be optimistic.\n";
   }
 }
 

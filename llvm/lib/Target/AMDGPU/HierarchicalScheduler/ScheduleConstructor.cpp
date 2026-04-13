@@ -20,14 +20,13 @@ using namespace llvm::hierarchical_scheduler;
 
 ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
                                          const GCNSubtarget &st,
-                                         const MachineRegisterInfo &mri,
-                                         const TargetRegisterInfo &tri,
+                                         const MachineFunction &mf,
                                          const LiveIntervals &lis)
     : graph_(&graph),
       pressure_tracker_(
           SmallVector<ScheduleNode *>(graph.TopoOrder().begin(),
                                      graph.TopoOrder().end()),
-          mri, tri, lis),
+          mf, lis),
       length_tracker_(graph, st) {
   // Check for group nodes.
   for (const ScheduleNode &node : graph.Nodes()) {
