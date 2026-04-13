@@ -336,8 +336,130 @@ void GCNRegisterTracker::Unschedule(const ScheduleNode *node) {
 }
 
 // ============================================================================
+// SGPR ceiling table (file-local, built from the classifier)
+// ============================================================================
+
+namespace {
+
+// Walk getOccupancyWithNumSGPRs from 0 upward, recording the last n
+// at each occupancy level before it drops. Unreachable occupancies
+// and the bottom (flat) bracket both stay at kNoSGPRCliff.
+SmallVector<unsigned, 12> BuildSGPRMaxTable(const GCNSubtarget &st) {
+  SmallVector<unsigned, 12> table;
+  unsigned max_waves = st.getMaxWavesPerEU();
+  table.assign(max_waves + 1, GCNRegisterTracker::kNoSGPRCliff);
+
+  // Cap is just comfortably past any known SGPR cliff. gfx9's
+  // classifier plateaus at 7 past 100 SGPRs; 128 is ample headroom.
+  constexpr unsigned kScanCap = 128;
+
+  unsigned prev_occ = st.getOccupancyWithNumSGPRs(0);
+  for (unsigned n = 1; n <= kScanCap; ++n) {
+    unsigned cur = st.getOccupancyWithNumSGPRs(n);
+    if (cur < prev_occ) {
+      if (prev_occ < table.size()) {
+        table[prev_occ] = n - 1;
+      }
+      prev_occ = cur;
+      if (cur == 0) {
+        break;
+      }
+    }
+  }
+  // prev_occ now holds the bottom bracket. Leave its entry as
+  // kNoSGPRCliff — the bracket is unbounded above our scan cap.
+  return table;
+}
+
+} // namespace
+
+unsigned GCNRegisterTracker::GetMaxNumSGPRsForOcc(const GCNSubtarget &st,
+                                                  unsigned occ) {
+  static const SmallVector<unsigned, 12> kTable = BuildSGPRMaxTable(st);
+  return (occ < kTable.size()) ? kTable[occ] : kNoSGPRCliff;
+}
+
+// ============================================================================
+// Continuous occupancy score helpers (file-local)
+// ============================================================================
+//
+// Smooth version of integer occupancy: integer occupancy plus a
+// fractional bonus for how far below the current bracket's upper
+// edge the register count sits. See GCNRegisterTracker.h for the
+// formula. Uncapped by design: the early-exit check
+// (IsAtOccupancyCeiling) makes the top-bracket plateau unreachable
+// during search, so a cap would only add branches without changing
+// any decision.
+namespace {
+
+// Continuous occupancy score for a single register class. The two
+// callbacks mirror the GCNSubtarget methods of the same names,
+// generic so the body is shared between VGPR and SGPR.
+template <typename GetOccupancyWithNumRegsFunc, typename GetMaxNumRegsFunc>
+int ComputeContinuousOccupancyScoreForRegClass(
+    unsigned num_regs, int max_waves,
+    GetOccupancyWithNumRegsFunc get_occupancy_with_num_regs_func,
+    GetMaxNumRegsFunc get_max_num_regs_func) {
+  constexpr int M = GCNRegisterTracker::kOccScoreMultiplier;
+
+  int occ = static_cast<int>(get_occupancy_with_num_regs_func(num_regs));
+  if (occ == 0) {
+    // Spilling — below the occ=1 bracket. Score 0 so any
+    // non-spilling schedule strictly beats it.
+    return 0;
+  }
+
+  // Bracket for this occupancy: (floor, ceil]. ceil is the max reg
+  // count still at this occ; floor is the max reg count at the next
+  // higher occ (or 0 if this is the top bracket, so the bracket
+  // spans 1..ceil).
+  int ceil = static_cast<int>(get_max_num_regs_func(occ));
+  int floor = (occ == max_waves)
+                  ? 0
+                  : static_cast<int>(get_max_num_regs_func(occ + 1));
+  int width = ceil - floor;
+
+  // Degenerate bracket: some targets have adjacent occupancies that
+  // share a register ceiling (insufficient granules to distinguish
+  // them). No within-bracket differentiation possible; just return
+  // the integer occupancy score.
+  if (width == 0) {
+    return M * occ;
+  }
+
+  int within = M * (ceil - static_cast<int>(num_regs)) / width;
+  return M * occ + within;
+}
+
+} // namespace
+
+// ============================================================================
 // Occupancy
 // ============================================================================
+
+int GCNRegisterTracker::ComputeContinuousOccupancyScore(
+    const GCNSubtarget &st, unsigned num_vgpr, unsigned num_sgpr) {
+  int max_waves = static_cast<int>(st.getMaxWavesPerEU());
+
+  int vgpr_score = ComputeContinuousOccupancyScoreForRegClass(
+      num_vgpr, max_waves,
+      [&](unsigned n) { return st.getOccupancyWithNumVGPRs(n); },
+      [&](unsigned occ) { return st.getMaxNumVGPRs(occ); });
+
+  int sgpr_score = ComputeContinuousOccupancyScoreForRegClass(
+      num_sgpr, max_waves,
+      [&](unsigned n) { return st.getOccupancyWithNumSGPRs(n); },
+      [&](unsigned occ) { return GetMaxNumSGPRsForOcc(st, occ); });
+
+  return std::min(vgpr_score, sgpr_score);
+}
+
+int GCNRegisterTracker::GetContinuousOccupancyScore() const {
+  return ComputeContinuousOccupancyScore(
+      *st_,
+      max_pressure_.getVGPRNum(st_->hasGFX90AInsts()),
+      max_pressure_.getSGPRNum());
+}
 
 unsigned GCNRegisterTracker::GetRegisterOccupancy() const {
   return max_pressure_.getOccupancy(*st_);
@@ -345,6 +467,10 @@ unsigned GCNRegisterTracker::GetRegisterOccupancy() const {
 
 unsigned GCNRegisterTracker::GetRegionOccupancy() const {
   return std::min(mfi_->getOccupancy(), GetRegisterOccupancy());
+}
+
+unsigned GCNRegisterTracker::GetFunctionOccupancyLimit() const {
+  return mfi_->getOccupancy();
 }
 
 unsigned GCNRegisterTracker::GetStandaloneRegionOccupancy() const {

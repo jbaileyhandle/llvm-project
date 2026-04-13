@@ -52,6 +52,22 @@ class MachineFunction;
 
 namespace hierarchical_scheduler {
 
+/// Criterion by which two ScheduleConstructor states are compared.
+/// Used with ScheduleConstructor::IsBetterThan.
+enum class ScheduleMetric {
+  /// Integer register occupancy (GetRegisterOccupancy). Coarse:
+  /// schedules in the same occupancy bracket tie. Higher is better.
+  kRegisterOccupancy,
+
+  /// Continuous register occupancy score (GetContinuousOccupancyScore).
+  /// Smooth within brackets — useful when search needs to see
+  /// progress toward the next higher bracket. Higher is better.
+  kContinuousRegisterOccupancyScore,
+
+  /// Current schedule length in cycles. Lower is better.
+  kScheduleLength,
+};
+
 class ScheduleConstructor {
 public:
   /// Construct from a graph and target info. The graph must outlive
@@ -103,6 +119,19 @@ public:
   int GetNumScheduled() const {
     return static_cast<int>(schedule_order_.size());
   }
+
+  /// True if this schedule is strictly better than `other` under the
+  /// given metric. Ties return false — callers that want "at least as
+  /// good" should negate IsBetterThan with arguments swapped.
+  bool IsBetterThan(const ScheduleConstructor &other,
+                    ScheduleMetric metric) const;
+
+  /// True when this region's register occupancy has reached the
+  /// function-level ceiling (hardware max, LDS, launch bounds, and
+  /// any reductions from earlier regions). At this point no further
+  /// register improvements can raise actual occupancy — a search can
+  /// exit early.
+  bool IsAtOccupancyCeiling() const;
 
   /// Human-readable summary of current state.
   std::string Describe() const;

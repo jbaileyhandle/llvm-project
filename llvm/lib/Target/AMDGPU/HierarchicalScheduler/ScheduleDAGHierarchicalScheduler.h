@@ -97,6 +97,11 @@ public:
   // round-trip.
   void RunScheduleConstructorShakedown(ScheduleGraph &graph);
 
+  // Tests ScheduleMetric comparison (IsBetterThan), the continuous
+  // register occupancy score sweep at gfx906 stair-step boundaries,
+  // and IsAtOccupancyCeiling on the given region.
+  void RunScheduleMetricShakedown(ScheduleGraph &graph);
+
   // Initialize per-function state. Called at the start of
   // RunHierarchicalScheduler / RunMaliciousScheduler. Stores mfi_
   // and resets occupancy to the pre-GCN-scheduler value.

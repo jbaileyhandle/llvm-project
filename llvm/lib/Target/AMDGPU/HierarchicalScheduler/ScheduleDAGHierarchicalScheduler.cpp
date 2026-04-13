@@ -119,6 +119,7 @@ void ScheduleDAGHierarchicalScheduler::RunRegionShakedowns(
   VerifyGCNRegisterTracker(graph, topo_nodes);
   RunScheduleLengthTrackerShakedown(graph);
   RunScheduleConstructorShakedown(graph);
+  RunScheduleMetricShakedown(graph);
 
   // Dump EntrySU/ExitSU edges from the LLVM DAG.
   llvm::outs() << "  EntrySU succs (" << EntrySU.Succs.size() << "):";
@@ -550,6 +551,147 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleConstructorShakedown(
   }
   llvm::outs() << "  ScheduleConstructor (topo order): "
                << sc2.Describe() << "\n";
+}
+
+void ScheduleDAGHierarchicalScheduler::RunScheduleMetricShakedown(
+    ScheduleGraph &graph) {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+  // Local alias for the occupancy score multiplier. One integer
+  // occupancy step is worth M points in the continuous score, so
+  // each bracket occupies [occ*M, (occ+1)*M).
+  constexpr int M = GCNRegisterTracker::kOccScoreMultiplier;
+  int max_waves = static_cast<int>(st.getMaxWavesPerEU());
+
+  llvm::outs() << "  ScheduleMetric shakedown:\n";
+
+  // --- Part 1: sweep VGPR cliffs, SGPR held at 0 so VGPR dominates ---
+  //
+  // At each cliff `ceil`, the score should be exactly M*occ (within
+  // = 0, top of bracket). One register above (`ceil + 1`), we've
+  // dropped one integer occupancy level, so the score must lie in
+  // [(occ-1)*M, occ*M) — the range of the next-lower bracket. That
+  // single bound catches both "integer occ dropped by 1" and "didn't
+  // overshoot into the bracket below that."
+  llvm::outs() << "    VGPR cliff sweep (sgpr=0):\n";
+  llvm::outs() << "      max_waves=" << max_waves << "\n";
+  for (int occ = max_waves; occ >= 1; --occ) {
+    unsigned ceil = st.getMaxNumVGPRs(occ);
+    int score_at = GCNRegisterTracker::ComputeContinuousOccupancyScore(
+        st, ceil, 0);
+    int score_above = GCNRegisterTracker::ComputeContinuousOccupancyScore(
+        st, ceil + 1, 0);
+    int expected_at = M * occ;
+    bool pass_at = (score_at == expected_at);
+    bool pass_step = (score_above >= (occ - 1) * M) &&
+                     (score_above < occ * M);
+    llvm::outs() << "      occ=" << occ << " ceil=" << ceil
+                 << " score@ceil=" << score_at
+                 << " score@ceil+1=" << score_above
+                 << (pass_at && pass_step ? "  PASS" : "  FAIL")
+                 << "\n";
+    if (!pass_at || !pass_step) {
+      report_fatal_error("VGPR cliff sweep failed");
+    }
+  }
+
+  // --- Part 2: sweep SGPR cliffs, VGPR held at 1 so SGPR dominates ---
+  //
+  // Uses our rolled-own GetMaxNumSGPRsForOcc (built from the same
+  // classifier the scoring helper uses), so the ceil values here
+  // agree with what the helper sees. Skips unreachable occupancies
+  // (GetMaxNumSGPRsForOcc returns kNoSGPRCliff) — those have no
+  // finite cliff to probe. Also skips the bottom bracket for the
+  // same reason.
+  llvm::outs() << "    SGPR cliff sweep (vgpr=1):\n";
+  for (int occ = max_waves; occ >= 1; --occ) {
+    unsigned ceil =
+        GCNRegisterTracker::GetMaxNumSGPRsForOcc(st, occ);
+    if (ceil >= GCNRegisterTracker::kNoSGPRCliff) {
+      // Either unreachable or the unbounded bottom bracket. Skip.
+      continue;
+    }
+    int score_at = GCNRegisterTracker::ComputeContinuousOccupancyScore(
+        st, 1, ceil);
+    int score_above = GCNRegisterTracker::ComputeContinuousOccupancyScore(
+        st, 1, ceil + 1);
+    int expected_at = M * occ;
+    bool pass_at = (score_at == expected_at);
+    bool pass_step = (score_above >= (occ - 1) * M) &&
+                     (score_above < occ * M);
+    llvm::outs() << "      occ=" << occ << " ceil=" << ceil
+                 << " score@ceil=" << score_at
+                 << " score@ceil+1=" << score_above
+                 << (pass_at && pass_step ? "  PASS" : "  FAIL")
+                 << "\n";
+    if (!pass_at || !pass_step) {
+      report_fatal_error("SGPR cliff sweep failed");
+    }
+  }
+
+  // --- Part 3: IsBetterThan plumbing ---
+  //
+  // Schedule the full graph on sc_full, leave sc_empty empty. For
+  // each metric, check that IsBetterThan's verdict matches a direct
+  // comparison of the underlying getter — verifies metric dispatch,
+  // comparison direction, and strict-vs-tie handling with real
+  // (non-fabricated) values from the region.
+  ScheduleConstructor sc_empty(graph, st, MF, *LIS);
+  ScheduleConstructor sc_full(graph, st, MF, *LIS);
+  for (ScheduleNode *node : graph.TopoOrder()) {
+    sc_full.Schedule(node);
+  }
+
+  auto check_metric = [&](ScheduleMetric metric, const char *name,
+                          int val_empty, int val_full, bool higher_is_better) {
+    bool expect_empty_better = higher_is_better ? (val_empty > val_full)
+                                                : (val_empty < val_full);
+    bool expect_full_better = higher_is_better ? (val_full > val_empty)
+                                               : (val_full < val_empty);
+    bool got_empty_better = sc_empty.IsBetterThan(sc_full, metric);
+    bool got_full_better = sc_full.IsBetterThan(sc_empty, metric);
+    bool pass = (got_empty_better == expect_empty_better) &&
+                (got_full_better == expect_full_better);
+    llvm::outs() << "    " << name << ": empty=" << val_empty
+                 << " full=" << val_full
+                 << " empty_better=" << got_empty_better
+                 << " full_better=" << got_full_better
+                 << (pass ? "  PASS" : "  FAIL") << "\n";
+    if (!pass) {
+      report_fatal_error("ScheduleMetric plumbing test failed");
+    }
+  };
+
+  check_metric(
+      ScheduleMetric::kRegisterOccupancy, "reg_occ",
+      sc_empty.GetPressureTracker().GetRegisterOccupancy(),
+      sc_full.GetPressureTracker().GetRegisterOccupancy(),
+      /*higher_is_better=*/true);
+  check_metric(
+      ScheduleMetric::kContinuousRegisterOccupancyScore, "cont_occ",
+      sc_empty.GetPressureTracker().GetContinuousOccupancyScore(),
+      sc_full.GetPressureTracker().GetContinuousOccupancyScore(),
+      /*higher_is_better=*/true);
+  check_metric(
+      ScheduleMetric::kScheduleLength, "length",
+      sc_empty.GetLengthTracker().GetCurrentCycle(),
+      sc_full.GetLengthTracker().GetCurrentCycle(),
+      /*higher_is_better=*/false);
+
+  // --- Part 4: IsAtOccupancyCeiling observability ---
+  //
+  // Print the pieces so we can see them line up. No pass/fail since
+  // whether the region is at the ceiling depends on actual pressure.
+  llvm::outs() << "    initial ceiling check: reg_occ="
+               << sc_empty.GetPressureTracker().GetRegisterOccupancy()
+               << " fn_limit="
+               << sc_empty.GetPressureTracker().GetFunctionOccupancyLimit()
+               << " at_ceiling=" << sc_empty.IsAtOccupancyCeiling() << "\n";
+  llvm::outs() << "    full ceiling check:    reg_occ="
+               << sc_full.GetPressureTracker().GetRegisterOccupancy()
+               << " fn_limit="
+               << sc_full.GetPressureTracker().GetFunctionOccupancyLimit()
+               << " at_ceiling=" << sc_full.IsAtOccupancyCeiling() << "\n";
 }
 
 // Set up ScheduleDAGMILive state for the given region. Calls startBlock and

@@ -139,6 +139,68 @@ public:
   /// set on the MachineFunction.
   unsigned GetStandaloneRegionOccupancy() const;
 
+  /// The function-level occupancy limit: MFI.getOccupancy(). This is
+  /// the current ceiling the region's occupancy is clamped against —
+  /// the structural ceiling (hardware max, LDS, launch bounds), plus
+  /// any reductions made by earlier passes or by this scheduler
+  /// processing other regions of the same function. Improving this
+  /// region's register pressure cannot raise occupancy above this
+  /// value.
+  unsigned GetFunctionOccupancyLimit() const;
+
+  /// Continuous occupancy score based on peak SGPR/VGPR pressure.
+  ///
+  /// Unlike the integer occupancy getters above, this score varies
+  /// smoothly as register pressure changes — two schedules at the
+  /// same integer occupancy are distinguished by how far each is
+  /// from the next-higher bracket. Higher is better.
+  ///
+  /// Register-only: LDS and launch bounds are not considered. Parallel
+  /// to GetRegisterOccupancy(); use GetRegionOccupancy() / an early-exit
+  /// check to handle non-register ceilings.
+  ///
+  /// For a single dimension (VGPR or SGPR):
+  ///   score = M * occ + M * (bracket_ceil - num_reg) / bracket_width
+  /// where M is kOccScoreMultiplier, `occ` is the integer occupancy
+  /// currently achieved by this dimension, and the bracket is the
+  /// register range in which the next integer occupancy step lies.
+  /// Final score is min(vgpr_score, sgpr_score), capped at
+  /// M * maxWavesPerEU. The bracket steps come from the subtarget,
+  /// so the score is portable across gfx targets.
+  int GetContinuousOccupancyScore() const;
+
+  /// Pure-functional version of GetContinuousOccupancyScore for
+  /// arbitrary register counts. Same formula, but takes the counts
+  /// explicitly instead of reading from this region's peak pressure —
+  /// useful for shakedown tests that sweep made-up values.
+  static int ComputeContinuousOccupancyScore(const GCNSubtarget &st,
+                                             unsigned num_vgpr,
+                                             unsigned num_sgpr);
+
+  /// Score points per integer occupancy step (the `M` in the formula
+  /// above). One full occupancy level is worth this many points.
+  static constexpr int kOccScoreMultiplier = 1000;
+
+  /// Stand-in ceiling used for SGPR brackets that have no finite
+  /// upper cliff (the bottom bracket, where the classifier plateaus,
+  /// and unreachable occupancy levels). Chosen well beyond any
+  /// realistic SGPR count so within-bracket interpolation stays
+  /// positive across the full range we'd ever see.
+  static constexpr unsigned kNoSGPRCliff = 255;
+
+  /// Rolled-own replacement for GCNSubtarget::getMaxNumSGPRs, built by
+  /// scanning GCNSubtarget::getOccupancyWithNumSGPRs (the hardcoded
+  /// hardware classifier). Returns the max SGPR count whose classifier
+  /// value equals `occ`, or kNoSGPRCliff for the bottom bracket and
+  /// for unreachable occupancies (so the bottom bracket still
+  /// interpolates smoothly from its floor up to the stand-in ceil).
+  ///
+  /// Needed because LLVM's getMaxNumSGPRs applies granule alignment
+  /// and trap-handler reservations, so it can disagree with the
+  /// classifier on which bracket a given SGPR count falls in. This
+  /// helper agrees with the classifier by construction.
+  static unsigned GetMaxNumSGPRsForOcc(const GCNSubtarget &st, unsigned occ);
+
   /// Human-readable description of a node's register effects.
   std::string DescribeRegOps(const ScheduleNode *node) const;
 

@@ -136,6 +136,33 @@ void ScheduleConstructor::Unschedule() {
 }
 
 // ============================================================================
+// Comparison
+// ============================================================================
+
+bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
+                                       ScheduleMetric metric) const {
+  switch (metric) {
+  case ScheduleMetric::kRegisterOccupancy:
+    return pressure_tracker_.GetRegisterOccupancy() >
+           other.pressure_tracker_.GetRegisterOccupancy();
+
+  case ScheduleMetric::kContinuousRegisterOccupancyScore:
+    return pressure_tracker_.GetContinuousOccupancyScore() >
+           other.pressure_tracker_.GetContinuousOccupancyScore();
+
+  case ScheduleMetric::kScheduleLength:
+    return length_tracker_.GetCurrentCycle() <
+           other.length_tracker_.GetCurrentCycle();
+  }
+  llvm_unreachable("Unknown ScheduleMetric");
+}
+
+bool ScheduleConstructor::IsAtOccupancyCeiling() const {
+  return pressure_tracker_.GetRegisterOccupancy() >=
+         pressure_tracker_.GetFunctionOccupancyLimit();
+}
+
+// ============================================================================
 // Diagnostics
 // ============================================================================
 
