@@ -18,6 +18,11 @@
 //       for (auto *node : sc.GetReadyList()) { ... }
 //       sc.Schedule(chosen_node);
 //   }
+//
+// If the loop body calls Schedule/Unschedule while iterating (e.g.,
+// enumerating alternatives), iterate a GetReadyListSnapshot() copy
+// instead — Schedule/Unschedule mutates the underlying set and
+// invalidates iterators.
 //   // sc.GetScheduleOrder() has the full schedule
 //   // sc.GetPressureTracker() / sc.GetLengthTracker() have metrics
 //
@@ -95,9 +100,28 @@ public:
 
   /// The current ready list — nodes whose strong predecessors are
   /// all scheduled.
+  ///
+  /// WARNING: Do NOT iterate this set across calls to
+  /// Schedule()/Unschedule(). Those mutate the set (erase the
+  /// scheduled node, insert newly-released successors) which
+  /// invalidates iterators. For loops that schedule and unschedule,
+  /// call GetReadyListSnapshot() to get a stable copy and iterate
+  /// that instead.
   const SmallDenseSet<const ScheduleNode *, 16> &GetReadyList() const {
     return ready_list_;
   }
+
+  /// Append the current ready-list contents to `out`. Use this
+  /// instead of iterating `GetReadyList()` directly when the loop
+  /// body will call `Schedule()`/`Unschedule()` — those mutate the
+  /// set and invalidate iterators. The snapshot is stable across
+  /// subsequent Schedule/Unschedule pairs, and the pointer values
+  /// are unaffected (ScheduleNode storage is graph-owned and
+  /// stable). The order in the snapshot is the set's current
+  /// iteration order, which is unspecified; callers that need a
+  /// deterministic ordering should sort the result.
+  void GetReadyListSnapshot(
+      SmallVectorImpl<const ScheduleNode *> &out) const;
 
   /// The schedule order built so far.
   ArrayRef<const ScheduleNode *> GetScheduleOrder() const {

@@ -115,6 +115,11 @@ void ScheduleConstructor::Schedule(const ScheduleNode *node) {
   ReleaseSuccessors(node);
 }
 
+void ScheduleConstructor::GetReadyListSnapshot(
+    SmallVectorImpl<const ScheduleNode *> &out) const {
+  out.append(ready_list_.begin(), ready_list_.end());
+}
+
 void ScheduleConstructor::Unschedule() {
   if (schedule_order_.empty()) {
     report_fatal_error("ScheduleConstructor: Unschedule with empty "
