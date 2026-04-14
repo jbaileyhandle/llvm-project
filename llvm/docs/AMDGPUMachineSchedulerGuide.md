@@ -30,6 +30,8 @@
 - [L. SIScheduleDAGMI (Older Hierarchical Scheduler)](#appendix-l-sischeduledag-mi-older-hierarchical-scheduler)
 - [M. Instruction Latency, Throughput, and Schedule Length](#appendix-m-instruction-latency-throughput-and-schedule-length)
 - [N. Occupancy](#appendix-n-occupancy)
+- [O. OptSched's Ant Colony Optimization (ACO)](#appendix-o-optscheds-ant-colony-optimization-aco)
+- [P. OptSched's Branch-and-Bound Enumerator](#appendix-p-optscheds-branch-and-bound-enumerator)
 
 ---
 
@@ -1867,6 +1869,36 @@ not themaxWavesPerEU starting point.
   or moved behind `LLVM_DEBUG` before the scheduler is used in
   production.
 
+- **Reversible vs non-reversible mode for `ScheduleConstructor` and
+  its trackers.** `GCNRegisterTracker`, `ScheduleLengthTracker`, and
+  `ScheduleConstructor` currently always record undo state on every
+  `Schedule()` call so that `Unschedule()` can reverse it exactly
+  — the pressure tracker saves `def_prev_masks` and `kill_masks`
+  per step, the length tracker saves `saved_max`/`prev_cycle`/
+  `prev_bubbles`, and the schedule-order vector and ready list are
+  pushed/popped. This is essential for DFS-style searches like B&B
+  that need symmetric do/undo. But it's pure overhead for
+  **forward-only** searches: ACO constructs each ant's schedule by
+  walking forward from root to done and never backtracks; a beam
+  search copies constructors instead of unwinding them. In those
+  modes every byte we push onto an undo stack is dead weight.
+  We could parametrize each tracker with a "reversible" mode (or a
+  compile-time template parameter for zero-overhead dispatch): the
+  non-reversible path skips all undo bookkeeping and omits
+  `Unschedule()` entirely, while the reversible path is exactly
+  what we have now. Concretely:
+  - `GCNRegisterTracker::Schedule` wouldn't push a `ScheduleStep`.
+  - `ScheduleLengthTracker::Schedule` wouldn't push undo state.
+  - `ScheduleConstructor::Schedule` wouldn't track
+    `remaining_strong_preds_` deltas or ready-list removals
+    beyond what's needed for future forward progress.
+  Impact: negligible per-call work but potentially significant
+  memory pressure savings across an ACO iteration (thousands of
+  ants × hundreds of nodes × a few dozen bytes of undo state per
+  step). Worth measuring before implementing — the per-step cost
+  is small, so the win depends on how cache-sensitive the ACO
+  inner loop turns out to be.
+
 - **Verify LLVM's scheduling model latencies for gfx906.** The latency
   numbers in `SIQuarterSpeedModel` were written in 2015 for early GCN
   hardware and inherited unchanged when gfx906 was added in 2018.
@@ -3496,3 +3528,1450 @@ The occupancy calculation itself doesn't need a new class — it's
 a few calls to existing `GCNSubtarget` and `GCNRegPressure` methods.
 What we need is the logic for deciding how to balance occupancy
 against schedule length, which is a scheduling strategy concern.
+
+---
+
+## Appendix O: OptSched's Ant Colony Optimization (ACO)
+
+This appendix describes how the ACO scheduler in our fork of OptSched
+actually works, based on a direct reading of the code in
+`llvm/lib/Target/AMDGPU/OptSched/lib/Scheduler/aco.hip.cpp` and the
+default configuration in `optsched-cfg/sched.ini`. It is intended as
+the reference spec for cloning ACO onto our `HierarchicalScheduler`
+infrastructure.
+
+Everything below describes the **host (CPU) path** with `USE_ACS = 0`
+(the default — see line 41). The `USE_ACS` branches and the device
+(GPU) paths exist in the same source file but are not what runs on a
+typical host build.
+
+### O.1 High-level overview
+
+Ant Colony Optimization is a population-based metaheuristic. Each
+"ant" builds a complete candidate schedule by walking the DAG from
+root to exit, making one instruction choice at each step. Choices
+are biased by two things:
+
+1. A **pheromone table** — learned over iterations, a matrix recording
+   "this predecessor → successor edge tends to appear in good
+   schedules."
+2. A **heuristic** — a cheap per-instruction score (critical-path
+   distance, last-use count, etc.) that injects static domain
+   knowledge.
+
+Per iteration, N ants each build a schedule. After the iteration,
+the best schedule's arcs get extra pheromone (the "deposit"), and
+the entire table is scaled down (the "evaporation"). Over many
+iterations, the pheromone concentration drifts toward arcs that
+repeatedly appear in low-cost schedules.
+
+**Which flavor of ACO does OptSched use?** There are several named
+variants in the ACO literature, and OptSched doesn't match any of
+them exactly — it mixes pieces of each:
+
+- **Ant System (AS)** — Dorigo 1992, the original. Every ant
+  deposits pheromone proportional to its solution quality. Global
+  evaporation multiplies every cell by `(1 - ρ)` after each
+  iteration. Selection is pure fitness-proportional (roulette
+  wheel) with no exploitation bias.
+
+- **Ant Colony System (ACS)** — Dorigo & Gambardella 1996/97, the
+  more aggressive refinement. Only the best ant (iteration or
+  global) deposits. Instead of a separate evaporation pass, ants
+  apply a **local** update to each arc they traverse
+  during construction (`τ ← (1 - ξ) · τ + ξ · τ₀`), which makes
+  that arc slightly less attractive to subsequent ants in the same
+  iteration — encourages exploration. Selection uses the
+  **pseudo-random proportional rule**: with probability `q₀`, pick
+  the max-score arc deterministically (exploitation); otherwise,
+  fitness-proportional sample (exploration).
+
+OptSched's default host configuration is a hybrid:
+
+| Aspect | AS | ACS | OptSched host default |
+|---|---|---|---|
+| Who deposits | all ants | best only | **iteration best only** (ACS-like) |
+| Evaporation | global pass, every cell | none; done via local update | **global pass, every cell** (AS-like) |
+| Local update during construction | none | yes | **none** (`USE_ACS = 0`) |
+| Selection | fitness-proportional | pseudo-random proportional | **pseudo-random proportional** (ACS-like) |
+
+So OptSched is an "AS-style update with an ACS-style selection rule,
+updating from iteration best." The `USE_ACS` macro in the source
+specifically gates the ACS local-update and ACS-style combined
+evaporate/deposit formula — turning it on switches to a more
+faithful ACS implementation. Its default value is `0` (off), so
+the AS-style bulk evaporation path is what actually runs.
+
+The upshot for us: when documentation or code comments in OptSched
+say "ACS," they mean the optional `USE_ACS = 1` path, not what the
+scheduler actually does by default.
+
+### O.2 The pheromone table
+
+**Storage** (`aco.hip.cpp:105-106`):
+```cpp
+int pheromone_size = (count_ + 1) * count_;
+pheromone_.resize(pheromone_size);
+```
+
+A flat 1D array of `(count + 1) * count` cells, where `count` is the
+number of instructions in the region.
+
+**Indexing** (`aco.hip.cpp:141-147`):
+```cpp
+pheromone_t &ACOScheduler::Pheromone(InstCount from, InstCount to) {
+  int row = 0;
+  if (from != -1)
+    row = from + 1;
+  return pheromone_[(row * count_) + to];
+}
+```
+
+- `from == -1` means "no previous instruction" (empty schedule; we
+  are picking the first instruction). This case is mapped to row 0.
+- `from == 0..count-1` means "previous was instruction with ID `from`"
+  and maps to row `from + 1`.
+- `to` is always the candidate instruction's ID.
+
+The logical structure is therefore "pheromone[prev → cur]" with a
+synthetic "empty" predecessor for the very first pick.
+
+**Initialization** (`aco.hip.cpp:1282-1300`):
+```cpp
+int pheromone_size = (count_ + 1) * count_;
+for (int i = 0; i < pheromone_size; i++)
+  pheromone_[i] = 1;
+initialValue_ = 1;
+// ... run one heuristic schedule, get its cost ...
+#if !USE_ACS
+initialValue_ = (double)numThreads_ / heuristicCost;
+#endif
+for (int i = 0; i < pheromone_size; i++)
+  pheromone_[i] = initialValue_;
+```
+
+All cells are first set to 1 (so the heuristic schedule run has
+something to work with), then re-seeded to
+`numThreads_ / heuristicCost`, which scales the uniform starting
+point by the number of ants and the baseline cost.
+
+### O.3 Heuristic values
+
+Each ready-list entry carries a precomputed heuristic value, derived
+from `SchedPriorities` via a `KeysHelper`. The heuristic is a
+**weighted combination** of simple per-instruction metrics — valid
+components are documented in `sched.ini`:
+
+- `CP`  — critical path distance
+- `LUC` — last use count (how many live values this instruction
+  ends — a high LUC means scheduling this instruction immediately
+  reduces pressure)
+- `UC`  — use count
+- `SC`  — successor count
+- `NID` — node ID (essentially a tiebreaker)
+- `LLVM` — LLVM's default list-scheduler order
+
+Example compound heuristics: `LUC_CP_NID`, `CP_LUC`, etc.
+
+The default in `optsched-cfg/sched.ini` is `ACO_HEURISTIC NID`.
+Despite its name ("node ID"), this is **not** an arbitrary
+construction-order tiebreaker — OptSched's `nodeID` is assigned
+from LLVM's `SUnit::NodeNum`
+(`OptSchedDDGWrapperBasic.cpp:485-487`), which reflects the
+instruction order in the MBB at the time LLVM built the schedule
+graph. Since OptSched runs after the GCN scheduler has already
+produced an initial ordering, `NodeNum` reflects that inherited
+schedule. The NID priority formula
+(`ready_list.hip.cpp:102`) is `MaxNID - nodeID`, so lower
+node IDs get higher priority — in other words, **NID prefers
+instructions that appeared earlier in the inherited schedule**.
+
+So using `NID` as the ACO heuristic encodes "stay close to what
+the upstream scheduler gave you, unless learned pheromones
+override." With a strong upstream like the GCN scheduler, that's
+a meaningful bias — not a no-op. LUC (pressure-focused) and CP
+(length-focused) are substantively different: they derive their
+priority from DAG structure rather than from the inherited order.
+
+The maximum possible heuristic value across a region is
+`kHelper->getMaxValue()`, stored as `MaxPriority` and inverted to
+`MaxPriorityInv = 1 / MaxPriority` for use in scoring.
+
+### O.4 Score formula
+
+For each (from, to) arc, the combined score is
+(`aco.hip.cpp:149-156`):
+```cpp
+pheromone_t Score(InstCount FromId, InstCount ToId, HeurType ToHeuristic) {
+  pheromone_t HeurScore = ToHeuristic * MaxPriorityInv + 1;   // in [1, 2]
+  pheromone_t Hf = heuristicImportance_ ? HeurScore : 1.0;
+  return Pheromone(FromId, ToId) * Hf;
+}
+```
+
+So:
+- If `heuristicImportance_ == 0`, score is just the raw pheromone.
+- Otherwise, score is `pheromone * (heuristic / maxHeur + 1)`, i.e.,
+  `pheromone * Hf` where `Hf ∈ [1, 2]`.
+
+This is **not** the classic Ant System formulation `τ^α · η^β`.
+`heuristicImportance_` is used as a boolean toggle, not an exponent —
+the `pow(ToHeuristic, heuristicImportance_)` version is commented out
+immediately above. The heuristic multiplier is at least 1 and at most
+2, so it can tilt choices but can never zero out a pheromone.
+
+`ACO_HEURISTIC_IMPORTANCE` in `sched.ini` defaults to `1`, meaning
+the [1, 2] multiplier is active.
+
+### O.5 Selection rule (pseudo-random proportional)
+
+The selection rule in `SelectInstruction` (`aco.hip.cpp:483-555`)
+combines two classical strategies with a coin flip between them.
+
+**Input to selection.** At this point, every ready-list entry `i`
+already has a precomputed score `IScore[i]` (from the formula in
+O.4 plus per-candidate adjustments from O.9). From these, the code
+computes:
+
+- `ScoreSum`  — the sum of all ready-list scores.
+- `MaxScoreIndx` — the index of the highest-scoring entry.
+
+**Two selection strategies.**
+
+1. **Exploitation (greedy).** Pick `MaxScoreIndx` deterministically.
+   "Whatever looks best right now, commit to it."
+
+2. **Exploration (fitness-proportional, aka roulette wheel).**
+   Pick entry `i` with probability `IScore[i] / ScoreSum`. A ready
+   instruction with twice the score of another is twice as likely
+   to be picked, but no instruction is ever forbidden unless its
+   score is literally zero. Implementation is the standard
+   "cumulative walk" — roll a random point `P` in `[0, ScoreSum]`,
+   then walk the ready list subtracting each entry's score from
+   `P` until it goes non-positive; the entry that pushed it over
+   is the winner.
+
+**Choosing between the two.** Each step, the ant rolls a single
+uniform random number `q ∈ [0, 1)` and compares it to a threshold
+`choose_best_chance`:
+
+- If `q < choose_best_chance`, **exploit** (pick `MaxScoreIndx`).
+- Otherwise, **explore** (roulette-wheel result).
+
+So `choose_best_chance` controls the greedy-vs-random mix. Higher
+value → more greedy, less exploration.
+
+**One override.** If the ant is `currentlyWaiting` on another
+instruction, exploitation is forced regardless of the roll — the
+ant can't afford to explore while already stalled.
+
+**How is `choose_best_chance` set?** Two modes, controlled by
+`ACO_USE_FIXED_BIAS`:
+
+- **Fixed-bias mode** (default, `ACO_USE_FIXED_BIAS YES`):
+  `choose_best_chance = max(0, 1 - fixed_bias / count)`, where
+  `fixed_bias` is `ACO_FIXED_BIAS` (default 5) and `count` is the
+  number of instructions in the region. For different region
+  sizes:
+
+  | `count` | `choose_best_chance` | Interpretation |
+  |---|---|---|
+  | 5   | 0    | Always explore, never exploit |
+  | 10  | 0.5  | 50/50 split |
+  | 50  | 0.9  | 90% greedy, 10% random |
+  | 100 | 0.95 | 95% greedy |
+  | 1000 | 0.995 | Essentially all greedy |
+
+  The logic: on small regions there are few ready candidates, so
+  pure exploration doesn't waste much; on big regions, random
+  picks are mostly junk and you want to trust the pheromone/heuristic
+  signal.
+
+- **Ratio mode** (`ACO_USE_FIXED_BIAS NO`):
+  `choose_best_chance = ACO_BIAS_RATIO` (default 0.995, size-independent).
+
+**Implementation quirk worth knowing.** The code computes both the
+roulette-wheel winner *and* the greedy winner on every step, then
+picks one based on the coin flip. That's wasteful-looking but
+intentional — it's written that way to avoid a divergent branch on
+GPU (both threads do the same work regardless of which rolls for
+exploration). On CPU it just means we always scan the ready list
+once to compute cumulative sums even when we're going to use the
+greedy pick. For our CPU port we can short-circuit: compute the
+greedy pick as a by-product of the score loop, and only do the
+roulette walk if we've decided to explore.
+
+**Summary.** At default settings on realistic regions (count ≥ 50),
+selection is ≥90% greedy with occasional probabilistic deviations.
+The pheromone table shapes *what* looks greedy; the rare exploration
+steps are what let it escape local optima and discover new arcs
+to deposit on.
+
+### O.6 Single ant: schedule construction (FindOneSchedule)
+
+One ant's work is to walk the DAG from root to done, picking one
+instruction per step until the schedule is complete. Host path at
+`aco.hip.cpp:785-918`:
+
+```
+FindOneSchedule(RPTarget):
+    schedule = new InstSchedule
+    Initialize scheduler state (crntCycleNum = 0, ready list empty, etc.)
+
+    Add root instruction to ready list
+    compute root's score from the pheromone and heuristic
+    lastInst = root
+
+    while (schedule not complete):
+        # Track how many ready instructions are RP-neutral or beneficial.
+        RP0OrPositiveCount = 0
+        for I in ready list:
+            if I is ready THIS cycle and I.defs ≤ I.LUC:
+                RP0OrPositiveCount++
+
+        # Step 1: Select an instruction (if not currently waiting).
+        inst = None
+        if not currently waiting:
+            closeToRPTarget = (current spill cost >= RPTarget * 9/10)
+            selIdx = SelectInstruction(lastInst, schedule.totalStalls,
+                                       rgn, closeToRPTarget,
+                                       currentlyWaiting=(waitFor != None))
+            if selIdx != -1:
+                entry = ready_list.remove_at(selIdx)
+                inst = entry.inst
+                if inst.ReadyOn > crntCycleNum or not legal:
+                    # Must wait — save and handle next cycle.
+                    waitUntil = inst.ReadyOn
+                    waitFor = inst
+                    inst = None
+                else:
+                    lastInst = inst
+
+        # Step 2: Resume waited-for instruction if possible.
+        if waitFor and waitUntil <= crntCycleNum and legal(waitFor):
+            inst = waitFor
+            waitFor = None
+            lastInst = inst
+
+        # Append to schedule (or a stall slot if no inst chosen).
+        if inst is None:
+            schedule.append(STALL)
+            schedule.totalStalls++
+        else:
+            schedule.append(inst)
+            mark inst scheduled; update ready list releases
+            # RPTarget enforcement: kill any ant that busts the budget.
+            if current spill cost > RPTarget:
+                delete schedule
+                numAntsTerminated_++
+                return NULL
+
+        if MovToNxtSlot advanced slot/cycle:
+            InitNewCycle
+
+    rgn_->UpdateScheduleCost(schedule)
+    return schedule
+```
+
+Key points:
+- The ant **never backtracks**. It's a forward construction loop.
+- The ant can **abort** mid-construction if its partial spill cost
+  exceeds `RPTarget` — this is how OptSched prunes obviously bad
+  ants without letting them complete. Aborted ants return `NULL`
+  and increment `numAntsTerminated_`.
+- Stalls are explicit: if the max-scoring instruction isn't ready
+  this cycle, the ant can choose to wait (inserting stall cycles)
+  or pick a different ready instruction (see O.9).
+- `SelectInstruction` consumes the chosen entry from the ready
+  list; `UpdateACOReadyList` releases successors after scheduling.
+
+### O.7 Pheromone update
+
+After an iteration, OptSched updates the table from the iteration's
+best schedule. Host path at `aco.hip.cpp:1635-1675` (non-ACS branch):
+
+```cpp
+portion = schedule->GetCost() / (ScRelMax * 1.5);
+deposition = fmax((1 - portion) * MAX_DEPOSITION_MINUS_MIN, 0) + MIN_DEPOSITION;
+// MIN_DEPOSITION = 1, MAX_DEPOSITION = 6, so deposition ∈ [1, 6].
+
+// Walk the schedule's arcs (lastInst → inst), depositing on each.
+lastInst = NULL;  // → Pheromone row 0 ("no previous")
+while (instNum != INVALID):
+    inst = dag.getInst(instNum);
+    pheromone = &Pheromone(lastInst, inst);
+    *pheromone += deposition;
+    lastInst = inst;
+    instNum = schedule.next();
+
+// Global evaporation — multiply every cell except row 0.
+for (int i = 0; i < count_; i++) {         // i maps to row i+1 internally
+    for (int j = 0; j < count_; j++) {
+        pheromone = &Pheromone(i, j);
+        *pheromone *= (1 - decay_factor);
+    }
+}
+```
+
+- **Deposition** is a function of how good the schedule was relative
+  to `ScRelMax`, which is set once per `FindSchedule` call as
+  `rgn_->GetHeuristicCost()` — the cost of the pre-loop heuristic
+  schedule. Schedules much better than the baseline get ~6 points
+  per arc; schedules at or above 1.5× the baseline get 1 point.
+- **Evaporation** is a uniform multiplicative decay across the
+  table, controlled by `decay_factor` (default
+  `ACO_DECAY_FACTOR = 0.8`).
+- **Quirk**: the decay loop iterates `i = 0..count-1`, which maps
+  to pheromone table rows `1..count` via `Pheromone(i, j)`'s
+  index translation. **Row 0 (the "no previous instruction" row)
+  is not touched by evaporation.** Deposits still hit row 0 via the
+  first-arc update (when `lastInst == NULL`). Whether this is a bug
+  or a design choice to preserve accumulated bias on first-pick
+  decisions isn't documented in the OptSched source. For our clone,
+  we should decide explicitly — matching OptSched exactly means
+  replicating this, but a straight fix is trivial.
+
+### O.8 Main loop: iterations and termination
+
+`FindSchedule` at `aco.hip.cpp:1238+`:
+
+```
+FindSchedule(schedule_out, region):
+    heuristicImportance_ = config[ACO_HEURISTIC_IMPORTANCE]      // default 1
+    fixed_bias           = config[ACO_FIXED_BIAS]                // default 5
+    decay_factor         = config[ACO_DECAY_FACTOR]              // default 0.8
+    noImprovementMax     = config[ACO_STOP_ITERATIONS_RANGE_X]   // depends on region size
+
+    # Pre-loop: seed pheromones uniformly and run the heuristic.
+    for cell in pheromone_table: cell = 1
+    ScRelMax = region->GetHeuristicCost()
+    heuristicSched = FindOneSchedule(RPTarget=INF)
+    heuristicCost  = heuristicSched.cost + 1
+    initialValue_  = numThreads_ / heuristicCost
+    for cell in pheromone_table: cell = initialValue_
+
+    # Seed with the better of (heuristic schedule, initial schedule).
+    bestSchedule = shouldReplaceSchedule(initial, heuristic)
+                     ? heuristic : initial
+    UpdatePheromone(bestSchedule, /*isIterationBest=*/false)
+    RPTarget = bestSchedule.spillCost
+
+    # Main loop.
+    noImprovement = 0
+    while noImprovement < noImprovementMax:
+        iterationBest = NULL
+        for ant = 0 .. numThreads_-1:                   # HOST_ANTS, default 11520
+            schedule = FindOneSchedule(RPTarget)
+            if schedule and shouldReplaceSchedule(iterationBest, schedule,
+                                                  /*IsGlobal=*/false, RPTarget):
+                iterationBest = schedule
+            else:
+                delete schedule
+        if iterationBest:
+            UpdatePheromone(iterationBest, /*isIterationBest=*/false)  # <- iteration best
+        if shouldReplaceSchedule(bestSchedule, iterationBest,
+                                 /*IsGlobal=*/true, RPTarget):
+            bestSchedule = iterationBest
+            RPTarget = bestSchedule.spillCost
+            noImprovement = 0
+        else:
+            noImprovement++
+```
+
+- The update is from **iteration best**, not global best
+  (`aco.hip.cpp:1508-1511`).
+- Termination is by **no-improvement counter**, not fixed iteration
+  count. Size-dependent thresholds
+  (`ACO_STOP_ITERATIONS_RANGE1..4`) cap how long we're willing to
+  stall on each region: 1 for `count < 50`, 2 for `count < 100`, 3
+  for `count < 1000`, 3 otherwise.
+- `RPTarget` tightens as the best improves — later ants must beat
+  the current best's spill cost or they get killed mid-construction
+  (see O.6). This is a key performance trick: most work goes into
+  promising schedules because losing ants abort early.
+- `isIterationBest` is always passed as `false`. There is a branch
+  inside `UpdatePheromone` for `isIterationBest == true` that
+  deposits a flat 100000, but it's dead code on the host path.
+
+### O.9 AMDGPU-specific score adjustments
+
+Beyond the base `pheromone * Hf` score, `SelectInstruction`
+(`aco.hip.cpp:376-470` host) applies several per-candidate
+adjustments based on register pressure and stall behavior:
+
+1. **Net-negative-to-RP penalty.** If any ready instruction is
+   RP-neutral or beneficial (`RP0OrPositiveCount != 0`) and
+   the candidate has more defs than last-uses
+   (`candidateDefs > candidateLUC`), scale its score by 0.9.
+
+2. **Not-yet-ready candidates get stall-related penalties.** If a
+   candidate's `ReadyOn > crntCycleNum` (scheduling it would
+   require stall cycles):
+   - If any candidate is ready this cycle (`RP0OrPositiveCount`
+     is nonzero), the not-ready candidate's score drops to
+     `0.0000001` — effectively rejected.
+   - Otherwise, scale by
+     `(globalBestStalls - cyclesNeededToWait * 2) / globalBestStalls`
+     or `1 / globalBestStalls`, depending on magnitude. If RP is
+     high on any used register type and we're close to the RP
+     target, skip the stall penalty (picking this now is more
+     valuable than avoiding the stall).
+   - Additional penalty if we've already racked up too many stalls
+     (`totalStalls >= globalBestStalls * 5/10`).
+
+3. **Currently-waiting filter.** If the ant is already waiting on
+   one instruction, don't consider candidates that would
+   require more waiting OR that are net-negative to RP.
+
+4. **Floor.** Any score below `0.0000001` is raised to that floor,
+   so no ready instruction is ever totally excluded (which would
+   break the roulette wheel if it zeros `ScoreSum`).
+
+These are AMDGPU-objective-specific — they encode "prefer
+pressure-reducing instructions when pressure is a concern" and
+"don't stall unnecessarily unless it helps pressure." They
+aren't part of ACO in general.
+
+### O.10 Configuration parameters (defaults)
+
+From `llvm/lib/Target/AMDGPU/OptSched/optsched-cfg/sched.ini`:
+
+| Parameter | Default | Role |
+|---|---|---|
+| `HOST_ANTS` | 11520 | Ants per iteration on host. |
+| `ACO_HEURISTIC` | `NID` | Heuristic type for 1st pass. |
+| `ACO_HEURISTIC_SECOND_PASS1/2` | `NID` | Heuristic for 2nd pass. |
+| `ACO_HEURISTIC_IMPORTANCE` | 1 | Toggle for heuristic multiplier. |
+| `ACO_USE_FIXED_BIAS` | `YES` | Use `1 - fixed_bias/count` rule. |
+| `ACO_FIXED_BIAS` | 5 | Bias constant when fixed-bias is on. |
+| `ACO_BIAS_RATIO` | 0.995 | Exploitation probability if fixed-bias off. |
+| `ACO_DECAY_FACTOR` | 0.8 | Global evaporation decay. |
+| `ACO_LOCAL_DECAY` | 0.1 | ACS local-decay (unused — `USE_ACS = 0`). |
+| `ACO_TOURNAMENT` | `NO` | 3-tournament selection (unused). |
+| `ACO_STOP_ITERATIONS_RANGE1` | 1 | `count < 50` |
+| `ACO_STOP_ITERATIONS_RANGE2` | 2 | `count < 100` |
+| `ACO_STOP_ITERATIONS_RANGE3` | 3 | `count < 1000` |
+| `ACO_STOP_ITERATIONS_RANGE4` | 3 | `count >= 1000` |
+
+And macros in `aco.hip.cpp`:
+```cpp
+#define USE_ACS 0              // Ant Colony System branch disabled
+#define MIN_DEPOSITION 1
+#define MAX_DEPOSITION 6
+#define MAX_DEPOSITION_MINUS_MIN (MAX_DEPOSITION - MIN_DEPOSITION)
+```
+
+### O.11 Putting it all together (pseudo-code)
+
+```
+ACO(region):
+    count = region.numInstructions()
+    pheromone = Table(rows=count+1, cols=count)   # row 0 = "no previous"
+    heurImp, fixedBias, decay, noImprMax = read_config()
+
+    # 1. Seed
+    heurSched = build_schedule_greedy(region)     # one heuristic run
+    ScRelMax  = heurSched.cost
+    pheromone.fill(numAnts / (heurSched.cost + 1))
+    best = heurSched
+    deposit_schedule(pheromone, best)
+    RPTarget = best.spillCost
+
+    # 2. Iterate
+    noImpr = 0
+    while noImpr < noImprMax:
+        iterBest = None
+        for ant in 1..numAnts:
+            sched = build_ant_schedule(region, pheromone, RPTarget)
+            if sched and (iterBest is None or sched.cost < iterBest.cost):
+                iterBest = sched
+        if iterBest:
+            deposit_schedule(pheromone, iterBest)
+            evaporate_all(pheromone, decay)
+        if iterBest and iterBest.cost < best.cost:
+            best = iterBest
+            RPTarget = best.spillCost
+            noImpr = 0
+        else:
+            noImpr += 1
+
+    return best
+
+
+build_ant_schedule(region, pheromone, RPTarget):
+    sched   = empty
+    ready   = {root}
+    lastId  = -1     # "no previous" sentinel
+    currentCycle = 0
+    waitFor = None
+
+    while sched is not complete:
+        # Score every ready candidate.
+        for cand in ready:
+            Hf = (cand.heur / maxHeur + 1) if heurImp else 1
+            cand.score = pheromone[lastId, cand.id] * Hf
+            apply AMDGPU-specific score adjustments (see O.9)
+
+        scoreSum = sum(c.score for c in ready)
+        maxIdx   = argmax(c.score for c in ready)
+
+        # Pseudo-random proportional rule.
+        if fixedBias: q0 = max(0, 1 - fixedBias/count)
+        else:         q0 = biasRatio
+
+        if random() < q0 or waitFor is not None:
+            choice = ready[maxIdx]                  # exploitation
+        else:
+            choice = roulette_wheel(ready, scoreSum)  # exploration
+
+        # Handle waiting / stalling.
+        if choice.readyOn > currentCycle:
+            waitFor = choice
+            sched.appendStall()
+            continue
+        else:
+            sched.append(choice)
+            lastId = choice.id
+            release_successors_of(choice, ready)
+
+        # RP budget — kill ants that overrun.
+        if sched.spillCost > RPTarget:
+            return None
+
+        currentCycle = advance()
+
+    return sched
+
+
+deposit_schedule(pheromone, sched):
+    portion = sched.cost / (ScRelMax * 1.5)
+    deposition = max((1 - portion) * 5, 0) + 1   # ∈ [1, 6]
+    lastId = -1
+    for inst in sched:
+        pheromone[lastId, inst.id] += deposition
+        lastId = inst.id
+
+
+evaporate_all(pheromone, decay):
+    for row in 1..count:            # NOTE: row 0 intentionally skipped
+        for col in 0..count-1:
+            pheromone[row, col] *= (1 - decay)
+```
+
+### O.12 Things we should probably not inherit from OptSched
+
+When cloning onto our infrastructure, several things are worth
+reconsidering rather than copying verbatim:
+
+- **11520 ants per iteration on the host path.** That number makes
+  sense for the GPU path (massive parallelism), but the CPU path
+  runs them sequentially. For our first cut we'd likely start with
+  a much smaller number (50–200) and scale up only if needed.
+- **Row 0 never evaporating** — we should decide whether to fix
+  this or replicate it. Replication is only interesting if there's
+  evidence the quirk is helpful.
+- **`USE_ACS` / `use_tournament` / `ACO_LOCAL_DECAY` dead branches.**
+  Skip entirely. The non-ACS roulette-with-bias path is what
+  actually runs.
+- **The `isIterationBest = true` branch of `UpdatePheromone`.**
+  Never called on host; don't port it.
+- **Per-candidate score adjustments** (O.9) are deeply entangled
+  with OptSched's `BBWithSpill` pressure model. For a first cut on
+  our infrastructure, we can use our `GCNRegisterTracker`-based
+  continuous occupancy score directly and add stall/RP penalties
+  later if needed.
+
+### O.13 Mapping to our infrastructure
+
+| OptSched concept | Our equivalent |
+|---|---|
+| `FindOneSchedule` | Loop calling `ScheduleConstructor::Schedule()` |
+| `readyLs` / `ACOReadyList` | `ScheduleConstructor::GetReadyListSnapshot()` |
+| `lastInst` (previous pick) | Tracked by the ant; our `ScheduleConstructor` doesn't need this since we pass it to the selection function |
+| `RPTarget` ant-termination | Check `pressure_tracker_.GetRegisterOccupancy()` or continuous score against a budget; `Unschedule` and abort if over |
+| `schedule->GetCost()` | `ScheduleConstructor::IsBetterThan` / cost-returning getters |
+| `shouldReplaceSchedule` | `ScheduleConstructor::IsBetterThan(other, metric)` |
+| `Pheromone(from, to)` table | `AcoTable` (new class, indexing per O.2) |
+| Heuristic precomputation | New per-graph pass computing LUC/CP/whatever per node |
+| `ScRelMax` = heuristic baseline | Cost of a single greedy-constructed schedule with our tracker |
+| `UpdatePheromone` | `AcoTable::Deposit` + `EvaporateAll` |
+
+---
+
+## Appendix P: OptSched's Branch-and-Bound Enumerator
+
+This appendix describes OptSched's exact enumerator (the "BnB"
+path) based on direct reading of
+`llvm/lib/Target/AMDGPU/OptSched/lib/Scheduler/enumerator.cpp`,
+`hist_table.cpp`, and the driver in `bb_spill.hip.cpp`. It is the
+reference spec for any future port to our infrastructure — for
+now we're starting with ACO, but documenting this up front gives
+us a clean baseline to compare against and helps us decide what
+to reuse if/when we return to B&B.
+
+### P.1 The two-pass algorithm
+
+OptSched's B&B scheduler for AMDGPU is a **two-pass** algorithm,
+described in Shobaki, Kerbow, Mekhanoshin, *Optimizing Occupancy
+and ILP on the GPU using a Combinatorial Approach*, CGO 2020. The
+two passes run sequentially over every region in the kernel,
+driven by `ScheduleDAGOptSchedGCN::finalizeSchedule`
+(`GCNOptSched.cpp:77`):
+
+1. **Occupancy pass** (`OptSchedMaxOcc` in the driver,
+   `scheduleOptSchedMinRP` under the hood,
+   `OptimizingScheduler.hip.cpp:1221`). Goal: minimize Adjusted
+   Peak Register Pressure (APRP), which in turn maximizes GPU
+   occupancy. Achieved by **setting every DAG edge latency to 1**,
+   which makes any instruction ordering trivially length-feasible
+   (since `length == instCnt` is always reachable on a
+   single-issue target with unit latencies). With length out of
+   the picture, the enumerator has a single objective: minimum
+   APRP. Runs with `LatencyPrecision = LTP_UNITY` and
+   `SchedForRPOnly = true`.
+
+2. **ILP pass** (`OptSchedBalanced` in the driver,
+   `scheduleOptSchedBalanced`, `OptimizingScheduler.hip.cpp:1232`).
+   Goal: find the shortest schedule that maintains the APRP found
+   in the occupancy pass. Runs with `LatencyPrecision = LTP_ROUGH`
+   (real LLVM latencies back in play), `SecondPass = true`, and
+   `HeurSchedType = SCHED_SEQ` so the pass takes pass-1's output
+   as its seed and only tries to tighten its length. The
+   enumerator iterates target schedule lengths from the
+   critical-path lower bound upward, looking for the first one
+   that meets both the length target and the APRP target.
+
+Both passes call into the **same enumerator code** — there is no
+separate "pass-1 enumerator" and "pass-2 enumerator." What
+differs between them is:
+
+- The DDG's edge latencies, set at DDG construction time
+  (`OptSchedDDGWrapperBasic.cpp:455-456`): `Latency = 1` if
+  `LTP_UNITY`, `I->getLatency()` if `LTP_ROUGH`.
+- A handful of scheduler flags (`SecondPass`, `SchedForRPOnly`,
+  `StaticNodeSup`, `UseLLVMScheduler`, `EnumPriorities`,
+  `HeurSchedType`).
+- The input seed schedule: pass 1 seeds from a list scheduler;
+  pass 2 seeds from pass 1's output (via `SCHED_SEQ`).
+- Timeouts, from separate config options.
+
+**Why unit latencies make the occupancy pass a simpler problem.**
+With all latencies = 1 on a single-issue machine, the schedule
+length is always `instCnt` regardless of the instruction order
+— every ordering uses exactly one cycle per instruction, with no
+stalls possible. So length is no longer a variable to optimize,
+and the enumerator's outer length loop (see P.3) degenerates to
+a single iteration at `trgtLngth == instCnt`. Pruning that
+depends on length (range tightening, dynamic LB) becomes
+trivial. The pass becomes a pure register-pressure search.
+
+**Why the ILP pass is constrained by the occupancy pass's
+result.** After the occupancy pass, each region has been
+scheduled to its minimum-APRP order under unit latencies. The
+ILP pass is allowed to move instructions around, but must not
+exceed the APRP it was given as a target, and should shorten the
+schedule if possible. Reusing the occupancy-pass output as the
+seed (`SCHED_SEQ`) means the ILP pass starts from an order
+that's already known to hit the APRP target, so its search tree
+begins at a known-feasible solution.
+
+The rest of this appendix describes the shared enumerator
+machinery that both passes invoke. Section P.2 onward describes
+the enumerator itself — same code for both passes, with
+differences noted where they matter.
+
+### P.1.1 High-level overview of the shared enumerator
+
+The enumerator searches for an optimal schedule by depth-first
+exploration of every legal instruction ordering, pruning subtrees
+that cannot possibly produce a better schedule than what's
+already been found. It's **branch and bound** in the classical
+sense: "branch" = pick an instruction to schedule next, "bound" =
+prove the subtree below can't improve on the current best.
+
+Two nested loops drive it:
+
+1. **Outer loop** (in `BBWithSpill::Enumerate_`, `bb_spill.hip.cpp:1071`).
+   Iterates over target schedule lengths from `schedLwrBound_` to
+   `schedUprBound_`. At each length, asks the enumerator "does a
+   feasible schedule of exactly this length exist, and if so,
+   what's its best cost?". Terminates when an optimal schedule is
+   found or when region/length timeouts fire. **In the occupancy
+   pass, this loop degenerates to a single iteration at
+   `trgtLngth == instCnt`** because unit latencies make
+   `schedLwrBound_ == schedUprBound_ == instCnt`.
+
+2. **Inner loop** (in `Enumerator::FindFeasibleSchedule_`,
+   `enumerator.cpp:869`). Given a target length, does a
+   depth-first search over partial schedules (the "enumeration
+   tree"), maintaining the best full schedule found so far.
+
+The enumerator is wrapped in three main pruning strategies (all
+configurable via the `Pruning` struct, `enumerator.h:30-41`):
+
+- **Node superiority pruning** (`nodeSup`): skip a branch if a
+  "superior" instruction has already been examined at the same
+  tree node.
+- **Relaxed scheduling pruning** (`rlxd`): skip a branch if a
+  relaxed (unconstrained-resources) schedule of the remaining
+  instructions can't fit in the target length.
+- **History-based domination** (`histDom`): skip a branch if a
+  previously-explored partial schedule with the same scheduled set
+  produced equal-or-better bounds. The key cleverness in
+  OptSched's enumerator.
+
+There's also unconditional pruning from lower-bound arithmetic
+(deadline checks), issue-slot availability, and — in the
+occupancy pass only — an RP-only branch filter from the
+`SchedForRPOnly_` flag (see P.5). That filter skips candidate
+instructions that produce new live values without consuming any,
+when a ready-list alternative exists that reduces pressure. It's
+off in the ILP pass because ILP-pass scheduling needs to
+consider instructions that increase pressure when doing so
+shortens the schedule.
+
+### P.2 The outer loop (Enumerate_): length-incrementing search
+
+```
+Enumerate_(startTime, rgnTimeout, lngthTimeout):
+    costLwrBound = 0
+    for trgtLngth = schedLwrBound_ .. schedUprBound_:
+        InitForSchdulng()                # reset scheduler state
+        rslt = enumrtr_->FindFeasibleSchedule(
+                   enumCrntSched_, trgtLngth, this,
+                   costLwrBound, lngthDeadline)
+
+        HandlEnumrtrRslt_(rslt, trgtLngth)
+
+        if GetBestCost() == 0:
+            break                         # optimal found
+        if rslt == RES_ERROR:
+            break
+        if lngthDeadline == rgnDeadline and rslt == RES_TIMEOUT:
+            break
+        if rslt == RES_SUCCESS and IsSecondPass():
+            break                         # two-pass: RP-matching done
+
+        enumrtr_->Reset()
+        enumCrntSched_->Reset()
+        if !IsSecondPass():
+            CmputSchedUprBound_()         # tighten upper bound
+        costLwrBound += 1
+        lngthDeadline = now() + lngthTimeout
+```
+
+Key points:
+- Each iteration *tightens* the lower bound on cost (`costLwrBound += 1`)
+  and lets the enumerator re-search. The enumerator passes this LB
+  down into its pruning so it can reject branches early.
+- `trgtLngth` is the schedule length the enumerator is searching
+  *for*, not a cap — the enumerator specifically tries to produce
+  a schedule of that exact length. Longer lengths give more room
+  but may not improve cost.
+- `schedLwrBound_` is static, derived from the DDG at construction
+  time: `max(critical_path_from_root_to_leaf, resource_lower_bound)`,
+  where the resource LB is `max over issue types of
+  ceil(insts_of_type / slots_per_cycle_for_type)`. **In the
+  occupancy pass**, both of these equal `instCnt` (unit latencies
+  collapse the critical path to `instCnt`, and a single-issue
+  machine has resource LB of `instCnt`), so the outer loop only
+  iterates one target length.
+
+- `schedUprBound_` is dynamic, derived from the current best cost:
+  `schedLwrBound_ + (GetBestCost() - 1) / schedCostFactor_`, clamped
+  by `abslutSchedUprBound_` (a loose structural cap = sum of max
+  edge latencies). Driven by the cost function, not by any
+  schedule's length directly. As the enumerator finds better
+  schedules, `GetBestCost()` drops, so `schedUprBound_` tightens
+  — the driver re-computes it between length iterations
+  (`bb_spill.hip.cpp:1119-1120`). **In the ILP pass**, the initial
+  `GetBestCost()` comes from the occupancy-pass output (seeded via
+  `SCHED_SEQ` + latency stall insertion), so the initial upper
+  bound is exactly "the occupancy-pass schedule made latency-legal
+  with stalls," which is the paper's `SatisfyLatencies(bestSched)`
+  upper bound construction.
+
+### P.3 The inner loop (FindFeasibleSchedule_): DFS over partial schedules
+
+```
+FindFeasibleSchedule_(sched, trgtLngth, deadline):
+    Initialize_(sched, trgtLngth)      # build root node, ready list, bounds
+    while !allNodesExplored and !WasObjctvMet_():
+        if now() > deadline:
+            return RES_TIMEOUT
+        if isCurrentNodeFeasible:
+            foundBranch = FindNxtFsblBrnch_(nxtNode)
+        else:
+            foundBranch = false
+        if foundBranch:
+            StepFrwrd_(nxtNode)        # commit the branch; descend one level
+            # Optional: suffix-concatenation shortcut (see P.9)
+        else:
+            if current node is root:
+                allNodesExplored = true
+            else:
+                BackTrack_()            # undo and move back up
+    return fsblSchedCnt > 0 ? RES_SUCCESS : RES_FAIL
+```
+
+The enumeration tree:
+- **Root**: empty schedule.
+- **Each tree node** corresponds to a partial schedule (a prefix
+  of instructions + stalls). Every tree node tracks `time_`
+  (how many slots have been filled), `crntBrnchNum_` (which branch
+  to try next), `frwrdLwrBounds_[]` (per-instruction forward LBs
+  tightened up to this node), `crntCycleBlkd_`, `avlblSlots_[]`,
+  and more.
+- **A branch from a node** is "schedule this specific ready
+  instruction in the current slot" or "schedule a stall in the
+  current slot." Branches are numbered 0..brnchCnt-1 where
+  brnchCnt = ready-list size (+1 for stall if enabled).
+- **Depth** = `time_` = the slot number being filled. A leaf is
+  a tree node at depth `trgtLngth * issueRate - 1` that has a
+  complete schedule.
+
+### P.4 Branches (FindNxtFsblBrnch_)
+
+`FindNxtFsblBrnch_` (`enumerator.cpp:962`) tries branches in
+order, starting from `crntBrnchNum_`, calling `ProbeBranch_` on
+each one. The first branch that `ProbeBranch_` declares feasible
+becomes the "step forward" target; the rest are deferred until
+we backtrack to this node.
+
+Branch ordering within a node comes from the ready list's
+priority sort (same heuristic as the list scheduler — LUC, CP,
+NID, etc.). OptSched picks the highest-priority ready instruction
+first, then the next, and so on. The "stall" branch, if enabled,
+is the last branch examined.
+
+```
+FindNxtFsblBrnch_(newNode):
+    brnchCnt = currentNode->GetBranchCnt()
+    for i = crntBrnchNum .. brnchCnt-1:
+        if i == brnchCnt - 1:
+            # Stall branch (if enabled)
+            inst = None
+            if EnumStall_() is false:
+                continue
+        else:
+            inst = rdyLst_->GetNextPriorityInst()
+            if inst is illegal or redundant in current slot:
+                continue
+
+        if ProbeBranch_(inst, newNode):
+            return true    # feasible — caller will step forward
+        else:
+            RestoreCrntState_()   # undo whatever Probe did
+    return false   # no feasible branch — caller will backtrack
+```
+
+### P.5 Feasibility / pruning in ProbeBranch_
+
+`Enumerator::ProbeBranch_` (`enumerator.cpp:1051`) is where the
+meaningful pruning happens. It runs a cascade of checks; any
+"false" return kills the branch:
+
+1. **Prefixed-cycle check.** If the instruction has a
+   `PreFxdCycle != INVALID_VALUE`, it can only be scheduled in
+   that exact cycle.
+
+2. **Forward lower bound.** If the inst's current forward LB is
+   greater than the current cycle, the inst is being scheduled
+   too early — infeasible.
+
+3. **Backward deadline.** If the inst's current deadline
+   (backward LB from exit) is less than the current cycle, the
+   inst is being scheduled too late — infeasible.
+
+4. **"Schedule for RP only" filter.** If `SchedForRPOnly_` is set
+   and the inst defines a register but reads none (and another
+   ready inst does read one), prune. **This is enabled in the
+   occupancy pass and disabled in the ILP pass.** In the
+   occupancy pass we want to avoid scheduling instructions that
+   add live values without freeing any, so pressure can only
+   grow when we have no other choice. In the ILP pass we drop
+   this filter because shorter schedules sometimes require
+   eagerly scheduling a producer even if it temporarily raises
+   pressure.
+
+5. **Node superiority.** If a previously-examined branch at this
+   tree node was "superior" to the current inst (dominates it in
+   some sense), prune.
+
+6. **Tentative schedule.** Actually mark the inst scheduled in the
+   current cycle/slot. Reserve slots. Set `instSchduld = true`
+   in the undo state so we can reverse it if the probe fails
+   later.
+
+7. **Issue slot feasibility.** Check that after consuming a slot
+   for this inst's issue type, the remaining slots for every
+   issue type still cover the remaining unscheduled instructions.
+
+8. **Tighten forward lower bounds.** Cascade the effect of
+   scheduling this inst on its successors' forward LBs. If any
+   successor's new LB exceeds its deadline, infeasible — restore
+   LBs and return false.
+
+9. **History-based domination.** If `prune_.histDom` is on, and
+   `WasDmnntSubProbExmnd_` finds a history node with the same
+   scheduled-instruction set that dominates this branch, prune.
+   (Details in P.6–P.8.)
+
+10. **Relaxed scheduling feasibility.** If `prune_.rlxd` is on,
+    run a relaxed scheduler (no resource constraints, just
+    latency) on the unscheduled instructions to see if they can
+    fit within the remaining slots. If not, infeasible.
+
+`LengthCostEnumerator::ProbeBranch_` (`enumerator.cpp:2064`)
+wraps the base `ProbeBranch_` and adds one more check:
+
+11. **Cost feasibility** (`ChkCostFsblty_`, via
+    `BBWithSpill::ChkCostFsblty`). Compute the *dynamic lower
+    bound* on the total cost of any completion of this partial
+    schedule. If that LB is `>= GetBestCost()`, prune.
+
+    ```cpp
+    crntCost = crntSpillCost_ * SCW_ + trgtLngth * schedCostFactor_;
+    crntCost -= GetCostLwrBound();
+    fsbl = crntCost < GetBestCost();
+    ```
+
+    This is the classical B&B bound: combining the spill cost
+    achieved so far (scaled) with the fixed cost of achieving
+    `trgtLngth`, minus a lower bound on achievable cost. If
+    already `>= best`, no completion can improve.
+
+### P.6 The history table (exmndSubProbs_)
+
+The history table is a `BinHashTable<HistEnumTreeNode>` indexed
+by a **partial-schedule signature** (a hash of the scheduled
+instruction set). It's populated as the DFS backtracks: whenever
+we leave a subtree, we archive the current node's `HistEnumTreeNode`
+into the table (`Enumerator::BackTrack_`, `enumerator.cpp:1443`):
+
+```cpp
+exmndSubProbs_->InsertElement(crntNode_->GetSig(), crntHstry, ...);
+SetTotalCostsAndSuffixes(crntNode_, ...);
+crntNode_->Archive();
+```
+
+Before stepping forward into any candidate branch, the enumerator
+queries `WasDmnntSubProbExmnd_(inst, newNode)`
+(`enumerator.cpp:1512`) to ask: "is there a previously-examined
+history node that makes this candidate redundant?"
+
+### P.7 Signature matching
+
+**Each instruction has a 32-bit random-ish signature**
+(`Enumerator::SetInstSigs_`, `enumerator.cpp:677`):
+
+```cpp
+for i in 0..totInstCnt:
+    sig = RandomGen::GetRand32()
+    sig <<= bitsNeededForInstCount  # low bits hold the instruction number
+    sig |= i
+    inst->SetSig(sig)
+```
+
+**A partial schedule's signature is the XOR of the signatures of
+its scheduled instructions** (`EnumTreeNode` constructor,
+`enumerator.cpp:164`):
+
+```cpp
+prtilSchedSig_ = prevNode->GetSig();  // inherit parent's sig
+if (inst != NULL)
+    prtilSchedSig_ ^= inst->GetSig(); // xor in the newly scheduled inst
+```
+
+Because XOR is commutative and associative, **two partial
+schedules with the same set of scheduled instructions (in any
+order) produce the same signature.** That's exactly the
+equivalence relation the history table wants: scheduling
+`{A, B, C}` with order ABC vs CBA gives the same "problem left to
+solve."
+
+Signature collisions across different scheduled sets are still
+possible (it's a hash), so on a match the enumerator explicitly
+compares the scheduled bit vectors (`HistEnumTreeNode::DoesMatch`,
+`hist_table.cpp:541`) before proceeding to the domination check:
+
+```cpp
+bool DoesMatch(EnumTreeNode *node, Enumerator *enumrtr) {
+    SetInstsSchduld_(instsSchduld);         // bit vector for this hist node
+    node->hstry_->SetInstsSchduld_(othrInstsSchduld);
+    return *othrInstsSchduld == *instsSchduld;
+}
+```
+
+### P.8 Domination test
+
+Signature match means "same set of scheduled instructions." That
+alone isn't enough to prune — two such partial schedules can
+differ in *when* they scheduled things, yielding different
+forward lower bounds and different costs. The history node
+dominates the candidate only if:
+
+- **Lower-bound dominance** (`HistEnumTreeNode::DoesDominate_`,
+  `hist_table.cpp:158`). The history node's forward lower bounds
+  on unscheduled instructions must be tight enough that anything
+  the candidate can feasibly reach, the history node could also
+  reach. This is checked instruction-by-instruction, looking at
+  each successor's forward LB induced by the history's prefix vs
+  the candidate's.
+
+- **Cost dominance** (`CostHistEnumTreeNode::ChkCostDmntnForBBSpill_`,
+  `hist_table.cpp:471`). The history node's recorded partial
+  cost must be no worse than the candidate's cost lower bound.
+  There's a specialized check per spill-cost function
+  (`SCF_PERP`, `SCF_PRP`, `SCF_SLIL`, etc.) since peak cost
+  functions admit a stronger "prefix doesn't matter" argument
+  than additive cost functions.
+
+If both checks pass, the candidate is pruned — anything it could
+achieve, the history node already could, and nothing better was
+ever found in that subtree.
+
+If the history node has `isLngthFsbl_ == false` (no feasible
+schedule was found below it) and the LB-domination check passes,
+the candidate is pruned without needing the cost check: "no
+feasible completion exists from this state, don't re-explore it."
+
+### P.9 Suffix concatenation
+
+When a history node matches, it may have a **recorded suffix** —
+the instruction order it used to complete its own schedule. If
+that suffix leads to the best-known full schedule, we can skip
+re-exploring and concatenate directly. Enabled by
+`prune_.useSuffixConcatenation`. Driver logic is in
+`FindFeasibleSchedule_`:
+
+```cpp
+if matchingHistNodesWithSuffix != nullptr:
+    crntNode->GetHistory()->SetSuffix(
+        matchingHistNodesWithSuffix->GetSuffix())
+    AppendAndCheckSuffixSchedules(...)
+    BackTrack_()
+```
+
+This is a real speedup on regions with lots of identical subtrees
+— we pay the enumeration cost once and then cheaply replay it at
+every equivalent state.
+
+### P.10 Backtracking
+
+`BackTrack_` (`enumerator.cpp:1443`) is the reverse of
+`StepFrwrd_`. It:
+
+1. If history domination is on, archives the current node to
+   `exmndSubProbs_` with its final cost/suffix info
+   (`SetTotalCostsAndSuffixes`).
+2. Frees the current tree node.
+3. Walks back to the parent, restores its ready list.
+4. Moves the scheduler one slot backward (`MovToPrevSlot_`).
+5. Unschedules the instruction, returns it to the ready list,
+   reverses issue-slot accounting, restores lower bounds.
+6. Increments `backTrackCnt_`.
+
+State restoration is precise because every mutation during
+`ProbeBranch_`/`StepFrwrd_` is recorded in
+`state_` (a small struct with `instSchduld`, `issuSlotsProbed`,
+`lwrBoundsTightnd`, `instFxd`, `rlxSchduld` flags) so
+`RestoreCrntState_` (`enumerator.cpp:1211`) knows exactly what to
+undo.
+
+`LengthCostEnumerator::BackTrack_` (`enumerator.cpp:2135`) adds
+one more check on top: after restoring state, re-test
+`crntNode->GetCostLwrBound() < GetBestCost()`. If even the
+current node's prefix cost can't beat the best, keep
+backtracking.
+
+### P.11 Termination
+
+- **Inner loop**: terminates when either
+  - `WasObjctvMet_` returns true (new best cost hit `costLwrBound_`
+    — i.e., we've proven optimality at this length), or
+  - `allNodesExplrd` is set (DFS has explored everything reachable
+    from the root and backed all the way back), or
+  - The deadline (`lngthDeadline`) has elapsed.
+
+- **Outer loop**: terminates when any of
+  - `GetBestCost() == 0` (absolute optimum found),
+  - An error occurred,
+  - Both the length and region deadlines converge while we're
+    timing out,
+  - Second-pass mode just got a successful schedule at the current
+    length.
+
+- **Overall**: even if the final length iteration times out, if
+  *any* previous length found a feasible schedule, the result is
+  `RES_SUCCESS` (the best one found). If all iterations failed to
+  find any schedule, `RES_FAIL`. Timeout is reported separately.
+
+### P.12 Configuration parameters
+
+Relevant defaults from `optsched-cfg/sched.ini`:
+
+| Parameter | Default | Role |
+|---|---|---|
+| `ENUM_HEURISTIC` | `NID` | Ordering used for the ready-list sort — same heuristics as ACO (O.3) |
+| `REGION_TIMEOUT` | 5 | Per-instruction or per-block timeout for the whole region (ms) |
+| `LENGTH_TIMEOUT` | 5 | Per-length timeout within a region |
+| `TIMEOUT_PER` | `INSTR` | Interpret timeouts as per-instruction or per-block |
+| `SCHED_FOR_RP_ONLY` | — | Skip the ILP objective, only minimize register pressure |
+| `ENBL_STALL_ENUM` | — | Whether to enumerate stall branches at each node |
+| `SIG_HASH_SIZE` | — | Number of bits in the partial-schedule signature hash |
+
+The `Pruning` struct is populated from config or defaults and
+passed into the `Enumerator` constructor; it enables/disables
+each of the five pruning strategies independently.
+
+### P.13 Pseudo-code summary
+
+```
+# Outer loop
+Enumerate(region, rgnDeadline):
+    for trgtLngth in [schedLwrBound, schedUprBound]:
+        FindFeasibleSchedule(trgtLngth, lngthDeadline, costLB)
+        if best == optimal:
+            break
+        costLB += 1
+    return best
+
+# Inner loop (DFS with backtracking)
+FindFeasibleSchedule(trgtLngth, deadline, costLB):
+    root = CreateRoot()
+    current = root
+    while not (allExplored or ObjectiveMet()):
+        if past deadline:
+            return TIMEOUT
+        candidate = FindNextFeasibleBranch(current)
+        if candidate is not null:
+            StepForward(candidate)
+            # Possibly short-circuit via suffix concatenation
+            if matchingHistNodeWithSuffix:
+                ConcatenateAndCheckSuffix(...)
+                BackTrack()
+        else:
+            if current is root:
+                allExplored = true
+            else:
+                BackTrack()
+    return RES_SUCCESS if feasible count > 0 else RES_FAIL
+
+FindNextFeasibleBranch(node):
+    for branch in [crntBranch .. branchCount-1]:
+        if branch is stall:
+            if !EnumStall(): continue
+            inst = None
+        else:
+            inst = rdyList.nextPriorityInst()
+            if illegal or redundant: continue
+
+        if ProbeBranch(inst, newNode):
+            return newNode
+        else:
+            RestoreState()
+    return null
+
+ProbeBranch(inst, newNode):
+    # Cheap checks first
+    if inst is prefixed to a specific cycle != crntCycleNum: return false
+    if inst.forwardLB > crntCycleNum: return false    # too early
+    if inst.deadline < crntCycleNum: return false      # too late
+    if SchedForRPOnly and inst produces-only: return false
+    if inst is dominated by a previously-examined branch: return false
+
+    # Tentatively apply
+    Schedule(inst, crntCycleNum, crntSlotNum)
+    if !IssueSlotsFeasible(): return false
+    if !TightenLowerBounds(inst): return false
+
+    # History domination
+    if histDom and WasDominatedSubProbExamined(newNode):
+        return false
+
+    # Relaxed scheduling test
+    if rlxd and !RelaxedScheduleFits(): return false
+
+    # Cost bound (LengthCostEnumerator only)
+    if spillCost and costLB(partialSchedule) >= bestCost:
+        return false
+
+    return true
+
+BackTrack(currentNode):
+    if histDom:
+        exmndSubProbs.insert(currentNode.signature, currentNode.history)
+    unschedule current instruction
+    restore lower bounds, slot availability, ready list
+    current = current.parent
+
+ObjectiveMet():
+    if !solutionFound: return false
+    newCost = region.updateOptimalSchedule(crntSched)
+    return newCost == costLwrBound
+
+# History table and signatures
+SignatureOf(partialSchedule):
+    # XOR of scheduled instruction signatures (commutative)
+    return XOR(inst.signature for inst in partialSchedule)
+
+WasDominatedSubProbExamined(candidate):
+    for histNode in exmndSubProbs.matching(candidate.signature):
+        if !histNode.DoesMatch(candidate):   # bit-vector check
+            continue
+        if histNode.DoesDominate(candidate):
+            return true
+    return false
+
+# Cost domination (CostHistEnumTreeNode)
+DoesDominate(candidate):
+    if !LowerBoundDominates(candidate): return false
+    if !histNode.isLngthFsbl and LB-dominates: return true  # no feasible path
+    return CostDominates(candidate)
+```
+
+### P.14 Why this is a lot of code
+
+Beyond the 2200+ lines of `enumerator.cpp` and 580+ lines of
+`hist_table.cpp`, the logical complexity is concentrated in a few
+places:
+
+1. **Lower-bound tightening.** Each `ProbeBranch_` cascades the
+   inst's scheduled cycle forward through successors' LBs. Each
+   `BackTrack_` must reverse that cascade exactly, with correct
+   ordering, or the next `ProbeBranch_` will get stale bounds.
+   `Enumerator::TightnLwrBounds_` / `UnTightnLwrBounds_` manage
+   this via linked lists of touched instructions.
+
+2. **Relaxed scheduling** (`RJ_RelaxedScheduler`) is a separate
+   scheduler implementation used purely for pruning — it answers
+   "can the remaining instructions fit in the remaining slots at
+   all, ignoring resource conflicts?" as a fast-path feasibility
+   check.
+
+3. **History domination's per-node forward-LB reconstruction.**
+   `HistEnumTreeNode::SetLwrBounds_` walks back through the
+   history node's prefix, recomputes all the LB updates that
+   scheduling those instructions in those cycles would have
+   implied, then compares to the candidate's own LBs. This is
+   the "can the history node reach everything the candidate can"
+   check.
+
+4. **Cost feasibility for multiple spill-cost functions.**
+   `BBWithSpill::ChkCostFsblty` and the various
+   `CostHistEnumTreeNode::ChkCostDmntn*` methods have per-spill-
+   cost-function logic (PERP, PRP, SLIL, peak+avg). Each has its
+   own definition of "dominates" and its own arithmetic.
+
+5. **Suffix concatenation plumbing.** Every archive step has to
+   save the suffix from root-to-leaf; every history match has to
+   check the saved suffix and potentially graft it into the
+   current schedule.
+
+For context: the **core DFS logic** (outer loop + StepFrwrd +
+FindNextFeasibleBranch + BackTrack, with no pruning) would be on
+the order of 300–500 lines on our infrastructure. Everything else
+is pruning machinery.
+
+### P.15 Mapping to our infrastructure
+
+Note the deep structural mismatch: OptSched is a **slot-filling
+enumerator**. Its outer loop iterates target schedule lengths,
+and inside each target length the DFS fills issue slots one at
+a time, deciding per slot whether to place an instruction or a
+stall. Schedule length is an input parameter, not a derived
+quantity.
+
+Our infrastructure is the opposite. `ScheduleConstructor` picks
+an **order**; schedule length is computed afterward by
+`ScheduleLengthTracker` from the order and per-edge latencies
+(`ready_cycle = max(current_cycle, pred_cycle + edge.latency)`).
+We have `IssueWidth = 1` and no resource constraints, so there
+are no "slots" to fill and no explicit stalls to enumerate.
+That difference reshapes most of the mapping:
+
+| OptSched concept | Our equivalent |
+|---|---|
+| Two-pass driver | New top-level driver that runs B&B twice per region: an occupancy pass with a pressure-only objective, then an ILP pass with a length objective constrained by the occupancy-pass APRP |
+| `LTP_UNITY` (unit latencies in pass 1) | **No analog needed.** OptSched uses unit latencies to eliminate length from the problem so its slot-filling enumerator doesn't waste time on stall decisions. Our enumerator doesn't fill slots — to ignore length, we just remove it from the cost function |
+| `SchedForRPOnly_` flag | Pass-1 mode that replaces the balanced cost function with a pressure-only one. Maps cleanly onto `ScheduleMetric::kContinuousRegisterOccupancyScore` |
+| `SecondPass = true` | Pass-2 mode flag that switches the cost function back to length-minimization and the comparison metric to `kScheduleLength` (with APRP as a hard constraint) |
+| Outer length-iterating loop | We don't need this loop at all — our search is over orders, with length as a derived per-order metric. A single DFS run suffices per pass |
+| Inner DFS | Recursive or iterative loop over `ScheduleConstructor::Schedule()` / `Unschedule()` |
+| `EnumTreeNode` (tree state) | `ScheduleConstructor` already tracks partial state; tree-node bookkeeping can just be "what branches have we tried from this depth" |
+| `rdyLst_->GetNextPriorityInst` | `ScheduleConstructor::GetReadyListSnapshot()` sorted by a new heuristic pass |
+| `StepFrwrd_` | `ScheduleConstructor::Schedule(node)` |
+| `BackTrack_` | `ScheduleConstructor::Unschedule()` |
+| `frwrdLwrBounds_[]` tightening / range tightening | Not directly applicable — we don't schedule cycle-by-cycle, so "too early / too late" isn't a notion. Length-feasibility at the current depth is a global property derived by the length tracker |
+| Issue slot feasibility | N/A — our model has no issue slots to over-commit |
+| Cost lower bound for pruning | Would need a new function: for pressure, a partial→completion LB is weak; for length, critical path through unscheduled nodes is tight |
+| APRP cost function | Already have `GetContinuousOccupancyScore` (smooth) and `GetRegisterOccupancy` (stair-stepped). The stair-stepped one is the direct analog of APRP |
+| History signature | XOR of ScheduleNode random IDs — easy |
+| History table | New `HistoryTable<PartialSchedState>` class |
+| History domination test | Without per-cycle lower bounds, the dominance relation is simpler in our model: two partial schedules with the same scheduled set are equivalent if their peak pressure and current cycle count are equal; the one with lower peak pressure dominates the other |
+| Relaxed scheduler | We don't need relaxed pruning for resource feasibility (single issue, no resources). Could still be useful as a length lower bound for pass-2 pruning |
+| Suffix concatenation | New field on history entries, plus driver logic. Only relevant if we implement history domination |
+| Occupancy-pass → ILP-pass seeding (`SCHED_SEQ`) | Save pass-1's `schedule_order_`, replay it at the start of pass 2 as the initial incumbent |
+
+### P.16 Things worth considering if we return to B&B
+
+**On the two-pass structure:**
+
+- **The two passes are substantially different in difficulty.**
+  Pass 1 is a straightforward search over orders using the
+  occupancy score as the cost function — we already have all
+  the infrastructure for it. Pass 2 is where the complexity
+  lives: cost lower bounds, history domination, the APRP
+  constraint, etc. Porting pass 1 is mostly wiring up an
+  existing `ScheduleConstructor` + `IsBetterThan` loop into a
+  DFS; porting pass 2 is where we'd build new machinery.
+
+- **Cheap first approach: keep ACO as the occupancy pass, port
+  only the ILP pass.** ACO is already our occupancy-focused
+  search. If we use its output as the seed + APRP target for a
+  B&B ILP pass, we get exactly the paper's two-pass structure
+  with half the work:
+  - Pass 1 = ACO with `kContinuousRegisterOccupancyScore` as
+    the objective. Produces a minimum-APRP schedule per region.
+  - Pass 2 = new B&B implementation, seeded by ACO's output,
+    with its APRP constraint set to the kernel-level worst
+    achieved in pass 1.
+  - The ILP-pass B&B only has to optimize length subject to
+    maintaining that APRP.
+
+- **We don't need OptSched's `LTP_UNITY` trick.** It exists
+  because OptSched's enumerator decides stall placement inside
+  a fixed-length slot grid. Our enumerator picks orders and
+  derives length, so "ignore length" just means "cost function
+  = `GetRegisterOccupancy`, nothing else." No latency override
+  required.
+
+**On pruning within the ILP pass (in order of effort):**
+
+- **Start with pruning disabled.** Plain DFS over orders, scored
+  by the length tracker. Correct but slow; a baseline we can
+  verify against.
+- **Add cost-lower-bound pruning first.** For a length objective,
+  the critical-path distance from each scheduled instruction to
+  the exit gives a tight LB on achievable length. Cheap to
+  compute; dramatically improves pruning.
+- **Add pressure-constraint pruning.** If a partial schedule's
+  current pressure already exceeds the APRP target (and pressure
+  is monotonically non-decreasing in our model), prune. We have
+  `GetRegisterOccupancy` already.
+- **History domination is the biggest lift.** Skip it until the
+  simpler pruning proves insufficient. It'll require building out
+  history-entry recording/replay and a signature hash table.
+- **Relaxed-scheduling pruning is probably not worth porting.**
+  OptSched needs it because its slot-filling enumerator has
+  resource-feasibility questions we don't have. A length LB
+  from critical path already gives us the useful half of that
+  pruning.
+
+**Sources:**
+- Shobaki, Kerbow, Mekhanoshin, *Optimizing Occupancy and ILP on
+  the GPU using a Combinatorial Approach*, CGO 2020. The paper
+  describes the two-pass algorithm explicitly with Algorithm 1
+  pseudo-code. NSF PAR copy:
+  https://par.nsf.gov/servlets/purl/10167428
