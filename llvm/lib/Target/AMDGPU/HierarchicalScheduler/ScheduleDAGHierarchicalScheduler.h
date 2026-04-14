@@ -50,6 +50,19 @@ public:
   // configured scheduling algorithm (e.g., MaliciousScheduler).
   void finalizeSchedule() override;
 
+  // Sort `regions_` ascending by the integer occupancy implied by
+  // each region's input peak pressure. After the sort, `regions_[0]`
+  // is the region whose input order produces the lowest occupancy
+  // — the binding constraint on kernel-level occupancy.
+  //
+  // Uses a stable sort so that regions with the same input
+  // occupancy keep their original recording order. This gives us
+  // deterministic output across runs and library implementations,
+  // and makes any secondary behavior (diagnostic printing,
+  // downstream iteration) consistent with the order regions
+  // appeared in the MachineFunction.
+  void SortRegionsByInputOccupancy();
+
   // Run the malicious scheduler over all recorded regions. For each region,
   // builds the DAG, computes the malicious schedule, and applies it.
   void RunMaliciousScheduler();

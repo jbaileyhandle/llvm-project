@@ -32,6 +32,8 @@
 - [N. Occupancy](#appendix-n-occupancy)
 - [O. OptSched's Ant Colony Optimization (ACO)](#appendix-o-optscheds-ant-colony-optimization-aco)
 - [P. OptSched's Branch-and-Bound Enumerator](#appendix-p-optscheds-branch-and-bound-enumerator)
+- [Q. Notable LLVM Bugs Found Along the Way](#appendix-q-notable-llvm-bugs-found-along-the-way)
+
 
 ---
 
@@ -4975,3 +4977,100 @@ That difference reshapes most of the mapping:
   describes the two-pass algorithm explicitly with Algorithm 1
   pseudo-code. NSF PAR copy:
   https://par.nsf.gov/servlets/purl/10167428
+
+---
+
+## Appendix Q: Notable LLVM Bugs Found Along the Way
+
+Real pre-existing bugs in upstream LLVM that we uncovered while
+debugging our scheduler's interactions with the rest of the
+AMDGPU backend. Not our code, not incomplete work on our end —
+bugs that were already in the tree. We're not fixing them here,
+just recording what they are and what they affect so we can
+decide later whether to upstream fixes.
+
+### Q.1 Stale region-pressure read in `GCNIterativeScheduler::scheduleLegacyMaxOccupancy`
+
+**File**: `llvm/lib/Target/AMDGPU/GCNIterativeScheduler.cpp`, around line 495.
+
+**What it is**: Inside the per-region loop of
+`scheduleLegacyMaxOccupancy`:
+
+```cpp
+Ovr.schedule();
+const auto RP = getRegionPressure(*R);   // (1) captures pressure of
+                                          //     the candidate schedule
+
+if (RP.getOccupancy(ST) < TgtOcc) {
+    // ... restore path ...
+    // scheduleBest(*R);  OR  Ovr.restoreOrder();
+    // Region in MF now holds a different (lower-pressure) order.
+}
+FinalOccupancy = std::min(FinalOccupancy, RP.getOccupancy(ST));
+// (2) uses `RP` captured at step (1) — NOT the restored pressure.
+```
+
+If the candidate schedule fails the occupancy target, the code
+restores a different order (via `scheduleBest` or
+`restoreOrder`), but the local `RP` still reflects the *discarded*
+attempt. `FinalOccupancy` accumulates the worst pressure of the
+discarded attempts, not the worst of what's actually committed.
+
+After the region loop finishes, `MFI->limitOccupancy(FinalOccupancy)`
+sets `MFI->Occupancy` to this pessimistic value. So a function
+whose committed schedule is cleanly at, say, 37 VGPRs (occupancy
+6) can end up with `MFI->Occupancy == 2` just because one of
+the iterative attempts produced a bad intermediate that was
+thrown away.
+
+**How we found it**: Our stencil kernel, doctored to include a
+synthetic high-pressure region, reported `VGPRs: 39 / Occupancy:
+6` in the final `kernel-resource-usage` remark, but our
+`InitFunction` saw `MFI->Occupancy == 2` when the hierarchical
+scheduler started. Instrumenting `SIMachineFunctionInfo::limitOccupancy`
+with a caller file:line trace (via `__builtin_FILE()` /
+`__builtin_LINE()` as default arguments, which expand in the
+caller's context) showed one single call `8 -> 2` coming from
+`GCNIterativeScheduler.cpp:513`. Per-region instrumentation
+inside `scheduleLegacyMaxOccupancy` then showed the high-pressure
+region went through a failed attempt (102 VGPRs post-schedule →
+occupancy 2) that got restored, but `FinalOccupancy` was still
+updated from the failed attempt's pressure.
+
+**Downstream effects** (why this isn't benign):
+
+Several passes read `MFI->getOccupancy()` as a ceiling:
+
+- `GCNNSAReassign.cpp:251` — budgets VGPRs via
+  `ST->getMaxNumVGPRs(MFI->getOccupancy())`. A corrupted-low
+  Occupancy makes the budget larger (`getMaxNumVGPRs(2) = 128` vs
+  `getMaxNumVGPRs(6) = 40`), which is more permissive than
+  intended. Could change NSA reassignment decisions on kernels
+  using NSA image ops.
+- `GCNHazardRecognizer.cpp:1934` — gates an MFMA hazard check on
+  `MFI->getOccupancy() < 2`. A corrupted-low Occupancy affects
+  whether the hazard fires, potentially inserting or omitting
+  waitstate instructions around MFMAs.
+- `GCNSchedStrategy.cpp:501` — any second-pass scheduler using
+  `GCNMaxOccupancySchedStrategy` reads it as `StartingOccupancy`
+  for its own search.
+- OptSched works around this via `resetInitialOccupancy` with an
+  `initialOccupancy` it captured upstream, before the iterative
+  scheduler had a chance to corrupt the value. Our hierarchical
+  scheduler uses the same mechanism. Schedulers without that
+  workaround would be stuck with the corrupted target.
+
+**Fix direction**: either recompute `getRegionPressure(*R)` after
+the restore branches, or have `scheduleBest`/`restoreOrder` return
+the pressure of what's now committed and use that in the `min`.
+Not fixing in our fork right now because nothing we care about
+reads the stale value once our `initialOccupancy` capture is in
+place — but the code comment at the bug site flags it for future
+attention, and it's a real candidate for an upstream patch.
+
+**Severity**: silent subtle codegen divergence on kernels that
+(a) pass through the iterative scheduler and (b) have a
+high-pressure region where the iterative scheduler's candidate
+schedules trigger a restore. Mostly affects image/NSA kernels,
+MFMA kernels, and any second-pass scheduler trusting
+`MFI->Occupancy`.

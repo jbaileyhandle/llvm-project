@@ -1238,9 +1238,26 @@ ScheduleDAGInstrs *GCNPassConfig::createMachineScheduler(
           return createIterativeILPMachineScheduler(C);
       } else if(config.GetScheduler() == MachineInstrSchedulerConfig::Scheduler::IterativeMaxOccupancy) {
           return createIterativeGCNMaxOccupancyMachineScheduler(C);
+      } else if(config.GetScheduler() == MachineInstrSchedulerConfig::Scheduler::HierarchicalScheduler) {
+          // HierarchicalScheduler runs as a SECOND pre-RA scheduling
+          // pass, inserted after the normal MachineScheduler pass.
+          // This factory is for the FIRST pass, so return the normal
+          // GCN max-occupancy scheduler — same as the default
+          // (HasConfig==false) path.
+          return createGCNMaxOccupancyMachineScheduler(C);
       }
 
-      assert(false && "Valid scheduler not specified in misched.txt");
+      // No case matched. Previously this was `assert(false && ...)`
+      // which is a no-op under NDEBUG, causing control to fall off
+      // the end of the function with no return statement — undefined
+      // behavior that in our release build returned a garbage
+      // pointer aliasing a GCNIterativeScheduler and silently
+      // lowered Occupancy via that scheduler's region loop. Use
+      // report_fatal_error instead so any future unmapped scheduler
+      // name fails loudly in both debug and release builds.
+      llvm::report_fatal_error(
+          "No first-pass scheduler factory matches the configured "
+          "scheduler in misched.txt. Add a case above.");
 
   } else {
 

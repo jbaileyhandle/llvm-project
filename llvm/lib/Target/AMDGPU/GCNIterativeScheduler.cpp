@@ -507,6 +507,31 @@ void GCNIterativeScheduler::scheduleLegacyMaxOccupancy(
           assert(R->MaxPressure.getOccupancy(ST) >= TgtOcc);
         }
       }
+      // BUG (not fixed): this uses `RP`, which captured the pressure
+      // of the candidate schedule BEFORE the restore above. If the
+      // restore fired, the region in the MF now holds a different
+      // (lower-pressure) order, but `RP` still reflects the
+      // discarded attempt. FinalOccupancy accumulates the
+      // worst-of-discarded pressures instead of the worst-of-kept
+      // pressures, and the eventual MFI->limitOccupancy(FinalOccupancy)
+      // call sets MFI->Occupancy lower than the schedule actually
+      // committed to the MF.
+      //
+      // Not benign: MFI->Occupancy is read by several downstream
+      // passes — GCNNSAReassign budgets VGPRs from it,
+      // GCNHazardRecognizer gates an MFMA hazard check on it >= 2,
+      // any second-pass scheduler (OptSched, hierarchical) reads it
+      // as a starting target. A corrupted-low Occupancy misleads
+      // all of these. Symptoms are subtle (no crash, no spilling)
+      // but codegen can differ.
+      //
+      // Fix direction: either recompute `getRegionPressure(*R)`
+      // after the restore, or have the scheduleBest / restoreOrder
+      // branches return the pressure of what's now committed and
+      // use that in the min.
+      //
+      // See docs/AMDGPUMachineSchedulerGuide.md appendix Q.1 for
+      // the investigation trail.
       FinalOccupancy = std::min(FinalOccupancy, RP.getOccupancy(ST));
     }
   }
