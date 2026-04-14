@@ -1838,6 +1838,21 @@ not themaxWavesPerEU starting point.
   computation but may underestimate costs for cross-region analysis.
   See `ScheduleDAGInstrs.cpp`, line 877.
 
+- **Sort regions by input register pressure for occupancy passes.**
+  When the scheduler runs, the input instruction order in each region
+  reflects the GCN scheduler's output, and its peak register pressure
+  is already a known scalar per region. For an occupancy-targeted
+  pass (e.g., "raise every region to at least occupancy N"), we can
+  pre-sort regions by input pressure descending and iterate in that
+  order. As soon as we find a region where we *cannot* raise
+  occupancy past its current ceiling — the hardest region by input
+  pressure — we can break out of the loop: every remaining region
+  has strictly lower input pressure, so they already achieve at
+  least that occupancy in the unscheduled input and nothing we do
+  to them can *lower* the function-wide ceiling we just discovered.
+  This avoids scheduling work on the easy regions whenever the hard
+  region is the binding constraint, which is the common case.
+
 - **Scheduling algorithm.** The core hierarchical scheduling algorithm
   is not yet implemented — `RunHierarchicalScheduler` currently builds
   the graph and runs shakedowns but does not reorder instructions.
