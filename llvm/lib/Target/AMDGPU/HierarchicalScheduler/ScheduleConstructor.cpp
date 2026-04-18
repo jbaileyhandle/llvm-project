@@ -148,8 +148,8 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
                                        ScheduleMetric metric) const {
   switch (metric) {
   case ScheduleMetric::kRegisterOccupancy:
-    return pressure_tracker_.GetRegisterOccupancy() >
-           other.pressure_tracker_.GetRegisterOccupancy();
+    return pressure_tracker_.GetRegisterOnlyOccupancy() >
+           other.pressure_tracker_.GetRegisterOnlyOccupancy();
 
   case ScheduleMetric::kContinuousRegisterOccupancyScore:
     return pressure_tracker_.GetContinuousOccupancyScore() >
@@ -163,8 +163,8 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
 }
 
 bool ScheduleConstructor::IsAtOccupancyCeiling() const {
-  return pressure_tracker_.GetRegisterOccupancy() >=
-         pressure_tracker_.GetFunctionOccupancyLimit();
+  return pressure_tracker_.GetRegisterOnlyOccupancy() >=
+         pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
 }
 
 // ============================================================================

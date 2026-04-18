@@ -68,7 +68,7 @@ void ScheduleDAGHierarchicalScheduler::schedule() {
   llvm::outs() << "HierarchicalScheduler: recorded region "
                << regions_.size() << " (" << region.GetNumInstrs()
                << " instrs, orig_reg_occ="
-               << region.GetOriginalRegisterOccupancy(st)
+               << region.GetOriginalRegisterOnlyOccupancy()
                << " vgpr=" << rp.getVGPRNum(st.hasGFX90AInsts())
                << " sgpr=" << rp.getSGPRNum() << ")\n";
 }
@@ -76,13 +76,11 @@ void ScheduleDAGHierarchicalScheduler::schedule() {
 // Sort `regions_` ascending by the integer occupancy implied by each
 // region's original peak pressure. See the header for rationale and the
 // stable-sort justification.
-void ScheduleDAGHierarchicalScheduler::SortRegionsByOriginalOccupancy() {
-  const GCNSubtarget &st =
-      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+void ScheduleDAGHierarchicalScheduler::SortRegionsByOriginalRegisterOnlyOccupancyAscending() {
   std::stable_sort(regions_.begin(), regions_.end(),
-                   [&](const RegionInfo &a, const RegionInfo &b) {
-                     return a.GetOriginalRegisterOccupancy(st) <
-                            b.GetOriginalRegisterOccupancy(st);
+                   [](const RegionInfo &a, const RegionInfo &b) {
+                     return a.GetOriginalRegisterOnlyOccupancy() <
+                            b.GetOriginalRegisterOnlyOccupancy();
                    });
 }
 
@@ -93,17 +91,15 @@ void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
   llvm::outs() << "HierarchicalScheduler: finalizeSchedule called with "
                << regions_.size() << " regions\n";
 
-  SortRegionsByOriginalOccupancy();
+  SortRegionsByOriginalRegisterOnlyOccupancyAscending();
 
   // TODO: Remove this temporary print once we've confirmed the sort.
-  const GCNSubtarget &st =
-      static_cast<const GCNSubtarget &>(MF.getSubtarget());
   llvm::outs() << "HierarchicalScheduler: region order after sort:\n";
   for (size_t i = 0; i < regions_.size(); ++i) {
     const RegionInfo &r = regions_[i];
     llvm::outs() << "  [" << i << "] " << r.GetNumInstrs()
                  << " instrs, orig_reg_occ="
-                 << r.GetOriginalRegisterOccupancy(st) << "\n";
+                 << r.GetOriginalRegisterOnlyOccupancy() << "\n";
   }
 
   const MachineInstrSchedulerConfig &config =

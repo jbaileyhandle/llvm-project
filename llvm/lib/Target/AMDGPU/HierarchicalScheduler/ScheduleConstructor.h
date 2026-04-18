@@ -60,7 +60,7 @@ namespace hierarchical_scheduler {
 /// Criterion by which two ScheduleConstructor states are compared.
 /// Used with ScheduleConstructor::IsBetterThan.
 enum class ScheduleMetric {
-  /// Integer register occupancy (GetRegisterOccupancy). Coarse:
+  /// Integer register occupancy (GetRegisterOnlyOccupancy). Coarse:
   /// schedules in the same occupancy bracket tie. Higher is better.
   kRegisterOccupancy,
 

@@ -62,18 +62,22 @@ public:
   }
 
   // Integer register-pressure-only occupancy implied by the peak
-  // pressure on the given subtarget: min(occ_from_sgpr, occ_from_vgpr).
-  // Symmetric with GCNRegisterTracker::GetRegisterOccupancy — both
-  // ignore LDS and launch bounds and return just the register-
-  // dimension ceiling. Lower = harder.
-  unsigned GetOriginalRegisterOccupancy(const GCNSubtarget &st) const {
-    return original_peak_pressure_.getOccupancy(st);
+  // pressure on the target subtarget: min(occ_from_sgpr, occ_from_vgpr).
+  // Cached at construction — the subtarget is fixed per MachineFunction
+  // and the peak pressure does not change after construction, so the
+  // occupancy is a stable scalar. Symmetric with
+  // GCNRegisterTracker::GetRegisterOnlyOccupancy — both ignore LDS
+  // and launch bounds and return just the register-dimension
+  // ceiling. Lower = harder.
+  int GetOriginalRegisterOnlyOccupancy() const {
+    return original_register_only_occupancy_;
   }
 
 private:
   MachineBasicBlock::iterator begin_;
   MachineBasicBlock::iterator end_;
   GCNRegPressure original_peak_pressure_;
+  int original_register_only_occupancy_ = 0;
 };
 
 } // namespace hierarchical_scheduler

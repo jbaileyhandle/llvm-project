@@ -190,9 +190,10 @@ void ScheduleDAGHierarchicalScheduler::RunGCNRegisterTrackerShakedown(
     llvm::outs() << "      " << tracker.DescribePressure() << "\n";
   }
 
-  llvm::outs() << "  Occupancy: register=" << tracker.GetRegisterOccupancy()
-               << " region=" << tracker.GetRegionOccupancy()
-               << " standalone=" << tracker.GetStandaloneRegionOccupancy()
+  llvm::outs() << "  Occupancy: register_only="
+               << tracker.GetRegisterOnlyOccupancy()
+               << " all_factors_region_only="
+               << tracker.GetAllFactorsRegionOnlyOccupancy()
                << "\n";
 
   // --- Reverse pass: unschedule in reverse topo order ---
@@ -556,8 +557,8 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleMetricShakedown(
 
   check_metric(
       ScheduleMetric::kRegisterOccupancy, "reg_occ",
-      sc_empty.GetPressureTracker().GetRegisterOccupancy(),
-      sc_full.GetPressureTracker().GetRegisterOccupancy(),
+      sc_empty.GetPressureTracker().GetRegisterOnlyOccupancy(),
+      sc_full.GetPressureTracker().GetRegisterOnlyOccupancy(),
       /*higher_is_better=*/true);
   check_metric(
       ScheduleMetric::kContinuousRegisterOccupancyScore, "cont_occ",
@@ -575,13 +576,13 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleMetricShakedown(
   // Print the pieces so we can see them line up. No pass/fail since
   // whether the region is at the ceiling depends on actual pressure.
   llvm::outs() << "    initial ceiling check: reg_occ="
-               << sc_empty.GetPressureTracker().GetRegisterOccupancy()
+               << sc_empty.GetPressureTracker().GetRegisterOnlyOccupancy()
                << " fn_limit="
-               << sc_empty.GetPressureTracker().GetFunctionOccupancyLimit()
+               << sc_empty.GetPressureTracker().GetConfiguredMachineFunctionOccupancyLimit()
                << " at_ceiling=" << sc_empty.IsAtOccupancyCeiling() << "\n";
   llvm::outs() << "    full ceiling check:    reg_occ="
-               << sc_full.GetPressureTracker().GetRegisterOccupancy()
+               << sc_full.GetPressureTracker().GetRegisterOnlyOccupancy()
                << " fn_limit="
-               << sc_full.GetPressureTracker().GetFunctionOccupancyLimit()
+               << sc_full.GetPressureTracker().GetConfiguredMachineFunctionOccupancyLimit()
                << " at_ceiling=" << sc_full.IsAtOccupancyCeiling() << "\n";
 }

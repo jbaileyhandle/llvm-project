@@ -461,19 +461,15 @@ int GCNRegisterTracker::GetContinuousOccupancyScore() const {
       max_pressure_.getSGPRNum());
 }
 
-unsigned GCNRegisterTracker::GetRegisterOccupancy() const {
+unsigned GCNRegisterTracker::GetRegisterOnlyOccupancy() const {
   return max_pressure_.getOccupancy(*st_);
 }
 
-unsigned GCNRegisterTracker::GetRegionOccupancy() const {
-  return std::min(mfi_->getOccupancy(), GetRegisterOccupancy());
-}
-
-unsigned GCNRegisterTracker::GetFunctionOccupancyLimit() const {
+unsigned GCNRegisterTracker::GetConfiguredMachineFunctionOccupancyLimit() const {
   return mfi_->getOccupancy();
 }
 
-unsigned GCNRegisterTracker::GetStandaloneRegionOccupancy() const {
+unsigned GCNRegisterTracker::GetAllFactorsRegionOnlyOccupancy() const {
   unsigned occ = st_->computeOccupancy(
       mf_->getFunction(), mfi_->getLDSSize(),
       max_pressure_.getSGPRNum(),

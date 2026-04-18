@@ -1579,25 +1579,20 @@ structural ceiling based on hardware max, LDS, and launch bounds,
 before any scheduler reduced it due to register pressure. This is
 the same approach OptSched uses (`GCNOptSched.cpp:58`).
 
-`GCNRegisterTracker` provides three occupancy query functions:
+`GCNRegisterTracker` provides these occupancy query functions:
 
-- **`GetRegisterOccupancy()`** — occupancy from peak register
+- **`GetRegisterOnlyOccupancy()`** — occupancy from peak register
   pressure only (SGPR + VGPR limits). Does not account for LDS
   or launch bounds.
 
-- **`GetRegionOccupancy()`** — `min(MFI.getOccupancy(),
-  register_occupancy)`. Incorporates the function-level ceiling
-  (hardware, LDS, launch bounds) and any reductions from this
-  scheduler processing other regions.
-
-- **`GetStandaloneRegionOccupancy()`** — recomputed from scratch
+- **`GetAllFactorsRegionOnlyOccupancy()`** — recomputed from scratch
   via `GCNSubtarget::computeOccupancy()` with this region's peak
   pressure, the kernel's LDS, and launch bounds. Ignores any
-  occupancy limit set on the MachineFunction. Useful for
-  evaluating what a region could achieve independently.
+  occupancy limit currently configured on the MachineFunction.
+  Useful for evaluating what a region could achieve independently.
 
 - **`GetContinuousOccupancyScore()`** — smooth version of
-  `GetRegisterOccupancy()`. Integer occupancy is stair-stepped
+  `GetRegisterOnlyOccupancy()`. Integer occupancy is stair-stepped
   (e.g., on gfx906, 24 VGPRs → 10 waves, 25 VGPRs → 9 waves),
   which hides incremental progress: two schedules at 25 and 28
   VGPRs both report occupancy 9 and look identical to a search.
@@ -1610,9 +1605,13 @@ the same approach OptSched uses (`GCNOptSched.cpp:58`).
   separately, so capping would only collapse the top bracket's
   resolution without changing any decision.
 
-- **`GetFunctionOccupancyLimit()`** — wraps
-  `MFI->getOccupancy()`, the current function-level clamp
-  (structural ceiling after any reductions from earlier regions).
+- **`GetConfiguredMachineFunctionOccupancyLimit()`** — wraps
+  `MFI->getOccupancy()`, the current function-level clamp. This
+  is the structural ceiling (hardware max, LDS, launch bounds)
+  only if nothing has lowered it; otherwise it also reflects
+  earlier register-pressure-driven reductions. For an effective
+  per-region occupancy, compose with `GetRegisterOnlyOccupancy()`:
+  `min(register_only, configured_function_limit)`.
 
 #### 10.9.1 SGPR ceiling table (why we roll our own)
 
@@ -1668,7 +1667,7 @@ occ=10 might actually hit occ=9 once reservations are added.
 `GCNRegPressure::getOccupancy` in LLVM has the same blind spot
 — it passes VR counts straight to `getOccupancyWithNumSGPRs`
 with no correction. Our score matches that behavior, which
-keeps `GetRegisterOccupancy()` and `GetContinuousOccupancyScore()`
+keeps `GetRegisterOnlyOccupancy()` and `GetContinuousOccupancyScore()`
 in sync with each other and with the rest of the compiler.
 
 In principle, a schedule can end up optimizing the wrong
@@ -1692,7 +1691,7 @@ values:
 - `kScheduleLength` — current cycle count (lower is better).
 
 `IsBetterThan` is strict: ties return false. `IsAtOccupancyCeiling()`
-returns true when `GetRegisterOccupancy() >= GetFunctionOccupancyLimit()`,
+returns true when `GetRegisterOnlyOccupancy() >= GetConfiguredMachineFunctionOccupancyLimit()`,
 i.e. when further register improvements cannot raise region
 occupancy — the natural early-exit condition for occupancy-focused
 search.
@@ -1817,7 +1816,7 @@ not themaxWavesPerEU starting point.
   exit node semantics.
 
 - **SGPR occupancy scoring and reserved registers (low priority).**
-  Both `GetRegisterOccupancy()` (via `GCNRegPressure::getOccupancy`)
+  Both `GetRegisterOnlyOccupancy()` (via `GCNRegPressure::getOccupancy`)
   and `GetContinuousOccupancyScore()` pass raw virtual-register counts
   to the hardware classifier. This ignores reserved SGPRs (VCC,
   FLAT_SCRATCH, XNACK, trap handler), so our SGPR→occupancy mapping
@@ -4190,7 +4189,7 @@ reconsidering rather than copying verbatim:
 | `FindOneSchedule` | Loop calling `ScheduleConstructor::Schedule()` |
 | `readyLs` / `ACOReadyList` | `ScheduleConstructor::GetReadyListSnapshot()` |
 | `lastInst` (previous pick) | Tracked by the ant; our `ScheduleConstructor` doesn't need this since we pass it to the selection function |
-| `RPTarget` ant-termination | Check `pressure_tracker_.GetRegisterOccupancy()` or continuous score against a budget; `Unschedule` and abort if over |
+| `RPTarget` ant-termination | Check `pressure_tracker_.GetRegisterOnlyOccupancy()` or continuous score against a budget; `Unschedule` and abort if over |
 | `schedule->GetCost()` | `ScheduleConstructor::IsBetterThan` / cost-returning getters |
 | `shouldReplaceSchedule` | `ScheduleConstructor::IsBetterThan(other, metric)` |
 | `Pheromone(from, to)` table | `AcoTable` (new class, indexing per O.2) |
@@ -4908,7 +4907,7 @@ That difference reshapes most of the mapping:
 | `frwrdLwrBounds_[]` tightening / range tightening | Not directly applicable — we don't schedule cycle-by-cycle, so "too early / too late" isn't a notion. Length-feasibility at the current depth is a global property derived by the length tracker |
 | Issue slot feasibility | N/A — our model has no issue slots to over-commit |
 | Cost lower bound for pruning | Would need a new function: for pressure, a partial→completion LB is weak; for length, critical path through unscheduled nodes is tight |
-| APRP cost function | Already have `GetContinuousOccupancyScore` (smooth) and `GetRegisterOccupancy` (stair-stepped). The stair-stepped one is the direct analog of APRP |
+| APRP cost function | Already have `GetContinuousOccupancyScore` (smooth) and `GetRegisterOnlyOccupancy` (stair-stepped). The stair-stepped one is the direct analog of APRP |
 | History signature | XOR of ScheduleNode random IDs — easy |
 | History table | New `HistoryTable<PartialSchedState>` class |
 | History domination test | Without per-cycle lower bounds, the dominance relation is simpler in our model: two partial schedules with the same scheduled set are equivalent if their peak pressure and current cycle count are equal; the one with lower peak pressure dominates the other |
@@ -4946,7 +4945,7 @@ That difference reshapes most of the mapping:
   because OptSched's enumerator decides stall placement inside
   a fixed-length slot grid. Our enumerator picks orders and
   derives length, so "ignore length" just means "cost function
-  = `GetRegisterOccupancy`, nothing else." No latency override
+  = `GetRegisterOnlyOccupancy`, nothing else." No latency override
   required.
 
 **On pruning within the ILP pass (in order of effort):**
@@ -4961,7 +4960,7 @@ That difference reshapes most of the mapping:
 - **Add pressure-constraint pruning.** If a partial schedule's
   current pressure already exceeds the APRP target (and pressure
   is monotonically non-decreasing in our model), prune. We have
-  `GetRegisterOccupancy` already.
+  `GetRegisterOnlyOccupancy` already.
 - **History domination is the biggest lift.** Skip it until the
   simpler pruning proves insufficient. It'll require building out
   history-entry recording/replay and a signature hash table.

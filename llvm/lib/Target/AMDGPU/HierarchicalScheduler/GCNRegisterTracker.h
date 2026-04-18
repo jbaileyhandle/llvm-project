@@ -121,32 +121,24 @@ public:
 
   /// Occupancy based on peak register pressure only (SGPR and VGPR
   /// limits). Does NOT account for LDS or launch bounds.
-  unsigned GetRegisterOccupancy() const;
-
-  /// Occupancy for this region, incorporating the function-level
-  /// occupancy limit (MFI.getOccupancy()). After
-  /// resetInitialOccupancy (called at the start of our scheduler),
-  /// this reflects the structural ceiling (hardware max, LDS, launch
-  /// bounds) and any reductions from this scheduler processing other
-  /// regions of the same function.
-  /// Returns min(function_occupancy, register_occupancy).
-  unsigned GetRegionOccupancy() const;
+  unsigned GetRegisterOnlyOccupancy() const;
 
   /// Occupancy for this region, computed from scratch using
   /// GCNSubtarget::computeOccupancy() with this region's peak
   /// register pressure, the kernel's LDS usage, and the launch
   /// bounds attribute. Does NOT incorporate any occupancy limit
-  /// set on the MachineFunction.
-  unsigned GetStandaloneRegionOccupancy() const;
+  /// currently configured on the MachineFunction.
+  unsigned GetAllFactorsRegionOnlyOccupancy() const;
 
-  /// The function-level occupancy limit: MFI.getOccupancy(). This is
-  /// the current ceiling the region's occupancy is clamped against —
-  /// the structural ceiling (hardware max, LDS, launch bounds), plus
-  /// any reductions made by earlier passes or by this scheduler
-  /// processing other regions of the same function. Improving this
-  /// region's register pressure cannot raise occupancy above this
-  /// value.
-  unsigned GetFunctionOccupancyLimit() const;
+  /// The occupancy currently configured on the MachineFunction
+  /// (MFI.getOccupancy()). This is the ceiling the region's occupancy
+  /// is clamped against — the structural ceiling (hardware max, LDS,
+  /// launch bounds) only if nothing has lowered it; otherwise it also
+  /// reflects earlier register-pressure-driven reductions from prior
+  /// passes or from this scheduler processing other regions of the
+  /// same function. Improving this region's register pressure cannot
+  /// raise occupancy above this value.
+  unsigned GetConfiguredMachineFunctionOccupancyLimit() const;
 
   /// Continuous occupancy score based on peak SGPR/VGPR pressure.
   ///
@@ -156,7 +148,8 @@ public:
   /// from the next-higher bracket. Higher is better.
   ///
   /// Register-only: LDS and launch bounds are not considered. Parallel
-  /// to GetRegisterOccupancy(); use GetRegionOccupancy() / an early-exit
+  /// to GetRegisterOnlyOccupancy(); compose with
+  /// GetConfiguredMachineFunctionOccupancyLimit() / an early-exit
   /// check to handle non-register ceilings.
   ///
   /// For a single dimension (VGPR or SGPR):

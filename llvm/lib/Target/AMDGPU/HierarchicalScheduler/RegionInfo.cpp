@@ -8,7 +8,9 @@
 
 #include "RegionInfo.h"
 #include "GCNRegPressure.h"
+#include "GCNSubtarget.h"
 #include "llvm/CodeGen/LiveIntervals.h"
+#include "llvm/CodeGen/MachineFunction.h"
 
 using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
@@ -27,4 +29,9 @@ RegionInfo::RegionInfo(MachineBasicBlock::iterator begin,
   // If reset() returned false (region is empty except debug
   // values), original_peak_pressure_ stays at its default-constructed
   // zero state.
+
+  const GCNSubtarget &st =
+      begin->getParent()->getParent()->getSubtarget<GCNSubtarget>();
+  original_register_only_occupancy_ =
+      static_cast<int>(original_peak_pressure_.getOccupancy(st));
 }

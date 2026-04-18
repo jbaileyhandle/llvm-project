@@ -64,7 +64,7 @@ public:
   // and makes any secondary behavior (diagnostic printing,
   // downstream iteration) consistent with the order regions
   // appeared in the MachineFunction.
-  void SortRegionsByOriginalOccupancy();
+  void SortRegionsByOriginalRegisterOnlyOccupancyAscending();
 
   // Run the malicious scheduler over all recorded regions. For each region,
   // builds the DAG, computes the malicious schedule, and applies it.
