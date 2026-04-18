@@ -469,12 +469,26 @@ unsigned GCNRegisterTracker::GetConfiguredMachineFunctionOccupancyLimit() const 
   return mfi_->getOccupancy();
 }
 
-unsigned GCNRegisterTracker::GetAllFactorsRegionOnlyOccupancy() const {
-  unsigned occ = st_->computeOccupancy(
-      mf_->getFunction(), mfi_->getLDSSize(),
+int GCNRegisterTracker::ComputeAllFactorsOccupancy(
+    const GCNSubtarget &st, const MachineFunction &mf,
+    unsigned num_sgprs, unsigned num_vgprs) {
+  const SIMachineFunctionInfo *mfi = mf.getInfo<SIMachineFunctionInfo>();
+  unsigned occ = st.computeOccupancy(mf.getFunction(), mfi->getLDSSize(),
+                                     num_sgprs, num_vgprs);
+  return static_cast<int>(std::min(occ, mfi->getMaxWavesPerEU()));
+}
+
+int GCNRegisterTracker::ComputeNonRegisterOccupancy(
+    const GCNSubtarget &st, const MachineFunction &mf) {
+  return ComputeAllFactorsOccupancy(st, mf, /*num_sgprs=*/0,
+                                    /*num_vgprs=*/0);
+}
+
+int GCNRegisterTracker::GetAllFactorsRegionOnlyOccupancy() const {
+  return ComputeAllFactorsOccupancy(
+      *st_, *mf_,
       max_pressure_.getSGPRNum(),
       max_pressure_.getVGPRNum(st_->hasGFX90AInsts()));
-  return std::min(occ, mfi_->getMaxWavesPerEU());
 }
 
 // ============================================================================

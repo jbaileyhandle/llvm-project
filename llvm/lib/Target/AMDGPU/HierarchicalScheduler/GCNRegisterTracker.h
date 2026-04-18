@@ -128,7 +128,24 @@ public:
   /// register pressure, the kernel's LDS usage, and the launch
   /// bounds attribute. Does NOT incorporate any occupancy limit
   /// currently configured on the MachineFunction.
-  unsigned GetAllFactorsRegionOnlyOccupancy() const;
+  int GetAllFactorsRegionOnlyOccupancy() const;
+
+  /// Static version of the compose used by
+  /// GetAllFactorsRegionOnlyOccupancy, parameterized by register
+  /// pressure. Register args of 0 skip the register-pressure clamping
+  /// inside GCNSubtarget::computeOccupancy.
+  static int ComputeAllFactorsOccupancy(
+      const GCNSubtarget &st, const MachineFunction &mf,
+      unsigned num_sgprs, unsigned num_vgprs);
+
+  /// Occupancy ignoring register pressure: arch max ∩ LDS ∩ launch
+  /// bounds. Useful as an independent cross-check against
+  /// GetConfiguredMachineFunctionOccupancyLimit — after
+  /// resetInitialOccupancy they should match, and a mismatch means
+  /// something lowered the MFI value without a corresponding reset.
+  /// Thin wrapper over ComputeAllFactorsOccupancy(st, mf, 0, 0).
+  static int ComputeNonRegisterOccupancy(
+      const GCNSubtarget &st, const MachineFunction &mf);
 
   /// The occupancy currently configured on the MachineFunction
   /// (MFI.getOccupancy()). This is the ceiling the region's occupancy
