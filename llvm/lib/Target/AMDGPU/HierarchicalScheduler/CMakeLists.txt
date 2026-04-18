@@ -18,6 +18,7 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/ScheduleLengthTracker.cpp
   HierarchicalScheduler/ScheduleConstructor.cpp
   HierarchicalScheduler/RegionInfo.cpp
+  HierarchicalScheduler/BranchAndBoundSearch.cpp
   PARENT_SCOPE
 )
 

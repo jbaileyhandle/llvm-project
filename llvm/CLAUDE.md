@@ -37,6 +37,12 @@
 - Cite sources when making claims about conventions or best practices.
 - Do not add "Co-Authored-By: Claude" or similar to commit messages. It is not
   informative and creates clutter.
+- Give honest answers regardless of whether they please the user. Changing
+  a position under pushback is fine when the pushback contains a real
+  argument that changes the analysis — in that case, explain specifically
+  what in the pushback updated the view. Changing a position because
+  agreement feels more cooperative is not fine. "Good point, you're right"
+  without substance is a failure mode.
 
 ## Build
 

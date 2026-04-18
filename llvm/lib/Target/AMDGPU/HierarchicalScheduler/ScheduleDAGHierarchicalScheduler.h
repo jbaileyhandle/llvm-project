@@ -17,9 +17,11 @@
 
 #include "RegionInfo.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineScheduler.h"
 #include <type_traits>
+#include <vector>
 
 namespace llvm {
 
@@ -27,6 +29,7 @@ class SIMachineFunctionInfo;
 
 namespace hierarchical_scheduler {
 
+class ScheduleConstructor;
 class ScheduleGraph;
 class ScheduleNode;
 
@@ -72,6 +75,18 @@ public:
   // is where the hierarchical algorithm will be implemented.
   void RunHierarchicalScheduler();
 
+  // Per-region graph-construction helper used by pass drivers.
+  // Wraps ProcessRegion, calls buildSchedGraph, constructs a
+  // ScheduleGraph from the fresh SUnits, computes its topo order,
+  // and hands the graph to the callback. The graph is destroyed
+  // when the callback returns; anything the callback wants to
+  // persist across calls must be saved in a form stable across
+  // buildSchedGraph rebuilds (e.g., MachineInstr* rather than
+  // ScheduleNode* or SUnit*).
+  void WithRegionGraph(
+      const RegionInfo &region,
+      function_ref<void(ScheduleGraph &)> callback);
+
   // Run all shakedowns: synthetic test DAG, then per-region shakedowns
   // on the first region.
   void RunAllShakedowns();
@@ -115,6 +130,12 @@ public:
   // and IsAtOccupancyCeiling on the given region.
   void RunScheduleMetricShakedown(ScheduleGraph &graph);
 
+  // Stub pass: schedule every region in topo order and apply.
+  // Exercises the full pipeline (WithRegionGraph → ScheduleConstructor
+  // → ApplyScheduleOrder) without any real search logic. Useful for
+  // verifying the plumbing.
+  void RunTopoPass();
+
   // Initialize per-function state. Called at the start of
   // RunHierarchicalScheduler / RunMaliciousScheduler. Stores mfi_
   // and resets occupancy to the pre-GCN-scheduler value.
@@ -123,10 +144,23 @@ public:
 protected:
   // Apply a computed schedule order to the given region. Physically moves
   // MachineInstrs to match the order given by |scheduled_units|.
+  // Every SUnit* must be non-null with a valid MachineInstr —
+  // guaranteed when drawing from the SUnits vector that buildSchedGraph
+  // populates (which only contains real instruction SUnits, not
+  // the boundary EntrySU/ExitSU).
   // Must be called within a BeginRegion/EndRegion pair.
   void ApplyScheduleOrder(
       const RegionInfo &region,
       const std::vector<SUnit *> &scheduled_units);
+
+  // Overload: extract the order from a completed ScheduleConstructor.
+  // Walks sc.GetScheduleOrder(), skips ScheduleNodes whose SUnit is
+  // null (synthetic entry/exit nodes from our ScheduleGraph that
+  // don't correspond to real MachineInstrs), and delegates to the
+  // SUnit* overload above.
+  void ApplyScheduleOrder(
+      const RegionInfo &region,
+      const ScheduleConstructor &sc);
 
   // Set up ScheduleDAGMILive state for the given region so that
   // moveInstruction() and other inherited methods work correctly.

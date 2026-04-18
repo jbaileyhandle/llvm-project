@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ScheduleDAGHierarchicalScheduler.h"
+#include "BranchAndBoundSearch.h"
 #include "MaliciousScheduler.h"
 #include "GCNRegisterTracker.h"
 #include "ScheduleConstructor.h"
@@ -194,18 +195,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunTestDAGShakedown();
 
   for (auto &region : regions_) {
-    ProcessRegion(region, [&]() {
-      buildSchedGraph(AA);
-
-      SlotIndex region_begin_idx = LIS->getInstructionIndex(*RegionBegin);
-      SlotIndex region_end_idx = RegionEnd == BB->end()
-          ? LIS->getMBBEndIdx(BB)
-          : LIS->getInstructionIndex(*RegionEnd);
-
-      ScheduleGraph graph = ScheduleGraph::BuildFromSUnits(
-          SUnits, *LIS, MF.getRegInfo(), region_begin_idx, region_end_idx);
-      graph.ComputeTopologicalOrder();
-
+    WithRegionGraph(region, [&](ScheduleGraph &graph) {
       llvm::outs() << "  Region: " << region.GetNumInstrs()
                    << " instrs, graph: " << graph.Size()
                    << " nodes (" << graph.LeafSize() << " leaves)"
@@ -220,6 +210,26 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   }
 }
 
+// Per-region graph-construction helper. See header for rationale.
+void ScheduleDAGHierarchicalScheduler::WithRegionGraph(
+    const RegionInfo &region,
+    function_ref<void(ScheduleGraph &)> callback) {
+  ProcessRegion(region, [&]() {
+    buildSchedGraph(AA);
+
+    SlotIndex region_begin_idx = LIS->getInstructionIndex(*RegionBegin);
+    SlotIndex region_end_idx = RegionEnd == BB->end()
+        ? LIS->getMBBEndIdx(BB)
+        : LIS->getInstructionIndex(*RegionEnd);
+
+    ScheduleGraph graph = ScheduleGraph::BuildFromSUnits(
+        SUnits, *LIS, MF.getRegInfo(), region_begin_idx, region_end_idx);
+    graph.ComputeTopologicalOrder();
+
+    callback(graph);
+  });
+}
+
 // Initialize per-function state. Stores mfi_ and resets occupancy
 // to the pre-GCN-scheduler value so we can aim for the best possible
 // occupancy with our own schedule (same approach as OptSched,
@@ -230,14 +240,64 @@ void ScheduleDAGHierarchicalScheduler::InitFunction() {
   mfi_->resetInitialOccupancy(MF);
 }
 
-// Main hierarchical scheduling path. Currently runs shakedowns only —
-// the actual scheduling algorithm will be implemented here.
+// Apply a schedule from a completed ScheduleConstructor. Extracts
+// the order, skips synthetic entry/exit nodes (null SUnit), and
+// delegates to the SUnit* overload. Group nodes are not expected
+// and trigger a fatal error — the flat-only ScheduleConstructor
+// should never produce them.
+// Materializes the SUnit* order from the ScheduleConstructor and
+// delegates to the vector<SUnit*> overload. This allocates an
+// intermediate vector, which could be avoided using LLVM's
+// make_filter_range + map_range to lazily iterate
+// sc.GetScheduleOrder() directly. Not worth it: we apply a
+// schedule at most once per region per pass, so the cost is
+// negligible.
+void ScheduleDAGHierarchicalScheduler::ApplyScheduleOrder(
+    const RegionInfo &region,
+    const ScheduleConstructor &sc) {
+  std::vector<SUnit *> sunit_order;
+  for (const ScheduleNode *node : sc.GetScheduleOrder()) {
+    if (!node->IsLeaf()) {
+      report_fatal_error("ApplyScheduleOrder: encountered a group node "
+                         "in the schedule order. Only leaf nodes are "
+                         "supported.");
+    }
+    SUnit *su = node->GetSUnit();
+    if (su) {
+      sunit_order.push_back(su);
+    }
+  }
+  ApplyScheduleOrder(region, sunit_order);
+}
+
+// Stub pass: schedule every region in topo order and apply. Exercises
+// the full pipeline without any real search logic.
+void ScheduleDAGHierarchicalScheduler::RunTopoPass() {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+
+  for (auto &region : regions_) {
+    WithRegionGraph(region, [&](ScheduleGraph &graph) {
+      ScheduleConstructor sc(graph, st, MF, *LIS);
+
+      for (ScheduleNode *node : graph.TopoOrder()) {
+        sc.Schedule(node);
+      }
+
+      ApplyScheduleOrder(region, sc);
+    });
+  }
+}
+
+// Main hierarchical scheduling path.
 void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   InitFunction();
 
   llvm::outs() << "RunHierarchicalScheduler: processing " << regions_.size()
                << " regions, target occupancy " << mfi_->getOccupancy()
                << "\n";
+
+  RunTopoPass();
 
   RunAllShakedowns();
 }
