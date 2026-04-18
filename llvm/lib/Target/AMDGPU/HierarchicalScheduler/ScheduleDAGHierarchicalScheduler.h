@@ -136,6 +136,22 @@ public:
   // verifying the plumbing.
   void RunTopoPass();
 
+  // Outer loop of the occupancy-maximization pass. Iterates regions
+  // ascending by original register-only occupancy and calls
+  // ScheduleRegionForMaximumOccupancy on each, tracking a running
+  // kernel ceiling with the early-exit conditions documented at the
+  // call site. Cross-checks MFI->getOccupancy() against
+  // ComputeNonRegisterOccupancy before starting.
+  void RunMaximizeOccupancyPass();
+
+  // Per-region worker for RunMaximizeOccupancyPass. Returns the
+  // maximum achieved all-factors occupancy for this region (arch max
+  // ∩ LDS ∩ launch bounds ∩ best register-pressure dimension). This
+  // is the per-region contribution to the kernel-wide occupancy
+  // min. Currently a stub that returns the original schedule's
+  // all-factors occupancy (i.e., no improvement).
+  int ScheduleRegionForMaximumOccupancy(RegionInfo &region);
+
   // Initialize per-function state. Called at the start of
   // RunHierarchicalScheduler / RunMaliciousScheduler. Stores mfi_
   // and resets occupancy to the pre-GCN-scheduler value.

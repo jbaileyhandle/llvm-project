@@ -9,6 +9,7 @@
 
 #include "ScheduleDAGHierarchicalScheduler.h"
 #include "BranchAndBoundSearch.h"
+#include "GCNRegisterTracker.h"
 #include "MaliciousScheduler.h"
 #include "ScheduleConstructor.h"
 #include "GCNSubtarget.h"
@@ -216,6 +217,95 @@ void ScheduleDAGHierarchicalScheduler::RunTopoPass() {
   }
 }
 
+// Maximize-occupancy outer loop. See header for detail.
+void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+
+  // Grab initial occupancy, ignoring registers
+  // This should match the configured limit for the function,
+  // which we reset previously
+  int configured_limit = static_cast<int>(mfi_->getOccupancy());
+  int non_register =
+      GCNRegisterTracker::ComputeNonRegisterOccupancy(st, MF);
+  if (configured_limit != non_register) {
+    report_fatal_error(
+        "RunMaximizeOccupancyPass: MFI->getOccupancy() disagrees with "
+        "ComputeNonRegisterOccupancy — something lowered the MFI value "
+        "without a matching reset");
+  }
+
+  int kernel_occupancy_so_far = configured_limit;
+
+  // TODO: Remove this temporary print once the pass is wired up.
+  llvm::outs() << "RunMaximizeOccupancyPass: starting with "
+               << "configured_limit=" << configured_limit << "\n";
+
+  for (size_t i = 0; i < regions_.size(); ++i) {
+    RegionInfo &region = regions_[i];
+    int original_register_only_occupancy =
+        region.GetOriginalRegisterOnlyOccupancy();
+
+    // Stop when this region's original register-only occupancy is
+    // already at or above the running kernel ceiling. Ascending
+    // iteration guarantees every later region's original is >= this one's,
+    // so their achievable occupancies are also >= kernel_occupancy_so_far,
+    // and no further work can raise the kernel above the value already
+    // pinned by an earlier region.
+    //
+    // On the first iteration, kernel_occupancy_so_far ==
+    // configured_limit, so this also catches the case where region 0's
+    // occupancy is already maxed out by the ceiling set by other factors 
+    // (e.g. arch max / LDS / launch bounds).
+    if (original_register_only_occupancy >= kernel_occupancy_so_far) {
+      int num_skipped = static_cast<int>(regions_.size() - i);
+      int total = static_cast<int>(regions_.size());
+      int percent_skipped = (num_skipped * 100) / total;
+      llvm::outs() << "  [" << i << "] stop: orig_reg_only="
+                   << original_register_only_occupancy
+                   << " >= kernel_so_far=" << kernel_occupancy_so_far
+                   << " (skipping " << num_skipped << "/" << total
+                   << " regions, " << percent_skipped << "%)\n";
+      break;
+    }
+
+    // Determine highest occupancy achievable for region
+    int best_region_occupancy = ScheduleRegionForMaximumOccupancy(region);
+
+    // Update kernel_occupancy_so_far 
+    int kernel_occupancy_after_region =
+        std::min(kernel_occupancy_so_far, best_region_occupancy);
+    llvm::outs() << "  [" << i << "] orig_reg_only="
+                 << original_register_only_occupancy
+                 << " -> best_region_occupancy=" << best_region_occupancy
+                 << "  kernel_occupancy_so_far: " << kernel_occupancy_so_far << " -> "
+                 << kernel_occupancy_after_region << "\n";
+    kernel_occupancy_so_far = kernel_occupancy_after_region;
+  }
+
+  // Record the achieved occupancy on the MachineFunction so later
+  // passes see the real ceiling. limitOccupancy only lowers, and
+  // kernel_occupancy_so_far is bounded above by configured_limit
+  // by construction, so this never raises.
+  mfi_->limitOccupancy(static_cast<unsigned>(kernel_occupancy_so_far));
+
+  llvm::outs() << "RunMaximizeOccupancyPass: final kernel_occupancy="
+               << kernel_occupancy_so_far
+               << " (MFI->Occupancy now " << mfi_->getOccupancy() << ")\n";
+}
+
+// Stub: returns the original schedule's all-factors occupancy, i.e.,
+// "no improvement." Placeholder until real DFS lands.
+int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
+    RegionInfo &region) {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+  const GCNRegPressure &pressure = region.GetOriginalPeakPressure();
+  return GCNRegisterTracker::ComputeAllFactorsOccupancy(
+      st, MF, pressure.getSGPRNum(),
+      pressure.getVGPRNum(st.hasGFX90AInsts()));
+}
+
 // Main hierarchical scheduling path.
 void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   InitFunction();
@@ -224,7 +314,7 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
                << " regions, target occupancy " << mfi_->getOccupancy()
                << "\n";
 
-  RunTopoPass();
+  RunMaximizeOccupancyPass();
 
   RunAllShakedowns();
 }
