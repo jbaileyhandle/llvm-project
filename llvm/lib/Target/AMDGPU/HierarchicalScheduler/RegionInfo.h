@@ -57,8 +57,8 @@ public:
   // construction time. "Peak" is componentwise: each dimension's
   // value is the max of that dimension across the walk, not
   // necessarily observed at the same instruction.
-  const GCNRegPressure &GetInputPeakPressure() const {
-    return input_peak_pressure_;
+  const GCNRegPressure &GetOriginalPeakPressure() const {
+    return original_peak_pressure_;
   }
 
   // Integer register-pressure-only occupancy implied by the peak
@@ -66,14 +66,14 @@ public:
   // Symmetric with GCNRegisterTracker::GetRegisterOccupancy — both
   // ignore LDS and launch bounds and return just the register-
   // dimension ceiling. Lower = harder.
-  unsigned GetInputRegisterOccupancy(const GCNSubtarget &st) const {
-    return input_peak_pressure_.getOccupancy(st);
+  unsigned GetOriginalRegisterOccupancy(const GCNSubtarget &st) const {
+    return original_peak_pressure_.getOccupancy(st);
   }
 
 private:
   MachineBasicBlock::iterator begin_;
   MachineBasicBlock::iterator end_;
-  GCNRegPressure input_peak_pressure_;
+  GCNRegPressure original_peak_pressure_;
 };
 
 } // namespace hierarchical_scheduler

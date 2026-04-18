@@ -22,9 +22,9 @@ RegionInfo::RegionInfo(MachineBasicBlock::iterator begin,
   GCNDownwardRPTracker tracker(lis);
   if (tracker.reset(*begin)) {
     tracker.advance(begin, end);
-    input_peak_pressure_ = tracker.moveMaxPressure();
+    original_peak_pressure_ = tracker.moveMaxPressure();
   }
   // If reset() returned false (region is empty except debug
-  // values), input_peak_pressure_ stays at its default-constructed
+  // values), original_peak_pressure_ stays at its default-constructed
   // zero state.
 }

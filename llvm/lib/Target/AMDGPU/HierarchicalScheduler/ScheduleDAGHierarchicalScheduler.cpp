@@ -52,7 +52,7 @@ void ScheduleDAGHierarchicalScheduler::schedule() {
   // Use the pressure-aware constructor so each region records the
   // occupancy of its incoming instruction order (what the prior
   // scheduler gave us). Kernel-level occupancy is the min over
-  // all regions, so the region with the lowest input occupancy
+  // all regions, so the region with the lowest original occupancy
   // is the binding constraint on kernel occupancy. finalizeSchedule
   // sorts regions by this value ascending and processes the
   // binding region first; if we can't raise its occupancy, no
@@ -64,25 +64,25 @@ void ScheduleDAGHierarchicalScheduler::schedule() {
   // TODO: Remove this temporary print once we've confirmed the pass runs.
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
-  const GCNRegPressure &rp = region.GetInputPeakPressure();
+  const GCNRegPressure &rp = region.GetOriginalPeakPressure();
   llvm::outs() << "HierarchicalScheduler: recorded region "
                << regions_.size() << " (" << region.GetNumInstrs()
-               << " instrs, input_reg_occ="
-               << region.GetInputRegisterOccupancy(st)
+               << " instrs, orig_reg_occ="
+               << region.GetOriginalRegisterOccupancy(st)
                << " vgpr=" << rp.getVGPRNum(st.hasGFX90AInsts())
                << " sgpr=" << rp.getSGPRNum() << ")\n";
 }
 
 // Sort `regions_` ascending by the integer occupancy implied by each
-// region's input peak pressure. See the header for rationale and the
+// region's original peak pressure. See the header for rationale and the
 // stable-sort justification.
-void ScheduleDAGHierarchicalScheduler::SortRegionsByInputOccupancy() {
+void ScheduleDAGHierarchicalScheduler::SortRegionsByOriginalOccupancy() {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
   std::stable_sort(regions_.begin(), regions_.end(),
                    [&](const RegionInfo &a, const RegionInfo &b) {
-                     return a.GetInputRegisterOccupancy(st) <
-                            b.GetInputRegisterOccupancy(st);
+                     return a.GetOriginalRegisterOccupancy(st) <
+                            b.GetOriginalRegisterOccupancy(st);
                    });
 }
 
@@ -93,7 +93,7 @@ void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
   llvm::outs() << "HierarchicalScheduler: finalizeSchedule called with "
                << regions_.size() << " regions\n";
 
-  SortRegionsByInputOccupancy();
+  SortRegionsByOriginalOccupancy();
 
   // TODO: Remove this temporary print once we've confirmed the sort.
   const GCNSubtarget &st =
@@ -102,8 +102,8 @@ void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
   for (size_t i = 0; i < regions_.size(); ++i) {
     const RegionInfo &r = regions_[i];
     llvm::outs() << "  [" << i << "] " << r.GetNumInstrs()
-                 << " instrs, input_reg_occ="
-                 << r.GetInputRegisterOccupancy(st) << "\n";
+                 << " instrs, orig_reg_occ="
+                 << r.GetOriginalRegisterOccupancy(st) << "\n";
   }
 
   const MachineInstrSchedulerConfig &config =
