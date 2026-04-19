@@ -145,13 +145,10 @@ void ScheduleDAGHierarchicalScheduler::WithRegionGraph(
   ProcessRegion(region, [&]() {
     buildSchedGraph(AA);
 
-    SlotIndex region_begin_idx = LIS->getInstructionIndex(*RegionBegin);
-    SlotIndex region_end_idx = RegionEnd == BB->end()
-        ? LIS->getMBBEndIdx(BB)
-        : LIS->getInstructionIndex(*RegionEnd);
-
+    const GCNSubtarget &st =
+        static_cast<const GCNSubtarget &>(MF.getSubtarget());
     ScheduleGraph graph = ScheduleGraph::BuildFromSUnits(
-        SUnits, *LIS, MF.getRegInfo(), region_begin_idx, region_end_idx);
+        SUnits, st, MF, *LIS, MF.getRegInfo(), region);
     graph.ComputeTopologicalOrder();
 
     callback(graph);

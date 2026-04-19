@@ -35,6 +35,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULEGRAPH_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/Register.h"
@@ -50,12 +51,16 @@
 
 namespace llvm {
 
+class GCNSubtarget;
 class LiveIntervals;
+class MachineFunction;
 class MachineRegisterInfo;
 
 namespace hierarchical_scheduler {
 
 class DominatorTree;
+class RegionInfo;
+class ScheduleConstructor;
 class ScheduleGraph;
 class ScheduleNode;
 struct ReducedGraph;
@@ -275,10 +280,11 @@ public:
   /// defs/uses are extracted from MachineInstrs and stored on each node
   /// for use by the RegisterTracker.
   static ScheduleGraph BuildFromSUnits(MutableArrayRef<SUnit> sunits,
+                                       const GCNSubtarget &st,
+                                       const MachineFunction &mf,
                                        const LiveIntervals &lis,
                                        const MachineRegisterInfo &mri,
-                                       SlotIndex region_begin_idx,
-                                       SlotIndex region_end_idx);
+                                       const RegionInfo &region);
 
   /// Build a synthetic test DAG with known structure for testing algorithms
   /// like topological sort, transitive reduction, and dominator trees.
@@ -385,6 +391,22 @@ public:
   /// that passes this graph to DominatorTree::ToString for node names.
   std::string DominatorTreeToString() const;
 
+  /// Access the input-order ScheduleConstructor — a fully-populated
+  /// schedule whose order matches the SUnit order observed at
+  /// BuildFromSUnits time (i.e., the MachineFunction's instruction
+  /// order at the moment this graph was constructed). Populated by
+  /// BuildFromSUnits as Phase 4 of construction.
+  ///
+  /// Naming note: deliberately "input" rather than "original". Only
+  /// the first pass run on a region is guaranteed to see the truly
+  /// original GCN scheduler order; subsequent passes may or may not
+  /// see a different order, depending on whether earlier passes
+  /// actually modified the MachineFunction. "Input" describes the
+  /// relationship to the current pass without overclaiming history.
+  const ScheduleConstructor &GetInputScheduleConstructor() const {
+    return *input_schedule_constructor_;
+  }
+
 private:
   int64_t id_;
   std::vector<ScheduleNode> nodes_;
@@ -393,16 +415,53 @@ private:
 
   std::unique_ptr<ReducedGraph> reduced_graph_;
   std::unique_ptr<DominatorTree> dom_tree_;
+  std::unique_ptr<ScheduleConstructor> input_schedule_constructor_;
 
   // --- Construction helpers (used by BuildFromSUnits) ---
 
-  /// Create entry and exit nodes, wire them to root/leaf nodes, and
-  /// populate their register defs/uses from LiveIntervals. Must be called
-  /// after all real instruction nodes and edges are added.
+  /// Phase 1: For each non-boundary SUnit, append a leaf ScheduleNode
+  /// to nodes_ (in SUnit iteration order, which is MachineFunction
+  /// instruction order) and record the mapping in sunit_to_node.
+  void CreateLeafNodesFromSUnits(
+      MutableArrayRef<SUnit> sunits,
+      DenseMap<const SUnit *, ScheduleNode *> &sunit_to_node);
+
+  /// Phase 2: Translate SDep successor edges into ScheduleEdges
+  /// between leaf nodes. Skips edges to/from LLVM's boundary nodes.
+  void AddEdgesBetweenLeafNodes(
+      const DenseMap<const SUnit *, ScheduleNode *> &sunit_to_node);
+
+  /// Phase 3: Create entry and exit nodes, wire them to root/leaf
+  /// nodes, and populate their register defs/uses from LiveIntervals.
+  /// Must be called after all real instruction nodes and edges are
+  /// added.
   void CreateEntryAndExitNodes(const LiveIntervals &lis,
                                const MachineRegisterInfo &mri,
                                SlotIndex region_begin_idx,
                                SlotIndex region_end_idx);
+
+  /// Phase 4: Construct input_schedule_constructor_ and populate it
+  /// by Schedule()-ing each leaf node in nodes_ storage order. Phase
+  /// 1's emplacement order matches MF order (since SUnits come in MF
+  /// order from buildSchedGraph), so iterating nodes_ directly avoids
+  /// needing the sunit_to_node map here. Two monotonicity checks
+  /// (ScheduleNode::id_ and SUnit::NodeNum) verify the leaf order
+  /// during the replay; the resulting schedule is then cross-checked
+  /// against the region's MF iterator range via
+  /// VerifyInputScheduleMatchesMFOrder.
+  void PopulateInputScheduleConstructor(const GCNSubtarget &st,
+                                        const MachineFunction &mf,
+                                        const LiveIntervals &lis,
+                                        const RegionInfo &region);
+
+  /// Cross-check that input_schedule_constructor_'s schedule order
+  /// matches [region.Begin(), region.End()) at the MachineInstr-
+  /// pointer level. Stronger evidence than the id_/NodeNum
+  /// monotonicity in Phase 4 — those verify structural ordering on
+  /// internal counters; this one walks the actual MF range and
+  /// compares MachineInstr* directly. Called once from Phase 4
+  /// after the replay completes.
+  void VerifyInputScheduleMatchesMFOrder(const RegionInfo &region) const;
 };
 
 /// Lightweight adjacency-list representation produced by transitive

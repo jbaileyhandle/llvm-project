@@ -7,6 +7,8 @@
 #include "ScheduleGraph.h"
 #include "DominatorTree.h"
 #include "GCNRegPressure.h"
+#include "RegionInfo.h"
+#include "ScheduleConstructor.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/CodeGen/LiveIntervals.h"
@@ -310,31 +312,59 @@ std::string ScheduleGraph::DominatorTreeToString() const {
 
 ScheduleGraph
 ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
+                               const GCNSubtarget &st,
+                               const MachineFunction &mf,
                                const LiveIntervals &lis,
                                const MachineRegisterInfo &mri,
-                               SlotIndex region_begin_idx,
-                               SlotIndex region_end_idx) {
+                               const RegionInfo &region) {
   ScheduleGraph graph;
 
   // Reserve space for all SUnits plus our own entry and exit nodes.
   graph.nodes_.reserve(sunits.size() + 2);
 
-  // Phase 1: Create a leaf node for each SUnit, skipping LLVM's boundary
-  // nodes. Register defs/uses are extracted automatically by the
-  // ScheduleNode constructor.
+  // Slot indices at the region's top and bottom. Used by Phase 3 to
+  // query LiveIntervals for live-in/live-out registers at the
+  // boundaries.
+  SlotIndex region_begin_idx = lis.getInstructionIndex(*region.Begin());
+  SlotIndex region_end_idx = region.End() == region.GetBlock()->end()
+      ? lis.getMBBEndIdx(region.GetBlock())
+      : lis.getInstructionIndex(*region.End());
+
+  // Local across phases: maps each non-boundary SUnit to the
+  // ScheduleNode created for it in Phase 1. Used by Phase 2 (edges).
   DenseMap<const SUnit *, ScheduleNode *> sunit_to_node;
 
+  graph.CreateLeafNodesFromSUnits(sunits, sunit_to_node);
+  graph.AddEdgesBetweenLeafNodes(sunit_to_node);
+  graph.CreateEntryAndExitNodes(lis, mri, region_begin_idx, region_end_idx);
+  graph.PopulateInputScheduleConstructor(st, mf, lis, region);
+
+  return graph;
+}
+
+void ScheduleGraph::CreateLeafNodesFromSUnits(
+    MutableArrayRef<SUnit> sunits,
+    DenseMap<const SUnit *, ScheduleNode *> &sunit_to_node) {
+  // SUnits are populated by LLVM's buildSchedGraph in MachineFunction
+  // instruction order. Emplacing nodes_ in the same iteration order
+  // is what makes Phase 4's iteration-of-nodes_ approach work — Phase
+  // 4 verifies the resulting MF order at runtime via SUnit::NodeNum
+  // and ScheduleNode::id_ monotonicity.
+  //
+  // Register defs/uses are extracted automatically by the
+  // ScheduleNode constructor.
   for (SUnit &su : sunits) {
     if (su.isBoundaryNode()) {
       continue;
     }
-    graph.nodes_.emplace_back(&su);
-    sunit_to_node[&su] = &graph.nodes_.back();
+    nodes_.emplace_back(&su);
+    sunit_to_node[&su] = &nodes_.back();
   }
+}
 
-  // Phase 2: Add edges between real instruction nodes. Skip edges to/from
-  // LLVM's boundary nodes.
-  for (ScheduleNode &node : graph.nodes_) {
+void ScheduleGraph::AddEdgesBetweenLeafNodes(
+    const DenseMap<const SUnit *, ScheduleNode *> &sunit_to_node) {
+  for (ScheduleNode &node : nodes_) {
     SUnit *su = node.GetSUnit();
     if (!su) {
       continue;
@@ -345,21 +375,140 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
         continue;
       }
 
-      auto it = sunit_to_node.find(succ_su);
-      if (it == sunit_to_node.end()) {
+      ScheduleNode *succ_node = sunit_to_node.lookup(succ_su);
+      if (!succ_node) {
         continue;
       }
 
       ScheduleEdge::Kind kind = MapSDepToEdgeKind(sdep);
       int latency = static_cast<int>(sdep.getLatency());
-      node.AddSucc(ScheduleEdge(it->second, kind, latency));
+      node.AddSucc(ScheduleEdge(succ_node, kind, latency));
     }
   }
+}
 
-  // Phase 3: Create entry/exit nodes with edges and live register info.
-  graph.CreateEntryAndExitNodes(lis, mri, region_begin_idx, region_end_idx);
+void ScheduleGraph::PopulateInputScheduleConstructor(
+    const GCNSubtarget &st, const MachineFunction &mf,
+    const LiveIntervals &lis, const RegionInfo &region) {
+  input_schedule_constructor_ =
+      std::make_unique<ScheduleConstructor>(*this, st, mf, lis);
 
-  return graph;
+  // nodes_ layout after Phase 1 + Phase 3:
+  //   [0 .. N-1] : real-instruction leaves (Phase 1 emplacement order
+  //                = current MF order)
+  //   [N]        : Entry  (Phase 3, null SUnit, has kArtificial edges
+  //                TO root leaves — root leaves need entry scheduled
+  //                first)
+  //   [N+1]      : Exit   (Phase 3, null SUnit, has kArtificial edges
+  //                FROM tail leaves — exit becomes ready once all its
+  //                predecessor leaves are scheduled)
+  //
+  // For IsDone() (which requires every node in nodes_ to be
+  // scheduled), the order is: Entry, then leaves in MF order, then
+  // Exit.
+  size_t n = nodes_.size();
+  if (n < 2) {
+    report_fatal_error("PopulateInputScheduleConstructor: nodes_.size() < 2 "
+                       "— Phase 3 (entry/exit) did not run");
+  }
+  ScheduleNode *entry_node = &nodes_[n - 2];
+  ScheduleNode *exit_node = &nodes_[n - 1];
+  if (entry_node->GetSUnit() || exit_node->GetSUnit()) {
+    report_fatal_error("PopulateInputScheduleConstructor: expected the last "
+                       "two nodes_ entries to be Phase 3 synthetic "
+                       "entry/exit (null SUnit)");
+  }
+
+  // Schedule entry to release the root leaves.
+  input_schedule_constructor_->Schedule(entry_node);
+
+  // Schedule leaves in MF order (Phase 1 emplacement order). Two
+  // monotonicity checks verify the ordering at runtime against the
+  // previous leaf node:
+  //
+  //   1. ScheduleNode::id_ — assigned from a global counter at
+  //      construction. Consecutive Phase 1 emplacements get
+  //      consecutive ids, so monotonicity confirms we're iterating
+  //      nodes in their emplacement order.
+  //
+  //   2. SUnit::NodeNum — assigned by buildSchedGraph at the *current*
+  //      call site. SUnits are transient: every WithRegionGraph call
+  //      rebuilds them fresh, with NodeNums numbered 0..N-1 in
+  //      current MF order (so any prior pass's reordering is already
+  //      reflected). Monotonicity confirms Phase 1's emplacement
+  //      order matches that current MF order — i.e., Phase 1 didn't
+  //      sort/shuffle/filter sunits before emplacing.
+  //
+  // Schedule()'s ready-list check is a third, separate guard against
+  // non-topological orderings (which would indicate an LLVM bug in
+  // buildSchedGraph or a Phase 2 edge bug).
+  const ScheduleNode *prev_node = nullptr;
+  for (ScheduleNode &node : nodes_) {
+    SUnit *su = node.GetSUnit();
+    if (!su) {
+      continue;
+    }
+    if (prev_node) {
+      if (node.GetId() <= prev_node->GetId()) {
+        report_fatal_error("PopulateInputScheduleConstructor: ScheduleNode "
+                           "ids not strictly increasing — nodes_ is not in "
+                           "Phase 1 emplacement order");
+      }
+      if (su->NodeNum <= prev_node->GetSUnit()->NodeNum) {
+        report_fatal_error("PopulateInputScheduleConstructor: SUnit NodeNums "
+                           "not strictly increasing — Phase 1 emplaced nodes "
+                           "out of MachineFunction order");
+      }
+    }
+    prev_node = &node;
+    input_schedule_constructor_->Schedule(&node);
+  }
+
+  // Schedule exit last; all its predecessor leaves are now scheduled,
+  // so its strong-pred count is 0 and it's in the ready list.
+  input_schedule_constructor_->Schedule(exit_node);
+
+  VerifyInputScheduleMatchesMFOrder(region);
+}
+
+void ScheduleGraph::VerifyInputScheduleMatchesMFOrder(
+    const RegionInfo &region) const {
+  // Walk the schedule we built (skipping entry/exit) and the
+  // region's MF iterator range (skipping debug/pseudo MIs, which
+  // have no SUnit) in lockstep, comparing MachineInstr pointers.
+  MachineBasicBlock::iterator mf_iter = region.Begin();
+  MachineBasicBlock::iterator mf_end = region.End();
+  int position = 0;
+  for (const ScheduleNode *node :
+       input_schedule_constructor_->GetScheduleOrder()) {
+    SUnit *su = node->GetSUnit();
+    if (!su) {
+      continue;  // entry / exit
+    }
+
+    while (mf_iter != mf_end && mf_iter->isDebugOrPseudoInstr()) {
+      ++mf_iter;
+    }
+    if (mf_iter == mf_end) {
+      report_fatal_error("VerifyInputScheduleMatchesMFOrder: schedule has "
+                         "more leaves than MF iterator range");
+    }
+    if (su->getInstr() != &*mf_iter) {
+      report_fatal_error("VerifyInputScheduleMatchesMFOrder: schedule order "
+                         "diverges from MF order at leaf position " +
+                         Twine(position));
+    }
+    ++mf_iter;
+    ++position;
+  }
+
+  while (mf_iter != mf_end && mf_iter->isDebugOrPseudoInstr()) {
+    ++mf_iter;
+  }
+  if (mf_iter != mf_end) {
+    report_fatal_error("VerifyInputScheduleMatchesMFOrder: MF iterator range "
+                       "has more real instructions than the schedule");
+  }
 }
 
 void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
