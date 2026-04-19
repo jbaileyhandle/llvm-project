@@ -554,17 +554,17 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleMetricShakedown(
   };
 
   check_metric(
-      ScheduleMetric::kRegisterOccupancy, "reg_occ",
+      ScheduleMetric::kMaximizeRegisterOccupancy, "reg_occ",
       sc_empty.GetPressureTracker().GetRegisterOnlyOccupancy(),
       sc_full.GetPressureTracker().GetRegisterOnlyOccupancy(),
       /*higher_is_better=*/true);
   check_metric(
-      ScheduleMetric::kContinuousRegisterOccupancyScore, "cont_occ",
+      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore, "cont_occ",
       sc_empty.GetPressureTracker().GetContinuousOccupancyScore(),
       sc_full.GetPressureTracker().GetContinuousOccupancyScore(),
       /*higher_is_better=*/true);
   check_metric(
-      ScheduleMetric::kScheduleLength, "length",
+      ScheduleMetric::kMinimizeScheduleLength, "length",
       sc_empty.GetLengthTracker().GetCurrentCycle(),
       sc_full.GetLengthTracker().GetCurrentCycle(),
       /*higher_is_better=*/false);

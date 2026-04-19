@@ -25,7 +25,7 @@ class ScheduleNode;
 class DfsMaximizeOccupancyPolicy {
  public:
   static constexpr ScheduleMetric kMetric =
-      ScheduleMetric::kRegisterOccupancy;
+      ScheduleMetric::kMaximizeRegisterOccupancy;
 
   // Return a pruned + sorted list of nodes to try next from
   // schedule_constructor's current ready list. Input is not modified.

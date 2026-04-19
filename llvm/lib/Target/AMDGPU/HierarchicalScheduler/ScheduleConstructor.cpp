@@ -144,17 +144,25 @@ void ScheduleConstructor::Unschedule() {
 bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
                                        ScheduleMetric metric) const {
   switch (metric) {
-  case ScheduleMetric::kRegisterOccupancy:
+  case ScheduleMetric::kMaximizeRegisterOccupancy:
     return pressure_tracker_.GetRegisterOnlyOccupancy() >
            other.pressure_tracker_.GetRegisterOnlyOccupancy();
 
-  case ScheduleMetric::kContinuousRegisterOccupancyScore:
+  case ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore:
     return pressure_tracker_.GetContinuousOccupancyScore() >
            other.pressure_tracker_.GetContinuousOccupancyScore();
 
-  case ScheduleMetric::kScheduleLength:
+  case ScheduleMetric::kMinimizeScheduleLength:
     return length_tracker_.GetCurrentCycle() <
            other.length_tracker_.GetCurrentCycle();
+
+  case ScheduleMetric::kMinimizeRegisterOccupancy:
+    return pressure_tracker_.GetRegisterOnlyOccupancy() <
+           other.pressure_tracker_.GetRegisterOnlyOccupancy();
+
+  case ScheduleMetric::kMinimizeContinuousRegisterOccupancyScore:
+    return pressure_tracker_.GetContinuousOccupancyScore() <
+           other.pressure_tracker_.GetContinuousOccupancyScore();
   }
   llvm_unreachable("Unknown ScheduleMetric");
 }

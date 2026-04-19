@@ -1684,11 +1684,11 @@ TODO section for a note on revisiting this.
 schedule-construction states under one of three `ScheduleMetric`
 values:
 
-- `kRegisterOccupancy` — integer register occupancy (higher is
+- `kMaximizeRegisterOccupancy` — integer register occupancy (higher is
   better).
-- `kContinuousRegisterOccupancyScore` — smooth occupancy score
+- `kMaximizeContinuousRegisterOccupancyScore` — smooth occupancy score
   (higher is better).
-- `kScheduleLength` — current cycle count (lower is better).
+- `kMinimizeScheduleLength` — current cycle count (lower is better).
 
 `IsBetterThan` is strict: ties return false. `IsAtOccupancyCeiling()`
 returns true when `GetRegisterOnlyOccupancy() >= GetConfiguredMachineFunctionOccupancyLimit()`,
@@ -4896,8 +4896,8 @@ That difference reshapes most of the mapping:
 |---|---|
 | Two-pass driver | New top-level driver that runs B&B twice per region: an occupancy pass with a pressure-only objective, then an ILP pass with a length objective constrained by the occupancy-pass APRP |
 | `LTP_UNITY` (unit latencies in pass 1) | **No analog needed.** OptSched uses unit latencies to eliminate length from the problem so its slot-filling enumerator doesn't waste time on stall decisions. Our enumerator doesn't fill slots — to ignore length, we just remove it from the cost function |
-| `SchedForRPOnly_` flag | Pass-1 mode that replaces the balanced cost function with a pressure-only one. Maps cleanly onto `ScheduleMetric::kContinuousRegisterOccupancyScore` |
-| `SecondPass = true` | Pass-2 mode flag that switches the cost function back to length-minimization and the comparison metric to `kScheduleLength` (with APRP as a hard constraint) |
+| `SchedForRPOnly_` flag | Pass-1 mode that replaces the balanced cost function with a pressure-only one. Maps cleanly onto `ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore` |
+| `SecondPass = true` | Pass-2 mode flag that switches the cost function back to length-minimization and the comparison metric to `kMinimizeScheduleLength` (with APRP as a hard constraint) |
 | Outer length-iterating loop | We don't need this loop at all — our search is over orders, with length as a derived per-order metric. A single DFS run suffices per pass |
 | Inner DFS | Recursive or iterative loop over `ScheduleConstructor::Schedule()` / `Unschedule()` |
 | `EnumTreeNode` (tree state) | `ScheduleConstructor` already tracks partial state; tree-node bookkeeping can just be "what branches have we tried from this depth" |
@@ -4933,7 +4933,7 @@ That difference reshapes most of the mapping:
   search. If we use its output as the seed + APRP target for a
   B&B ILP pass, we get exactly the paper's two-pass structure
   with half the work:
-  - Pass 1 = ACO with `kContinuousRegisterOccupancyScore` as
+  - Pass 1 = ACO with `kMaximizeContinuousRegisterOccupancyScore` as
     the objective. Produces a minimum-APRP schedule per region.
   - Pass 2 = new B&B implementation, seeded by ACO's output,
     with its APRP constraint set to the kernel-level worst
