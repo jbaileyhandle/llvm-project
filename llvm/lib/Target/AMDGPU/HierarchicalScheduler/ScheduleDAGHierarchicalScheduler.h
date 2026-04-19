@@ -130,6 +130,13 @@ public:
   // and IsAtOrAboveFunctionOccupancyCeiling on the given region.
   void RunScheduleMetricShakedown(ScheduleGraph &graph);
 
+  // Sweep every entry of the precomputed continuous-occupancy-score
+  // lookup tables and verify each value matches the formula-based
+  // ComputeContinuousOccupancyScore. Catches populator bugs (off-
+  // by-one in bracket bounds, etc.) that the cliff-only sweep
+  // would miss in within-bracket interior values.
+  void RunContinuousScoreTableSweepShakedown();
+
   // Stub pass: schedule every region in topo order and apply.
   // Exercises the full pipeline (WithRegionGraph → ScheduleConstructor
   // → ApplyScheduleOrder) without any real search logic. Useful for

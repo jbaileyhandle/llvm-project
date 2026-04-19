@@ -74,6 +74,7 @@ void ScheduleDAGHierarchicalScheduler::RunRegionShakedowns(
 void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   llvm::outs() << "RunAllShakedowns:\n";
 
+  RunContinuousScoreTableSweepShakedown();
   RunTestDAGShakedown();
 
   for (auto &region : regions_) {
@@ -583,4 +584,60 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleMetricShakedown(
                << " fn_limit="
                << sc_full.GetPressureTracker().GetConfiguredMachineFunctionOccupancyLimit()
                << " at_ceiling=" << sc_full.IsAtOrAboveFunctionOccupancyCeiling() << "\n";
+}
+
+// Sweep every entry of the precomputed continuous-occupancy-score
+// lookup tables and verify each value matches what
+// ComputeContinuousOccupancyScore returns for the corresponding
+// register count. Compares vgpr_score_by_count[v] against
+// ComputeContinuousOccupancyScore(st, v, 0) for all v in range,
+// and similarly sgpr_score_by_count[s] against (st, 0, s).
+void ScheduleDAGHierarchicalScheduler::
+    RunContinuousScoreTableSweepShakedown() {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+  const auto &score_tables =
+      GCNRegisterTracker::GetOrComputeContinuousOccupancyScoreTables(st);
+
+  llvm::outs() << "  Continuous score table sweep:\n";
+
+  int vgpr_mismatches = 0;
+  for (size_t v = 0; v < GCNRegisterTracker::kContinuousScoreVGPRTableSize;
+       ++v) {
+    int formula = GCNRegisterTracker::ComputeContinuousOccupancyScore(
+        st, /*num_vgpr=*/v, /*num_sgpr=*/0);
+    int lookup = score_tables.vgpr_score_by_count[v];
+    if (formula != lookup) {
+      llvm::outs() << "    VGPR mismatch at vgpr=" << v
+                   << ": formula=" << formula << " lookup=" << lookup << "\n";
+      ++vgpr_mismatches;
+    }
+  }
+
+  int sgpr_mismatches = 0;
+  for (size_t s = 0; s < GCNRegisterTracker::kContinuousScoreSGPRTableSize;
+       ++s) {
+    int formula = GCNRegisterTracker::ComputeContinuousOccupancyScore(
+        st, /*num_vgpr=*/0, /*num_sgpr=*/s);
+    int lookup = score_tables.sgpr_score_by_count[s];
+    if (formula != lookup) {
+      llvm::outs() << "    SGPR mismatch at sgpr=" << s
+                   << ": formula=" << formula << " lookup=" << lookup << "\n";
+      ++sgpr_mismatches;
+    }
+  }
+
+  bool pass = (vgpr_mismatches == 0) && (sgpr_mismatches == 0);
+  llvm::outs() << "    swept "
+               << GCNRegisterTracker::kContinuousScoreVGPRTableSize
+               << " VGPR + "
+               << GCNRegisterTracker::kContinuousScoreSGPRTableSize
+               << " SGPR entries; "
+               << vgpr_mismatches << " VGPR mismatches, "
+               << sgpr_mismatches << " SGPR mismatches"
+               << (pass ? "  PASS" : "  FAIL") << "\n";
+  if (!pass) {
+    report_fatal_error("ContinuousScoreTableSweep: lookup table disagrees "
+                       "with formula on some entries");
+  }
 }

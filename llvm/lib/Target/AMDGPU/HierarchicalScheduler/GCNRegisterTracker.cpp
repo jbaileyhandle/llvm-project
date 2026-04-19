@@ -139,7 +139,9 @@ GCNRegisterTracker::GCNRegisterTracker(const ScheduleGraph &graph,
     : mf_(&mf),
       st_(&mf.getSubtarget<GCNSubtarget>()),
       mfi_(mf.getInfo<SIMachineFunctionInfo>()),
-      mri_(&mf.getRegInfo()) {
+      mri_(&mf.getRegInfo()),
+      continuous_score_tables_(
+          &GetOrComputeContinuousOccupancyScoreTables(*st_)) {
   CheckForFunctionCalls(mf);
   ExtractNodeRegInfo(graph, mf.getRegInfo(),
                      *mf.getSubtarget().getRegisterInfo(), lis);
@@ -455,10 +457,44 @@ int GCNRegisterTracker::ComputeContinuousOccupancyScore(
 }
 
 int GCNRegisterTracker::GetContinuousOccupancyScore() const {
-  return ComputeContinuousOccupancyScore(
-      *st_,
-      max_pressure_.getVGPRNum(st_->hasGFX90AInsts()),
-      max_pressure_.getSGPRNum());
+  // Hot path: one member-pointer load + two array indexes + one min.
+  // No per-call arithmetic — the per-pressure-value scores are
+  // precomputed once per subtarget and cached (see
+  // GetOrComputeContinuousOccupancyScoreTables).
+  return std::min(continuous_score_tables_->vgpr_score_by_count[
+                      max_pressure_.getVGPRNum(st_->hasGFX90AInsts())],
+                  continuous_score_tables_->sgpr_score_by_count[
+                      max_pressure_.getSGPRNum()]);
+}
+
+const GCNRegisterTracker::ContinuousOccupancyScoreTables &
+GCNRegisterTracker::GetOrComputeContinuousOccupancyScoreTables(
+    const GCNSubtarget &st) {
+  // Process-wide cache, lazily populated. One entry per unique
+  // subtarget pointer; in typical compilations there's only one.
+  // Construction-time call only — never on the hot path.
+  static DenseMap<const GCNSubtarget *, ContinuousOccupancyScoreTables>
+      cache;
+  auto it = cache.find(&st);
+  if (it != cache.end()) {
+    return it->second;
+  }
+
+  ContinuousOccupancyScoreTables tables;
+  for (size_t v = 0; v < kContinuousScoreVGPRTableSize; ++v) {
+    // Score for this VGPR count alone (SGPR set to 0 = SGPR
+    // dimension contributes its max possible score, so the min
+    // returns the VGPR-side value).
+    tables.vgpr_score_by_count[v] =
+        ComputeContinuousOccupancyScore(st, /*num_vgpr=*/v,
+                                        /*num_sgpr=*/0);
+  }
+  for (size_t s = 0; s < kContinuousScoreSGPRTableSize; ++s) {
+    tables.sgpr_score_by_count[s] =
+        ComputeContinuousOccupancyScore(st, /*num_vgpr=*/0,
+                                        /*num_sgpr=*/s);
+  }
+  return cache.insert({&st, tables}).first->second;
 }
 
 unsigned GCNRegisterTracker::GetRegisterOnlyOccupancy() const {

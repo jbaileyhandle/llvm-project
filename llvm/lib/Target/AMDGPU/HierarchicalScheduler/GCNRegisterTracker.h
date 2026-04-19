@@ -44,6 +44,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/MC/LaneBitmask.h"
+#include <array>
 #include <string>
 #include <vector>
 
@@ -198,6 +199,25 @@ public:
   /// positive across the full range we'd ever see.
   static constexpr unsigned kNoSGPRCliff = 255;
 
+  /// Precomputed continuous-occupancy-score lookup tables for one
+  /// subtarget — populated once per unique subtarget and cached.
+  /// One entry per possible raw register count for each dimension,
+  /// so per-call score lookup is just two array indexes + a min
+  /// with no per-call arithmetic.
+  ///
+  /// Sizes are conservative upper bounds for AMDGPU targets we care
+  /// about (gfx906 has 256 architectural VGPRs and ~102 per-wave
+  /// SGPRs). The +1 above the architectural max covers the
+  /// "one-above-cliff" probe used by shakedown sweeps (which test
+  /// values just past the top cliff to verify spill-bracket
+  /// behavior, score=0).
+  static constexpr size_t kContinuousScoreVGPRTableSize = 258;
+  static constexpr size_t kContinuousScoreSGPRTableSize = 129;
+  struct ContinuousOccupancyScoreTables {
+    std::array<int, kContinuousScoreVGPRTableSize> vgpr_score_by_count;
+    std::array<int, kContinuousScoreSGPRTableSize> sgpr_score_by_count;
+  };
+
   /// Rolled-own replacement for GCNSubtarget::getMaxNumSGPRs, built by
   /// scanning GCNSubtarget::getOccupancyWithNumSGPRs (the hardcoded
   /// hardware classifier). Returns the max SGPR count whose classifier
@@ -266,7 +286,20 @@ private:
 
   void InitRemainingUses();
 
+  /// Pointer into the per-subtarget cache, set in the constructor.
+  /// Never reassigned after construction.
+  const ContinuousOccupancyScoreTables *continuous_score_tables_;
+
 public:
+  /// Return the continuous-occupancy-score lookup tables for `st`.
+  /// Lazily populates a process-wide cache on first call for a given
+  /// subtarget pointer. Each tracker instance stores the returned
+  /// pointer in continuous_score_tables_ so per-call lookup is just
+  /// one member load + array indexes (no DenseMap lookup, no per-call
+  /// arithmetic). Public so shakedowns can index the tables directly
+  /// for formula-vs-lookup verification.
+  static const ContinuousOccupancyScoreTables &
+  GetOrComputeContinuousOccupancyScoreTables(const GCNSubtarget &st);
   /// Warn if the MachineFunction contains any call instructions,
   /// since the callee's register usage is invisible to the scheduler.
   /// Call instructions are scheduling boundaries and don't appear
