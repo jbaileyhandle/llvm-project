@@ -20,8 +20,27 @@ DfsMaximizeOccupancyPolicy::PruneAndSortReadyList(
 }
 
 bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
-    const ScheduleConstructor & /*schedule_constructor*/,
-    const ScheduleConstructor & /*best_schedule_constructor*/) {
+    const ScheduleConstructor &schedule_constructor,
+    const ScheduleConstructor &best_schedule_constructor) {
+  // Continuous-score bound: working's current continuous score is
+  // the BEST it'll have at completion (peak pressure only grows
+  // as more nodes are scheduled, so score only drops). If working's
+  // current score is already <= best's, no completion of working
+  // can strictly beat best. Bound.
+  //
+  // SOUNDNESS NOTE: this relies on the metric being maximize-
+  // direction with monotonically-non-improving partial values.
+  // True for kMaximizeContinuousRegisterOccupancyScore. A future
+  // minimize-direction policy must NOT copy this bound verbatim —
+  // partial values for minimize-occupancy IMPROVE as pressure
+  // grows, so this bound would over-prune.
+  if (schedule_constructor.GetPressureTracker()
+          .GetContinuousOccupancyScore() <=
+      best_schedule_constructor.GetPressureTracker()
+          .GetContinuousOccupancyScore()) {
+    return true;
+  }
+
   return false;
 }
 

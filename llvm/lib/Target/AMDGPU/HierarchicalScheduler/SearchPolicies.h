@@ -24,8 +24,13 @@ class ScheduleNode;
 // the contract.
 class DfsMaximizeOccupancyPolicy {
  public:
+  // Use the continuous score, not the integer one. The integer
+  // metric ties any two schedules in the same occupancy bracket;
+  // continuous distinguishes within-bracket pressure too, which
+  // gives ShouldBoundSearch real prune signal even when we're not
+  // crossing a cliff.
   static constexpr ScheduleMetric kMetric =
-      ScheduleMetric::kMaximizeRegisterOccupancy;
+      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
 
   // Return a pruned + sorted list of nodes to try next from
   // schedule_constructor's current ready list. Input is not modified.
