@@ -133,7 +133,7 @@ void GCNRegisterTracker::ExtractFromGroupNode(const ScheduleNode *node) {
 // Construction
 // ============================================================================
 
-GCNRegisterTracker::GCNRegisterTracker(ArrayRef<ScheduleNode *> nodes,
+GCNRegisterTracker::GCNRegisterTracker(const ScheduleGraph &graph,
                                        const MachineFunction &mf,
                                        const LiveIntervals &lis)
     : mf_(&mf),
@@ -141,7 +141,7 @@ GCNRegisterTracker::GCNRegisterTracker(ArrayRef<ScheduleNode *> nodes,
       mfi_(mf.getInfo<SIMachineFunctionInfo>()),
       mri_(&mf.getRegInfo()) {
   CheckForFunctionCalls(mf);
-  ExtractNodeRegInfo(nodes, mf.getRegInfo(),
+  ExtractNodeRegInfo(graph, mf.getRegInfo(),
                      *mf.getSubtarget().getRegisterInfo(), lis);
   InitRemainingUses();
 }
@@ -163,27 +163,27 @@ void GCNRegisterTracker::CheckForFunctionCalls(
   }
 }
 
-void GCNRegisterTracker::ExtractNodeRegInfo(ArrayRef<ScheduleNode *> nodes,
+void GCNRegisterTracker::ExtractNodeRegInfo(const ScheduleGraph &graph,
                                             const MachineRegisterInfo &mri,
                                             const TargetRegisterInfo &tri,
                                             const LiveIntervals &lis) {
-  for (ScheduleNode *node : nodes) {
-    if (!node->IsLeaf()) {
-      ExtractFromGroupNode(node);
+  for (const ScheduleNode &node : graph.Nodes()) {
+    if (!node.IsLeaf()) {
+      ExtractFromGroupNode(&node);
       continue;
     }
 
     NodeRegInfo info;
 
-    SUnit *su = node->GetSUnit();
+    SUnit *su = node.GetSUnit();
     if (su && su->getInstr()) {
-      ExtractFromMachineInstr(node, info, mri, lis);
+      ExtractFromMachineInstr(&node, info, mri, lis);
     } else {
-      ExtractFromNodeRegLists(node, info, mri);
+      ExtractFromNodeRegLists(&node, info, mri);
     }
 
     if (!info.defs.empty() || !info.uses.empty()) {
-      node_reg_info_[node] = std::move(info);
+      node_reg_info_[&node] = std::move(info);
     }
   }
 }

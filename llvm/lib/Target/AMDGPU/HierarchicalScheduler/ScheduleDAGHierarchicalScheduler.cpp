@@ -9,9 +9,11 @@
 
 #include "ScheduleDAGHierarchicalScheduler.h"
 #include "BranchAndBoundSearch.h"
+#include "DfsSearch.h"
 #include "GCNRegisterTracker.h"
 #include "MaliciousScheduler.h"
 #include "ScheduleConstructor.h"
+#include "SearchPolicies.h"
 #include "GCNSubtarget.h"
 #include "SIMachineFunctionInfo.h"
 #include "ScheduleGraph.h"
@@ -291,16 +293,50 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
                << " (MFI->Occupancy now " << mfi_->getOccupancy() << ")\n";
 }
 
-// Stub: returns the original schedule's all-factors occupancy, i.e.,
-// "no improvement." Placeholder until real DFS lands.
+// Runs DFS with DfsMaximizeOccupancyPolicy on the region's graph and
+// applies whatever schedule it returns. DfsSearch seeds best with the
+// graph's input ScheduleConstructor (the region's current MF-order
+// schedule), so the returned schedule is guaranteed to be at least
+// as good as the input — no non-regression check needed here. If
+// DFS found nothing better, ApplyScheduleOrder is a no-op move-wise
+// because every MI is already at its CurrentTop position.
 int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     RegionInfo &region) {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
-  const GCNRegPressure &pressure = region.GetOriginalPeakPressure();
-  return GCNRegisterTracker::ComputeAllFactorsOccupancy(
-      st, MF, pressure.getSGPRNum(),
-      pressure.getVGPRNum(st.hasGFX90AInsts()));
+
+  int achieved_all_factors_occupancy = 0;
+  WithRegionGraph(region, [&](ScheduleGraph &graph) {
+    const ScheduleConstructor &input_schedule_constructor =
+        graph.GetInputScheduleConstructor();
+    const GCNRegPressure &input_peak =
+        input_schedule_constructor.GetPressureTracker().GetPeakPressure();
+
+    DfsSearch<DfsMaximizeOccupancyPolicy> search(graph, st, MF, *LIS);
+    ScheduleConstructor dfs_best_schedule_constructor = search.Run();
+    const GCNRegPressure &dfs_peak =
+        dfs_best_schedule_constructor.GetPressureTracker().GetPeakPressure();
+
+    bool changed =
+        input_schedule_constructor.GetScheduleOrder() !=
+            dfs_best_schedule_constructor.GetScheduleOrder();
+
+    // TODO: Remove this debug print once we trust the pass.
+    llvm::outs() << "    [DFS] input peak: vgpr="
+                 << input_peak.getVGPRNum(st.hasGFX90AInsts())
+                 << " sgpr=" << input_peak.getSGPRNum()
+                 << " | dfs best peak: vgpr="
+                 << dfs_peak.getVGPRNum(st.hasGFX90AInsts())
+                 << " sgpr=" << dfs_peak.getSGPRNum()
+                 << " | order changed=" << (changed ? "yes" : "no") << "\n";
+
+    ApplyScheduleOrder(region, dfs_best_schedule_constructor);
+
+    achieved_all_factors_occupancy =
+        dfs_best_schedule_constructor.GetPressureTracker()
+            .GetAllFactorsRegionOnlyOccupancy();
+  });
+  return achieved_all_factors_occupancy;
 }
 
 // Main hierarchical scheduling path.

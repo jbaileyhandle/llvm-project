@@ -104,7 +104,7 @@ public:
   ///
   /// Reports fatal error if a group node (subgraph) is encountered.
   /// Warns if the MachineFunction contains non-inlined function calls.
-  GCNRegisterTracker(ArrayRef<ScheduleNode *> nodes,
+  GCNRegisterTracker(const ScheduleGraph &graph,
                      const MachineFunction &mf,
                      const LiveIntervals &lis);
 
@@ -259,7 +259,7 @@ private:
 
   // --- Construction helpers ---
 
-  void ExtractNodeRegInfo(ArrayRef<ScheduleNode *> nodes,
+  void ExtractNodeRegInfo(const ScheduleGraph &graph,
                           const MachineRegisterInfo &mri,
                           const TargetRegisterInfo &tri,
                           const LiveIntervals &lis);

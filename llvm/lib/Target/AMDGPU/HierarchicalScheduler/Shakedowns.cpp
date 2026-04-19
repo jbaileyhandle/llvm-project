@@ -179,7 +179,7 @@ void ScheduleDAGHierarchicalScheduler::RunGCNRegisterTrackerShakedown(
     ScheduleGraph &graph) {
   SmallVector<ScheduleNode *> nodes(graph.TopoOrder().begin(),
                                     graph.TopoOrder().end());
-  GCNRegisterTracker tracker(nodes, MF, *LIS);
+  GCNRegisterTracker tracker(graph, MF, *LIS);
 
   // --- Forward pass: schedule in topo order ---
   llvm::outs() << "  GCN register pressure trace (topo order):\n";
@@ -293,9 +293,7 @@ void ScheduleDAGHierarchicalScheduler::VerifyGCNRegisterTracker(
   }
 
   // --- Our tracker: walk order forward, record pressure at each step ---
-  GCNRegisterTracker tracker(
-      SmallVector<ScheduleNode *>(order.begin(), order.end()),
-      MF, *LIS);
+  GCNRegisterTracker tracker(graph, MF, *LIS);
 
   llvm::outs() << "  Cross-check per-instruction (same order):\n";
   llvm::outs() << "    " << std::string(60, '-') << "\n";
