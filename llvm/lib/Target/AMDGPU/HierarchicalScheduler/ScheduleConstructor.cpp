@@ -167,7 +167,7 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
   llvm_unreachable("Unknown ScheduleMetric");
 }
 
-bool ScheduleConstructor::IsAtOccupancyCeiling() const {
+bool ScheduleConstructor::IsAtOrAboveFunctionOccupancyCeiling() const {
   return pressure_tracker_.GetRegisterOnlyOccupancy() >=
          pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
 }

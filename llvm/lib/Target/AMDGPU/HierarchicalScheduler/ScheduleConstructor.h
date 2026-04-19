@@ -168,12 +168,16 @@ public:
   bool IsBetterThan(const ScheduleConstructor &other,
                     ScheduleMetric metric) const;
 
-  /// True when this region's register occupancy has reached the
-  /// function-level ceiling (hardware max, LDS, launch bounds, and
-  /// any reductions from earlier regions). At this point no further
-  /// register improvements can raise actual occupancy — a search can
-  /// exit early.
-  bool IsAtOccupancyCeiling() const;
+  /// True when this region's register-only occupancy meets or
+  /// exceeds the MachineFunction's currently-configured occupancy
+  /// limit (hardware max, LDS, launch bounds, and any reductions
+  /// from earlier passes/regions calling MFI->limitOccupancy).
+  /// "AtOrAbove" rather than just "At" because register-only
+  /// occupancy can exceed the function cap when structural factors
+  /// (LDS, launch bounds) are binding below the register max — in
+  /// that case extra register headroom doesn't translate to extra
+  /// effective occupancy. A search can exit early either way.
+  bool IsAtOrAboveFunctionOccupancyCeiling() const;
 
   /// Human-readable summary of current state.
   std::string Describe() const;

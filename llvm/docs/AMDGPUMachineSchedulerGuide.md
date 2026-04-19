@@ -1601,7 +1601,7 @@ the same approach OptSched uses (`GCNOptSched.cpp:58`).
   `ceil`/`floor` are the bracket bounds, and each integer
   occupancy level is worth `M` points. It's the minimum of the
   VGPR- and SGPR-dimension scores, uncapped by design — the
-  early-exit check `IsAtOccupancyCeiling()` handles saturation
+  early-exit check `IsAtOrAboveFunctionOccupancyCeiling()` handles saturation
   separately, so capping would only collapse the top bracket's
   resolution without changing any decision.
 
@@ -1690,7 +1690,7 @@ values:
   (higher is better).
 - `kMinimizeScheduleLength` — current cycle count (lower is better).
 
-`IsBetterThan` is strict: ties return false. `IsAtOccupancyCeiling()`
+`IsBetterThan` is strict: ties return false. `IsAtOrAboveFunctionOccupancyCeiling()`
 returns true when `GetRegisterOnlyOccupancy() >= GetConfiguredMachineFunctionOccupancyLimit()`,
 i.e. when further register improvements cannot raise region
 occupancy — the natural early-exit condition for occupancy-focused

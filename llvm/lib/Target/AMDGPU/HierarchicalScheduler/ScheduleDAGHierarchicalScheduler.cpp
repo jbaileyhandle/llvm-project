@@ -271,7 +271,7 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     // Determine highest occupancy achievable for region
     int best_region_occupancy = ScheduleRegionForMaximumOccupancy(region);
 
-    // Update kernel_occupancy_so_far 
+    // Update kernel_occupancy_so_far
     int kernel_occupancy_after_region =
         std::min(kernel_occupancy_so_far, best_region_occupancy);
     llvm::outs() << "  [" << i << "] orig_reg_only="
@@ -280,13 +280,16 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
                  << "  kernel_occupancy_so_far: " << kernel_occupancy_so_far << " -> "
                  << kernel_occupancy_after_region << "\n";
     kernel_occupancy_so_far = kernel_occupancy_after_region;
-  }
 
-  // Record the achieved occupancy on the MachineFunction so later
-  // passes see the real ceiling. limitOccupancy only lowers, and
-  // kernel_occupancy_so_far is bounded above by configured_limit
-  // by construction, so this never raises.
-  mfi_->limitOccupancy(static_cast<unsigned>(kernel_occupancy_so_far));
+    // Tighten MFI's occupancy limit immediately so the next region's
+    // search sees the real running kernel ceiling (via
+    // ScheduleConstructor::IsAtOrAboveFunctionOccupancyCeiling and
+    // any other code that consults MFI->getOccupancy()).
+    // limitOccupancy only lowers; kernel_occupancy_so_far is
+    // monotonically non-increasing, so this is always a no-op or
+    // tightening.
+    mfi_->limitOccupancy(static_cast<unsigned>(kernel_occupancy_so_far));
+  }
 
   llvm::outs() << "RunMaximizeOccupancyPass: final kernel_occupancy="
                << kernel_occupancy_so_far

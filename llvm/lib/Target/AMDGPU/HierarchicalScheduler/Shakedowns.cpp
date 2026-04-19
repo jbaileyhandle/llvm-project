@@ -569,7 +569,7 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleMetricShakedown(
       sc_full.GetLengthTracker().GetCurrentCycle(),
       /*higher_is_better=*/false);
 
-  // --- Part 4: IsAtOccupancyCeiling observability ---
+  // --- Part 4: IsAtOrAboveFunctionOccupancyCeiling observability ---
   //
   // Print the pieces so we can see them line up. No pass/fail since
   // whether the region is at the ceiling depends on actual pressure.
@@ -577,10 +577,10 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleMetricShakedown(
                << sc_empty.GetPressureTracker().GetRegisterOnlyOccupancy()
                << " fn_limit="
                << sc_empty.GetPressureTracker().GetConfiguredMachineFunctionOccupancyLimit()
-               << " at_ceiling=" << sc_empty.IsAtOccupancyCeiling() << "\n";
+               << " at_ceiling=" << sc_empty.IsAtOrAboveFunctionOccupancyCeiling() << "\n";
   llvm::outs() << "    full ceiling check:    reg_occ="
                << sc_full.GetPressureTracker().GetRegisterOnlyOccupancy()
                << " fn_limit="
                << sc_full.GetPressureTracker().GetConfiguredMachineFunctionOccupancyLimit()
-               << " at_ceiling=" << sc_full.IsAtOccupancyCeiling() << "\n";
+               << " at_ceiling=" << sc_full.IsAtOrAboveFunctionOccupancyCeiling() << "\n";
 }

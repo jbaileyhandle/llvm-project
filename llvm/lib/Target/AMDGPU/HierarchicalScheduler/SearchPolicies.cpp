@@ -24,3 +24,9 @@ bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
     const ScheduleConstructor & /*best_schedule_constructor*/) {
   return false;
 }
+
+bool DfsMaximizeOccupancyPolicy::ShouldEndSearch(
+    const ScheduleConstructor & /*schedule_constructor*/,
+    const ScheduleConstructor &best_schedule_constructor) {
+  return best_schedule_constructor.IsAtOrAboveFunctionOccupancyCeiling();
+}

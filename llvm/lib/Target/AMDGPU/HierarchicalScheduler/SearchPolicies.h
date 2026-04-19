@@ -41,6 +41,16 @@ class DfsMaximizeOccupancyPolicy {
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);
+
+  // Called on completed schedules after the IsBetterThan/update step.
+  // Return true to end the entire search and have DfsSearch::Run
+  // return whatever best is currently held. For maximize: end as
+  // soon as best is at or above the function-wide occupancy ceiling
+  // (no register-side improvement can raise effective occupancy
+  // further).
+  static bool ShouldEndSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor);
 };
 
 } // namespace hierarchical_scheduler

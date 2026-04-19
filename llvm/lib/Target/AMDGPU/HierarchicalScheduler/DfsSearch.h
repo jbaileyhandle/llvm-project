@@ -30,6 +30,16 @@ namespace hierarchical_scheduler {
 //   static bool ShouldBoundSearch(
 //       const ScheduleConstructor &schedule_constructor,
 //       const ScheduleConstructor &best_schedule_constructor);
+//   static bool ShouldEndSearch(
+//       const ScheduleConstructor &schedule_constructor,
+//       const ScheduleConstructor &best_schedule_constructor);
+//
+// ShouldBoundSearch is a LOCAL prune: returning true abandons the
+// current subtree but lets the search continue elsewhere. Called on
+// partial schedules. ShouldEndSearch is a GLOBAL terminate:
+// returning true stops the entire search and Run() returns whatever
+// best is currently held. Called on completed schedules, after the
+// IsBetterThan/update step.
 template <typename Policy>
 class DfsSearch {
  public:
@@ -58,6 +68,10 @@ class DfsSearch {
               best_schedule_constructor_, Policy::kMetric)) {
         best_schedule_constructor_ = working_schedule_constructor_;
       }
+      if (Policy::ShouldEndSearch(working_schedule_constructor_,
+                                  best_schedule_constructor_)) {
+        should_end_search_ = true;
+      }
       return;
     }
 
@@ -72,16 +86,24 @@ class DfsSearch {
       working_schedule_constructor_.Schedule(node);
       Recurse();
       working_schedule_constructor_.Unschedule();
+      if (should_end_search_) {
+        return;
+      }
     }
   }
 
   // Mutable search state; Schedule/Unschedule walk every branch.
   ScheduleConstructor working_schedule_constructor_;
 
-  // Best complete schedule seen. Seeded with topo order; replaced
-  // whenever working_schedule_constructor_ is IsDone and beats it by
-  // Policy::kMetric.
+  // Best complete schedule seen. Seeded from the graph's input
+  // schedule; replaced whenever working_schedule_constructor_ is
+  // IsDone and beats it by Policy::kMetric.
   ScheduleConstructor best_schedule_constructor_;
+
+  // Set true by Recurse when Policy::ShouldEndSearch fires. Each
+  // recursive frame propagates the flag back up by checking it
+  // after each child Recurse() returns.
+  bool should_end_search_ = false;
 };
 
 } // namespace hierarchical_scheduler

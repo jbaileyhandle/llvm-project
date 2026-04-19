@@ -127,7 +127,7 @@ public:
 
   // Tests ScheduleMetric comparison (IsBetterThan), the continuous
   // register occupancy score sweep at gfx906 stair-step boundaries,
-  // and IsAtOccupancyCeiling on the given region.
+  // and IsAtOrAboveFunctionOccupancyCeiling on the given region.
   void RunScheduleMetricShakedown(ScheduleGraph &graph);
 
   // Stub pass: schedule every region in topo order and apply.
