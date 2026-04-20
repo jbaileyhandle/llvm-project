@@ -80,19 +80,26 @@ int64_t GetAndIncrementScheduleId() {
 
 // --- ScheduleNode ---
 
-ScheduleNode::ScheduleNode(SUnit *su)
-    : id_(GetAndIncrementScheduleId()), content_(su) {
+ScheduleNode::ScheduleNode(SUnit *su, ScheduleGraph *top_level_graph)
+    : id_(GetAndIncrementScheduleId()),
+      graph_local_id_(top_level_graph->GetAndIncrementGraphLocalId()),
+      content_(su) {
   ExtractRegInfo();
 }
 
-ScheduleNode::ScheduleNode(SUnit *su, std::string debug_name)
-    : id_(GetAndIncrementScheduleId()), content_(su),
-      debug_name_(std::move(debug_name)) {
+ScheduleNode::ScheduleNode(SUnit *su, std::string debug_name,
+                           ScheduleGraph *top_level_graph)
+    : id_(GetAndIncrementScheduleId()),
+      graph_local_id_(top_level_graph->GetAndIncrementGraphLocalId()),
+      content_(su), debug_name_(std::move(debug_name)) {
   ExtractRegInfo();
 }
 
-ScheduleNode::ScheduleNode(std::unique_ptr<ScheduleGraph> subgraph)
-    : id_(GetAndIncrementScheduleId()), content_(std::move(subgraph)) {}
+ScheduleNode::ScheduleNode(std::unique_ptr<ScheduleGraph> subgraph,
+                           ScheduleGraph *top_level_graph)
+    : id_(GetAndIncrementScheduleId()),
+      graph_local_id_(top_level_graph->GetAndIncrementGraphLocalId()),
+      content_(std::move(subgraph)) {}
 
 void ScheduleNode::ExtractRegInfo() {
   if (!IsLeaf()) {
@@ -162,7 +169,9 @@ int ScheduleNode::LeafSize() const {
 
 // --- ScheduleGraph ---
 
-ScheduleGraph::ScheduleGraph() : id_(GetAndIncrementScheduleId()) {}
+ScheduleGraph::ScheduleGraph()
+    : id_(GetAndIncrementScheduleId()),
+      graph_local_id_(GetAndIncrementGraphLocalId()) {}
 ScheduleGraph::~ScheduleGraph() = default;
 
 std::string ScheduleGraph::ToString() const {
@@ -310,17 +319,17 @@ std::string ScheduleGraph::DominatorTreeToString() const {
   return dom_tree_->ToString(*this);
 }
 
-ScheduleGraph
+std::unique_ptr<ScheduleGraph>
 ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
                                const GCNSubtarget &st,
                                const MachineFunction &mf,
                                const LiveIntervals &lis,
                                const MachineRegisterInfo &mri,
                                const RegionInfo &region) {
-  ScheduleGraph graph;
+  auto graph = std::make_unique<ScheduleGraph>();
 
   // Reserve space for all SUnits plus our own entry and exit nodes.
-  graph.nodes_.reserve(sunits.size() + 2);
+  graph->nodes_.reserve(sunits.size() + 2);
 
   // Slot indices at the region's top and bottom. Used by Phase 3 to
   // query LiveIntervals for live-in/live-out registers at the
@@ -334,10 +343,10 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
   // ScheduleNode created for it in Phase 1. Used by Phase 2 (edges).
   DenseMap<const SUnit *, ScheduleNode *> sunit_to_node;
 
-  graph.CreateLeafNodesFromSUnits(sunits, sunit_to_node);
-  graph.AddEdgesBetweenLeafNodes(sunit_to_node);
-  graph.CreateEntryAndExitNodes(lis, mri, region_begin_idx, region_end_idx);
-  graph.PopulateInputScheduleConstructor(st, mf, lis, region);
+  graph->CreateLeafNodesFromSUnits(sunits, sunit_to_node);
+  graph->AddEdgesBetweenLeafNodes(sunit_to_node);
+  graph->CreateEntryAndExitNodes(lis, mri, region_begin_idx, region_end_idx);
+  graph->PopulateInputScheduleConstructor(st, mf, lis, region);
 
   return graph;
 }
@@ -357,7 +366,7 @@ void ScheduleGraph::CreateLeafNodesFromSUnits(
     if (su.isBoundaryNode()) {
       continue;
     }
-    nodes_.emplace_back(&su);
+    nodes_.emplace_back(&su, this);
     sunit_to_node[&su] = &nodes_.back();
   }
 }
@@ -515,10 +524,10 @@ void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
                                             const MachineRegisterInfo &mri,
                                             SlotIndex region_begin_idx,
                                             SlotIndex region_end_idx) {
-  nodes_.emplace_back(static_cast<SUnit *>(nullptr), "Entry");
+  nodes_.emplace_back(static_cast<SUnit *>(nullptr), "Entry", this);
   ScheduleNode &entry_node = nodes_[nodes_.size() - 1];
 
-  nodes_.emplace_back(static_cast<SUnit *>(nullptr), "Exit");
+  nodes_.emplace_back(static_cast<SUnit *>(nullptr), "Exit", this);
   ScheduleNode &exit_node = nodes_[nodes_.size() - 1];
 
   // Wire entry to all root nodes, exit from all leaf nodes.
@@ -567,27 +576,27 @@ void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
   }
 }
 
-ScheduleGraph ScheduleGraph::BuildTestDAG() {
-  ScheduleGraph graph;
+std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAG() {
+  auto graph = std::make_unique<ScheduleGraph>();
 
   // 7 nodes: A(0), C(1), D(2), E(3), F(4), G(5), H(6)
   // Nodes are leaves wrapping nullptr since we have no real SUnits.
-  graph.nodes_.reserve(7);
-  graph.nodes_.emplace_back(nullptr, "A");
-  graph.nodes_.emplace_back(nullptr, "C");
-  graph.nodes_.emplace_back(nullptr, "D");
-  graph.nodes_.emplace_back(nullptr, "E");
-  graph.nodes_.emplace_back(nullptr, "F");
-  graph.nodes_.emplace_back(nullptr, "G");
-  graph.nodes_.emplace_back(nullptr, "H");
+  graph->nodes_.reserve(7);
+  graph->nodes_.emplace_back(nullptr, "A", graph.get());
+  graph->nodes_.emplace_back(nullptr, "C", graph.get());
+  graph->nodes_.emplace_back(nullptr, "D", graph.get());
+  graph->nodes_.emplace_back(nullptr, "E", graph.get());
+  graph->nodes_.emplace_back(nullptr, "F", graph.get());
+  graph->nodes_.emplace_back(nullptr, "G", graph.get());
+  graph->nodes_.emplace_back(nullptr, "H", graph.get());
 
-  ScheduleNode &a = graph.nodes_[0];
-  ScheduleNode &c = graph.nodes_[1];
-  ScheduleNode &d = graph.nodes_[2];
-  ScheduleNode &e = graph.nodes_[3];
-  ScheduleNode &f = graph.nodes_[4];
-  ScheduleNode &g = graph.nodes_[5];
-  ScheduleNode &h = graph.nodes_[6];
+  ScheduleNode &a = graph->nodes_[0];
+  ScheduleNode &c = graph->nodes_[1];
+  ScheduleNode &d = graph->nodes_[2];
+  ScheduleNode &e = graph->nodes_[3];
+  ScheduleNode &f = graph->nodes_[4];
+  ScheduleNode &g = graph->nodes_[5];
+  ScheduleNode &h = graph->nodes_[6];
 
   // Edges (all kData with zero latency):
   a.AddSucc(ScheduleEdge(&h, ScheduleEdge::kData));
@@ -603,18 +612,18 @@ ScheduleGraph ScheduleGraph::BuildTestDAG() {
   return graph;
 }
 
-ScheduleGraph ScheduleGraph::BuildTestDAGWithCycle() {
-  ScheduleGraph graph;
+std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAGWithCycle() {
+  auto graph = std::make_unique<ScheduleGraph>();
 
   // 3 nodes with a cycle: A → B → C → B
-  graph.nodes_.reserve(3);
-  graph.nodes_.emplace_back(nullptr, "A");
-  graph.nodes_.emplace_back(nullptr, "B");
-  graph.nodes_.emplace_back(nullptr, "C");
+  graph->nodes_.reserve(3);
+  graph->nodes_.emplace_back(nullptr, "A", graph.get());
+  graph->nodes_.emplace_back(nullptr, "B", graph.get());
+  graph->nodes_.emplace_back(nullptr, "C", graph.get());
 
-  ScheduleNode &a = graph.nodes_[0];
-  ScheduleNode &b = graph.nodes_[1];
-  ScheduleNode &c = graph.nodes_[2];
+  ScheduleNode &a = graph->nodes_[0];
+  ScheduleNode &b = graph->nodes_[1];
+  ScheduleNode &c = graph->nodes_[2];
 
   a.AddSucc(ScheduleEdge(&b, ScheduleEdge::kData));
   b.AddSucc(ScheduleEdge(&c, ScheduleEdge::kData));

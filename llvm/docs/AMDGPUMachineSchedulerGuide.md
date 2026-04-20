@@ -1945,6 +1945,86 @@ not themaxWavesPerEU starting point.
   runtime launch bounds. See Appendix N.3 for how launch bounds
   affect occupancy.
 
+- **Disable schedule-length tracking inside `ScheduleConstructor`
+  during the occupancy pass.** `ScheduleConstructor` currently
+  always constructs and updates both the `pressure_tracker_` and
+  the `length_tracker_` on every `Schedule()`/`Unschedule()` call.
+  The occupancy pass only consults the pressure tracker — the
+  length tracker's per-step do/undo work is pure overhead. A simple
+  fix is to make length-tracker presence opt-in (e.g., a constructor
+  flag, or two ScheduleConstructor variants), so the occupancy pass
+  pays nothing for it. The length pass keeps both: it needs the
+  length tracker for its primary metric AND the pressure tracker
+  to enforce the "do not drop occupancy below the kernel ceiling"
+  bound.
+
+  Considered but deferred — "lookahead" variant: during the
+  occupancy DFS, record the schedule length of every complete
+  schedule that ties the current best occupancy. The length pass
+  could then start with the shortest such schedule as initial
+  best (or use the recorded set to prune). Real obstacles:
+
+  - Bounding and group-formation conditions differ between the
+    two passes. The occupancy bound is "current continuous score
+    ≤ best's"; the length bound is "current length lower bound
+    ≥ best length" combined with the occupancy-ceiling
+    constraint. In a future hierarchical extension the two passes
+    may also decompose into different subgraph structures.
+    Sharing intermediate state across passes constrains those
+    decisions.
+  - The current occupancy bound (continuous score) prunes most
+    schedules that *would* tie the best integer occupancy but
+    sit lower within their bracket. So the lookahead set is
+    sparse — its shortest length is unlikely to be a tight
+    starting bound for the length pass. We could loosen the
+    bound (only bound when the partial schedule has already
+    *violated* the occupancy ceiling, ignoring continuous score),
+    but that makes occupancy search significantly slower.
+  - Caching the lookahead set raises a "what gets cached"
+    question. Storing every complete schedule that ties best is
+    memory-heavy. Storing a hash per schedule is cheap but only
+    helps dedup at completion — it can't prune partial schedules
+    in the length search, since the hash is over a complete
+    ordering. Further, if we prune part of the subtree producing A
+    in the occupancy search, we won't know which parts of the
+    subtree were pruned when doing length search (due to different
+    bounding conditions). Therefore, while
+    A is a known candidate schedule, it gives little to no information
+    about how much searching we can skip in length search (other
+    than provide an upper length bound)
+
+  None of these are showstoppers, but the combination makes the
+  payoff unclear without measurement. Revisit once the simple
+  per-pass design is proven.
+
+- **Pointer-vs-reference convention audit.** The Google C++ Style
+  Guide rules for argument and member types are:
+  - `const T&` for input-only arguments that are never null and
+    not retained beyond the call.
+  - `T*` for arguments the callee may *mutate*, may *retain*, or
+    arguments where the call site should visibly say "this is an
+    address" (`&x` makes intent obvious).
+  - Stored member references (`T&` as a class member) are almost
+    always wrong: they cannot be rebound, cannot be default-
+    constructed, and break implicit move/copy. Use `T*` for stored
+    references.
+
+  We have not been consistent. Several constructors take and store
+  `const T&` for objects whose lifetime they assume but never
+  declare; some store references that prevent move/copy; some
+  pass by reference where the callee is doing mutation that should
+  be visible at the call site. Audit and standardize:
+  - All stored "references" should be pointers. If non-null is part
+    of the contract, document and assert at the storing site.
+  - Mutating arguments should be pointers. Call sites become
+    `Foo(&x)` instead of `Foo(x)`, signaling the address handover.
+  - Const, non-retained input parameters can stay `const T&`.
+
+  Files known to need attention (non-exhaustive — full sweep
+  required): `ScheduleConstructor`, `GCNRegisterTracker`,
+  `ScheduleLengthTracker`, `ScheduleGraph`, all stored
+  `MachineFunction`/`GCNSubtarget`/`LiveIntervals` references.
+
 ---
 
 ## Appendix G: Manual Scheduling Hints

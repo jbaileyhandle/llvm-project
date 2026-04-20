@@ -97,23 +97,23 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
 // Will be extended as we add new algorithms (transitive reduction, dominator
 // trees, etc.).
 void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
-  ScheduleGraph test_graph = ScheduleGraph::BuildTestDAG();
-  test_graph.ComputeTopologicalOrder();
+  auto test_graph = ScheduleGraph::BuildTestDAG();
+  test_graph->ComputeTopologicalOrder();
 
   llvm::outs() << "  Test DAG topo order:";
-  for (ScheduleNode *node : test_graph.TopoOrder()) {
+  for (ScheduleNode *node : test_graph->TopoOrder()) {
     llvm::outs() << " " << node->ToString();
   }
   llvm::outs() << "\n";
 
   // Count original edges.
   int original_edge_count = 0;
-  for (const ScheduleNode &node : test_graph.Nodes()) {
+  for (const ScheduleNode &node : test_graph->Nodes()) {
     original_edge_count += node.NumSuccs();
   }
 
-  test_graph.ComputeTransitiveReduction();
-  const ReducedGraph &reduced = test_graph.GetReducedGraph();
+  test_graph->ComputeTransitiveReduction();
+  const ReducedGraph &reduced = test_graph->GetReducedGraph();
 
   // Count reduced edges.
   int reduced_edge_count = 0;
@@ -127,23 +127,23 @@ void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
   // Print the reduced edges using node names from the original graph.
   llvm::outs() << "  Reduced edges:";
   for (int topo_idx = 0; topo_idx < reduced.size; ++topo_idx) {
-    ScheduleNode *from = test_graph.TopoOrder()[topo_idx];
+    ScheduleNode *from = test_graph->TopoOrder()[topo_idx];
     for (int succ_topo_idx : reduced.succs[topo_idx]) {
-      ScheduleNode *to = test_graph.TopoOrder()[succ_topo_idx];
+      ScheduleNode *to = test_graph->TopoOrder()[succ_topo_idx];
       llvm::outs() << " " << from->ToString() << "->" << to->ToString();
     }
   }
   llvm::outs() << "\n";
 
   // Build dominator tree.
-  test_graph.ComputeDominatorTree();
-  llvm::outs() << "  Dominator tree:\n" << test_graph.DominatorTreeToString();
+  test_graph->ComputeDominatorTree();
+  llvm::outs() << "  Dominator tree:\n" << test_graph->DominatorTreeToString();
 
   // Cycle detection verified: BuildTestDAGWithCycle() +
   // ComputeTopologicalOrder() fires report_fatal_error with graph ToString.
   // Uncomment to re-test:
-  // ScheduleGraph cyclic = ScheduleGraph::BuildTestDAGWithCycle();
-  // cyclic.ComputeTopologicalOrder();
+  // auto cyclic = ScheduleGraph::BuildTestDAGWithCycle();
+  // cyclic->ComputeTopologicalOrder();
 }
 
 // Tests RegisterTracker by scheduling the first region's instructions in

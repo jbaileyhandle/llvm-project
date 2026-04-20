@@ -141,14 +141,24 @@ struct ScheduleEdge {
 /// exist only to catch misuse during development and debug builds.
 class ScheduleNode {
 public:
-  /// Create a leaf node wrapping a single SUnit.
-  explicit ScheduleNode(SUnit *su);
+  /// Create a leaf node wrapping a single SUnit. The node's graph-local
+  /// id is drawn from `top_level_graph`'s counter — that is, the root
+  /// of the graph hierarchy this node will live in. For a flat (non-
+  /// nested) graph this is just the graph being built.
+  /// Must not be null.
+  ScheduleNode(SUnit *su, ScheduleGraph *top_level_graph);
 
   /// Create a leaf node with a debug name (for test DAGs without real SUnits).
-  ScheduleNode(SUnit *su, std::string debug_name);
+  /// Must not be null.
+  ScheduleNode(SUnit *su, std::string debug_name,
+               ScheduleGraph *top_level_graph);
 
-  /// Create a group node owning a subgraph.
-  explicit ScheduleNode(std::unique_ptr<ScheduleGraph> subgraph);
+  /// Create a group node owning a subgraph. `top_level_graph` is the
+  /// root of the hierarchy this wrapping node will live in (NOT the
+  /// wrapped subgraph itself).
+  /// Must not be null.
+  ScheduleNode(std::unique_ptr<ScheduleGraph> subgraph,
+               ScheduleGraph *top_level_graph);
 
   bool IsLeaf() const {
     return std::holds_alternative<SUnit *>(content_);
@@ -207,6 +217,13 @@ public:
   /// instances. Assigned from a shared counter at construction time.
   int64_t GetId() const { return id_; }
 
+  /// Graph-local ID, dense in [0, top_level_graph.GetNumGraphLocalIds()).
+  /// Drawn from the top-level graph's counter at construction time.
+  /// Suitable as a vector index for per-node precomputations
+  /// (critical-path-from-exit, ALAP/ASAP, etc.) — unlike GetId(),
+  /// values do not skip ahead between regions/graphs.
+  int GetGraphLocalId() const { return graph_local_id_; }
+
   /// Human-readable description of this node. Format:
   ///   Leaf with instruction:  "[3] S_LOAD_DWORD ..."
   ///   Leaf with debug name:   "[7:A]"
@@ -235,6 +252,7 @@ public:
 
 private:
   int64_t id_;
+  int graph_local_id_;
   std::variant<SUnit *, std::unique_ptr<ScheduleGraph>> content_;
   SmallVector<ScheduleEdge> succs_;
   SmallVector<ScheduleEdge> preds_;
@@ -259,12 +277,44 @@ public:
   // in the .cpp (forward-declared here to avoid circular includes).
   ~ScheduleGraph();
 
-  // Explicitly defaulted move operations — required because declaring a
-  // destructor suppresses implicit move generation.
-  ScheduleGraph(ScheduleGraph &&) = default;
-  ScheduleGraph &operator=(ScheduleGraph &&) = default;
+  // ScheduleGraph is non-copyable AND non-movable. The self-referential
+  // top_level_ pointer cannot be safely copied or moved without custom
+  // logic that's a footgun to maintain (every new member would need to
+  // be remembered in the move op). Factories return std::unique_ptr,
+  // which keeps the graph at a fixed heap address — so the value of
+  // top_level_ stays valid for the graph's entire lifetime regardless
+  // of how the unique_ptr is moved around.
+  ScheduleGraph(const ScheduleGraph &) = delete;
+  ScheduleGraph &operator=(const ScheduleGraph &) = delete;
+  ScheduleGraph(ScheduleGraph &&) = delete;
+  ScheduleGraph &operator=(ScheduleGraph &&) = delete;
 
   int64_t GetId() const { return id_; }
+
+  /// Graph-local ID for this graph itself, drawn from the top-level
+  /// graph's counter. For a top-level graph (no parent) this is always
+  /// 0 — the graph self-assigns id 0 by calling its own counter, then
+  /// nodes added to it take 1..N. For a subgraph (future), the counter
+  /// is forwarded to the top-level parent so all ids in the hierarchy
+  /// are drawn from one dense space.
+  int GetGraphLocalId() const { return graph_local_id_; }
+
+  /// Hand out the next graph-local id and increment the counter.
+  /// Forwards to the top-level parent so subgraph nodes share the
+  /// top-level counter (currently top_level_ is always `this` since
+  /// subgraph nesting isn't wired yet). Called by ScheduleNode and
+  /// ScheduleGraph constructors.
+  int GetAndIncrementGraphLocalId() {
+    return top_level_->next_graph_local_id_++;
+  }
+
+  /// Total number of graph-local ids handed out so far on this
+  /// hierarchy's counter (== top_level_->next_graph_local_id_).
+  /// Useful as the size for per-node vectors indexed by
+  /// GetGraphLocalId().
+  int GetNumGraphLocalIds() const {
+    return top_level_->next_graph_local_id_;
+  }
 
   /// Build a leaf-level graph by copying the dependency structure from an
   /// existing SUnit DAG. Each SUnit becomes a leaf ScheduleNode, and SDep
@@ -279,12 +329,13 @@ public:
   /// Live-in/live-out information comes from LiveIntervals. Register
   /// defs/uses are extracted from MachineInstrs and stored on each node
   /// for use by the RegisterTracker.
-  static ScheduleGraph BuildFromSUnits(MutableArrayRef<SUnit> sunits,
-                                       const GCNSubtarget &st,
-                                       const MachineFunction &mf,
-                                       const LiveIntervals &lis,
-                                       const MachineRegisterInfo &mri,
-                                       const RegionInfo &region);
+  static std::unique_ptr<ScheduleGraph> BuildFromSUnits(
+      MutableArrayRef<SUnit> sunits,
+      const GCNSubtarget &st,
+      const MachineFunction &mf,
+      const LiveIntervals &lis,
+      const MachineRegisterInfo &mri,
+      const RegionInfo &region);
 
   /// Build a synthetic test DAG with known structure for testing algorithms
   /// like topological sort, transitive reduction, and dominator trees.
@@ -309,7 +360,7 @@ public:
   ///           v   v
   ///             G
   ///
-  static ScheduleGraph BuildTestDAG();
+  static std::unique_ptr<ScheduleGraph> BuildTestDAG();
 
   /// Build a synthetic test DAG that contains a cycle, for testing that
   /// ComputeTopologicalOrder correctly detects it and calls
@@ -326,7 +377,7 @@ public:
   ///     C ----'
   ///
   /// Edges: A→B, B→C, C→B
-  static ScheduleGraph BuildTestDAGWithCycle();
+  static std::unique_ptr<ScheduleGraph> BuildTestDAGWithCycle();
 
   /// Human-readable identifier for this graph. Format: "graph[ID]"
   std::string ToString() const;
@@ -409,6 +460,23 @@ public:
 
 private:
   int64_t id_;
+
+  /// Root of the hierarchy this graph belongs to. For top-level graphs
+  /// this is `this`; for subgraphs (future) it's the ultimate root.
+  /// Pointer (not reference) because it must be re-bindable when a
+  /// subgraph is attached to a parent.
+  ScheduleGraph *top_level_ = this;
+
+  /// Counter that hands out graph-local ids. Only meaningful on the
+  /// top-level graph; subgraphs forward to their top-level via
+  /// GetAndIncrementGraphLocalId.
+  int next_graph_local_id_ = 0;
+
+  /// This graph's own graph-local id. Set in the constructor by
+  /// calling GetAndIncrementGraphLocalId on itself, so a top-level
+  /// graph always gets id 0.
+  int graph_local_id_;
+
   std::vector<ScheduleNode> nodes_;
   std::vector<ScheduleNode *> topo_order_;
   bool topo_sorted_ = false;
