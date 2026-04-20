@@ -118,8 +118,10 @@ struct ScheduleEdge {
   // Classification helpers. Member functions defined in the class body are
   // implicitly inline per the C++ standard, so these have zero call overhead.
 
-  /// True for register data dependencies (RAW). These carry latency and
-  /// create live ranges.
+  /// True for register data dependencies (RAW) — raw kind classifier,
+  /// unconditional on any semantic interpretation. For "does this edge
+  /// count toward schedule length / critical path", use IsLatencyEdge
+  /// instead (currently forwards here, but that mapping may change).
   bool IsDataEdge() const { return kind_ == kData; }
 
   /// True for all edges that block readiness. Includes register dependencies
@@ -129,6 +131,13 @@ struct ScheduleEdge {
 
   /// True for edges that are hints only and do not block readiness.
   bool IsWeakEdge() const { return kind_ >= kCluster; }
+
+  /// True for edges that contribute to schedule-length / critical-path
+  /// calculations. Single source of truth for ScheduleLengthTracker and
+  /// ScheduleGraph::ComputeCriticalPathFromExit — if we ever broaden
+  /// the definition (e.g., include Anti/Output with non-zero latency),
+  /// change it here and both code paths pick it up.
+  bool IsLatencyEdge() const { return IsDataEdge(); }
 };
 
 /// A node in a ScheduleGraph. Either a leaf (wrapping a single SUnit) or a
@@ -338,8 +347,9 @@ public:
       const RegionInfo &region);
 
   /// Build a synthetic test DAG with known structure for testing algorithms
-  /// like topological sort, transitive reduction, and dominator trees.
-  /// Does not depend on LLVM SUnits — nodes are leaves wrapping nullptr.
+  /// like topological sort, transitive reduction, dominator trees, and
+  /// critical-path-from-exit. Does not depend on LLVM SUnits — nodes are
+  /// leaves wrapping nullptr.
   ///
   /// 7 nodes (A-H, no B), 9 edges (all kData):
   ///
@@ -360,6 +370,15 @@ public:
   ///           v   v
   ///             G
   ///
+  /// Edge latencies:
+  ///   A→H=1  A→D=3  A→C=2
+  ///   C→D=1  C→E=4
+  ///   D→F=2  E→F=1
+  ///   H→G=5  F→G=2
+  ///
+  /// Expected cp_from_exit values (longest latency-weighted path to G):
+  ///   G=0, H=5, F=2, E=3, D=4, C=7, A=9
+  /// Critical path: A→C→E→F→G (length 2+4+1+2 = 9).
   static std::unique_ptr<ScheduleGraph> BuildTestDAG();
 
   /// Build a synthetic test DAG that contains a cycle, for testing that
@@ -406,6 +425,34 @@ public:
 
   /// Whether ComputeTopologicalOrder() has been called.
   bool IsTopoSorted() const { return topo_sorted_; }
+
+  /// Compute the longest latency-weighted path from each node to the
+  /// exit node, considering only latency-carrying edges (see
+  /// ScheduleEdge::IsLatencyEdge). Used for schedule-length lower
+  /// bounds during branch-and-bound length search.
+  ///
+  /// Recurrence (base case: exit has cp_from_exit = 0):
+  ///   cp_from_exit[n] = max over latency-edge succs s of
+  ///                         (edge.latency + cp_from_exit[s.target])
+  ///
+  /// Implemented as a single reverse-topological pass — O(V + E).
+  /// Requires ComputeTopologicalOrder to have been called first
+  /// (fires report_fatal_error otherwise).
+  ///
+  /// Storage: std::vector<int> indexed by ScheduleNode::GetGraphLocalId().
+  /// Slot 0 (the graph's own graph-local id, not a node) is unused.
+  void ComputeCriticalPathFromExit();
+
+  /// Whether ComputeCriticalPathFromExit() has been called.
+  bool HasCriticalPathFromExit() const {
+    return !critical_path_from_exit_.empty();
+  }
+
+  /// Longest latency-weighted path from `node` to the exit node.
+  /// Only valid after ComputeCriticalPathFromExit().
+  int GetCriticalPathFromExit(const ScheduleNode *node) const {
+    return critical_path_from_exit_[node->GetGraphLocalId()];
+  }
 
   /// Compute the transitive reduction of this graph. Stores the result
   /// internally. Requires topo sort to have been computed first.
@@ -480,6 +527,10 @@ private:
   std::vector<ScheduleNode> nodes_;
   std::vector<ScheduleNode *> topo_order_;
   bool topo_sorted_ = false;
+
+  /// Populated by ComputeCriticalPathFromExit. Empty until then.
+  /// Indexed by ScheduleNode::GetGraphLocalId().
+  std::vector<int> critical_path_from_exit_;
 
   std::unique_ptr<ReducedGraph> reduced_graph_;
   std::unique_ptr<DominatorTree> dom_tree_;

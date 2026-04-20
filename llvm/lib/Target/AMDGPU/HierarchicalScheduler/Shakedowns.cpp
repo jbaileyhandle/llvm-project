@@ -93,9 +93,77 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   }
 }
 
+namespace {
+
+// Verifies transitive reduction on the test DAG: prints edge count
+// before/after and the reduced edges themselves. Print-only.
+void CheckTransitiveReduction(ScheduleGraph &graph) {
+  int original_edge_count = 0;
+  for (const ScheduleNode &node : graph.Nodes()) {
+    original_edge_count += node.NumSuccs();
+  }
+
+  graph.ComputeTransitiveReduction();
+  const ReducedGraph &reduced = graph.GetReducedGraph();
+
+  int reduced_edge_count = 0;
+  for (int topo_idx = 0; topo_idx < reduced.size; ++topo_idx) {
+    reduced_edge_count += static_cast<int>(reduced.succs[topo_idx].size());
+  }
+
+  llvm::outs() << "  Transitive reduction: " << original_edge_count
+               << " edges -> " << reduced_edge_count << " edges\n";
+
+  llvm::outs() << "  Reduced edges:";
+  for (int topo_idx = 0; topo_idx < reduced.size; ++topo_idx) {
+    ScheduleNode *from = graph.TopoOrder()[topo_idx];
+    for (int succ_topo_idx : reduced.succs[topo_idx]) {
+      ScheduleNode *to = graph.TopoOrder()[succ_topo_idx];
+      llvm::outs() << " " << from->ToString() << "->" << to->ToString();
+    }
+  }
+  llvm::outs() << "\n";
+}
+
+// Dumps the computed dominator tree on the test DAG. Print-only.
+void CheckDominatorTree(ScheduleGraph &graph) {
+  graph.ComputeDominatorTree();
+  llvm::outs() << "  Dominator tree:\n" << graph.DominatorTreeToString();
+}
+
+// Verifies critical-path-from-exit against the hand-computed values
+// documented in BuildTestDAG's header docstring. Assumes nodes were
+// emplaced in order A, C, D, E, F, G, H. PASS/FAIL based on exact
+// match at every node.
+void CheckCriticalPath(ScheduleGraph &graph) {
+  graph.ComputeCriticalPathFromExit();
+  struct ExpectedCp {
+    const char *name;
+    int expected;
+  };
+  const ExpectedCp expected_cps[] = {
+      {"A", 9}, {"C", 7}, {"D", 4}, {"E", 3},
+      {"F", 2}, {"G", 0}, {"H", 5},
+  };
+  int mismatches = 0;
+  llvm::outs() << "  Critical path from exit:";
+  for (int i = 0, n = graph.Size(); i < n; ++i) {
+    const ScheduleNode &node = graph.Nodes()[i];
+    int got = graph.GetCriticalPathFromExit(&node);
+    int want = expected_cps[i].expected;
+    llvm::outs() << " " << expected_cps[i].name << "=" << got;
+    if (got != want) {
+      llvm::outs() << "(expected " << want << ")";
+      ++mismatches;
+    }
+  }
+  llvm::outs() << (mismatches == 0 ? "  PASS\n" : "  FAIL\n");
+}
+
+} // namespace
+
 // Exercises graph algorithms on a synthetic test DAG with known structure.
-// Will be extended as we add new algorithms (transitive reduction, dominator
-// trees, etc.).
+// Delegates each algorithm to a helper in the anonymous namespace above.
 void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
   auto test_graph = ScheduleGraph::BuildTestDAG();
   test_graph->ComputeTopologicalOrder();
@@ -106,38 +174,9 @@ void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
   }
   llvm::outs() << "\n";
 
-  // Count original edges.
-  int original_edge_count = 0;
-  for (const ScheduleNode &node : test_graph->Nodes()) {
-    original_edge_count += node.NumSuccs();
-  }
-
-  test_graph->ComputeTransitiveReduction();
-  const ReducedGraph &reduced = test_graph->GetReducedGraph();
-
-  // Count reduced edges.
-  int reduced_edge_count = 0;
-  for (int topo_idx = 0; topo_idx < reduced.size; ++topo_idx) {
-    reduced_edge_count += static_cast<int>(reduced.succs[topo_idx].size());
-  }
-
-  llvm::outs() << "  Transitive reduction: " << original_edge_count
-               << " edges -> " << reduced_edge_count << " edges\n";
-
-  // Print the reduced edges using node names from the original graph.
-  llvm::outs() << "  Reduced edges:";
-  for (int topo_idx = 0; topo_idx < reduced.size; ++topo_idx) {
-    ScheduleNode *from = test_graph->TopoOrder()[topo_idx];
-    for (int succ_topo_idx : reduced.succs[topo_idx]) {
-      ScheduleNode *to = test_graph->TopoOrder()[succ_topo_idx];
-      llvm::outs() << " " << from->ToString() << "->" << to->ToString();
-    }
-  }
-  llvm::outs() << "\n";
-
-  // Build dominator tree.
-  test_graph->ComputeDominatorTree();
-  llvm::outs() << "  Dominator tree:\n" << test_graph->DominatorTreeToString();
+  CheckTransitiveReduction(*test_graph);
+  CheckDominatorTree(*test_graph);
+  CheckCriticalPath(*test_graph);
 
   // Cycle detection verified: BuildTestDAGWithCycle() +
   // ComputeTopologicalOrder() fires report_fatal_error with graph ToString.
@@ -351,9 +390,9 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleLengthTrackerShakedown(
     // Print the instruction.
     llvm::outs() << "    " << node->ToString() << "\n";
 
-    // Print data dependency predecessors and their edge latencies.
+    // Print latency-carrying predecessors and their edge latencies.
     for (const ScheduleEdge &edge : node->Preds()) {
-      if (!edge.IsDataEdge()) {
+      if (!edge.IsLatencyEdge()) {
         continue;
       }
       llvm::outs() << "      pred " << edge.node_->ToString()

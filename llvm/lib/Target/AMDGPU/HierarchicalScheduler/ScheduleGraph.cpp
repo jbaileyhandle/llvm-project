@@ -250,6 +250,37 @@ void ScheduleGraph::ComputeTopologicalOrder(bool include_weak_edges) {
   topo_sorted_ = true;
 }
 
+void ScheduleGraph::ComputeCriticalPathFromExit() {
+  if (!topo_sorted_) {
+    std::string msg = "ComputeCriticalPathFromExit called on " + ToString() +
+                      " before ComputeTopologicalOrder";
+    report_fatal_error(llvm::StringRef(msg));
+  }
+
+  // Size to the full graph-local id space (includes the graph's own
+  // slot 0, which is unused). Default-initialized to 0 so the exit
+  // node's base case is implicit.
+  critical_path_from_exit_.assign(GetNumGraphLocalIds(), 0);
+
+  // Walk in reverse topological order: successors are visited before
+  // predecessors, so cp_from_exit[succ] is ready when we compute
+  // cp_from_exit[node].
+  for (ScheduleNode *node : llvm::reverse(topo_order_)) {
+    int max_cp = 0;
+    for (const ScheduleEdge &edge : node->Succs()) {
+      if (!edge.IsLatencyEdge()) {
+        continue;
+      }
+      int cp = edge.latency_ +
+               critical_path_from_exit_[edge.node_->GetGraphLocalId()];
+      if (cp > max_cp) {
+        max_cp = cp;
+      }
+    }
+    critical_path_from_exit_[node->GetGraphLocalId()] = max_cp;
+  }
+}
+
 void ScheduleGraph::ComputeTransitiveReduction() {
   if (!topo_sorted_) {
     std::string msg = "ComputeTransitiveReduction called on " + ToString() +
@@ -598,16 +629,19 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAG() {
   ScheduleNode &g = graph->nodes_[5];
   ScheduleNode &h = graph->nodes_[6];
 
-  // Edges (all kData with zero latency):
-  a.AddSucc(ScheduleEdge(&h, ScheduleEdge::kData));
-  a.AddSucc(ScheduleEdge(&c, ScheduleEdge::kData));
-  a.AddSucc(ScheduleEdge(&d, ScheduleEdge::kData));
-  c.AddSucc(ScheduleEdge(&d, ScheduleEdge::kData));
-  c.AddSucc(ScheduleEdge(&e, ScheduleEdge::kData));
-  d.AddSucc(ScheduleEdge(&f, ScheduleEdge::kData));
-  e.AddSucc(ScheduleEdge(&f, ScheduleEdge::kData));
-  h.AddSucc(ScheduleEdge(&g, ScheduleEdge::kData));
-  f.AddSucc(ScheduleEdge(&g, ScheduleEdge::kData));
+  // Edges (all kData). Latencies are chosen so cp_from_exit exercises
+  // 3-way max at A (1+5=6 vs 3+4=7 vs 2+7=9 → 9), 2-way max at C
+  // (1+4=5 vs 4+3=7 → 7), and a unique critical path A→C→E→F→G of
+  // length 9. See BuildTestDAG docstring for expected cp values.
+  a.AddSucc(ScheduleEdge(&h, ScheduleEdge::kData, /*latency=*/1));
+  a.AddSucc(ScheduleEdge(&c, ScheduleEdge::kData, /*latency=*/2));
+  a.AddSucc(ScheduleEdge(&d, ScheduleEdge::kData, /*latency=*/3));
+  c.AddSucc(ScheduleEdge(&d, ScheduleEdge::kData, /*latency=*/1));
+  c.AddSucc(ScheduleEdge(&e, ScheduleEdge::kData, /*latency=*/4));
+  d.AddSucc(ScheduleEdge(&f, ScheduleEdge::kData, /*latency=*/2));
+  e.AddSucc(ScheduleEdge(&f, ScheduleEdge::kData, /*latency=*/1));
+  h.AddSucc(ScheduleEdge(&g, ScheduleEdge::kData, /*latency=*/5));
+  f.AddSucc(ScheduleEdge(&g, ScheduleEdge::kData, /*latency=*/2));
 
   return graph;
 }

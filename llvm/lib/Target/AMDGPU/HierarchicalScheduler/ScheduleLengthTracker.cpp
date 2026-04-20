@@ -84,11 +84,12 @@ void ScheduleLengthTracker::Schedule(const ScheduleNode *node) {
                        ". Group node scheduling is not yet implemented.");
   }
 
-  // Compute ready cycle from already-scheduled predecessors.
-  // Only data edges carry meaningful latency.
+  // Compute ready cycle from already-scheduled predecessors. Only
+  // latency-carrying edges constrain readiness (see
+  // ScheduleEdge::IsLatencyEdge for the single source of truth).
   int ready_cycle = current_cycle_;
   for (const ScheduleEdge &edge : node->Preds()) {
-    if (!edge.IsDataEdge()) {
+    if (!edge.IsLatencyEdge()) {
       continue;
     }
     int pred_cycle = GetScheduledCycle(edge.node_);
