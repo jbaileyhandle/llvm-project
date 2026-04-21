@@ -191,7 +191,10 @@ int ScheduleGraph::LeafSize() const {
 // Produces a forward topological order (sources first, sinks last).
 // If not all nodes are placed, the graph contains a cycle.
 void ScheduleGraph::ComputeTopologicalOrder(bool include_weak_edges) {
-  topo_order_.clear();
+  // Re-sorting (e.g., with a different `include_weak_edges`) would
+  // produce a different topo_order_, silently invalidating any
+  // downstream caches keyed by topo index. Clear them up front.
+  InvalidateDerivedData();
   topo_order_.reserve(nodes_.size());
 
   // Count the number of relevant predecessors for each node. We use a
@@ -199,7 +202,7 @@ void ScheduleGraph::ComputeTopologicalOrder(bool include_weak_edges) {
   DenseMap<ScheduleNode *, int> in_degree;
   for (ScheduleNode &node : nodes_) {
     int count = 0;
-    for (const ScheduleEdge &pred : node.Preds()) {
+    for (const ScheduleEdge &pred : node.Predecessors()) {
       if (include_weak_edges || pred.IsStrongEdge()) {
         ++count;
       }
@@ -224,7 +227,7 @@ void ScheduleGraph::ComputeTopologicalOrder(bool include_weak_edges) {
     node->SetTopoIndex(static_cast<int>(topo_order_.size()));
     topo_order_.push_back(node);
 
-    for (const ScheduleEdge &succ : node->Succs()) {
+    for (const ScheduleEdge &succ : node->Successors()) {
       if (!include_weak_edges && succ.IsWeakEdge()) {
         continue;
       }
@@ -244,45 +247,52 @@ void ScheduleGraph::ComputeTopologicalOrder(bool include_weak_edges) {
   // Sort each node's successor list by ascending topo index. Required by
   // the transitive reduction algorithm (process closest successors first).
   for (ScheduleNode &node : nodes_) {
-    node.SortSuccsByTopoIndex();
+    node.SortSuccessorsByTopoIndex();
   }
+}
 
-  topo_sorted_ = true;
+void ScheduleGraph::InvalidateDerivedData() {
+  topo_order_.clear();
+  critical_path_from_exit_by_topo_index_.clear();
+  reduced_graph_.reset();
+  dom_tree_.reset();
+  // input_schedule_constructor_ is NOT cleared; it's a Phase-4 artifact
+  // tied to the original SUnit emplacement order, not a structural
+  // derivation that changes when the graph mutates.
 }
 
 void ScheduleGraph::ComputeCriticalPathFromExit() {
-  if (!topo_sorted_) {
+  if (!IsTopoSorted()) {
     std::string msg = "ComputeCriticalPathFromExit called on " + ToString() +
                       " before ComputeTopologicalOrder";
     report_fatal_error(llvm::StringRef(msg));
   }
 
-  // Size to the full graph-local id space (includes the graph's own
-  // slot 0, which is unused). Default-initialized to 0 so the exit
-  // node's base case is implicit.
-  critical_path_from_exit_.assign(GetNumGraphLocalIds(), 0);
+  // One slot per node, indexed by topo_index. Default-initialized to 0
+  // so the exit node's base case is implicit.
+  critical_path_from_exit_by_topo_index_.assign(Size(), 0);
 
   // Walk in reverse topological order: successors are visited before
   // predecessors, so cp_from_exit[succ] is ready when we compute
   // cp_from_exit[node].
   for (ScheduleNode *node : llvm::reverse(topo_order_)) {
     int max_cp = 0;
-    for (const ScheduleEdge &edge : node->Succs()) {
+    for (const ScheduleEdge &edge : node->Successors()) {
       if (!edge.IsLatencyEdge()) {
         continue;
       }
       int cp = edge.latency_ +
-               critical_path_from_exit_[edge.node_->GetGraphLocalId()];
+               critical_path_from_exit_by_topo_index_[edge.node_->GetTopoIndex()];
       if (cp > max_cp) {
         max_cp = cp;
       }
     }
-    critical_path_from_exit_[node->GetGraphLocalId()] = max_cp;
+    critical_path_from_exit_by_topo_index_[node->GetTopoIndex()] = max_cp;
   }
 }
 
 void ScheduleGraph::ComputeTransitiveReduction() {
-  if (!topo_sorted_) {
+  if (!IsTopoSorted()) {
     std::string msg = "ComputeTransitiveReduction called on " + ToString() +
                       " before ComputeTopologicalOrder";
     report_fatal_error(llvm::StringRef(msg));
@@ -302,7 +312,7 @@ void ScheduleGraph::ComputeTransitiveReduction() {
 
   // Process nodes in reverse topo order (sinks first, sources last).
   // For each node, iterate its successors in ascending topo order (closest
-  // first, guaranteed by SortSuccsByTopoIndex in ComputeTopologicalOrder).
+  // first, guaranteed by SortSuccessorsByTopoIndex in ComputeTopologicalOrder).
   //
   // If a successor is already in our reachable set, it means we can reach
   // it through a closer successor we already processed — the direct edge
@@ -312,7 +322,7 @@ void ScheduleGraph::ComputeTransitiveReduction() {
        --curr_topo_idx) {
     ScheduleNode *curr_node = topo_order_[curr_topo_idx];
 
-    for (const ScheduleEdge &succ_edge : curr_node->Succs()) {
+    for (const ScheduleEdge &succ_edge : curr_node->Successors()) {
       int succ_topo_idx = succ_edge.node_->GetTopoIndex();
 
       if (reachable[curr_topo_idx].test(succ_topo_idx)) {
@@ -321,8 +331,8 @@ void ScheduleGraph::ComputeTransitiveReduction() {
       }
 
       // Essential edge — keep it in the reduced graph.
-      reduced->succs[curr_topo_idx].push_back(succ_topo_idx);
-      reduced->preds[succ_topo_idx].push_back(curr_topo_idx);
+      reduced->successors_by_topo_index[curr_topo_idx].push_back(succ_topo_idx);
+      reduced->predecessors_by_topo_index[succ_topo_idx].push_back(curr_topo_idx);
 
       // Merge the successor's reachable set into ours.
       reachable[curr_topo_idx] |= reachable[succ_topo_idx];
@@ -359,8 +369,15 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
                                const RegionInfo &region) {
   auto graph = std::make_unique<ScheduleGraph>();
 
-  // Reserve space for all SUnits plus our own entry and exit nodes.
-  graph->nodes_.reserve(sunits.size() + 2);
+  // Reserve generously: 2x SUnits + 2 entry/exit nodes. The 2x
+  // factor leaves headroom for future subgraph-insertion passes that
+  // add subgraph proxy nodes (one per subgraph). Without enough
+  // headroom, EmplaceNode would fail assertertion (and rightly so — 
+  // reallocating nodes_ would invalidate every ScheduleNode * stored in any
+  // ScheduleEdge anywhere in the graph). Worst case for subgraph
+  // formation is one proxy per real instruction, so 2x should 
+  // cover it.
+  graph->nodes_.reserve(sunits.size() * 2 + 2);
 
   // Slot indices at the region's top and bottom. Used by Phase 3 to
   // query LiveIntervals for live-in/live-out registers at the
@@ -397,8 +414,8 @@ void ScheduleGraph::CreateLeafNodesFromSUnits(
     if (su.isBoundaryNode()) {
       continue;
     }
-    nodes_.emplace_back(&su, this);
-    sunit_to_node[&su] = &nodes_.back();
+    ScheduleNode &n = EmplaceNode(&su, this);
+    sunit_to_node[&su] = &n;
   }
 }
 
@@ -422,7 +439,7 @@ void ScheduleGraph::AddEdgesBetweenLeafNodes(
 
       ScheduleEdge::Kind kind = MapSDepToEdgeKind(sdep);
       int latency = static_cast<int>(sdep.getLatency());
-      node.AddSucc(ScheduleEdge(succ_node, kind, latency));
+      AddEdge(&node, succ_node, kind, latency);
     }
   }
 }
@@ -555,21 +572,20 @@ void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
                                             const MachineRegisterInfo &mri,
                                             SlotIndex region_begin_idx,
                                             SlotIndex region_end_idx) {
-  nodes_.emplace_back(static_cast<SUnit *>(nullptr), "Entry", this);
-  ScheduleNode &entry_node = nodes_[nodes_.size() - 1];
-
-  nodes_.emplace_back(static_cast<SUnit *>(nullptr), "Exit", this);
-  ScheduleNode &exit_node = nodes_[nodes_.size() - 1];
+  ScheduleNode &entry_node =
+      EmplaceNode(static_cast<SUnit *>(nullptr), "Entry", this);
+  ScheduleNode &exit_node =
+      EmplaceNode(static_cast<SUnit *>(nullptr), "Exit", this);
 
   // Wire entry to all root nodes, exit from all leaf nodes.
   for (ScheduleNode &node : nodes_) {
     if (&node == &entry_node || &node == &exit_node) {
       continue;
     }
-    if (node.NumPreds() == 0) {
-      entry_node.AddSucc(ScheduleEdge(&node, ScheduleEdge::kArtificial));
+    if (node.NumPredecessors() == 0) {
+      AddEdge(&entry_node, &node, ScheduleEdge::kArtificial);
     }
-    if (node.NumSuccs() == 0) {
+    if (node.NumSuccessors() == 0) {
       // TODO: LLVM's buildSchedGraph adds an artificial edge from
       // high-latency leaf instructions to ExitSU with latency =
       // SU->Latency - 1 (ScheduleDAGInstrs.cpp, line 877). This
@@ -578,7 +594,7 @@ void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
       // latency 80 at the end of a region). We currently use
       // latency 0, which is fine for within-region schedule length
       // but may underestimate costs for cross-region analysis.
-      node.AddSucc(ScheduleEdge(&exit_node, ScheduleEdge::kArtificial));
+      AddEdge(&node, &exit_node, ScheduleEdge::kArtificial);
     }
   }
 
@@ -610,38 +626,30 @@ void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
 std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAG() {
   auto graph = std::make_unique<ScheduleGraph>();
 
-  // 7 nodes: A(0), C(1), D(2), E(3), F(4), G(5), H(6)
-  // Nodes are leaves wrapping nullptr since we have no real SUnits.
+  // 7 nodes: A, C, D, E, F, G, H (leaves wrapping nullptr since we
+  // have no real SUnits).
   graph->nodes_.reserve(7);
-  graph->nodes_.emplace_back(nullptr, "A", graph.get());
-  graph->nodes_.emplace_back(nullptr, "C", graph.get());
-  graph->nodes_.emplace_back(nullptr, "D", graph.get());
-  graph->nodes_.emplace_back(nullptr, "E", graph.get());
-  graph->nodes_.emplace_back(nullptr, "F", graph.get());
-  graph->nodes_.emplace_back(nullptr, "G", graph.get());
-  graph->nodes_.emplace_back(nullptr, "H", graph.get());
-
-  ScheduleNode &a = graph->nodes_[0];
-  ScheduleNode &c = graph->nodes_[1];
-  ScheduleNode &d = graph->nodes_[2];
-  ScheduleNode &e = graph->nodes_[3];
-  ScheduleNode &f = graph->nodes_[4];
-  ScheduleNode &g = graph->nodes_[5];
-  ScheduleNode &h = graph->nodes_[6];
+  ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
+  ScheduleNode &c = graph->EmplaceNode(nullptr, "C", graph.get());
+  ScheduleNode &d = graph->EmplaceNode(nullptr, "D", graph.get());
+  ScheduleNode &e = graph->EmplaceNode(nullptr, "E", graph.get());
+  ScheduleNode &f = graph->EmplaceNode(nullptr, "F", graph.get());
+  ScheduleNode &g = graph->EmplaceNode(nullptr, "G", graph.get());
+  ScheduleNode &h = graph->EmplaceNode(nullptr, "H", graph.get());
 
   // Edges (all kData). Latencies are chosen so cp_from_exit exercises
   // 3-way max at A (1+5=6 vs 3+4=7 vs 2+7=9 → 9), 2-way max at C
   // (1+4=5 vs 4+3=7 → 7), and a unique critical path A→C→E→F→G of
   // length 9. See BuildTestDAG docstring for expected cp values.
-  a.AddSucc(ScheduleEdge(&h, ScheduleEdge::kData, /*latency=*/1));
-  a.AddSucc(ScheduleEdge(&c, ScheduleEdge::kData, /*latency=*/2));
-  a.AddSucc(ScheduleEdge(&d, ScheduleEdge::kData, /*latency=*/3));
-  c.AddSucc(ScheduleEdge(&d, ScheduleEdge::kData, /*latency=*/1));
-  c.AddSucc(ScheduleEdge(&e, ScheduleEdge::kData, /*latency=*/4));
-  d.AddSucc(ScheduleEdge(&f, ScheduleEdge::kData, /*latency=*/2));
-  e.AddSucc(ScheduleEdge(&f, ScheduleEdge::kData, /*latency=*/1));
-  h.AddSucc(ScheduleEdge(&g, ScheduleEdge::kData, /*latency=*/5));
-  f.AddSucc(ScheduleEdge(&g, ScheduleEdge::kData, /*latency=*/2));
+  graph->AddEdge(&a, &h, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&a, &c, ScheduleEdge::kData, /*latency=*/2);
+  graph->AddEdge(&a, &d, ScheduleEdge::kData, /*latency=*/3);
+  graph->AddEdge(&c, &d, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&c, &e, ScheduleEdge::kData, /*latency=*/4);
+  graph->AddEdge(&d, &f, ScheduleEdge::kData, /*latency=*/2);
+  graph->AddEdge(&e, &f, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&h, &g, ScheduleEdge::kData, /*latency=*/5);
+  graph->AddEdge(&f, &g, ScheduleEdge::kData, /*latency=*/2);
 
   return graph;
 }
@@ -651,17 +659,13 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAGWithCycle() {
 
   // 3 nodes with a cycle: A → B → C → B
   graph->nodes_.reserve(3);
-  graph->nodes_.emplace_back(nullptr, "A", graph.get());
-  graph->nodes_.emplace_back(nullptr, "B", graph.get());
-  graph->nodes_.emplace_back(nullptr, "C", graph.get());
+  ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
+  ScheduleNode &b = graph->EmplaceNode(nullptr, "B", graph.get());
+  ScheduleNode &c = graph->EmplaceNode(nullptr, "C", graph.get());
 
-  ScheduleNode &a = graph->nodes_[0];
-  ScheduleNode &b = graph->nodes_[1];
-  ScheduleNode &c = graph->nodes_[2];
-
-  a.AddSucc(ScheduleEdge(&b, ScheduleEdge::kData));
-  b.AddSucc(ScheduleEdge(&c, ScheduleEdge::kData));
-  c.AddSucc(ScheduleEdge(&b, ScheduleEdge::kData));  // cycle: C → B
+  graph->AddEdge(&a, &b, ScheduleEdge::kData);
+  graph->AddEdge(&b, &c, ScheduleEdge::kData);
+  graph->AddEdge(&c, &b, ScheduleEdge::kData);  // cycle: C → B
 
   return graph;
 }

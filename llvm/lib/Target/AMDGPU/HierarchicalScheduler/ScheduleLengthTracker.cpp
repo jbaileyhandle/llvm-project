@@ -88,7 +88,7 @@ void ScheduleLengthTracker::Schedule(const ScheduleNode *node) {
   // latency-carrying edges constrain readiness (see
   // ScheduleEdge::IsLatencyEdge for the single source of truth).
   int ready_cycle = current_cycle_;
-  for (const ScheduleEdge &edge : node->Preds()) {
+  for (const ScheduleEdge &edge : node->Predecessors()) {
     if (!edge.IsLatencyEdge()) {
       continue;
     }

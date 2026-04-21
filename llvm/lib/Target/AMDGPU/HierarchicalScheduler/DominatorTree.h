@@ -14,7 +14,7 @@
 // is at index -1 and does not appear in the ReducedGraph or ScheduleGraph.
 //
 // All queries are by topological index. Use the original ScheduleGraph's
-// TopoOrder() to map topo indices back to ScheduleNode pointers.
+// GetTopoOrder() to map topo indices back to ScheduleNode pointers.
 //
 //===----------------------------------------------------------------------===//
 
@@ -38,24 +38,24 @@ public:
   /// Get the immediate dominator of a node (by topo index).
   /// Returns -1 for nodes dominated directly by the virtual root
   /// (including single-root DAGs where the root's idom is -1).
-  int GetIDom(int topo_idx) const { return idom_[topo_idx]; }
+  int GetIDomByTopoIndex(int topo_idx) const { return idom_by_topo_index_[topo_idx]; }
 
   /// Does node at topo index |dominator| dominate node at topo index |node|?
   /// A node dominates itself. The virtual root (-1) dominates everything.
   bool Dominates(int dominator, int node) const;
 
   /// Number of nodes in the tree (not counting the virtual root).
-  int Size() const { return static_cast<int>(idom_.size()); }
+  int Size() const { return static_cast<int>(idom_by_topo_index_.size()); }
 
   /// Human-readable dump of the dominator tree. Requires the original
   /// ScheduleGraph to map topo indices to node names.
   std::string ToString(const ScheduleGraph &graph) const;
 
 private:
-  // idom_[topo_idx] = topo index of the immediate dominator.
+  // idom_by_topo_index_[topo_idx] = topo index of the immediate dominator.
   // -1 means the node is dominated by the virtual root (i.e., it is a
   // root node, or the single entry node of the DAG).
-  std::vector<int> idom_;
+  std::vector<int> idom_by_topo_index_;
 };
 
 } // namespace hierarchical_scheduler

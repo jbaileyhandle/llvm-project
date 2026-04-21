@@ -51,30 +51,30 @@ int Intersect(const std::vector<int> &idom, int finger_a, int finger_b) {
 DominatorTree DominatorTree::Build(const ReducedGraph &graph) {
   DominatorTree tree;
   int num_nodes = graph.size;
-  tree.idom_.assign(num_nodes, -1);
+  tree.idom_by_topo_index_.assign(num_nodes, -1);
 
   // Single pass in topological order. Since this is a DAG, all predecessors
   // of node N have topo index < N and are already processed by the time we
   // reach N. No fixpoint iteration needed.
   for (int topo_idx = 0; topo_idx < num_nodes; ++topo_idx) {
-    if (graph.preds[topo_idx].empty()) {
+    if (graph.predecessors_by_topo_index[topo_idx].empty()) {
       // Root node — dominated by the virtual root.
-      tree.idom_[topo_idx] = -1;
+      tree.idom_by_topo_index_[topo_idx] = -1;
       continue;
     }
 
     // Start with the first predecessor as the candidate idom.
-    int new_idom = graph.preds[topo_idx][0];
+    int new_idom = graph.predecessors_by_topo_index[topo_idx][0];
 
     // Intersect with each remaining predecessor to find their nearest
     // common dominator.
     for (int pred_idx = 1;
-         pred_idx < static_cast<int>(graph.preds[topo_idx].size());
+         pred_idx < static_cast<int>(graph.predecessors_by_topo_index[topo_idx].size());
          ++pred_idx) {
-      new_idom = Intersect(tree.idom_, new_idom, graph.preds[topo_idx][pred_idx]);
+      new_idom = Intersect(tree.idom_by_topo_index_, new_idom, graph.predecessors_by_topo_index[topo_idx][pred_idx]);
     }
 
-    tree.idom_[topo_idx] = new_idom;
+    tree.idom_by_topo_index_[topo_idx] = new_idom;
   }
 
   return tree;
@@ -92,21 +92,21 @@ bool DominatorTree::Dominates(int dominator, int node) const {
     if (current == dominator) {
       return true;
     }
-    current = idom_[current];
+    current = idom_by_topo_index_[current];
   }
   return false;
 }
 
 std::string DominatorTree::ToString(const ScheduleGraph &graph) const {
   std::string result;
-  ArrayRef<ScheduleNode *> topo_order = graph.TopoOrder();
+  ArrayRef<ScheduleNode *> topo_order = graph.GetTopoOrder();
 
   for (int topo_idx = 0; topo_idx < Size(); ++topo_idx) {
     result += "  idom(" + topo_order[topo_idx]->ToString() + ") = ";
-    if (idom_[topo_idx] == -1) {
+    if (idom_by_topo_index_[topo_idx] == -1) {
       result += "ROOT";
     } else {
-      result += topo_order[idom_[topo_idx]]->ToString();
+      result += topo_order[idom_by_topo_index_[topo_idx]]->ToString();
     }
     result += "\n";
   }

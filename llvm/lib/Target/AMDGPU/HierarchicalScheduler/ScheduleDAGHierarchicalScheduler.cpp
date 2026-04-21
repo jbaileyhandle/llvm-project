@@ -207,7 +207,7 @@ void ScheduleDAGHierarchicalScheduler::RunTopoPass() {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {
       ScheduleConstructor sc(graph, st, MF, *LIS);
 
-      for (ScheduleNode *node : graph.TopoOrder()) {
+      for (ScheduleNode *node : graph.GetTopoOrder()) {
         sc.Schedule(node);
       }
 

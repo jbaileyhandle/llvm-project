@@ -185,30 +185,19 @@ public:
     return std::get<std::unique_ptr<ScheduleGraph>>(content_).get();
   }
 
-  /// Add a successor edge from this node to the target node. Automatically
-  /// adds the matching predecessor edge on the target, ensuring edges are
-  /// always symmetric. This works because C++ access control is per-class,
-  /// not per-instance — a ScheduleNode method can access private members
-  /// of any other ScheduleNode.
-  void AddSucc(ScheduleEdge edge) {
-    succs_.push_back(edge);
-    edge.node_->preds_.push_back(
-        ScheduleEdge(this, edge.kind_, edge.latency_));
-  }
-
   /// Read-only edge access.
-  ArrayRef<ScheduleEdge> Succs() const { return succs_; }
-  ArrayRef<ScheduleEdge> Preds() const { return preds_; }
+  ArrayRef<ScheduleEdge> Successors() const { return successors_; }
+  ArrayRef<ScheduleEdge> Predecessors() const { return predecessors_; }
 
-  int NumPreds() const { return static_cast<int>(preds_.size()); }
-  int NumSuccs() const { return static_cast<int>(succs_.size()); }
+  int NumPredecessors() const { return static_cast<int>(predecessors_.size()); }
+  int NumSuccessors() const { return static_cast<int>(successors_.size()); }
 
   /// Sort successor edges by ascending topo index of the destination node.
   /// Called by ComputeTopologicalOrder after topo indices are assigned.
   /// Required by the transitive reduction algorithm (process closest
   /// successors first).
-  void SortSuccsByTopoIndex() {
-    llvm::sort(succs_, [](const ScheduleEdge &a, const ScheduleEdge &b) {
+  void SortSuccessorsByTopoIndex() {
+    llvm::sort(successors_, [](const ScheduleEdge &a, const ScheduleEdge &b) {
       return a.node_->GetTopoIndex() < b.node_->GetTopoIndex();
     });
   }
@@ -260,11 +249,31 @@ public:
   void ExtractRegInfo();
 
 private:
+  // ScheduleGraph is the only allowed mutator of edge state — it routes
+  // edge addition through ScheduleGraph::AddEdge so that derived caches
+  // (topo, cp, dom, reduced) get invalidated automatically. Making
+  // AddSuccessor private + friending ScheduleGraph enforces that physically.
+  friend class ScheduleGraph;
+
+  /// Add a successor edge from this node to the target node. Automatically
+  /// adds the matching predecessor edge on the target, ensuring edges are
+  /// always symmetric. This works because C++ access control is per-class,
+  /// not per-instance — a ScheduleNode method can access private members
+  /// of any other ScheduleNode.
+  ///
+  /// Private — callers go through ScheduleGraph::AddEdge so cache
+  /// invalidation is centralized.
+  void AddSuccessor(ScheduleEdge edge) {
+    successors_.push_back(edge);
+    edge.node_->predecessors_.push_back(
+        ScheduleEdge(this, edge.kind_, edge.latency_));
+  }
+
   int64_t id_;
   int graph_local_id_;
   std::variant<SUnit *, std::unique_ptr<ScheduleGraph>> content_;
-  SmallVector<ScheduleEdge> succs_;
-  SmallVector<ScheduleEdge> preds_;
+  SmallVector<ScheduleEdge> successors_;
+  SmallVector<ScheduleEdge> predecessors_;
   SmallVector<RegWithLaneMask> reg_defs_;
   SmallVector<RegWithLaneMask> reg_uses_;
   int topo_index_ = -1;
@@ -409,6 +418,17 @@ public:
   /// Total number of leaf nodes across all levels of the hierarchy.
   int LeafSize() const;
 
+  /// Add an edge from `from` to `to`. The graph routes all edge
+  /// additions through here so that derived caches (topo, cp,
+  /// reduced, dom, ...) are invalidated automatically — see
+  /// InvalidateDerivedData. Callers should NOT call ScheduleNode
+  /// methods to add edges directly; that path is private.
+  void AddEdge(ScheduleNode *from, ScheduleNode *to,
+               ScheduleEdge::Kind kind, int latency = 0) {
+    from->AddSuccessor(ScheduleEdge(to, kind, latency));
+    InvalidateDerivedData();
+  }
+
   /// Compute topological order using Kahn's algorithm (iterative BFS-based).
   /// Populates topo_order_ and sets topo_index_ on each node. Also serves
   /// as a cycle check: asserts if the graph contains a cycle (not all nodes
@@ -417,14 +437,21 @@ public:
   /// If include_weak_edges is false (the default), only strong edges
   /// constrain the ordering. If true, weak edges (Cluster, Weak) also
   /// count as predecessors that must be scheduled first.
+  ///
+  /// Calls InvalidateDerivedData() at entry. Even though topo sort is
+  /// deterministic on the same (graph, options) pair, re-running with
+  /// a flipped `include_weak_edges` would produce a different order
+  /// and silently invalidate downstream caches; clearing on entry
+  /// covers that case uniformly.
   void ComputeTopologicalOrder(bool include_weak_edges = false);
 
   /// Access the computed topological order. Only valid after
   /// ComputeTopologicalOrder() has been called.
-  ArrayRef<ScheduleNode *> TopoOrder() const { return topo_order_; }
+  ArrayRef<ScheduleNode *> GetTopoOrder() const { return topo_order_; }
 
-  /// Whether ComputeTopologicalOrder() has been called.
-  bool IsTopoSorted() const { return topo_sorted_; }
+  /// Whether ComputeTopologicalOrder() has been called and not been
+  /// invalidated by a subsequent graph mutation.
+  bool IsTopoSorted() const { return !topo_order_.empty(); }
 
   /// Compute the longest latency-weighted path from each node to the
   /// exit node, considering only latency-carrying edges (see
@@ -439,19 +466,28 @@ public:
   /// Requires ComputeTopologicalOrder to have been called first
   /// (fires report_fatal_error otherwise).
   ///
-  /// Storage: std::vector<int> indexed by ScheduleNode::GetGraphLocalId().
-  /// Slot 0 (the graph's own graph-local id, not a node) is unused.
+  /// Storage: std::vector<int> indexed by ScheduleNode::GetTopoIndex().
+  /// Sized to Size() (one slot per node, no waste).
   void ComputeCriticalPathFromExit();
 
-  /// Whether ComputeCriticalPathFromExit() has been called.
+  /// Whether ComputeCriticalPathFromExit() has been called and not
+  /// been invalidated since.
   bool HasCriticalPathFromExit() const {
-    return !critical_path_from_exit_.empty();
+    return !critical_path_from_exit_by_topo_index_.empty();
   }
 
-  /// Longest latency-weighted path from `node` to the exit node.
-  /// Only valid after ComputeCriticalPathFromExit().
+  /// Longest latency-weighted path to the exit node, keyed by topo
+  /// index. Bare lookup — caller is responsible for ensuring CP has
+  /// been computed (consumers like the length pass driver should
+  /// report_fatal_error_unless HasCriticalPathFromExit() at entry).
+  int GetCriticalPathFromExitByTopoIndex(int topo_idx) const {
+    return critical_path_from_exit_by_topo_index_[topo_idx];
+  }
+
+  /// Convenience: same as above but extracts the topo index from
+  /// the node.
   int GetCriticalPathFromExit(const ScheduleNode *node) const {
-    return critical_path_from_exit_[node->GetGraphLocalId()];
+    return GetCriticalPathFromExitByTopoIndex(node->GetTopoIndex());
   }
 
   /// Compute the transitive reduction of this graph. Stores the result
@@ -525,16 +561,56 @@ private:
   int graph_local_id_;
 
   std::vector<ScheduleNode> nodes_;
-  std::vector<ScheduleNode *> topo_order_;
-  bool topo_sorted_ = false;
 
-  /// Populated by ComputeCriticalPathFromExit. Empty until then.
-  /// Indexed by ScheduleNode::GetGraphLocalId().
-  std::vector<int> critical_path_from_exit_;
+  /// Populated by ComputeTopologicalOrder. Empty == "not computed
+  /// or invalidated since." IsTopoSorted() = !topo_order_.empty().
+  std::vector<ScheduleNode *> topo_order_;
+
+  /// Populated by ComputeCriticalPathFromExit. Indexed by
+  /// ScheduleNode::GetTopoIndex(). Empty == "not computed or
+  /// invalidated since." Sized to Size() (one slot per node).
+  std::vector<int> critical_path_from_exit_by_topo_index_;
 
   std::unique_ptr<ReducedGraph> reduced_graph_;
   std::unique_ptr<DominatorTree> dom_tree_;
   std::unique_ptr<ScheduleConstructor> input_schedule_constructor_;
+
+  /// Clear all derived caches. Called by every graph-mutating op
+  /// (AddEdge, EmplaceNode, future EmplaceSubgraphProxyNode, ...)
+  /// and by ComputeTopologicalOrder (since re-running with
+  /// different options would invalidate downstream).
+  void InvalidateDerivedData();
+
+  /// Emplace a new ScheduleNode into nodes_ and invalidate derived
+  /// caches. Variadic forwarder over ScheduleNode's constructors.
+  /// Returns a reference to the new node, matching the
+  /// std::vector::emplace_back signature.
+  ///
+  /// CONVENTION: every node-addition site inside ScheduleGraph
+  /// methods MUST go through this helper, NOT direct
+  /// nodes_.emplace_back. The helper centralizes the
+  /// invalidate-on-mutation guarantee. Direct nodes_.emplace_back
+  /// is not enforced as private (still accessible to ScheduleGraph
+  /// methods) but should be avoided.
+  ///
+  /// HARD INVARIANT: nodes_ must have spare capacity at the moment
+  /// of emplacement. Reallocation would invalidate every
+  /// ScheduleNode * stored in any ScheduleEdge anywhere in the
+  /// graph (a silent UB hazard). Callers reserve up front via
+  /// nodes_.reserve(...). If we'd reallocate here, fail loudly
+  /// instead of silently corrupting stored pointers.
+  template <typename... Args>
+  ScheduleNode &EmplaceNode(Args &&...args) {
+    if (nodes_.size() == nodes_.capacity()) {
+      report_fatal_error(
+          "ScheduleGraph::EmplaceNode would reallocate nodes_ — "
+          "caller must reserve capacity before adding to a graph "
+          "that has stored ScheduleNode pointers in edges");
+    }
+    nodes_.emplace_back(std::forward<Args>(args)...);
+    InvalidateDerivedData();
+    return nodes_.back();
+  }
 
   // --- Construction helpers (used by BuildFromSUnits) ---
 
@@ -591,14 +667,16 @@ private:
 /// survived the reduction (SmallVector because most nodes have few
 /// successors, so inline storage avoids per-node heap allocation).
 struct ReducedGraph {
-  int size;                                // number of nodes
-  std::vector<SmallVector<int>> succs;     // succs[topo_idx] = successor topo indices
-  std::vector<SmallVector<int>> preds;     // preds[topo_idx] = predecessor topo indices
+  int size;                                          // number of nodes
+  std::vector<SmallVector<int>> successors_by_topo_index;
+  std::vector<SmallVector<int>> predecessors_by_topo_index;
 
   /// Construct with a given number of nodes. Allocates empty adjacency
   /// lists of the specified size.
   explicit ReducedGraph(int num_nodes)
-      : size(num_nodes), succs(num_nodes), preds(num_nodes) {}
+      : size(num_nodes),
+        successors_by_topo_index(num_nodes),
+        predecessors_by_topo_index(num_nodes) {}
 };
 
 } // namespace hierarchical_scheduler

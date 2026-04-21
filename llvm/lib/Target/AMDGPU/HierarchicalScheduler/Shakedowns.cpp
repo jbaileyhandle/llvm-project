@@ -32,15 +32,15 @@ using namespace llvm::hierarchical_scheduler;
 void ScheduleDAGHierarchicalScheduler::RunRegionShakedowns(
     ScheduleGraph &graph) {
   llvm::outs() << "  Topo order:\n";
-  for (ScheduleNode *node : graph.TopoOrder()) {
+  for (ScheduleNode *node : graph.GetTopoOrder()) {
     llvm::outs() << "    " << node->ToString() << "\n";
   }
 
   RunRegisterTrackerShakedown(graph);
   RunGCNRegisterTrackerShakedown(graph);
 
-  SmallVector<ScheduleNode *> topo_nodes(graph.TopoOrder().begin(),
-                                         graph.TopoOrder().end());
+  SmallVector<ScheduleNode *> topo_nodes(graph.GetTopoOrder().begin(),
+                                         graph.GetTopoOrder().end());
   VerifyGCNRegisterTracker(graph, topo_nodes);
   RunScheduleLengthTrackerShakedown(graph);
   RunScheduleConstructorShakedown(graph);
@@ -82,7 +82,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
       llvm::outs() << "  Region: " << region.GetNumInstrs()
                    << " instrs, graph: " << graph.Size()
                    << " nodes (" << graph.LeafSize() << " leaves)"
-                   << ", topo order size: " << graph.TopoOrder().size()
+                   << ", topo order size: " << graph.GetTopoOrder().size()
                    << "\n";
 
       // Run detailed shakedowns on the first region only.
@@ -100,7 +100,7 @@ namespace {
 void CheckTransitiveReduction(ScheduleGraph &graph) {
   int original_edge_count = 0;
   for (const ScheduleNode &node : graph.Nodes()) {
-    original_edge_count += node.NumSuccs();
+    original_edge_count += node.NumSuccessors();
   }
 
   graph.ComputeTransitiveReduction();
@@ -108,7 +108,7 @@ void CheckTransitiveReduction(ScheduleGraph &graph) {
 
   int reduced_edge_count = 0;
   for (int topo_idx = 0; topo_idx < reduced.size; ++topo_idx) {
-    reduced_edge_count += static_cast<int>(reduced.succs[topo_idx].size());
+    reduced_edge_count += static_cast<int>(reduced.successors_by_topo_index[topo_idx].size());
   }
 
   llvm::outs() << "  Transitive reduction: " << original_edge_count
@@ -116,9 +116,9 @@ void CheckTransitiveReduction(ScheduleGraph &graph) {
 
   llvm::outs() << "  Reduced edges:";
   for (int topo_idx = 0; topo_idx < reduced.size; ++topo_idx) {
-    ScheduleNode *from = graph.TopoOrder()[topo_idx];
-    for (int succ_topo_idx : reduced.succs[topo_idx]) {
-      ScheduleNode *to = graph.TopoOrder()[succ_topo_idx];
+    ScheduleNode *from = graph.GetTopoOrder()[topo_idx];
+    for (int succ_topo_idx : reduced.successors_by_topo_index[topo_idx]) {
+      ScheduleNode *to = graph.GetTopoOrder()[succ_topo_idx];
       llvm::outs() << " " << from->ToString() << "->" << to->ToString();
     }
   }
@@ -169,7 +169,7 @@ void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
   test_graph->ComputeTopologicalOrder();
 
   llvm::outs() << "  Test DAG topo order:";
-  for (ScheduleNode *node : test_graph->TopoOrder()) {
+  for (ScheduleNode *node : test_graph->GetTopoOrder()) {
     llvm::outs() << " " << node->ToString();
   }
   llvm::outs() << "\n";
@@ -189,13 +189,13 @@ void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
 // topo order and printing pressure at each step.
 void ScheduleDAGHierarchicalScheduler::RunRegisterTrackerShakedown(
     ScheduleGraph &graph) {
-  SmallVector<ScheduleNode *> nodes(graph.TopoOrder().begin(),
-                                    graph.TopoOrder().end());
+  SmallVector<ScheduleNode *> nodes(graph.GetTopoOrder().begin(),
+                                    graph.GetTopoOrder().end());
   RegisterTracker tracker(nodes, MF.getRegInfo(),
                           *MF.getSubtarget().getRegisterInfo());
 
   llvm::outs() << "  Register pressure trace (topo order):\n";
-  for (ScheduleNode *node : graph.TopoOrder()) {
+  for (ScheduleNode *node : graph.GetTopoOrder()) {
     llvm::outs() << "    " << node->ToString() << "\n";
     tracker.Schedule(node);
     llvm::outs() << "      " << tracker.DescribeRegOps(node) << "\n";
@@ -217,13 +217,13 @@ void ScheduleDAGHierarchicalScheduler::RunRegisterTrackerShakedown(
 // returns to zero.
 void ScheduleDAGHierarchicalScheduler::RunGCNRegisterTrackerShakedown(
     ScheduleGraph &graph) {
-  SmallVector<ScheduleNode *> nodes(graph.TopoOrder().begin(),
-                                    graph.TopoOrder().end());
+  SmallVector<ScheduleNode *> nodes(graph.GetTopoOrder().begin(),
+                                    graph.GetTopoOrder().end());
   GCNRegisterTracker tracker(graph, MF, *LIS);
 
   // --- Forward pass: schedule in topo order ---
   llvm::outs() << "  GCN register pressure trace (topo order):\n";
-  for (ScheduleNode *node : graph.TopoOrder()) {
+  for (ScheduleNode *node : graph.GetTopoOrder()) {
     tracker.Schedule(node);
     llvm::outs() << "    " << node->ToString() << "\n";
     llvm::outs() << "      " << tracker.DescribeRegOps(node) << "\n";
@@ -386,12 +386,12 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleLengthTrackerShakedown(
 
   // --- Forward pass: schedule in topo order ---
   llvm::outs() << "  Schedule length trace (topo order):\n";
-  for (ScheduleNode *node : graph.TopoOrder()) {
+  for (ScheduleNode *node : graph.GetTopoOrder()) {
     // Print the instruction.
     llvm::outs() << "    " << node->ToString() << "\n";
 
     // Print latency-carrying predecessors and their edge latencies.
-    for (const ScheduleEdge &edge : node->Preds()) {
+    for (const ScheduleEdge &edge : node->Predecessors()) {
       if (!edge.IsLatencyEdge()) {
         continue;
       }
@@ -415,7 +415,7 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleLengthTrackerShakedown(
 
   // --- Reverse pass: unschedule everything ---
   llvm::outs() << "  Schedule length trace (unschedule):\n";
-  for (int i = static_cast<int>(graph.TopoOrder().size()) - 1; i >= 0; --i) {
+  for (int i = static_cast<int>(graph.GetTopoOrder().size()) - 1; i >= 0; --i) {
     tracker.Unschedule();
     llvm::outs() << "    undo  " << tracker.Describe() << "\n";
   }
@@ -477,7 +477,7 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleConstructorShakedown(
 
   // --- Second pass: schedule in topo order for comparison ---
   ScheduleConstructor sc2(graph, st, MF, *LIS);
-  for (ScheduleNode *node : graph.TopoOrder()) {
+  for (ScheduleNode *node : graph.GetTopoOrder()) {
     sc2.Schedule(node);
   }
   llvm::outs() << "  ScheduleConstructor (topo order): "
@@ -569,7 +569,7 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleMetricShakedown(
   // (non-fabricated) values from the region.
   ScheduleConstructor sc_empty(graph, st, MF, *LIS);
   ScheduleConstructor sc_full(graph, st, MF, *LIS);
-  for (ScheduleNode *node : graph.TopoOrder()) {
+  for (ScheduleNode *node : graph.GetTopoOrder()) {
     sc_full.Schedule(node);
   }
 

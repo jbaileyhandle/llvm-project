@@ -41,9 +41,9 @@ ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
 // Ready list
 // ============================================================================
 
-int ScheduleConstructor::CountStrongPreds(const ScheduleNode *node) {
+int ScheduleConstructor::CountStrongPredecessors(const ScheduleNode *node) {
   int count = 0;
-  for (const ScheduleEdge &edge : node->Preds()) {
+  for (const ScheduleEdge &edge : node->Predecessors()) {
     if (edge.IsStrongEdge()) {
       count++;
     }
@@ -53,21 +53,21 @@ int ScheduleConstructor::CountStrongPreds(const ScheduleNode *node) {
 
 void ScheduleConstructor::InitReadyList() {
   for (const ScheduleNode &node : graph_->Nodes()) {
-    int strong_preds = CountStrongPreds(&node);
-    remaining_strong_preds_[&node] = strong_preds;
-    if (strong_preds == 0) {
+    int strong_predecessors = CountStrongPredecessors(&node);
+    remaining_strong_predecessors_[&node] = strong_predecessors;
+    if (strong_predecessors == 0) {
       ready_list_.insert(&node);
     }
   }
 }
 
 void ScheduleConstructor::ReleaseSuccessors(const ScheduleNode *node) {
-  for (const ScheduleEdge &edge : node->Succs()) {
+  for (const ScheduleEdge &edge : node->Successors()) {
     if (!edge.IsStrongEdge()) {
       continue;
     }
     const ScheduleNode *succ = edge.node_;
-    int &remaining = remaining_strong_preds_[succ];
+    int &remaining = remaining_strong_predecessors_[succ];
     remaining--;
     if (remaining == 0) {
       ready_list_.insert(succ);
@@ -76,12 +76,12 @@ void ScheduleConstructor::ReleaseSuccessors(const ScheduleNode *node) {
 }
 
 void ScheduleConstructor::UnreleaseSuccessors(const ScheduleNode *node) {
-  for (const ScheduleEdge &edge : node->Succs()) {
+  for (const ScheduleEdge &edge : node->Successors()) {
     if (!edge.IsStrongEdge()) {
       continue;
     }
     const ScheduleNode *succ = edge.node_;
-    int &remaining = remaining_strong_preds_[succ];
+    int &remaining = remaining_strong_predecessors_[succ];
     if (remaining == 0) {
       ready_list_.erase(succ);
     }

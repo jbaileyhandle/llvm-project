@@ -195,9 +195,9 @@ private:
 
   /// Per-node count of strong predecessors not yet scheduled.
   /// When this reaches 0, the node enters the ready list.
-  DenseMap<const ScheduleNode *, int> remaining_strong_preds_;
+  DenseMap<const ScheduleNode *, int> remaining_strong_predecessors_;
 
-  /// Initialize remaining_strong_preds_ and ready_list_ from the graph.
+  /// Initialize remaining_strong_predecessors_ and ready_list_ from the graph.
   void InitReadyList();
 
   /// Decrement strong-pred counts for the node's successors. If any
@@ -216,7 +216,7 @@ private:
   void UnreleaseSuccessors(const ScheduleNode *node);
 
   /// Count strong predecessors for a node.
-  static int CountStrongPreds(const ScheduleNode *node);
+  static int CountStrongPredecessors(const ScheduleNode *node);
 };
 
 } // namespace hierarchical_scheduler
