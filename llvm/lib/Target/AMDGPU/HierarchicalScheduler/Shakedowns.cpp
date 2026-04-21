@@ -76,6 +76,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
 
   RunContinuousScoreTableSweepShakedown();
   RunTestDAGShakedown();
+  RunLengthLowerBoundShakedown();
 
   for (auto &region : regions_) {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {
@@ -131,6 +132,64 @@ void CheckDominatorTree(ScheduleGraph &graph) {
   llvm::outs() << "  Dominator tree:\n" << graph.DominatorTreeToString();
 }
 
+// Inner helper: verifies GetLengthLowerBound on one graph against a
+// hand-computed expected sequence. Exercises both the forward
+// Schedule path (running max maintenance) and the reverse
+// Unschedule path (restoration from undo records).
+//
+// `label` is used only for the PASS/FAIL print line. `expected_lb`
+// must have size graph.Size()+1 (one entry per scheduling step,
+// starting from the empty state).
+//
+// Requires graph.ComputeCriticalPathFromExit() and
+// graph.ComputeTopologicalOrder() to have run already.
+void CheckOneLengthLowerBoundRun(ScheduleGraph &graph,
+                                 const GCNSubtarget &st,
+                                 ArrayRef<int> expected_lb,
+                                 StringRef label) {
+  ScheduleLengthTracker tracker(graph, st);
+
+  if (static_cast<int>(expected_lb.size()) != graph.Size() + 1) {
+    llvm::outs() << "  LB " << label << " expected array size mismatch: "
+                 << expected_lb.size() << " vs graph.Size()+1="
+                 << (graph.Size() + 1) << "  FAIL\n";
+    return;
+  }
+
+  // Forward pass.
+  int mismatches = 0;
+  llvm::outs() << "  LB on " << label << " (forward):";
+  int lb = tracker.GetLengthLowerBound();
+  llvm::outs() << " " << lb;
+  if (lb != expected_lb[0]) {
+    ++mismatches;
+  }
+  for (int i = 0; i < graph.Size(); ++i) {
+    tracker.Schedule(graph.GetTopoOrder()[i]);
+    lb = tracker.GetLengthLowerBound();
+    llvm::outs() << " " << lb;
+    if (lb != expected_lb[i + 1]) {
+      ++mismatches;
+    }
+  }
+  llvm::outs() << (mismatches == 0 ? "  PASS\n" : "  FAIL\n");
+
+  // Reverse pass: after undoing the k-th forward Schedule, LB
+  // should match expected_lb[steps_remaining] = expected_lb[i].
+  int reverse_mismatches = 0;
+  llvm::outs() << "  LB on " << label << " (reverse):";
+  for (int i = graph.Size() - 1; i >= 0; --i) {
+    tracker.Unschedule();
+    lb = tracker.GetLengthLowerBound();
+    llvm::outs() << " " << lb;
+    if (lb != expected_lb[i]) {
+      ++reverse_mismatches;
+    }
+  }
+  llvm::outs() << (reverse_mismatches == 0 ? "  PASS\n" : "  FAIL\n");
+}
+
+
 // Verifies critical-path-from-exit against the hand-computed values
 // documented in BuildTestDAG's header docstring. Assumes nodes were
 // emplaced in order A, C, D, E, F, G, H. PASS/FAIL based on exact
@@ -183,6 +242,40 @@ void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
   // Uncomment to re-test:
   // auto cyclic = ScheduleGraph::BuildTestDAGWithCycle();
   // cyclic->ComputeTopologicalOrder();
+}
+
+// Verifies ScheduleLengthTracker::GetLengthLowerBound against hand-
+// computed expected sequences on two synthetic DAGs. Builds both
+// graphs internally — this shakedown is self-contained and does not
+// depend on any region-level graph.
+void ScheduleDAGHierarchicalScheduler::RunLengthLowerBoundShakedown() {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+
+  // Primary test DAG (BuildTestDAG): topo order [A, H, C, D, E, F, G],
+  // latencies per BuildTestDAG's header, giving expected LB sequence
+  // {7, 9, 9, 9, 9, 9, 9, 10}. Only two transitions (7->9 on the
+  // first Schedule, 9->10 on the final bubble at G).
+  {
+    auto graph = ScheduleGraph::BuildTestDAG();
+    graph->ComputeTopologicalOrder();
+    graph->ComputeCriticalPathFromExit();
+    const int expected_lb[] = {7, 9, 9, 9, 9, 9, 9, 10};
+    CheckOneLengthLowerBoundRun(*graph, st, expected_lb, "BuildTestDAG");
+  }
+
+  // Dedicated-for-LB DAG: chosen so the LB transitions multiple
+  // times via both terms of the formula. Topo order [N0..N5],
+  // expected sequence {6, 9, 9, 9, 11, 11, 12}. Three transitions:
+  // 6->9 (2nd term), 9->11 (bubble at N3), 11->12 (final bubble).
+  {
+    auto graph = ScheduleGraph::BuildLengthLowerBoundTestDAG();
+    graph->ComputeTopologicalOrder();
+    graph->ComputeCriticalPathFromExit();
+    const int expected_lb[] = {6, 9, 9, 9, 11, 11, 12};
+    CheckOneLengthLowerBoundRun(*graph, st, expected_lb,
+                                "BuildLengthLowerBoundTestDAG");
+  }
 }
 
 // Tests RegisterTracker by scheduling the first region's instructions in
@@ -378,11 +471,18 @@ void ScheduleDAGHierarchicalScheduler::VerifyGCNRegisterTracker(
 
 // Tests ScheduleLengthTracker: schedules in topo order printing length/bubbles
 // at each step, then unschedules everything and verifies state returns to zero.
+// Also exercises GetLengthLowerBound, both its monotonicity through Schedule
+// and its correct restoration through Unschedule.
 void ScheduleDAGHierarchicalScheduler::RunScheduleLengthTrackerShakedown(
     ScheduleGraph &graph) {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
   ScheduleLengthTracker tracker(graph, st);
+
+  // lb_after[i] = GetLengthLowerBound() after i nodes have been
+  // scheduled. Index 0 = empty state; index N = fully scheduled.
+  std::vector<int> lb_after;
+  lb_after.push_back(tracker.GetLengthLowerBound());
 
   // --- Forward pass: schedule in topo order ---
   llvm::outs() << "  Schedule length trace (topo order):\n";
@@ -409,16 +509,60 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleLengthTrackerShakedown(
 
     // Schedule and print resulting state.
     tracker.Schedule(node);
+    int lb = tracker.GetLengthLowerBound();
+    lb_after.push_back(lb);
     llvm::outs() << "      -> cycle=" << tracker.GetScheduledCycle(node)
-                 << "  " << tracker.Describe() << "\n";
+                 << "  " << tracker.Describe() << "  lb=" << lb << "\n";
   }
 
+  // --- Forward LB invariants ---
+  // (a) LB at empty state == LeafSize (current_cycle=0, no contribution
+  //     from scheduled set).
+  // (b) LB at fully scheduled state == final length (current_cycle_),
+  //     i.e., tight bound at completion.
+  // (c) LB is monotonically non-decreasing along the forward pass
+  //     (first term is non-decreasing by IssueWidth=1; second term is
+  //     a running max).
+  int forward_violations = 0;
+  if (lb_after.front() != graph.LeafSize()) {
+    llvm::outs() << "  LB-at-empty mismatch: got " << lb_after.front()
+                 << ", expected " << graph.LeafSize() << "\n";
+    ++forward_violations;
+  }
+  if (lb_after.back() != tracker.GetCurrentCycle()) {
+    llvm::outs() << "  LB-at-fully-scheduled mismatch: got "
+                 << lb_after.back() << ", expected "
+                 << tracker.GetCurrentCycle() << "\n";
+    ++forward_violations;
+  }
+  for (int i = 1; i < static_cast<int>(lb_after.size()); ++i) {
+    if (lb_after[i] < lb_after[i - 1]) {
+      llvm::outs() << "  LB monotonicity violated at step " << i << ": "
+                   << lb_after[i - 1] << " -> " << lb_after[i] << "\n";
+      ++forward_violations;
+    }
+  }
+  llvm::outs() << "  LB forward invariants:"
+               << (forward_violations == 0 ? "  PASS\n" : "  FAIL\n");
+
   // --- Reverse pass: unschedule everything ---
+  // After unscheduling node i (in reverse topo order), the tracker
+  // state should equal the state just before that node was scheduled
+  // forward, so LB should equal lb_after[steps_remaining].
   llvm::outs() << "  Schedule length trace (unschedule):\n";
+  int reverse_violations = 0;
   for (int i = static_cast<int>(graph.GetTopoOrder().size()) - 1; i >= 0; --i) {
     tracker.Unschedule();
-    llvm::outs() << "    undo  " << tracker.Describe() << "\n";
+    int lb = tracker.GetLengthLowerBound();
+    int expected = lb_after[i];
+    llvm::outs() << "    undo  " << tracker.Describe()
+                 << "  lb=" << lb << " (expected " << expected << ")\n";
+    if (lb != expected) {
+      ++reverse_violations;
+    }
   }
+  llvm::outs() << "  LB reverse (Unschedule restoration):"
+               << (reverse_violations == 0 ? "  PASS\n" : "  FAIL\n");
 
   // --- Verify round-trip ---
   bool pass = (tracker.GetCurrentCycle() == 0 &&

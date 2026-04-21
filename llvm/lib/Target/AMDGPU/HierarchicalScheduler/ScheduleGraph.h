@@ -45,6 +45,7 @@
 #include <cassert>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -390,6 +391,27 @@ public:
   /// Critical path: A→C→E→F→G (length 2+4+1+2 = 9).
   static std::unique_ptr<ScheduleGraph> BuildTestDAG();
 
+  /// Build a synthetic test DAG specifically for exercising
+  /// GetLengthLowerBound. Shape and latencies chosen so the LB
+  /// transitions several times through the forward schedule — both
+  /// from the first term (bubbles advancing current_cycle past the
+  /// node-count floor) and from the second term (new max of
+  /// scheduled_cycle + cp_from_exit).
+  ///
+  /// 6 nodes, 6 edges:
+  ///
+  ///   N0 --(3)--> N1 --(5)--> N3 --(1)--> N5
+  ///    \                                   ^
+  ///     \-(1)--> N2 --(1)--> N4 --(2)------/
+  ///
+  /// Expected cp_from_exit: N0=9, N1=6, N2=3, N3=1, N4=2, N5=0.
+  /// Topo order (Kahn's): N0, N1, N2, N3, N4, N5.
+  /// Expected LB after scheduling k nodes (k=0..6):
+  ///   {6, 9, 9, 9, 11, 11, 12}
+  /// Transitions: 6->9 (2nd term kicks in), 9->11 (bubble at N3),
+  /// 11->12 (final bubble at N5).
+  static std::unique_ptr<ScheduleGraph> BuildLengthLowerBoundTestDAG();
+
   /// Build a synthetic test DAG that contains a cycle, for testing that
   /// ComputeTopologicalOrder correctly detects it and calls
   /// report_fatal_error.
@@ -570,6 +592,11 @@ private:
   /// ScheduleNode::GetTopoIndex(). Empty == "not computed or
   /// invalidated since." Sized to Size() (one slot per node).
   std::vector<int> critical_path_from_exit_by_topo_index_;
+
+  /// Lazily-computed leaf-node count (see LeafSize()). Populated on
+  /// first call; cleared on any graph mutation via
+  /// InvalidateDerivedData. `mutable` so LeafSize() can stay const.
+  mutable std::optional<int> cached_leaf_size_;
 
   std::unique_ptr<ReducedGraph> reduced_graph_;
   std::unique_ptr<DominatorTree> dom_tree_;

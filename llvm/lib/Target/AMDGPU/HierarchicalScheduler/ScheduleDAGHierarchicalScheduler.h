@@ -137,6 +137,13 @@ public:
   // would miss in within-bracket interior values.
   void RunContinuousScoreTableSweepShakedown();
 
+  // Verify ScheduleLengthTracker::GetLengthLowerBound against hand-
+  // computed expected sequences on two synthetic DAGs. Constructs
+  // its own test graphs internally (BuildTestDAG and
+  // BuildLengthLowerBoundTestDAG) and exercises both forward
+  // Schedule and reverse Unschedule paths.
+  void RunLengthLowerBoundShakedown();
+
   // Stub pass: schedule every region in topo order and apply.
   // Exercises the full pipeline (WithRegionGraph → ScheduleConstructor
   // → ApplyScheduleOrder) without any real search logic. Useful for

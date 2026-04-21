@@ -151,7 +151,6 @@ void ScheduleDAGHierarchicalScheduler::WithRegionGraph(
         static_cast<const GCNSubtarget &>(MF.getSubtarget());
     auto graph = ScheduleGraph::BuildFromSUnits(
         SUnits, st, MF, *LIS, MF.getRegInfo(), region);
-    graph->ComputeTopologicalOrder();
 
     callback(*graph);
   });

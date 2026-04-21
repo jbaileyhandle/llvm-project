@@ -69,8 +69,16 @@ void ScheduleLengthTracker::ValidateGraph(const ScheduleGraph &graph,
 // ============================================================================
 
 ScheduleLengthTracker::ScheduleLengthTracker(const ScheduleGraph &graph,
-                                             const GCNSubtarget &st) {
+                                             const GCNSubtarget &st)
+    : graph_(&graph),
+      scheduled_cycle_by_topo_index_(graph.Size(), /*sentinel=*/-1) {
   ValidateGraph(graph, st);
+  if (!graph.HasCriticalPathFromExit()) {
+    report_fatal_error(
+        "ScheduleLengthTracker requires ScheduleGraph::"
+        "ComputeCriticalPathFromExit to have been called before "
+        "construction (see class-level precondition).");
+  }
 }
 
 // ============================================================================
@@ -84,8 +92,30 @@ void ScheduleLengthTracker::Schedule(const ScheduleNode *node) {
                        ". Group node scheduling is not yet implemented.");
   }
 
-  // Compute ready cycle from already-scheduled predecessors. Only
-  // latency-carrying edges constrain readiness (see
+  int ready_cycle = ComputeReadyCycle(node);
+  PushUndoStep(node);
+  AdvanceSchedule(node, ready_cycle);
+  UpdateLengthLowerBoundMax(node, ready_cycle);
+}
+
+void ScheduleLengthTracker::Unschedule() {
+  if (undo_stack_.empty()) {
+    report_fatal_error("ScheduleLengthTracker: Unschedule without matching "
+                       "Schedule");
+  }
+
+  ScheduleStep step = undo_stack_.back();
+  undo_stack_.pop_back();
+
+  scheduled_cycle_by_topo_index_[step.node->GetTopoIndex()] = -1;
+  current_cycle_ = step.prev_cycle;
+  total_bubbles_ = step.prev_bubbles;
+  max_scheduled_plus_cp_ = step.prev_max_scheduled_plus_cp;
+}
+
+int ScheduleLengthTracker::ComputeReadyCycle(
+    const ScheduleNode *node) const {
+  // Only latency-carrying edges constrain readiness (see
   // ScheduleEdge::IsLatencyEdge for the single source of truth).
   int ready_cycle = current_cycle_;
   for (const ScheduleEdge &edge : node->Predecessors()) {
@@ -98,39 +128,48 @@ void ScheduleLengthTracker::Schedule(const ScheduleNode *node) {
       ready_cycle = pred_ready;
     }
   }
+  return ready_cycle;
+}
 
-  // Push undo record.
-  undo_stack_.push_back({node, current_cycle_, total_bubbles_});
+void ScheduleLengthTracker::PushUndoStep(const ScheduleNode *node) {
+  undo_stack_.push_back({node, current_cycle_, total_bubbles_,
+                         max_scheduled_plus_cp_});
+}
 
-  // Update state.
+void ScheduleLengthTracker::AdvanceSchedule(const ScheduleNode *node,
+                                            int ready_cycle) {
   int bubbles = ready_cycle - current_cycle_;
   total_bubbles_ += bubbles;
-  scheduled_cycle_[node] = ready_cycle;
+  scheduled_cycle_by_topo_index_[node->GetTopoIndex()] = ready_cycle;
   current_cycle_ = ready_cycle + 1;
 }
 
-void ScheduleLengthTracker::Unschedule() {
-  if (undo_stack_.empty()) {
-    report_fatal_error("ScheduleLengthTracker: Unschedule without matching "
-                       "Schedule");
+void ScheduleLengthTracker::UpdateLengthLowerBoundMax(
+    const ScheduleNode *node, int ready_cycle) {
+  int contribution = ready_cycle + graph_->GetCriticalPathFromExit(node);
+  if (contribution > max_scheduled_plus_cp_) {
+    max_scheduled_plus_cp_ = contribution;
   }
+}
 
-  ScheduleStep step = undo_stack_.back();
-  undo_stack_.pop_back();
-
-  scheduled_cycle_.erase(step.node);
-  current_cycle_ = step.prev_cycle;
-  total_bubbles_ = step.prev_bubbles;
+int ScheduleLengthTracker::GetLengthLowerBound() const {
+  // Constructor enforces cp_from_exit availability, so no per-call
+  // check here. LeafSize counts every leaf node (including entry/exit,
+  // which the tracker treats as consuming one cycle each); future
+  // subgraph proxies in a hierarchical graph are excluded, since
+  // they're not scheduled.
+  int num_unscheduled = graph_->LeafSize() - GetNumScheduled();
+  return std::max(current_cycle_ + num_unscheduled, max_scheduled_plus_cp_);
 }
 
 int ScheduleLengthTracker::GetScheduledCycle(
     const ScheduleNode *node) const {
-  auto it = scheduled_cycle_.find(node);
-  if (it == scheduled_cycle_.end()) {
+  int cycle = scheduled_cycle_by_topo_index_[node->GetTopoIndex()];
+  if (cycle < 0) {
     report_fatal_error("ScheduleLengthTracker: GetScheduledCycle called "
                        "for unscheduled node " + Twine(node->GetId()));
   }
-  return it->second;
+  return cycle;
 }
 
 // ============================================================================

@@ -180,11 +180,14 @@ std::string ScheduleGraph::ToString() const {
 }
 
 int ScheduleGraph::LeafSize() const {
-  int count = 0;
-  for (const ScheduleNode &node : nodes_) {
-    count += node.LeafSize();
+  if (!cached_leaf_size_.has_value()) {
+    int count = 0;
+    for (const ScheduleNode &node : nodes_) {
+      count += node.LeafSize();
+    }
+    cached_leaf_size_ = count;
   }
-  return count;
+  return *cached_leaf_size_;
 }
 
 // Kahn's algorithm: iteratively remove nodes with no unmet predecessors.
@@ -256,6 +259,7 @@ void ScheduleGraph::InvalidateDerivedData() {
   critical_path_from_exit_by_topo_index_.clear();
   reduced_graph_.reset();
   dom_tree_.reset();
+  cached_leaf_size_.reset();
   // input_schedule_constructor_ is NOT cleared; it's a Phase-4 artifact
   // tied to the original SUnit emplacement order, not a structural
   // derivation that changes when the graph mutates.
@@ -394,6 +398,11 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
   graph->CreateLeafNodesFromSUnits(sunits, sunit_to_node);
   graph->AddEdgesBetweenLeafNodes(sunit_to_node);
   graph->CreateEntryAndExitNodes(lis, mri, region_begin_idx, region_end_idx);
+  // Compute topo and cp_from_exit before Phase 4 so the
+  // ScheduleLengthTracker inside input_schedule_constructor_ satisfies
+  // its precondition (cp must be available at tracker construction).
+  graph->ComputeTopologicalOrder();
+  graph->ComputeCriticalPathFromExit();
   graph->PopulateInputScheduleConstructor(st, mf, lis, region);
 
   return graph;
@@ -650,6 +659,32 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAG() {
   graph->AddEdge(&e, &f, ScheduleEdge::kData, /*latency=*/1);
   graph->AddEdge(&h, &g, ScheduleEdge::kData, /*latency=*/5);
   graph->AddEdge(&f, &g, ScheduleEdge::kData, /*latency=*/2);
+
+  return graph;
+}
+
+std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildLengthLowerBoundTestDAG() {
+  auto graph = std::make_unique<ScheduleGraph>();
+
+  graph->nodes_.reserve(6);
+  ScheduleNode &n0 = graph->EmplaceNode(nullptr, "N0", graph.get());
+  ScheduleNode &n1 = graph->EmplaceNode(nullptr, "N1", graph.get());
+  ScheduleNode &n2 = graph->EmplaceNode(nullptr, "N2", graph.get());
+  ScheduleNode &n3 = graph->EmplaceNode(nullptr, "N3", graph.get());
+  ScheduleNode &n4 = graph->EmplaceNode(nullptr, "N4", graph.get());
+  ScheduleNode &n5 = graph->EmplaceNode(nullptr, "N5", graph.get());
+
+  // Two parallel chains converging at N5. N0->N1->N3->N5 is the
+  // heavy chain; N0->N2->N4->N5 is lighter. The latency-5 edge
+  // N1->N3 and the latency-2 edge N4->N5 force bubbles during
+  // forward scheduling, which makes the LB transition multiple
+  // times.
+  graph->AddEdge(&n0, &n1, ScheduleEdge::kData, /*latency=*/3);
+  graph->AddEdge(&n0, &n2, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&n1, &n3, ScheduleEdge::kData, /*latency=*/5);
+  graph->AddEdge(&n2, &n4, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&n3, &n5, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&n4, &n5, ScheduleEdge::kData, /*latency=*/2);
 
   return graph;
 }
