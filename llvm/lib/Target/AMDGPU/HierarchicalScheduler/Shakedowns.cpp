@@ -26,74 +26,6 @@
 using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
 
-// Run all shakedown / validation tests on a single region's graph.
-// Exercises register trackers, schedule length tracker, and prints
-// debug info about LLVM's EntrySU/ExitSU.
-void ScheduleDAGHierarchicalScheduler::RunRegionShakedowns(
-    ScheduleGraph &graph) {
-  llvm::outs() << "  Topo order:\n";
-  for (ScheduleNode *node : graph.GetTopoOrder()) {
-    llvm::outs() << "    " << node->ToString() << "\n";
-  }
-
-  RunRegisterTrackerShakedown(graph);
-  RunGCNRegisterTrackerShakedown(graph);
-
-  SmallVector<ScheduleNode *> topo_nodes(graph.GetTopoOrder().begin(),
-                                         graph.GetTopoOrder().end());
-  VerifyGCNRegisterTracker(graph, topo_nodes);
-  RunScheduleLengthTrackerShakedown(graph);
-  RunScheduleConstructorShakedown(graph);
-  RunScheduleMetricShakedown(graph);
-
-  // Dump EntrySU/ExitSU edges from the LLVM DAG.
-  llvm::outs() << "  EntrySU succs (" << EntrySU.Succs.size() << "):";
-  for (const SDep &dep : EntrySU.Succs) {
-    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
-  }
-  llvm::outs() << "\n";
-  llvm::outs() << "  EntrySU preds (" << EntrySU.Preds.size() << "):";
-  for (const SDep &dep : EntrySU.Preds) {
-    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
-  }
-  llvm::outs() << "\n";
-  llvm::outs() << "  ExitSU succs (" << ExitSU.Succs.size() << "):";
-  for (const SDep &dep : ExitSU.Succs) {
-    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
-  }
-  llvm::outs() << "\n";
-  llvm::outs() << "  ExitSU preds (" << ExitSU.Preds.size() << "):";
-  for (const SDep &dep : ExitSU.Preds) {
-    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
-  }
-  llvm::outs() << "\n";
-}
-
-// Run all shakedowns: synthetic test DAG first, then per-region
-// shakedowns on the first region.
-void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
-  llvm::outs() << "RunAllShakedowns:\n";
-
-  RunContinuousScoreTableSweepShakedown();
-  RunTestDAGShakedown();
-  RunLengthLowerBoundShakedown();
-
-  for (auto &region : regions_) {
-    WithRegionGraph(region, [&](ScheduleGraph &graph) {
-      llvm::outs() << "  Region: " << region.GetNumInstrs()
-                   << " instrs, graph: " << graph.Size()
-                   << " nodes (" << graph.LeafSize() << " leaves)"
-                   << ", topo order size: " << graph.GetTopoOrder().size()
-                   << "\n";
-
-      // Run detailed shakedowns on the first region only.
-      if (&region == &regions_.front()) {
-        RunRegionShakedowns(graph);
-      }
-    });
-  }
-}
-
 namespace {
 
 // Verifies transitive reduction on the test DAG: prints edge count
@@ -219,11 +151,9 @@ void CheckCriticalPath(ScheduleGraph &graph) {
   llvm::outs() << (mismatches == 0 ? "  PASS\n" : "  FAIL\n");
 }
 
-} // namespace
-
 // Exercises graph algorithms on a synthetic test DAG with known structure.
-// Delegates each algorithm to a helper in the anonymous namespace above.
-void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
+// Delegates each algorithm to a helper in this anonymous namespace.
+void RunTestDAGShakedown() {
   auto test_graph = ScheduleGraph::BuildTestDAG();
   test_graph->ComputeTopologicalOrder();
 
@@ -248,10 +178,7 @@ void ScheduleDAGHierarchicalScheduler::RunTestDAGShakedown() {
 // computed expected sequences on two synthetic DAGs. Builds both
 // graphs internally — this shakedown is self-contained and does not
 // depend on any region-level graph.
-void ScheduleDAGHierarchicalScheduler::RunLengthLowerBoundShakedown() {
-  const GCNSubtarget &st =
-      static_cast<const GCNSubtarget &>(MF.getSubtarget());
-
+void RunLengthLowerBoundShakedown(const GCNSubtarget &st) {
   // Primary test DAG (BuildTestDAG): topo order [A, H, C, D, E, F, G],
   // latencies per BuildTestDAG's header, giving expected LB sequence
   // {7, 9, 9, 9, 9, 9, 9, 10}. Only two transitions (7->9 on the
@@ -280,12 +207,12 @@ void ScheduleDAGHierarchicalScheduler::RunLengthLowerBoundShakedown() {
 
 // Tests RegisterTracker by scheduling the first region's instructions in
 // topo order and printing pressure at each step.
-void ScheduleDAGHierarchicalScheduler::RunRegisterTrackerShakedown(
-    ScheduleGraph &graph) {
+void RunRegisterTrackerShakedown(ScheduleGraph &graph,
+                                 const MachineFunction &mf) {
   SmallVector<ScheduleNode *> nodes(graph.GetTopoOrder().begin(),
                                     graph.GetTopoOrder().end());
-  RegisterTracker tracker(nodes, MF.getRegInfo(),
-                          *MF.getSubtarget().getRegisterInfo());
+  RegisterTracker tracker(nodes, mf.getRegInfo(),
+                          *mf.getSubtarget().getRegisterInfo());
 
   llvm::outs() << "  Register pressure trace (topo order):\n";
   for (ScheduleNode *node : graph.GetTopoOrder()) {
@@ -308,11 +235,12 @@ void ScheduleDAGHierarchicalScheduler::RunRegisterTrackerShakedown(
 // topo order (printing pressure at each step), then unscheduling everything
 // in reverse order (also printing pressure), and verifying that pressure
 // returns to zero.
-void ScheduleDAGHierarchicalScheduler::RunGCNRegisterTrackerShakedown(
-    ScheduleGraph &graph) {
+void RunGCNRegisterTrackerShakedown(ScheduleGraph &graph,
+                                    const MachineFunction &mf,
+                                    const LiveIntervals &lis) {
   SmallVector<ScheduleNode *> nodes(graph.GetTopoOrder().begin(),
                                     graph.GetTopoOrder().end());
-  GCNRegisterTracker tracker(graph, MF, *LIS);
+  GCNRegisterTracker tracker(graph, mf, lis);
 
   // --- Forward pass: schedule in topo order ---
   llvm::outs() << "  GCN register pressure trace (topo order):\n";
@@ -370,10 +298,11 @@ void ScheduleDAGHierarchicalScheduler::RunGCNRegisterTrackerShakedown(
 // and live-out uses). The initial live set that GCNUpwardRPTracker gets
 // from LiveIntervals at the region boundary is equivalent to our exit
 // node's uses, so the peaks should still be comparable.
-void ScheduleDAGHierarchicalScheduler::VerifyGCNRegisterTracker(
-    ScheduleGraph &graph,
-    ArrayRef<ScheduleNode *> order) {
-  const MachineRegisterInfo &mri = MF.getRegInfo();
+void VerifyGCNRegisterTracker(ScheduleGraph &graph,
+                              ArrayRef<ScheduleNode *> order,
+                              const MachineFunction &mf,
+                              const LiveIntervals &lis) {
+  const MachineRegisterInfo &mri = mf.getRegInfo();
 
   // --- Collect MachineInstrs from the order, skipping entry/exit ---
   SmallVector<MachineInstr *, 32> mis;
@@ -404,7 +333,7 @@ void ScheduleDAGHierarchicalScheduler::VerifyGCNRegisterTracker(
   // mis[i] = our state after mis[i-1]. We record the pre-recede state
   // (the initial live set from reset) as the "after last instruction"
   // value.
-  GCNUpwardRPTracker llvm_tracker(*LIS);
+  GCNUpwardRPTracker llvm_tracker(lis);
   llvm_tracker.reset(*mis.back());
 
   // llvm_pressures[i] = pressure after forward instruction mis[i].
@@ -426,7 +355,7 @@ void ScheduleDAGHierarchicalScheduler::VerifyGCNRegisterTracker(
   }
 
   // --- Our tracker: walk order forward, record pressure at each step ---
-  GCNRegisterTracker tracker(graph, MF, *LIS);
+  GCNRegisterTracker tracker(graph, mf, lis);
 
   llvm::outs() << "  Cross-check per-instruction (same order):\n";
   llvm::outs() << "    " << std::string(60, '-') << "\n";
@@ -473,10 +402,8 @@ void ScheduleDAGHierarchicalScheduler::VerifyGCNRegisterTracker(
 // at each step, then unschedules everything and verifies state returns to zero.
 // Also exercises GetLengthLowerBound, both its monotonicity through Schedule
 // and its correct restoration through Unschedule.
-void ScheduleDAGHierarchicalScheduler::RunScheduleLengthTrackerShakedown(
-    ScheduleGraph &graph) {
-  const GCNSubtarget &st =
-      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+void RunScheduleLengthTrackerShakedown(ScheduleGraph &graph,
+                                       const GCNSubtarget &st) {
   ScheduleLengthTracker tracker(graph, st);
 
   // lb_after[i] = GetLengthLowerBound() after i nodes have been
@@ -579,11 +506,12 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleLengthTrackerShakedown(
 // Tests ScheduleConstructor: constructs a full schedule by always picking
 // the first node from the ready list, then unschedules everything and
 // verifies round-trip.
-void ScheduleDAGHierarchicalScheduler::RunScheduleConstructorShakedown(
-    ScheduleGraph &graph) {
+void RunScheduleConstructorShakedown(ScheduleGraph &graph,
+                                     const MachineFunction &mf,
+                                     const LiveIntervals &lis) {
   const GCNSubtarget &st =
-      static_cast<const GCNSubtarget &>(MF.getSubtarget());
-  ScheduleConstructor sc(graph, st, MF, *LIS);
+      static_cast<const GCNSubtarget &>(mf.getSubtarget());
+  ScheduleConstructor sc(graph, st, mf, lis);
 
   // --- Forward pass: always pick the first ready node ---
   llvm::outs() << "  ScheduleConstructor trace:\n";
@@ -620,7 +548,7 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleConstructorShakedown(
   }
 
   // --- Second pass: schedule in topo order for comparison ---
-  ScheduleConstructor sc2(graph, st, MF, *LIS);
+  ScheduleConstructor sc2(graph, st, mf, lis);
   for (ScheduleNode *node : graph.GetTopoOrder()) {
     sc2.Schedule(node);
   }
@@ -628,10 +556,11 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleConstructorShakedown(
                << sc2.Describe() << "\n";
 }
 
-void ScheduleDAGHierarchicalScheduler::RunScheduleMetricShakedown(
-    ScheduleGraph &graph) {
+void RunScheduleMetricShakedown(ScheduleGraph &graph,
+                                const MachineFunction &mf,
+                                const LiveIntervals &lis) {
   const GCNSubtarget &st =
-      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+      static_cast<const GCNSubtarget &>(mf.getSubtarget());
   // Local alias for the occupancy score multiplier. One integer
   // occupancy step is worth M points in the continuous score, so
   // each bracket occupies [occ*M, (occ+1)*M).
@@ -711,8 +640,8 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleMetricShakedown(
   // comparison of the underlying getter — verifies metric dispatch,
   // comparison direction, and strict-vs-tie handling with real
   // (non-fabricated) values from the region.
-  ScheduleConstructor sc_empty(graph, st, MF, *LIS);
-  ScheduleConstructor sc_full(graph, st, MF, *LIS);
+  ScheduleConstructor sc_empty(graph, st, mf, lis);
+  ScheduleConstructor sc_full(graph, st, mf, lis);
   for (ScheduleNode *node : graph.GetTopoOrder()) {
     sc_full.Schedule(node);
   }
@@ -775,10 +704,7 @@ void ScheduleDAGHierarchicalScheduler::RunScheduleMetricShakedown(
 // register count. Compares vgpr_score_by_count[v] against
 // ComputeContinuousOccupancyScore(st, v, 0) for all v in range,
 // and similarly sgpr_score_by_count[s] against (st, 0, s).
-void ScheduleDAGHierarchicalScheduler::
-    RunContinuousScoreTableSweepShakedown() {
-  const GCNSubtarget &st =
-      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+void RunContinuousScoreTableSweepShakedown(const GCNSubtarget &st) {
   const auto &score_tables =
       GCNRegisterTracker::GetOrComputeContinuousOccupancyScoreTables(st);
 
@@ -822,5 +748,85 @@ void ScheduleDAGHierarchicalScheduler::
   if (!pass) {
     report_fatal_error("ContinuousScoreTableSweep: lookup table disagrees "
                        "with formula on some entries");
+  }
+}
+
+// Run all per-region shakedowns on one region's graph. Exercises
+// register trackers, schedule-length tracker, ScheduleConstructor,
+// ScheduleMetric, and prints the region's EntrySU/ExitSU edge info
+// from the LLVM DAG.
+void RunRegionShakedowns(ScheduleGraph &graph,
+                         const MachineFunction &mf,
+                         const LiveIntervals &lis,
+                         const SUnit &entry_su,
+                         const SUnit &exit_su) {
+  llvm::outs() << "  Topo order:\n";
+  for (ScheduleNode *node : graph.GetTopoOrder()) {
+    llvm::outs() << "    " << node->ToString() << "\n";
+  }
+
+  RunRegisterTrackerShakedown(graph, mf);
+  RunGCNRegisterTrackerShakedown(graph, mf, lis);
+
+  SmallVector<ScheduleNode *> topo_nodes(graph.GetTopoOrder().begin(),
+                                         graph.GetTopoOrder().end());
+  VerifyGCNRegisterTracker(graph, topo_nodes, mf, lis);
+
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(mf.getSubtarget());
+  RunScheduleLengthTrackerShakedown(graph, st);
+  RunScheduleConstructorShakedown(graph, mf, lis);
+  RunScheduleMetricShakedown(graph, mf, lis);
+
+  // Dump EntrySU/ExitSU edges from the LLVM DAG.
+  llvm::outs() << "  EntrySU succs (" << entry_su.Succs.size() << "):";
+  for (const SDep &dep : entry_su.Succs) {
+    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+  }
+  llvm::outs() << "\n";
+  llvm::outs() << "  EntrySU preds (" << entry_su.Preds.size() << "):";
+  for (const SDep &dep : entry_su.Preds) {
+    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+  }
+  llvm::outs() << "\n";
+  llvm::outs() << "  ExitSU succs (" << exit_su.Succs.size() << "):";
+  for (const SDep &dep : exit_su.Succs) {
+    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+  }
+  llvm::outs() << "\n";
+  llvm::outs() << "  ExitSU preds (" << exit_su.Preds.size() << "):";
+  for (const SDep &dep : exit_su.Preds) {
+    llvm::outs() << " SU(" << dep.getSUnit()->NodeNum << ")";
+  }
+  llvm::outs() << "\n";
+}
+
+} // namespace
+
+// The only class-member shakedown entry point. All the per-shakedown
+// helpers live in the anonymous namespace above. Orchestrates the
+// standalone shakedowns and the per-region batch.
+void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
+  llvm::outs() << "RunAllShakedowns:\n";
+
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+  RunContinuousScoreTableSweepShakedown(st);
+  RunTestDAGShakedown();
+  RunLengthLowerBoundShakedown(st);
+
+  for (auto &region : regions_) {
+    WithRegionGraph(region, [&](ScheduleGraph &graph) {
+      llvm::outs() << "  Region: " << region.GetNumInstrs()
+                   << " instrs, graph: " << graph.Size()
+                   << " nodes (" << graph.LeafSize() << " leaves)"
+                   << ", topo order size: " << graph.GetTopoOrder().size()
+                   << "\n";
+
+      // Run detailed shakedowns on the first region only.
+      if (&region == &regions_.front()) {
+        RunRegionShakedowns(graph, MF, *LIS, EntrySU, ExitSU);
+      }
+    });
   }
 }

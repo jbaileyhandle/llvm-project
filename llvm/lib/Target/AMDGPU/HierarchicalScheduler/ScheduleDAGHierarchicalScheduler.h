@@ -87,63 +87,6 @@ public:
       const RegionInfo &region,
       function_ref<void(ScheduleGraph &)> callback);
 
-  // Run all shakedowns: synthetic test DAG, then per-region shakedowns
-  // on the first region.
-  void RunAllShakedowns();
-
-  // Run shakedowns on a single region's graph: register trackers,
-  // schedule length tracker, debug dumps.
-  void RunRegionShakedowns(ScheduleGraph &graph);
-
-  // Exercises graph algorithms on a synthetic test DAG with known structure.
-  // Extended as new algorithms are added.
-  void RunTestDAGShakedown();
-
-  // Tests RegisterTracker on the first region: schedules instructions in
-  // topo order and prints pressure at each step.
-  void RunRegisterTrackerShakedown(ScheduleGraph &graph);
-
-  // Tests GCNRegisterTracker: schedules in topo order printing pressure
-  // at each step, then unschedules everything and verifies state returns
-  // to zero.
-  void RunGCNRegisterTrackerShakedown(ScheduleGraph &graph);
-
-  // Cross-checks GCNRegisterTracker peak pressure against LLVM's
-  // GCNUpwardRPTracker on the same instruction order. Both trackers
-  // walk the same sequence; any difference is a tracking bug (or the
-  // known whole-register kill overestimate).
-  void VerifyGCNRegisterTracker(ScheduleGraph &graph,
-                                ArrayRef<ScheduleNode *> order);
-
-  // Tests ScheduleLengthTracker: schedules in topo order printing
-  // length/bubbles at each step, then unschedules everything and
-  // verifies state returns to zero.
-  void RunScheduleLengthTrackerShakedown(ScheduleGraph &graph);
-
-  // Tests ScheduleConstructor: schedules all nodes by always picking
-  // the first ready node, then unschedules everything and verifies
-  // round-trip.
-  void RunScheduleConstructorShakedown(ScheduleGraph &graph);
-
-  // Tests ScheduleMetric comparison (IsBetterThan), the continuous
-  // register occupancy score sweep at gfx906 stair-step boundaries,
-  // and IsAtOrAboveFunctionOccupancyCeiling on the given region.
-  void RunScheduleMetricShakedown(ScheduleGraph &graph);
-
-  // Sweep every entry of the precomputed continuous-occupancy-score
-  // lookup tables and verify each value matches the formula-based
-  // ComputeContinuousOccupancyScore. Catches populator bugs (off-
-  // by-one in bracket bounds, etc.) that the cliff-only sweep
-  // would miss in within-bracket interior values.
-  void RunContinuousScoreTableSweepShakedown();
-
-  // Verify ScheduleLengthTracker::GetLengthLowerBound against hand-
-  // computed expected sequences on two synthetic DAGs. Constructs
-  // its own test graphs internally (BuildTestDAG and
-  // BuildLengthLowerBoundTestDAG) and exercises both forward
-  // Schedule and reverse Unschedule paths.
-  void RunLengthLowerBoundShakedown();
-
   // Stub pass: schedule every region in topo order and apply.
   // Exercises the full pipeline (WithRegionGraph → ScheduleConstructor
   // → ApplyScheduleOrder) without any real search logic. Useful for
@@ -170,6 +113,17 @@ public:
   // RunHierarchicalScheduler / RunMaliciousScheduler. Stores mfi_
   // and resets occupancy to the pre-GCN-scheduler value.
   void InitFunction();
+
+private:
+  // Run every shakedown / validation test. Called by
+  // RunHierarchicalScheduler during development. All the individual
+  // shakedown helpers (per-graph register trackers, schedule-
+  // constructor round-trip, critical-path checks, etc.) live in
+  // the anonymous namespace of Shakedowns.cpp and take whatever
+  // state they need as explicit parameters; this method
+  // orchestrates them with class state (MF, *LIS, EntrySU,
+  // ExitSU, regions_).
+  void RunAllShakedowns();
 
 protected:
   // Apply a computed schedule order to the given region. Physically moves
