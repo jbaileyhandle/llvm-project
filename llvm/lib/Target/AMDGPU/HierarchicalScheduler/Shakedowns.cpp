@@ -71,13 +71,17 @@ void CheckDominatorTree(ScheduleGraph &graph) {
 //
 // `label` is used only for the PASS/FAIL print line. `expected_lb`
 // must have size graph.Size()+1 (one entry per scheduling step,
-// starting from the empty state).
+// starting from the empty state). `expected_cp_length` and
+// `expected_graph_length_floor` cross-check the graph-level scalars
+// computed during ComputeCriticalPathFromExit.
 //
 // Requires graph.ComputeCriticalPathFromExit() and
 // graph.ComputeTopologicalOrder() to have run already.
 void CheckOneLengthLowerBoundRun(ScheduleGraph &graph,
                                  const GCNSubtarget &st,
                                  ArrayRef<int> expected_lb,
+                                 int expected_cp_length,
+                                 int expected_graph_length_floor,
                                  StringRef label) {
   ScheduleLengthTracker tracker(graph, st);
 
@@ -87,6 +91,18 @@ void CheckOneLengthLowerBoundRun(ScheduleGraph &graph,
                  << (graph.Size() + 1) << "  FAIL\n";
     return;
   }
+
+  // Graph-level scalars.
+  int got_cp = graph.GetCriticalPathLength();
+  int got_floor = graph.GetGraphLengthFloor();
+  llvm::outs() << "  Graph scalars on " << label
+               << ": cp_length=" << got_cp
+               << " (expected " << expected_cp_length << ")"
+               << "  length_floor=" << got_floor
+               << " (expected " << expected_graph_length_floor << ")  ";
+  bool scalars_ok = (got_cp == expected_cp_length) &&
+                    (got_floor == expected_graph_length_floor);
+  llvm::outs() << (scalars_ok ? "PASS\n" : "FAIL\n");
 
   // Forward pass.
   int mismatches = 0;
@@ -155,7 +171,7 @@ void CheckCriticalPath(ScheduleGraph &graph) {
 // Delegates each algorithm to a helper in this anonymous namespace.
 void RunTestDAGShakedown() {
   auto test_graph = ScheduleGraph::BuildTestDAG();
-  test_graph->ComputeTopologicalOrder();
+  test_graph->ValidateAndComputeTopologicalOrder();
 
   llvm::outs() << "  Test DAG topo order:";
   for (ScheduleNode *node : test_graph->GetTopoOrder()) {
@@ -168,10 +184,10 @@ void RunTestDAGShakedown() {
   CheckCriticalPath(*test_graph);
 
   // Cycle detection verified: BuildTestDAGWithCycle() +
-  // ComputeTopologicalOrder() fires report_fatal_error with graph ToString.
-  // Uncomment to re-test:
+  // ValidateAndComputeTopologicalOrder() fires report_fatal_error
+  // with graph ToString. Uncomment to re-test:
   // auto cyclic = ScheduleGraph::BuildTestDAGWithCycle();
-  // cyclic->ComputeTopologicalOrder();
+  // cyclic->ValidateAndComputeTopologicalOrder();
 }
 
 // Verifies ScheduleLengthTracker::GetLengthLowerBound against hand-
@@ -181,26 +197,36 @@ void RunTestDAGShakedown() {
 void RunLengthLowerBoundShakedown(const GCNSubtarget &st) {
   // Primary test DAG (BuildTestDAG): topo order [A, H, C, D, E, F, G],
   // latencies per BuildTestDAG's header, giving expected LB sequence
-  // {7, 9, 9, 9, 9, 9, 9, 10}. Only two transitions (7->9 on the
-  // first Schedule, 9->10 on the final bubble at G).
+  // {7, 10, 10, 10, 10, 10, 10, 10}. Single 7->10 transition at the
+  // first Schedule (A's contribution 0+9+1=10 dominates everything
+  // afterward; final length is also 10).
+  // Graph scalars: cp_length=9 (cp[A]), length_floor=max(7, 10)=10.
   {
     auto graph = ScheduleGraph::BuildTestDAG();
-    graph->ComputeTopologicalOrder();
+    graph->ValidateAndComputeTopologicalOrder();
     graph->ComputeCriticalPathFromExit();
-    const int expected_lb[] = {7, 9, 9, 9, 9, 9, 9, 10};
-    CheckOneLengthLowerBoundRun(*graph, st, expected_lb, "BuildTestDAG");
+    const int expected_lb[] = {7, 10, 10, 10, 10, 10, 10, 10};
+    CheckOneLengthLowerBoundRun(*graph, st, expected_lb,
+                                /*expected_cp_length=*/9,
+                                /*expected_graph_length_floor=*/10,
+                                "BuildTestDAG");
   }
 
   // Dedicated-for-LB DAG: chosen so the LB transitions multiple
   // times via both terms of the formula. Topo order [N0..N5],
-  // expected sequence {6, 9, 9, 9, 11, 11, 12}. Three transitions:
-  // 6->9 (2nd term), 9->11 (bubble at N3), 11->12 (final bubble).
+  // expected sequence {6, 10, 10, 10, 11, 12, 12}. Three transitions:
+  // 6->10 (2nd term kicks in via N0), 10->11 (1st term overtakes due
+  // to bubble at N3), 11->12 (2nd term jumps via N4).
+  // Graph scalars: cp_length=9 (cp[N0]), length_floor=max(6, 10)=10.
+  // (Floor is loose vs final length 12 because graph isn't a chain.)
   {
     auto graph = ScheduleGraph::BuildLengthLowerBoundTestDAG();
-    graph->ComputeTopologicalOrder();
+    graph->ValidateAndComputeTopologicalOrder();
     graph->ComputeCriticalPathFromExit();
-    const int expected_lb[] = {6, 9, 9, 9, 11, 11, 12};
+    const int expected_lb[] = {6, 10, 10, 10, 11, 12, 12};
     CheckOneLengthLowerBoundRun(*graph, st, expected_lb,
+                                /*expected_cp_length=*/9,
+                                /*expected_graph_length_floor=*/10,
                                 "BuildLengthLowerBoundTestDAG");
   }
 }

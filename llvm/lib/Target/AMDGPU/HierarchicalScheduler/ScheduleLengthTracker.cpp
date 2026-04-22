@@ -146,7 +146,12 @@ void ScheduleLengthTracker::AdvanceSchedule(const ScheduleNode *node,
 
 void ScheduleLengthTracker::UpdateLengthLowerBoundMax(
     const ScheduleNode *node, int ready_cycle) {
-  int contribution = ready_cycle + graph_->GetCriticalPathFromExit(node);
+  // The +1 translates "latency-sink's cycle" into "schedule length":
+  // cp_from_exit[node] bounds the sink's cycle from node, and length
+  // is one past the last issued cycle. See the formula in the
+  // class-level comment.
+  int contribution =
+      ready_cycle + graph_->GetCriticalPathFromExit(node) + 1;
   if (contribution > max_scheduled_plus_cp_) {
     max_scheduled_plus_cp_ = contribution;
   }

@@ -16,6 +16,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
 #include <queue>
 
 using namespace llvm;
@@ -74,6 +75,51 @@ ScheduleEdge::Kind MapSDepToEdgeKind(const SDep &dep) {
 int64_t GetAndIncrementScheduleId() {
   static int64_t next_id = 0;
   return next_id++;
+}
+
+// Verify a structural invariant of the graph: under the given edge
+// filter, exactly one node has no predecessors (the source) and
+// exactly one has no successors (the sink). Downstream consumers
+// (e.g., GetCriticalPathLength reading topo_order_[0] as the unique
+// source) rely on this for the strong-edge interpretation; checking
+// the include-weak interpretation too catches accidental disconnection
+// or stray weak-only ends. report_fatal_error if violated.
+void CheckSingleSourceSingleSink(const ScheduleGraph &graph,
+                                 bool include_weak_edges) {
+  int source_count = 0;
+  int sink_count = 0;
+  for (const ScheduleNode &node : graph.Nodes()) {
+    bool has_pred = false;
+    for (const ScheduleEdge &pred : node.Predecessors()) {
+      if (include_weak_edges || pred.IsStrongEdge()) {
+        has_pred = true;
+        break;
+      }
+    }
+    if (!has_pred) {
+      ++source_count;
+    }
+    bool has_succ = false;
+    for (const ScheduleEdge &succ : node.Successors()) {
+      if (include_weak_edges || !succ.IsWeakEdge()) {
+        has_succ = true;
+        break;
+      }
+    }
+    if (!has_succ) {
+      ++sink_count;
+    }
+  }
+  if (source_count == 1 && sink_count == 1) {
+    return;
+  }
+  std::string msg =
+      graph.ToString() +
+      ": expected exactly one source and one sink (include_weak_edges=" +
+      (include_weak_edges ? "true" : "false") + "), got " +
+      std::to_string(source_count) + " sources and " +
+      std::to_string(sink_count) + " sinks";
+  report_fatal_error(llvm::StringRef(msg));
 }
 
 } // anonymous namespace
@@ -191,6 +237,13 @@ int ScheduleGraph::LeafSize() const {
 }
 
 // Kahn's algorithm: iteratively remove nodes with no unmet predecessors.
+void ScheduleGraph::ValidateAndComputeTopologicalOrder(
+    bool include_weak_edges) {
+  ComputeTopologicalOrder(include_weak_edges);
+  CheckSingleSourceSingleSink(*this, /*include_weak_edges=*/false);
+  CheckSingleSourceSingleSink(*this, /*include_weak_edges=*/true);
+}
+
 // Produces a forward topological order (sources first, sinks last).
 // If not all nodes are placed, the graph contains a cycle.
 void ScheduleGraph::ComputeTopologicalOrder(bool include_weak_edges) {
@@ -257,6 +310,8 @@ void ScheduleGraph::ComputeTopologicalOrder(bool include_weak_edges) {
 void ScheduleGraph::InvalidateDerivedData() {
   topo_order_.clear();
   critical_path_from_exit_by_topo_index_.clear();
+  critical_path_length_.reset();
+  graph_length_floor_.reset();
   reduced_graph_.reset();
   dom_tree_.reset();
   cached_leaf_size_.reset();
@@ -285,7 +340,13 @@ void ScheduleGraph::ComputeCriticalPathFromExit() {
       if (!edge.IsLatencyEdge()) {
         continue;
       }
-      int cp = edge.latency_ +
+      // Clamp to 1: at IssueWidth=1, every strong edge forces at least
+      // one cycle of separation between predecessor and successor, even
+      // when the model assigns latency_=0 (kAnti, kArtificial, and
+      // kBarrier non-store->load all default to 0). Without the clamp
+      // the cp ignores those ordering chains entirely.
+      int weight = std::max(1, edge.latency_);
+      int cp = weight +
                critical_path_from_exit_by_topo_index_[edge.node_->GetTopoIndex()];
       if (cp > max_cp) {
         max_cp = cp;
@@ -293,6 +354,12 @@ void ScheduleGraph::ComputeCriticalPathFromExit() {
     }
     critical_path_from_exit_by_topo_index_[node->GetTopoIndex()] = max_cp;
   }
+  // Single-source graphs: topo_index 0 is always the source (Kahn's
+  // emits roots first, and we have exactly one root). cp at the source
+  // is the longest latency-weighted path through the whole graph.
+  int cp_at_source = critical_path_from_exit_by_topo_index_[0];
+  critical_path_length_ = cp_at_source;
+  graph_length_floor_ = std::max(LeafSize(), cp_at_source + 1);
 }
 
 void ScheduleGraph::ComputeTransitiveReduction() {
@@ -401,7 +468,9 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
   // Compute topo and cp_from_exit before Phase 4 so the
   // ScheduleLengthTracker inside input_schedule_constructor_ satisfies
   // its precondition (cp must be available at tracker construction).
-  graph->ComputeTopologicalOrder();
+  // ValidateAndComputeTopologicalOrder also enforces single-source /
+  // single-sink (entry / exit must each be unique by construction).
+  graph->ValidateAndComputeTopologicalOrder();
   graph->ComputeCriticalPathFromExit();
   graph->PopulateInputScheduleConstructor(st, mf, lis, region);
 

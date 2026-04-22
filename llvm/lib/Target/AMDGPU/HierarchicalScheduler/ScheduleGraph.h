@@ -79,6 +79,12 @@ struct RegWithLaneMask {
 /// translation. Classification helpers (IsDataEdge, IsStrongEdge, etc.)
 /// provide the coarser categories needed by scheduling algorithms.
 struct ScheduleEdge {
+  // Enum ordering matters: range checks below assume
+  //   [kData .. kArtificial]      = strong AND latency-contributing
+  //   kSubgraphOrderEdge          = strong but NOT latency-contributing
+  //   [kCluster .. kWeak]         = weak
+  // Keep new strong-but-non-latency kinds sandwiched between kArtificial
+  // and kCluster to preserve the cheap comparisons.
   enum Kind {
     // Register dependencies (from SDep::Kind).
     kData,         // True data dependence (RAW). One node produces a value
@@ -101,6 +107,21 @@ struct ScheduleEdge {
     kArtificial,   // Arbitrary strong edge, typically added by DAG mutations
                    // (e.g., to prevent reordering within a cluster).
 
+    //========================================================================
+    // End of latency
+    //========================================================================
+
+    // Subgraph proxy wiring. Strong (blocks readiness — a subgraph member
+    // cannot be scheduled until its proxy enters scope), but does NOT
+    // contribute to schedule-length / critical-path because the proxy
+    // itself does not issue. Reserved for future hierarchical scheduling;
+    // not produced anywhere yet.
+    kSubgraphOrderEdge,
+
+    //========================================================================
+    // End of strong
+    //========================================================================
+
     // Weak ordering constraints. These are scheduling hints that do NOT
     // block readiness. The scheduler may violate them if doing so produces
     // a better schedule.
@@ -119,26 +140,32 @@ struct ScheduleEdge {
   // Classification helpers. Member functions defined in the class body are
   // implicitly inline per the C++ standard, so these have zero call overhead.
 
-  /// True for register data dependencies (RAW) — raw kind classifier,
-  /// unconditional on any semantic interpretation. For "does this edge
-  /// count toward schedule length / critical path", use IsLatencyEdge
-  /// instead (currently forwards here, but that mapping may change).
+  /// True for register data dependencies (RAW). Raw kind classifier
+  /// only — for "does this edge count toward schedule length / critical
+  /// path", use IsLatencyEdge instead.
   bool IsDataEdge() const { return kind_ == kData; }
 
-  /// True for all edges that block readiness. Includes register dependencies
-  /// (Data, Anti, Output) and strong ordering constraints (Barrier,
-  /// MayAliasMem, MustAliasMem, Artificial).
-  bool IsStrongEdge() const { return kind_ <= kArtificial; }
+  /// True for all edges that block readiness: register dependencies
+  /// (Data, Anti, Output), strong ordering constraints (Barrier,
+  /// MayAliasMem, MustAliasMem, Artificial), and subgraph proxy
+  /// wiring (kSubgraphOrderEdge).
+  bool IsStrongEdge() const { return kind_ <= kSubgraphOrderEdge; }
 
   /// True for edges that are hints only and do not block readiness.
   bool IsWeakEdge() const { return kind_ >= kCluster; }
 
   /// True for edges that contribute to schedule-length / critical-path
   /// calculations. Single source of truth for ScheduleLengthTracker and
-  /// ScheduleGraph::ComputeCriticalPathFromExit — if we ever broaden
-  /// the definition (e.g., include Anti/Output with non-zero latency),
-  /// change it here and both code paths pick it up.
-  bool IsLatencyEdge() const { return IsDataEdge(); }
+  /// ScheduleGraph::ComputeCriticalPathFromExit.
+  ///
+  /// At IssueWidth=1 every strong edge forces successor.cycle >=
+  /// predecessor.cycle + 1 (no two instructions co-issue), so every
+  /// strong edge contributes — except kSubgraphOrderEdge, where the
+  /// proxy node itself does not issue and the cycle delta lives
+  /// inside the subgraph instead. cp computations weight contributing
+  /// edges by max(1, edge.latency_), so model-zero strong edges still
+  /// account for the IssueWidth=1 ordering gap.
+  bool IsLatencyEdge() const { return kind_ <= kArtificial; }
 };
 
 /// A node in a ScheduleGraph. Either a leaf (wrapping a single SUnit) or a
@@ -407,9 +434,10 @@ public:
   /// Expected cp_from_exit: N0=9, N1=6, N2=3, N3=1, N4=2, N5=0.
   /// Topo order (Kahn's): N0, N1, N2, N3, N4, N5.
   /// Expected LB after scheduling k nodes (k=0..6):
-  ///   {6, 9, 9, 9, 11, 11, 12}
-  /// Transitions: 6->9 (2nd term kicks in), 9->11 (bubble at N3),
-  /// 11->12 (final bubble at N5).
+  ///   {6, 10, 10, 10, 11, 12, 12}
+  /// Transitions: 6->10 (2nd term kicks in via N0, contrib=0+9+1=10),
+  /// 10->11 (1st term overtakes due to bubble at N3, cc=9 + 2 left),
+  /// 11->12 (2nd term jumps via N4, contrib=9+2+1=12).
   static std::unique_ptr<ScheduleGraph> BuildLengthLowerBoundTestDAG();
 
   /// Build a synthetic test DAG that contains a cycle, for testing that
@@ -451,21 +479,19 @@ public:
     InvalidateDerivedData();
   }
 
-  /// Compute topological order using Kahn's algorithm (iterative BFS-based).
-  /// Populates topo_order_ and sets topo_index_ on each node. Also serves
-  /// as a cycle check: asserts if the graph contains a cycle (not all nodes
-  /// are reachable).
+  /// Umbrella entry point: verify single-source / single-sink (under
+  /// both the strong-edge and all-edge interpretations, for safety)
+  /// and compute topological order. This is the standard "graph
+  /// construction is complete, derive what's needed for analysis"
+  /// hand-off. Re-runnable if the graph is later mutated (e.g., by
+  /// adding subgraph proxy nodes); previously-derived data is
+  /// invalidated and recomputed.
   ///
-  /// If include_weak_edges is false (the default), only strong edges
-  /// constrain the ordering. If true, weak edges (Cluster, Weak) also
-  /// count as predecessors that must be scheduled first.
-  ///
-  /// Calls InvalidateDerivedData() at entry. Even though topo sort is
-  /// deterministic on the same (graph, options) pair, re-running with
-  /// a flipped `include_weak_edges` would produce a different order
-  /// and silently invalidate downstream caches; clearing on entry
-  /// covers that case uniformly.
-  void ComputeTopologicalOrder(bool include_weak_edges = false);
+  /// Cycle detection fires first inside ComputeTopologicalOrder; if
+  /// the graph contains a cycle, the source/sink checks are skipped
+  /// and the cycle is reported instead. report_fatal_error on any
+  /// invariant violation.
+  void ValidateAndComputeTopologicalOrder(bool include_weak_edges = false);
 
   /// Access the computed topological order. Only valid after
   /// ComputeTopologicalOrder() has been called.
@@ -511,6 +537,24 @@ public:
   int GetCriticalPathFromExit(const ScheduleNode *node) const {
     return GetCriticalPathFromExitByTopoIndex(node->GetTopoIndex());
   }
+
+  /// Critical path length of this graph: cp_from_exit at the source
+  /// node. Every graph we process has a single source (the synthetic
+  /// entry in BuildFromSUnits, the unique root in test DAGs), so this
+  /// equals max_n cp_from_exit[n]. Cached during
+  /// ComputeCriticalPathFromExit; caller must ensure
+  /// HasCriticalPathFromExit().
+  int GetCriticalPathLength() const { return *critical_path_length_; }
+
+  /// Lower bound on schedule length implied by graph structure alone:
+  ///   max(LeafSize, GetCriticalPathLength() + 1)
+  /// LeafSize covers the IssueWidth=1 floor (one cycle per leaf);
+  /// CriticalPathLength + 1 covers the latency-chain floor (the +1
+  /// is the cycle the latency-sink itself occupies). For chain-like
+  /// graphs CP+1 dominates; for parallel/branchy graphs LeafSize can.
+  /// Cached during ComputeCriticalPathFromExit; caller must ensure
+  /// HasCriticalPathFromExit().
+  int GetGraphLengthFloor() const { return *graph_length_floor_; }
 
   /// Compute the transitive reduction of this graph. Stores the result
   /// internally. Requires topo sort to have been computed first.
@@ -564,6 +608,24 @@ public:
   }
 
 private:
+  /// Compute topological order using Kahn's algorithm (iterative
+  /// BFS-based). Populates topo_order_ and sets topo_index_ on each
+  /// node. Detects cycles (via Kahn's incomplete-coverage signal) and
+  /// fires report_fatal_error if found.
+  ///
+  /// If include_weak_edges is false, only strong edges constrain the
+  /// ordering. If true, weak edges (Cluster, Weak) also count as
+  /// predecessors that must be scheduled first.
+  ///
+  /// Calls InvalidateDerivedData() at entry so re-running with a
+  /// different include_weak_edges doesn't leave stale downstream
+  /// caches keyed by the previous topo order.
+  ///
+  /// PRIVATE: external callers go through
+  /// ValidateAndComputeTopologicalOrder so structural invariants are
+  /// also verified.
+  void ComputeTopologicalOrder(bool include_weak_edges);
+
   int64_t id_;
 
   /// Root of the hierarchy this graph belongs to. For top-level graphs
@@ -592,6 +654,15 @@ private:
   /// ScheduleNode::GetTopoIndex(). Empty == "not computed or
   /// invalidated since." Sized to Size() (one slot per node).
   std::vector<int> critical_path_from_exit_by_topo_index_;
+
+  /// Cached max over critical_path_from_exit_by_topo_index_. Populated
+  /// at the end of ComputeCriticalPathFromExit; reset in
+  /// InvalidateDerivedData.
+  std::optional<int> critical_path_length_;
+
+  /// Cached max(LeafSize, critical_path_length_ + 1). Populated at the
+  /// end of ComputeCriticalPathFromExit; reset in InvalidateDerivedData.
+  std::optional<int> graph_length_floor_;
 
   /// Lazily-computed leaf-node count (see LeafSize()). Populated on
   /// first call; cleared on any graph mutation via

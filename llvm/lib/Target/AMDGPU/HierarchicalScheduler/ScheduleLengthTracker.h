@@ -23,15 +23,19 @@
 //
 //   LB = max(current_cycle + num_unscheduled,
 //            max over scheduled n of
-//                (scheduled_cycle[n] + cp_from_exit[n]))
+//                (scheduled_cycle[n] + cp_from_exit[n] + 1))
 //
 // First term: each unscheduled node still needs at least one more
 // cycle, so length >= current_cycle + (remaining nodes).
 //
-// Second term: for any scheduled node n, successors must issue
-// respecting edge latencies, so the exit issues at cycle
-// >= scheduled_cycle[n] + cp_from_exit[n]. Taking the max across
-// all scheduled nodes gives the tightest such floor.
+// Second term: every graph we process has a single latency-sink —
+// the synthetic exit node in BuildFromSUnits graphs, or the unique
+// terminal node in test DAGs — and that sink is the last instruction
+// scheduled (every other node is a transitive predecessor of it).
+// cp_from_exit[n] is the longest latency-weighted path from n to that
+// sink, so sink.cycle >= scheduled_cycle[n] + cp_from_exit[n], and
+// length = sink.cycle + 1 >= scheduled_cycle[n] + cp_from_exit[n] + 1.
+// The trailing +1 is the cycle the sink itself occupies.
 //
 // The second-term max is maintained incrementally in
 // max_scheduled_plus_cp_, so GetLengthLowerBound is O(1) (no sweep
