@@ -72,6 +72,17 @@ class DfsSearch {
     return best_schedule_constructor_;
   }
 
+  // Number of Schedule/ScheduleByIndex calls made on the working
+  // constructor during the most recent Run() — a direct measure of
+  // search effort. Compare to the region's node count: equal means
+  // a single linear pass with no backtracking; N * K means roughly
+  // K average orderings explored per node. Does not distinguish
+  // pruned vs full subtrees; it just counts actual scheduling
+  // operations performed.
+  int64_t GetScheduleCallCount() const {
+    return working_schedule_constructor_.GetScheduleCallCount();
+  }
+
  private:
   void Recurse() {
     if (working_schedule_constructor_.IsDone()) {

@@ -196,6 +196,14 @@ public:
     return static_cast<int>(schedule_order_.size());
   }
 
+  /// Cumulative count of Schedule / ScheduleByIndex calls on this
+  /// constructor since construction. Schedule funnels through
+  /// ScheduleByIndex, so this counts every actual scheduling
+  /// operation without double-counting. Unschedule does NOT
+  /// decrement (the count is effort spent, not depth). Useful for
+  /// assessing search effort in DFS-style traversals.
+  int64_t GetScheduleCallCount() const { return schedule_call_count_; }
+
   /// True if this schedule is strictly better than `other` under the
   /// given metric. Ties return false — callers that want "at least as
   /// good" should negate IsBetterThan with arguments swapped.
@@ -232,6 +240,10 @@ private:
 
   /// Comparator defining ready_list_ sort order. See ReadyComparator.
   ReadyComparator ready_comparator_;
+
+  /// Incremented by ScheduleByIndex. Tracks search effort; see
+  /// GetScheduleCallCount.
+  int64_t schedule_call_count_ = 0;
 
   /// Per-node count of strong predecessors not yet scheduled,
   /// indexed by ScheduleNode::GetTopoIndex(). Sized to graph.Size()

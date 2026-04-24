@@ -156,6 +156,8 @@ void ScheduleConstructor::ScheduleByIndex(int index) {
   }
   const ScheduleNode *node = ready_list_[index];
 
+  ++schedule_call_count_;
+
   // Update trackers.
   pressure_tracker_.Schedule(node);
   length_tracker_.Schedule(node);

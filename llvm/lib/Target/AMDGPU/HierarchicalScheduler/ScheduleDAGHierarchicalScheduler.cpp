@@ -330,6 +330,8 @@ int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
                  << " | dfs best peak: vgpr="
                  << dfs_peak.getVGPRNum(st.hasGFX90AInsts())
                  << " sgpr=" << dfs_peak.getSGPRNum()
+                 << " | schedule_calls=" << search.GetScheduleCallCount()
+                 << " (N=" << graph.Size() << ")"
                  << " | order changed=" << (changed ? "yes" : "no") << "\n";
 
     ApplyScheduleOrder(region, dfs_best_schedule_constructor);
@@ -380,6 +382,8 @@ void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
     llvm::outs() << "input length=" << input_length
                  << " dfs best length=" << dfs_length
                  << " floor=" << graph.GetGraphLengthFloor()
+                 << " | schedule_calls=" << search.GetScheduleCallCount()
+                 << " (N=" << graph.Size() << ")"
                  << " | order changed=" << (changed ? "yes" : "no") << "\n";
 
     ApplyScheduleOrder(region, dfs_best_schedule_constructor);
