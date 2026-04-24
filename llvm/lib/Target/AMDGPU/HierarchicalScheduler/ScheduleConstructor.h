@@ -42,9 +42,9 @@
 //                            // GetReadyList()[i] is still n
 //   }
 //
-// Iterators/pointers into ready_list_ are NOT stable across
-// Schedule — memmove shifts entries. Iterate by index, or
-// snapshot explicitly via GetReadyListSnapshot.
+// Iterators/pointers into the current scope's ready list are NOT
+// stable across Schedule — memmove shifts entries. Iterate by
+// index, or snapshot explicitly via GetReadyListSnapshot.
 //
 //===----------------------------------------------------------------------===//
 
@@ -137,10 +137,11 @@ public:
   /// appends the node to the schedule order.
   void Schedule(const ScheduleNode *node);
 
-  /// Schedule the node currently at ready_list_[index]. Skips the
-  /// binary search used by Schedule(const ScheduleNode*) — DFS knows
-  /// the index from its iteration loop, so it can erase directly.
-  /// Otherwise identical to Schedule(const ScheduleNode*).
+  /// Schedule the node currently at the current scope's ready list
+  /// at `index`. Skips the binary search used by Schedule(const
+  /// ScheduleNode*) — DFS knows the index from its iteration loop,
+  /// so it can erase directly. Otherwise identical to
+  /// Schedule(const ScheduleNode*).
   void ScheduleByIndex(int index);
 
   /// Undo the last Schedule() call. Restores register pressure,
@@ -148,31 +149,36 @@ public:
   /// schedule order.
   void Unschedule();
 
-  /// True when all nodes have been scheduled.
+  /// True when all nodes have been scheduled. Uses the scope-stack
+  /// form so it stays correct once subgraph proxies are introduced
+  /// (a pushed scope means "in the middle of a subgraph," not done).
   bool IsDone() const {
-    return static_cast<int>(schedule_order_.size()) == graph_->Size();
+    return scopes_.size() == 1 && scopes_[0].ready.empty();
   }
 
-  /// The current ready list — nodes whose strong predecessors are
-  /// all scheduled. Maintained in sorted order under the
-  /// constructor-supplied comparator.
+  /// The current scope's ready list — nodes whose strong predecessors
+  /// are all scheduled AND that are visible in the currently-active
+  /// scope. Maintained in sorted order under the constructor-supplied
+  /// comparator.
   ///
   /// Iteration-across-mutation: iterate by INDEX if the loop body
-  /// calls Schedule/Unschedule. After a round-trip the list has the
-  /// same contents in the same order, so `ready_list[i]` refers to
-  /// the same node. Pointers/iterators into the returned ArrayRef
-  /// are NOT stable across Schedule (memmove shifts entries).
+  /// calls Schedule/Unschedule. After a round-trip the current
+  /// scope's list has the same contents in the same order, so
+  /// `ready_list[i]` refers to the same node. Pointers/iterators
+  /// into the returned ArrayRef are NOT stable across Schedule
+  /// (memmove shifts entries).
   ArrayRef<const ScheduleNode *> GetReadyList() const {
-    return ready_list_;
+    return scopes_.back().ready;
   }
 
-  /// Append the current ready-list contents (in the maintained sort
-  /// order) to `out`. Convenience for callers that want a stable
-  /// copy to iterate across Schedule/Unschedule without using the
-  /// index-based pattern.
+  /// Append the current scope's ready-list contents (in the
+  /// maintained sort order) to `out`. Convenience for callers that
+  /// want a stable copy to iterate across Schedule/Unschedule
+  /// without using the index-based pattern.
   void GetReadyListSnapshot(
       SmallVectorImpl<const ScheduleNode *> &out) const {
-    out.append(ready_list_.begin(), ready_list_.end());
+    const auto &ready = scopes_.back().ready;
+    out.append(ready.begin(), ready.end());
   }
 
   /// The schedule order built so far.
@@ -232,13 +238,29 @@ private:
   /// Nodes scheduled so far, in order.
   SmallVector<const ScheduleNode *> schedule_order_;
 
-  /// Nodes ready to be scheduled (all strong predecessors done),
-  /// maintained in sorted order under ready_comparator_. Inline
-  /// capacity sized to cover typical region ready-list sizes
-  /// without heap spill.
-  SmallVector<const ScheduleNode *, 64> ready_list_;
+  /// One active scheduling scope. Base scope has subgraph_proxy ==
+  /// nullptr and covers the whole graph. Phase 0 always has exactly
+  /// one scope; the scope-stack shape is in place now so subgraph
+  /// integration (AMDGPUClusteringDesign.md Approach B) can push/pop
+  /// scopes without further refactoring of ScheduleConstructor.
+  struct SubgraphScheduleScope {
+    /// The subgraph proxy whose members this scope is scheduling, or
+    /// nullptr for the base scope.
+    const ScheduleNode *subgraph_proxy;
+    /// Nodes visible in this scope that are currently schedulable,
+    /// maintained in sorted order under ready_comparator_. Inline
+    /// capacity sized to cover typical ready-list sizes without
+    /// heap spill.
+    SmallVector<const ScheduleNode *, 64> ready;
+  };
 
-  /// Comparator defining ready_list_ sort order. See ReadyComparator.
+  /// Stack of active scheduling scopes. scopes_.back() is the current
+  /// scope — the one DFS picks from and that Schedule/Unschedule
+  /// operate on. Invariant: scopes_.size() >= 1; scopes_[0] is the
+  /// base scope. Phase 0 never pushes past size 1.
+  std::vector<SubgraphScheduleScope> scopes_;
+
+  /// Comparator defining ready-list sort order within each scope.
   ReadyComparator ready_comparator_;
 
   /// Incremented by ScheduleByIndex. Tracks search effort; see
@@ -248,27 +270,53 @@ private:
   /// Per-node count of strong predecessors not yet scheduled,
   /// indexed by ScheduleNode::GetTopoIndex(). Sized to graph.Size()
   /// at construction. When an entry reaches 0 the corresponding node
-  /// enters the ready list.
+  /// enters its home scope's ready list.
   std::vector<int> remaining_strong_predecessors_by_topo_index_;
 
-  /// Initialize remaining_strong_predecessors_ and ready_list_ from the graph.
+  /// Initialize remaining_strong_predecessors_by_topo_index_ and the
+  /// base scope's ready list from the graph.
   void InitReadyList();
 
-  /// Return the index of `node` in ready_list_, or -1 if absent.
+  /// Return the ready list of the scope that `node` belongs in.
+  /// Used by Release / Unrelease / Unschedule's re-insert — anywhere
+  /// a node is transitioning into or out of ready-list membership.
+  ///
+  /// Phase 0: ignores `node` and returns the base scope's ready
+  /// list (only one scope exists). Phase 2 will swap the body to
+  /// `FindScopeOnStack(node->GetParentSubgraphProxy()).ready`; the
+  /// callers don't have to change.
+  ///
+  /// Distinct from `scopes_.back().ready`, which is what
+  /// Schedule / ScheduleByIndex operate on. Those sites are
+  /// semantically "current scope" (DFS picks from the active scope);
+  /// release sites are semantically "node's home scope."
+  SmallVectorImpl<const ScheduleNode *> &
+  GetReadyListForNode(const ScheduleNode *node) {
+    (void)node;
+    return scopes_[0].ready;
+  }
+
+  /// Return the index of `node` in `ready_list`, or -1 if absent.
   /// Binary search under ready_comparator_ (O(log K)).
-  int GetReadyListIndexOf(const ScheduleNode *node) const;
+  int GetReadyListIndexOf(
+      const SmallVectorImpl<const ScheduleNode *> &ready_list,
+      const ScheduleNode *node) const;
 
-  /// Insert `node` into ready_list_ at its sorted position under
+  /// Insert `node` into `ready_list` at its sorted position under
   /// ready_comparator_. Precondition: node is not already present.
-  void ReadyListInsert(const ScheduleNode *node);
+  void ReadyListInsert(SmallVectorImpl<const ScheduleNode *> &ready_list,
+                       const ScheduleNode *node);
 
-  /// Erase the entry at `index` in ready_list_ (direct erase, no search).
-  void ReadyListEraseAt(int index);
+  /// Erase the entry at `index` in `ready_list` (direct erase, no
+  /// search).
+  void ReadyListEraseAt(SmallVectorImpl<const ScheduleNode *> &ready_list,
+                        int index);
 
-  /// Erase `node` from ready_list_, locating it via GetReadyListIndexOf.
-  /// Precondition: node IS present. Used by Schedule(node) and
-  /// UnreleaseSuccessors.
-  void ReadyListErase(const ScheduleNode *node);
+  /// Erase `node` from `ready_list`, locating it via
+  /// GetReadyListIndexOf. Precondition: node IS present. Used by
+  /// Schedule(node) and UnreleaseSuccessors.
+  void ReadyListErase(SmallVectorImpl<const ScheduleNode *> &ready_list,
+                      const ScheduleNode *node);
 
   /// Decrement strong-pred counts for the node's successors. If any
   /// successor's count reaches 0, add it to the ready list. A node
