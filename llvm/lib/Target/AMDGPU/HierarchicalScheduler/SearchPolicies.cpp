@@ -7,16 +7,29 @@
 using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
 
-SmallVector<const ScheduleNode *, 16>
-DfsMaximizeOccupancyPolicy::PruneAndSortReadyList(
-    const ScheduleConstructor &schedule_constructor) {
-  SmallVector<const ScheduleNode *, 16> ordered_ready;
-  schedule_constructor.GetReadyListSnapshot(ordered_ready);
-  std::sort(ordered_ready.begin(), ordered_ready.end(),
-            [](const ScheduleNode *a, const ScheduleNode *b) {
-              return a->GetId() < b->GetId();
-            });
-  return ordered_ready;
+bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
+    const ScheduleConstructor &schedule_constructor,
+    const ScheduleConstructor &best_schedule_constructor) {
+  int best_length =
+      best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
+  int working_lb =
+      schedule_constructor.GetLengthTracker().GetLengthLowerBound();
+  if (working_lb >= best_length) {
+    return true;
+  }
+  if (!schedule_constructor.IsAtOrAboveFunctionOccupancyCeiling()) {
+    return true;
+  }
+  return false;
+}
+
+bool DfsMinimizeLengthPolicy::ShouldEndSearch(
+    const ScheduleConstructor & /*schedule_constructor*/,
+    const ScheduleConstructor &best_schedule_constructor) {
+  int best_length =
+      best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
+  int floor = best_schedule_constructor.GetGraph().GetGraphLengthFloor();
+  return best_length <= floor;
 }
 
 bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(

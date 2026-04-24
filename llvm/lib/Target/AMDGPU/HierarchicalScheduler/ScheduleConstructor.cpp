@@ -10,6 +10,7 @@
 #include "GCNSubtarget.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <algorithm>
 
 using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
@@ -21,10 +22,12 @@ using namespace llvm::hierarchical_scheduler;
 ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
                                          const GCNSubtarget &st,
                                          const MachineFunction &mf,
-                                         const LiveIntervals &lis)
+                                         const LiveIntervals &lis,
+                                         ReadyComparator ready_cmp)
     : graph_(&graph),
       pressure_tracker_(graph, mf, lis),
-      length_tracker_(graph, st) {
+      length_tracker_(graph, st),
+      ready_comparator_(ready_cmp) {
   // Check for group nodes.
   for (const ScheduleNode &node : graph.Nodes()) {
     if (!node.IsLeaf()) {
@@ -38,8 +41,45 @@ ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
 }
 
 // ============================================================================
-// Ready list
+// Ready list maintenance (sorted SmallVector under ready_comparator_)
 // ============================================================================
+
+int ScheduleConstructor::GetReadyListIndexOf(const ScheduleNode *node) const {
+  auto it = std::lower_bound(ready_list_.begin(), ready_list_.end(), node,
+                             ready_comparator_);
+  if (it == ready_list_.end() || *it != node) {
+    return -1;
+  }
+  return static_cast<int>(it - ready_list_.begin());
+}
+
+void ScheduleConstructor::ReadyListInsert(const ScheduleNode *node) {
+  auto it = std::lower_bound(ready_list_.begin(), ready_list_.end(), node,
+                             ready_comparator_);
+  // Duplicate check: since ready_comparator_ is a strict total order,
+  // node can only already be present at the position lower_bound
+  // returned. Cheap — reuses the same traversal.
+  if (it != ready_list_.end() && *it == node) {
+    report_fatal_error("ScheduleConstructor: ReadyListInsert on node " +
+                       Twine(node->GetId()) +
+                       " which is already in the ready list");
+  }
+  ready_list_.insert(it, node);
+}
+
+void ScheduleConstructor::ReadyListEraseAt(int index) {
+  ready_list_.erase(ready_list_.begin() + index);
+}
+
+void ScheduleConstructor::ReadyListErase(const ScheduleNode *node) {
+  int index = GetReadyListIndexOf(node);
+  if (index < 0) {
+    report_fatal_error("ScheduleConstructor: ReadyListErase on node " +
+                       Twine(node->GetId()) +
+                       " which is not in the ready list");
+  }
+  ReadyListEraseAt(index);
+}
 
 int ScheduleConstructor::CountStrongPredecessors(const ScheduleNode *node) {
   int count = 0;
@@ -52,11 +92,13 @@ int ScheduleConstructor::CountStrongPredecessors(const ScheduleNode *node) {
 }
 
 void ScheduleConstructor::InitReadyList() {
+  remaining_strong_predecessors_by_topo_index_.assign(graph_->Size(), 0);
   for (const ScheduleNode &node : graph_->Nodes()) {
     int strong_predecessors = CountStrongPredecessors(&node);
-    remaining_strong_predecessors_[&node] = strong_predecessors;
+    remaining_strong_predecessors_by_topo_index_[node.GetTopoIndex()] =
+        strong_predecessors;
     if (strong_predecessors == 0) {
-      ready_list_.insert(&node);
+      ReadyListInsert(&node);
     }
   }
 }
@@ -67,10 +109,11 @@ void ScheduleConstructor::ReleaseSuccessors(const ScheduleNode *node) {
       continue;
     }
     const ScheduleNode *succ = edge.node_;
-    int &remaining = remaining_strong_predecessors_[succ];
+    int &remaining =
+        remaining_strong_predecessors_by_topo_index_[succ->GetTopoIndex()];
     remaining--;
     if (remaining == 0) {
-      ready_list_.insert(succ);
+      ReadyListInsert(succ);
     }
   }
 }
@@ -81,9 +124,10 @@ void ScheduleConstructor::UnreleaseSuccessors(const ScheduleNode *node) {
       continue;
     }
     const ScheduleNode *succ = edge.node_;
-    int &remaining = remaining_strong_predecessors_[succ];
+    int &remaining =
+        remaining_strong_predecessors_by_topo_index_[succ->GetTopoIndex()];
     if (remaining == 0) {
-      ready_list_.erase(succ);
+      ReadyListErase(succ);
     }
     remaining++;
   }
@@ -94,27 +138,34 @@ void ScheduleConstructor::UnreleaseSuccessors(const ScheduleNode *node) {
 // ============================================================================
 
 void ScheduleConstructor::Schedule(const ScheduleNode *node) {
-  if (!ready_list_.count(node)) {
+  int index = GetReadyListIndexOf(node);
+  if (index < 0) {
     report_fatal_error("ScheduleConstructor: scheduling node " +
                        Twine(node->GetId()) +
                        " which is not in the ready list");
   }
+  ScheduleByIndex(index);
+}
+
+void ScheduleConstructor::ScheduleByIndex(int index) {
+  if (index < 0 || index >= static_cast<int>(ready_list_.size())) {
+    report_fatal_error(
+        "ScheduleConstructor: ScheduleByIndex with out-of-range index " +
+        Twine(index) + " (ready size " +
+        Twine(static_cast<int>(ready_list_.size())) + ")");
+  }
+  const ScheduleNode *node = ready_list_[index];
 
   // Update trackers.
   pressure_tracker_.Schedule(node);
   length_tracker_.Schedule(node);
 
-  // Remove from ready list and add to schedule order.
-  ready_list_.erase(node);
+  // Remove from ready list and append to schedule order.
+  ReadyListEraseAt(index);
   schedule_order_.push_back(node);
 
   // Release successors.
   ReleaseSuccessors(node);
-}
-
-void ScheduleConstructor::GetReadyListSnapshot(
-    SmallVectorImpl<const ScheduleNode *> &out) const {
-  out.append(ready_list_.begin(), ready_list_.end());
 }
 
 void ScheduleConstructor::Unschedule() {
@@ -129,8 +180,8 @@ void ScheduleConstructor::Unschedule() {
   // Reverse successor release.
   UnreleaseSuccessors(node);
 
-  // Add the node back to the ready list.
-  ready_list_.insert(node);
+  // Add the node back to the ready list at its sorted position.
+  ReadyListInsert(node);
 
   // Undo trackers (reverse order of Schedule).
   length_tracker_.Unschedule();

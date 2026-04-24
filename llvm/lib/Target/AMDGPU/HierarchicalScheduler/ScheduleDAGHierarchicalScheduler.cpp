@@ -341,6 +341,51 @@ int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
   return achieved_all_factors_occupancy;
 }
 
+// Outer loop of the length-minimization pass. See header.
+void ScheduleDAGHierarchicalScheduler::RunMinimizeLengthPass() {
+  // TODO: Remove this temporary print once the pass is wired up.
+  llvm::outs() << "RunMinimizeLengthPass: starting with "
+               << regions_.size() << " regions\n";
+
+  for (size_t i = 0; i < regions_.size(); ++i) {
+    llvm::outs() << "  [" << i << "] ";
+    ScheduleRegionForMinimumLength(regions_[i]);
+  }
+
+  llvm::outs() << "RunMinimizeLengthPass: done\n";
+}
+
+// Per-region worker. Runs DFS with DfsMinimizeLengthPolicy and
+// applies the resulting schedule.
+void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
+    RegionInfo &region) {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+
+  WithRegionGraph(region, [&](ScheduleGraph &graph) {
+    const ScheduleConstructor &input_schedule_constructor =
+        graph.GetInputScheduleConstructor();
+    int input_length =
+        input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
+
+    DfsSearch<DfsMinimizeLengthPolicy> search(graph, st, MF, *LIS);
+    ScheduleConstructor dfs_best_schedule_constructor = search.Run();
+    int dfs_length =
+        dfs_best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
+
+    bool changed = input_schedule_constructor.GetScheduleOrder() !=
+                   dfs_best_schedule_constructor.GetScheduleOrder();
+
+    // TODO: Remove this debug print once we trust the pass.
+    llvm::outs() << "input length=" << input_length
+                 << " dfs best length=" << dfs_length
+                 << " floor=" << graph.GetGraphLengthFloor()
+                 << " | order changed=" << (changed ? "yes" : "no") << "\n";
+
+    ApplyScheduleOrder(region, dfs_best_schedule_constructor);
+  });
+}
+
 // Main hierarchical scheduling path.
 void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   InitFunction();
@@ -350,6 +395,7 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
                << "\n";
 
   RunMaximizeOccupancyPass();
+  RunMinimizeLengthPass();
 
   RunAllShakedowns();
 }

@@ -265,7 +265,20 @@ private:
 
   // --- Core state ---
 
-  DenseMap<const ScheduleNode *, NodeRegInfo> node_reg_info_;
+  /// Precomputed per-node register def/use info, indexed by
+  /// ScheduleNode::GetTopoIndex(). Sized to graph.Size() at
+  /// construction. Entries for nodes with no reg defs/uses are
+  /// left default-constructed (empty defs + empty uses) — the
+  /// Schedule/Unschedule path checks emptiness and skips processing.
+  std::vector<NodeRegInfo> node_reg_info_by_topo_index_;
+
+  // TODO(perf): live_regs_ is a DenseMap<unsigned, LaneBitmask>
+  // keyed by vreg index. Virtual registers are dense across the
+  // function but sparse per region, so we can't trivially switch
+  // to a vector. An llvm::SparseSet<LiveReg> would give O(1)
+  // actual (not amortized) ops and cache-friendly iteration with
+  // a one-time per-tracker sparse array allocation. Evaluate if
+  // profiling identifies this as a hot spot.
   DenseMap<unsigned, int> remaining_uses_;
   LiveRegSet live_regs_;
   GCNRegPressure cur_pressure_;

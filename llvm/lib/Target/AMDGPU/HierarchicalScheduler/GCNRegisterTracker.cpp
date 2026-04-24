@@ -169,6 +169,12 @@ void GCNRegisterTracker::ExtractNodeRegInfo(const ScheduleGraph &graph,
                                             const MachineRegisterInfo &mri,
                                             const TargetRegisterInfo &tri,
                                             const LiveIntervals &lis) {
+  // One slot per node, indexed by topo_index. Any node whose
+  // extraction produces no defs or uses leaves its slot
+  // default-constructed (empty defs/uses) — ProcessDefs /
+  // ProcessUses treat that as zero iterations, the semantically
+  // correct no-op.
+  node_reg_info_by_topo_index_.assign(graph.Size(), NodeRegInfo{});
   for (const ScheduleNode &node : graph.Nodes()) {
     if (!node.IsLeaf()) {
       ExtractFromGroupNode(&node);
@@ -185,13 +191,13 @@ void GCNRegisterTracker::ExtractNodeRegInfo(const ScheduleGraph &graph,
     }
 
     if (!info.defs.empty() || !info.uses.empty()) {
-      node_reg_info_[&node] = std::move(info);
+      node_reg_info_by_topo_index_[node.GetTopoIndex()] = std::move(info);
     }
   }
 }
 
 void GCNRegisterTracker::InitRemainingUses() {
-  for (const auto &[node, info] : node_reg_info_) {
+  for (const NodeRegInfo &info : node_reg_info_by_topo_index_) {
     for (const RegMask &use : info.uses) {
       remaining_uses_[use.reg]++;
     }
@@ -238,21 +244,20 @@ void GCNRegisterTracker::Schedule(const ScheduleNode *node) {
   ScheduleStep step;
   step.saved_max = max_pressure_;
 
-  auto it = node_reg_info_.find(node);
-  if (it != node_reg_info_.end()) {
-    const NodeRegInfo &info = it->second;
-
-    if constexpr (kModel == PressureModel::kAMDGPU) {
-      // Defs first, peak, then dying uses.
-      ProcessDefs(info, step);
-      max_pressure_ = max(max_pressure_, cur_pressure_);
-      ProcessUses(info, step);
-    } else {
-      // Dying uses first, then defs, then peak.
-      ProcessUses(info, step);
-      ProcessDefs(info, step);
-      max_pressure_ = max(max_pressure_, cur_pressure_);
-    }
+  const NodeRegInfo &info =
+      node_reg_info_by_topo_index_[node->GetTopoIndex()];
+  // Empty info (no defs and no uses) is valid — ProcessDefs /
+  // ProcessUses loop zero times.
+  if constexpr (kModel == PressureModel::kAMDGPU) {
+    // Defs first, peak, then dying uses.
+    ProcessDefs(info, step);
+    max_pressure_ = max(max_pressure_, cur_pressure_);
+    ProcessUses(info, step);
+  } else {
+    // Dying uses first, then defs, then peak.
+    ProcessUses(info, step);
+    ProcessDefs(info, step);
+    max_pressure_ = max(max_pressure_, cur_pressure_);
   }
 
   undo_stack_.push_back(std::move(step));
@@ -319,19 +324,19 @@ void GCNRegisterTracker::Unschedule(const ScheduleNode *node) {
   ScheduleStep step = std::move(undo_stack_.back());
   undo_stack_.pop_back();
 
-  auto it = node_reg_info_.find(node);
-  if (it != node_reg_info_.end()) {
-    const NodeRegInfo &info = it->second;
-
-    if constexpr (kModel == PressureModel::kAMDGPU) {
-      // Schedule was: defs, peak, uses. Undo in reverse: uses, defs.
-      UndoUses(info, step);
-      UndoDefs(step);
-    } else {
-      // Schedule was: uses, defs, peak. Undo in reverse: defs, uses.
-      UndoDefs(step);
-      UndoUses(info, step);
-    }
+  const NodeRegInfo &info =
+      node_reg_info_by_topo_index_[node->GetTopoIndex()];
+  // Empty info (no defs and no uses) is valid — UndoDefs / UndoUses
+  // loop zero times. Their undo data structures in `step` are also
+  // empty in that case, so the loops correctly do nothing.
+  if constexpr (kModel == PressureModel::kAMDGPU) {
+    // Schedule was: defs, peak, uses. Undo in reverse: uses, defs.
+    UndoUses(info, step);
+    UndoDefs(step);
+  } else {
+    // Schedule was: uses, defs, peak. Undo in reverse: defs, uses.
+    UndoDefs(step);
+    UndoUses(info, step);
   }
 
   max_pressure_ = step.saved_max;
@@ -533,12 +538,11 @@ int GCNRegisterTracker::GetAllFactorsRegionOnlyOccupancy() const {
 
 std::string
 GCNRegisterTracker::DescribeRegOps(const ScheduleNode *node) const {
-  auto it = node_reg_info_.find(node);
-  if (it == node_reg_info_.end()) {
+  const NodeRegInfo &info =
+      node_reg_info_by_topo_index_[node->GetTopoIndex()];
+  if (info.defs.empty() && info.uses.empty()) {
     return "(no register ops)";
   }
-
-  const NodeRegInfo &info = it->second;
   std::string result;
 
   if (!info.defs.empty()) {

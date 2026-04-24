@@ -5153,3 +5153,77 @@ high-pressure region where the iterative scheduler's candidate
 schedules trigger a restore. Mostly affects image/NSA kernels,
 MFMA kernels, and any second-pass scheduler trusting
 `MFI->Occupancy`.
+
+---
+
+## Appendix R: Deferred Optimizations
+
+Ideas investigated during design but not currently implemented.
+Each should be driven by profile data before committing to the
+engineering work — the expected win on each is modest, and
+blindly applying them without measurement risks adding complexity
+for no real benefit.
+
+### R.1 `SparseSet<LiveReg>` for `GCNRegisterTracker::live_regs_`
+
+Currently `live_regs_` is `DenseMap<unsigned, LaneBitmask>` —
+hash+probe per access. Virtual registers form a dense
+integer universe (indices 0..NumVirtRegs across the function),
+but only a small subset is live at any point in a region.
+`llvm::SparseSet<LiveReg>` matches this pattern:
+
+- O(1) actual insert/erase/find (two indexed loads instead of
+  hash+probe), ~3-5 cycles per op vs ~10-20 for DenseMap.
+- Cache-friendly iteration over only the live entries (contiguous
+  dense array) instead of walking the DenseMap's bucket array
+  including empty slots.
+- One-time allocation of a sparse lookup array sized to
+  NumVirtRegs per tracker instance (~40 KB at 10k vregs).
+
+Rough estimate: ~40-60ms saved per compile on a function with
+many DFS frames, dominated by Schedule/Unschedule DenseMap
+lookups. Switch if profile shows `live_regs_.find` in the top
+hot spots. `remaining_uses_` could potentially benefit similarly
+but has a more uniformly-populated access pattern; start with
+`live_regs_`.
+
+### R.2 Template `ScheduleConstructor` on the ready-list comparator
+
+`ScheduleConstructor::ready_comparator_` is currently a raw
+function pointer (`bool (*)(const ScheduleNode*, const
+ScheduleNode*)`) — ~2-3 cycles of indirect-call overhead per
+compare. At ~6 compares per DFS frame and ~1M frames per
+compile, that's ~50ms of indirect-call overhead.
+
+Templating the class on the comparator type (`template <typename
+Cmp> class ScheduleConstructor`) would let the compiler inline
+the comparator at every callsite, reducing compare cost to near
+zero. Cost: all method definitions would have to move to the
+header (template instantiation requires visibility), and every
+site that names the type would need `<>` or `<SomeCmp>`. API
+propagation through `DfsSearch`, `input_schedule_constructor_`,
+`ApplyScheduleOrder` signatures, shakedowns.
+
+Defer until a concrete use case appears for stateful
+comparators (closures capturing search-time state), since the
+current stateless function-pointer design covers all planned
+policies (id, slack, pressure-hint) natively.
+
+### R.3 Precompute filtered edge lists per ScheduleNode
+
+`ComputeReadyCycle` iterates `node->Predecessors()` and filters
+by `IsLatencyEdge`. `ReleaseSuccessors` / `UnreleaseSuccessors`
+iterate `node->Successors()` and filter by `IsStrongEdge`.
+
+For each node, we could precompute and cache:
+- `SmallVector<std::pair<int topo_idx, int latency>>` for
+  latency-carrying predecessors.
+- `SmallVector<int topo_idx>` for strong-edge successors.
+
+Savings: skip the per-edge filter branch, avoid the
+`ScheduleEdge → ScheduleNode → topo_index` pointer chase (three
+cache-line loads per edge), denser contiguous iteration.
+
+Rough estimate: ~10-20 cycles per Schedule saved for typical
+pred/succ counts. Modest. Probably only worth it if the edge
+iteration shows up in a profile alongside R.1.

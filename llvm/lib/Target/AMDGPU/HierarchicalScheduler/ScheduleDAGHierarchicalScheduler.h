@@ -109,6 +109,19 @@ public:
   // all-factors occupancy (i.e., no improvement).
   int ScheduleRegionForMaximumOccupancy(RegionInfo &region);
 
+  // Outer loop of the length-minimization pass. Iterates every region
+  // and calls ScheduleRegionForMinimumLength. Runs after
+  // RunMaximizeOccupancyPass so MFI->getOccupancy() already reflects
+  // the kernel-wide ceiling — the per-region DFS's occupancy-drop
+  // bound prevents the length search from degrading occupancy.
+  void RunMinimizeLengthPass();
+
+  // Per-region worker for RunMinimizeLengthPass. Runs DFS with
+  // DfsMinimizeLengthPolicy and applies the resulting schedule.
+  // DfsSearch seeds best with the input schedule, so the output is
+  // guaranteed no worse than the current MF order.
+  void ScheduleRegionForMinimumLength(RegionInfo &region);
+
   // Initialize per-function state. Called at the start of
   // RunHierarchicalScheduler / RunMaliciousScheduler. Stores mfi_
   // and resets occupancy to the pre-GCN-scheduler value.

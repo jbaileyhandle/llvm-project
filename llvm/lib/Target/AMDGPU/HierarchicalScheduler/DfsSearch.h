@@ -25,14 +25,19 @@ namespace hierarchical_scheduler {
 
 // Policy contract:
 //   static constexpr ScheduleMetric kMetric;
-//   static SmallVector<const ScheduleNode*, 16> PruneAndSortReadyList(
-//       const ScheduleConstructor &schedule_constructor);
+//   static bool ReadyCompare(const ScheduleNode *a,
+//                            const ScheduleNode *b);
 //   static bool ShouldBoundSearch(
 //       const ScheduleConstructor &schedule_constructor,
 //       const ScheduleConstructor &best_schedule_constructor);
 //   static bool ShouldEndSearch(
 //       const ScheduleConstructor &schedule_constructor,
 //       const ScheduleConstructor &best_schedule_constructor);
+//
+// ReadyCompare must be a strict total order; it drives the sort order
+// of ScheduleConstructor's ready list. DfsSearch iterates the ready
+// list by index, relying on the round-trip stability guarantee
+// documented on ScheduleConstructor.
 //
 // ShouldBoundSearch is a LOCAL prune: returning true abandons the
 // current subtree but lets the search continue elsewhere. Called on
@@ -45,7 +50,8 @@ class DfsSearch {
  public:
   DfsSearch(const ScheduleGraph &graph, const GCNSubtarget &st,
             const MachineFunction &mf, const LiveIntervals &lis)
-      : working_schedule_constructor_(graph, st, mf, lis),
+      : working_schedule_constructor_(graph, st, mf, lis,
+                                      &Policy::ReadyCompare),
         best_schedule_constructor_(graph.GetInputScheduleConstructor()) {
     // best_schedule_constructor_ is copy-constructed from the
     // graph's input schedule (built by BuildFromSUnits as Phase 4).
@@ -53,6 +59,11 @@ class DfsSearch {
     // current MF order before any DFS step runs, so DFS guarantees
     // non-regression against the input MF order — no separate
     // outer-level comparison needed.
+    //
+    // Note: best's ready list uses the default (topo_index) comparator
+    // since input_schedule_constructor_ was built with the default.
+    // That's fine — best is read-only after construction from the
+    // DFS's perspective; we never iterate its ready list for order.
   }
 
   // Runs DFS, returns a copy of the best schedule found.
@@ -80,10 +91,14 @@ class DfsSearch {
       return;
     }
 
-    SmallVector<const ScheduleNode *, 16> ordered_ready =
-        Policy::PruneAndSortReadyList(working_schedule_constructor_);
-    for (const ScheduleNode *node : ordered_ready) {
-      working_schedule_constructor_.Schedule(node);
+    // Iterate the live ready list by index. Schedule+Unschedule is a
+    // round-trip: after Unschedule the ready list has identical
+    // contents AND index layout (strict-total-order comparator + sort
+    // maintenance), so ++i points to the next sibling.
+    int ready_size =
+        static_cast<int>(working_schedule_constructor_.GetReadyList().size());
+    for (int i = 0; i < ready_size; ++i) {
+      working_schedule_constructor_.ScheduleByIndex(i);
       Recurse();
       working_schedule_constructor_.Unschedule();
       if (should_end_search_) {

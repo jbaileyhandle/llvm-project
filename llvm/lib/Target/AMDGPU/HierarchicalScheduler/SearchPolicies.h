@@ -19,9 +19,59 @@ namespace hierarchical_scheduler {
 
 class ScheduleNode;
 
+// Policy for DFS when the objective is to minimize schedule length for
+// a single region, SUBJECT TO not dropping the region's register-only
+// occupancy below the function-wide ceiling set by an earlier
+// occupancy pass.
+class DfsMinimizeLengthPolicy {
+ public:
+  static constexpr ScheduleMetric kMetric =
+      ScheduleMetric::kMinimizeScheduleLength;
+
+  // Strict total order used to sort ScheduleConstructor's ready list.
+  // First cut: topo_index ascending (deterministic, unique per node).
+  // Planned enhancement: slack-based ordering (ALAP - ASAP, low-slack
+  // critical-path nodes first, tiebreak by topo_index). Finding a
+  // shorter schedule sooner means best.length drops earlier in the
+  // search, so the length-LB bound prunes more subtrees.
+  static bool ReadyCompare(const ScheduleNode *a, const ScheduleNode *b) {
+    return a->GetTopoIndex() < b->GetTopoIndex();
+  }
+
+  // Bound the current subtree if either:
+  //   (a) the working schedule's length lower bound is at or above
+  //       best's current length — no completion can strictly beat
+  //       best; or
+  //   (b) the working schedule's register-only occupancy has dropped
+  //       below the function ceiling — no completion can recover, and
+  //       we must not degrade occupancy.
+  //
+  // SOUNDNESS:
+  //   (a) LB is monotonically non-decreasing as nodes are scheduled
+  //       (current_cycle + num_unscheduled never decreases, and the
+  //       running max of scheduled_cycle + cp + 1 only grows), so
+  //       once LB >= best.length, every completion has length >= LB
+  //       >= best.length.
+  //   (b) Peak register pressure is monotonically non-decreasing, so
+  //       register-only occupancy is monotonically non-increasing.
+  //       Once working drops below the function ceiling, no
+  //       completion restores it.
+  static bool ShouldBoundSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor);
+
+  // End the search globally once best matches the graph-level length
+  // floor (max(LeafSize, cp_length + 1)) — no schedule can be shorter,
+  // so further exploration is pointless. The bound check in
+  // ShouldBoundSearch handles incremental pruning; this is the cheap
+  // "we hit the optimum" exit.
+  static bool ShouldEndSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor);
+};
+
 // Policy for DFS when the objective is to maximize register-only
-// occupancy for a single region. Hooks are static; see DfsSearch for
-// the contract.
+// occupancy for a single region.
 class DfsMaximizeOccupancyPolicy {
  public:
   // Use the continuous score, not the integer one. The integer
@@ -32,12 +82,12 @@ class DfsMaximizeOccupancyPolicy {
   static constexpr ScheduleMetric kMetric =
       ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
 
-  // Return a pruned + sorted list of nodes to try next from
-  // schedule_constructor's current ready list. Input is not modified.
-  // First cut: no pruning, sort by ScheduleNode id ascending
-  // (deterministic).
-  static SmallVector<const ScheduleNode *, 16> PruneAndSortReadyList(
-      const ScheduleConstructor &schedule_constructor);
+  // Strict total order used to sort ScheduleConstructor's ready list.
+  // Topo_index ascending — deterministic, unique per node. No
+  // heuristic for occupancy yet; 
+  static bool ReadyCompare(const ScheduleNode *a, const ScheduleNode *b) {
+    return a->GetTopoIndex() < b->GetTopoIndex();
+  }
 
   // Return true if no completion of the current partial schedule can
   // improve on best_schedule_constructor. First cut: always false

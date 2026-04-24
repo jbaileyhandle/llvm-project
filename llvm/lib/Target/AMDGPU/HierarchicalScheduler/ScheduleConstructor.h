@@ -19,13 +19,6 @@
 //       sc.Schedule(chosen_node);
 //   }
 //
-// If the loop body calls Schedule/Unschedule while iterating (e.g.,
-// enumerating alternatives), iterate a GetReadyListSnapshot() copy
-// instead — Schedule/Unschedule mutates the underlying set and
-// invalidates iterators.
-//   // sc.GetScheduleOrder() has the full schedule
-//   // sc.GetPressureTracker() / sc.GetLengthTracker() have metrics
-//
 // Supports do/undo:
 //   sc.Schedule(node_a);
 //   sc.Schedule(node_b);
@@ -34,7 +27,24 @@
 //
 // Ready list: a node is ready when all of its strong predecessors
 // have been scheduled. Weak edges (cluster hints, etc.) do not
-// block readiness.
+// block readiness. The list is maintained in a stable sorted
+// order under a caller-supplied strict total order comparator
+// (default: topo_index ascending). Schedule/Unschedule reverse
+// each other exactly, so after a round-trip the list's contents
+// AND indices are restored. This lets DFS iterate by index across
+// Schedule/Unschedule pairs without snapshotting:
+//
+//   for (int i = 0; i < sc.GetReadyList().size(); ++i) {
+//     const ScheduleNode *n = sc.GetReadyList()[i];
+//     sc.Schedule(n);
+//     Recurse();
+//     sc.Unschedule();       // ready list back to identical state;
+//                            // GetReadyList()[i] is still n
+//   }
+//
+// Iterators/pointers into ready_list_ are NOT stable across
+// Schedule — memmove shifts entries. Iterate by index, or
+// snapshot explicitly via GetReadyListSnapshot.
 //
 //===----------------------------------------------------------------------===//
 
@@ -45,9 +55,8 @@
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include <vector>
 
 namespace llvm {
 
@@ -93,18 +102,46 @@ enum class ScheduleMetric {
 
 class ScheduleConstructor {
 public:
+  /// Comparator for ready-list ordering. Must be a strict total
+  /// order — no two distinct nodes may compare equal. The default
+  /// (topo_index ascending) satisfies this because topo_index is
+  /// unique per node. Policies with multi-criterion ordering must
+  /// still bottom out in a uniquely-identifying tiebreaker.
+  ///
+  /// Strict total order is required for index-based iteration to be
+  /// stable across Schedule/Unschedule round-trips — ties would let
+  /// a re-inserted element land at a different index.
+  ///
+  using ReadyComparator = bool (*)(const ScheduleNode *,
+                                   const ScheduleNode *);
+
+  /// Default ready-list comparator: topo_index ascending. Stateless,
+  /// strict total order.
+  static bool DefaultReadyComparator(const ScheduleNode *a,
+                                     const ScheduleNode *b) {
+    return a->GetTopoIndex() < b->GetTopoIndex();
+  }
+
   /// Construct from a graph and target info. The graph must outlive
   /// this object. Reports fatal error if the graph contains group
-  /// nodes (not yet supported at this level).
+  /// nodes (not yet supported at this level). `ready_cmp` defines the
+  /// ready-list order; default is topo_index ascending.
   ScheduleConstructor(const ScheduleGraph &graph,
                       const GCNSubtarget &st,
                       const MachineFunction &mf,
-                      const LiveIntervals &lis);
+                      const LiveIntervals &lis,
+                      ReadyComparator ready_cmp = DefaultReadyComparator);
 
   /// Schedule a node. The node must be in the ready list.
   /// Updates register pressure, schedule length, ready list, and
   /// appends the node to the schedule order.
   void Schedule(const ScheduleNode *node);
+
+  /// Schedule the node currently at ready_list_[index]. Skips the
+  /// binary search used by Schedule(const ScheduleNode*) — DFS knows
+  /// the index from its iteration loop, so it can erase directly.
+  /// Otherwise identical to Schedule(const ScheduleNode*).
+  void ScheduleByIndex(int index);
 
   /// Undo the last Schedule() call. Restores register pressure,
   /// schedule length, ready list, and removes the node from the
@@ -117,29 +154,26 @@ public:
   }
 
   /// The current ready list — nodes whose strong predecessors are
-  /// all scheduled.
+  /// all scheduled. Maintained in sorted order under the
+  /// constructor-supplied comparator.
   ///
-  /// WARNING: Do NOT iterate this set across calls to
-  /// Schedule()/Unschedule(). Those mutate the set (erase the
-  /// scheduled node, insert newly-released successors) which
-  /// invalidates iterators. For loops that schedule and unschedule,
-  /// call GetReadyListSnapshot() to get a stable copy and iterate
-  /// that instead.
-  const SmallDenseSet<const ScheduleNode *, 16> &GetReadyList() const {
+  /// Iteration-across-mutation: iterate by INDEX if the loop body
+  /// calls Schedule/Unschedule. After a round-trip the list has the
+  /// same contents in the same order, so `ready_list[i]` refers to
+  /// the same node. Pointers/iterators into the returned ArrayRef
+  /// are NOT stable across Schedule (memmove shifts entries).
+  ArrayRef<const ScheduleNode *> GetReadyList() const {
     return ready_list_;
   }
 
-  /// Append the current ready-list contents to `out`. Use this
-  /// instead of iterating `GetReadyList()` directly when the loop
-  /// body will call `Schedule()`/`Unschedule()` — those mutate the
-  /// set and invalidate iterators. The snapshot is stable across
-  /// subsequent Schedule/Unschedule pairs, and the pointer values
-  /// are unaffected (ScheduleNode storage is graph-owned and
-  /// stable). The order in the snapshot is the set's current
-  /// iteration order, which is unspecified; callers that need a
-  /// deterministic ordering should sort the result.
+  /// Append the current ready-list contents (in the maintained sort
+  /// order) to `out`. Convenience for callers that want a stable
+  /// copy to iterate across Schedule/Unschedule without using the
+  /// index-based pattern.
   void GetReadyListSnapshot(
-      SmallVectorImpl<const ScheduleNode *> &out) const;
+      SmallVectorImpl<const ScheduleNode *> &out) const {
+    out.append(ready_list_.begin(), ready_list_.end());
+  }
 
   /// The schedule order built so far.
   ArrayRef<const ScheduleNode *> GetScheduleOrder() const {
@@ -190,15 +224,39 @@ private:
   /// Nodes scheduled so far, in order.
   SmallVector<const ScheduleNode *> schedule_order_;
 
-  /// Nodes ready to be scheduled (all strong predecessors done).
-  SmallDenseSet<const ScheduleNode *, 16> ready_list_;
+  /// Nodes ready to be scheduled (all strong predecessors done),
+  /// maintained in sorted order under ready_comparator_. Inline
+  /// capacity sized to cover typical region ready-list sizes
+  /// without heap spill.
+  SmallVector<const ScheduleNode *, 64> ready_list_;
 
-  /// Per-node count of strong predecessors not yet scheduled.
-  /// When this reaches 0, the node enters the ready list.
-  DenseMap<const ScheduleNode *, int> remaining_strong_predecessors_;
+  /// Comparator defining ready_list_ sort order. See ReadyComparator.
+  ReadyComparator ready_comparator_;
+
+  /// Per-node count of strong predecessors not yet scheduled,
+  /// indexed by ScheduleNode::GetTopoIndex(). Sized to graph.Size()
+  /// at construction. When an entry reaches 0 the corresponding node
+  /// enters the ready list.
+  std::vector<int> remaining_strong_predecessors_by_topo_index_;
 
   /// Initialize remaining_strong_predecessors_ and ready_list_ from the graph.
   void InitReadyList();
+
+  /// Return the index of `node` in ready_list_, or -1 if absent.
+  /// Binary search under ready_comparator_ (O(log K)).
+  int GetReadyListIndexOf(const ScheduleNode *node) const;
+
+  /// Insert `node` into ready_list_ at its sorted position under
+  /// ready_comparator_. Precondition: node is not already present.
+  void ReadyListInsert(const ScheduleNode *node);
+
+  /// Erase the entry at `index` in ready_list_ (direct erase, no search).
+  void ReadyListEraseAt(int index);
+
+  /// Erase `node` from ready_list_, locating it via GetReadyListIndexOf.
+  /// Precondition: node IS present. Used by Schedule(node) and
+  /// UnreleaseSuccessors.
+  void ReadyListErase(const ScheduleNode *node);
 
   /// Decrement strong-pred counts for the node's successors. If any
   /// successor's count reaches 0, add it to the ready list. A node
