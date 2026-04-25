@@ -150,13 +150,22 @@ ScheduleNode::ScheduleNode(std::unique_ptr<SubgraphInfo> info,
       graph_local_id_(top_level_graph->GetAndIncrementGraphLocalId()),
       content_(std::move(info)) {}
 
+ScheduleNode::ScheduleNode(SubgraphInfo *info,
+                           ScheduleGraph *top_level_graph)
+    : id_(GetAndIncrementScheduleId()),
+      graph_local_id_(top_level_graph->GetAndIncrementGraphLocalId()),
+      content_(info) {}
+
 SubgraphInfo *ScheduleNode::GetSubgraphInfo() const {
-  if (!IsSubgraphProxy()) {
-    report_fatal_error(
-        "GetSubgraphInfo called on scheduling-unit node " +
-        Twine(id_));
+  if (IsSubgraphStartProxy()) {
+    return std::get<std::unique_ptr<SubgraphInfo>>(content_).get();
   }
-  return std::get<std::unique_ptr<SubgraphInfo>>(content_).get();
+  if (IsSubgraphEndProxy()) {
+    return std::get<SubgraphInfo *>(content_);
+  }
+  report_fatal_error(
+      "GetSubgraphInfo called on scheduling-unit node " +
+      Twine(id_));
 }
 
 void ScheduleNode::ExtractRegInfo() {
@@ -187,8 +196,9 @@ std::string ScheduleNode::ToString() const {
 
   if (IsSubgraphProxy()) {
     SubgraphInfo *info = GetSubgraphInfo();
-    result += ":proxy(" + info->debug_name + "," +
-              std::to_string(info->members.size()) + ")]";
+    const char *kind = IsSubgraphStartProxy() ? "start" : "end";
+    result += ":proxy_" + std::string(kind) + "(" + info->debug_name +
+              "," + std::to_string(info->members.size()) + ")]";
     return result;
   }
 

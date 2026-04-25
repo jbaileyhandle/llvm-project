@@ -12,13 +12,14 @@
 // later by InsertSubgraphProxies when the proxy node is emplaced in
 // the graph.
 //
-// Ownership: the SubgraphInfo is owned by the proxy ScheduleNode
-// (held inside the node's std::variant content_ as a
-// std::unique_ptr<SubgraphInfo>). The proxy node is owned by the
-// ScheduleGraph; therefore the SubgraphInfo's lifetime is the proxy
-// node's lifetime, which is the graph's lifetime. Callers construct
-// a SubgraphInfo via std::make_unique and transfer ownership to the
-// proxy at emplace time.
+// Ownership: the SubgraphInfo is owned by the START proxy ScheduleNode
+// (held inside that node's std::variant content_ as a
+// std::unique_ptr<SubgraphInfo>). The END proxy holds a raw
+// SubgraphInfo* back-reference (in its variant). Both proxy nodes
+// are owned by the ScheduleGraph; therefore the SubgraphInfo's
+// lifetime is the START proxy's lifetime, which is the graph's
+// lifetime. Callers construct a SubgraphInfo via std::make_unique
+// and transfer ownership to the start proxy at emplace time.
 //
 // See AMDGPUClusteringDesign.md (Approach B) for how SubgraphInfo
 // and the proxy node fit into the single-graph-hybrid model.
@@ -55,9 +56,21 @@ struct SubgraphInfo {
   /// Same shape as ext_predecessors.
   SmallVector<ScheduleNode *, 16> ext_successors;
 
-  /// The proxy node that represents this subgraph in the outer
-  /// scheduling graph. Null until InsertSubgraphProxies runs.
+  /// The START proxy node that represents the entry into this
+  /// subgraph in the outer scheduling graph. Pushes a scope on the
+  /// scope stack when scheduled. Null until InsertSubgraphProxies
+  /// runs. Names "subgraph_proxy" for backward compatibility with
+  /// callers that predate the start/end split; semantically this
+  /// is the start proxy.
   ScheduleNode *subgraph_proxy = nullptr;
+
+  /// The END proxy node that marks the exit from this subgraph.
+  /// Has every member of the subgraph as a strong predecessor (so
+  /// it is only ready after every member has been scheduled), and
+  /// every external successor of the subgraph as a successor.
+  /// Pops the scope when scheduled. Null until InsertSubgraphProxies
+  /// runs.
+  ScheduleNode *end_proxy = nullptr;
 
   /// Build from a member list and a debug name. Walks `members` once
   /// to compute ext_predecessors (predecessors of any member that

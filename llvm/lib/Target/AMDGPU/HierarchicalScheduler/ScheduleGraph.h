@@ -7,44 +7,55 @@
 //   - A scheduling unit (IsSchedulingUnit() == true): wraps a
 //     single SUnit — a real MachineInstr-backed instruction or a
 //     synthetic entry/exit sentinel.
-//   - A subgraph proxy (IsSubgraphProxy() == true): owns a
-//     SubgraphInfo that holds the membership and external interface
-//     of a subgraph the proxy stands in for.
+//   - A subgraph START proxy (IsSubgraphStartProxy() == true): owns
+//     a SubgraphInfo. Pushes a scope when scheduled.
+//   - A subgraph END proxy (IsSubgraphEndProxy() == true): holds a
+//     raw back-pointer to the same SubgraphInfo. Pops the scope
+//     when scheduled.
+// IsSubgraphProxy() returns true for either start or end — useful
+// for code (trackers, etc.) that should self-skip on any proxy.
 //
 // A ScheduleGraph is a FLAT collection of ScheduleNodes with edges
 // between them. There is no nested-ScheduleGraph hierarchy: under
 // the single-graph-hybrid design (Approach B,
 // AMDGPUClusteringDesign.md), proxies and their subgraph members
-// coexist in the same graph. The proxy is gated on the subgraph's
-// external predecessors via kSubgraphOrderEdge artificial edges, and
-// each member is gated on its proxy via the same edge kind. The
-// original member-to-member and member-to-external edges are never
-// rewritten.
+// coexist in the same graph. Each subgraph contributes a start
+// proxy on the predecessor boundary and an end proxy on the
+// successor boundary; the original member-to-member and
+// member-to-external edges are kept intact (the new artificials
+// are added on top so the original real edges keep their data
+// latencies for the length tracker).
 //
 // Example layout: subgraph S = {B, C}, external pred A, external
-// succ D. The graph holds A, B, C, D, P (P = proxy for S):
+// succ D. The graph holds A, B, C, D, P_start, P_end:
 //
-//   A ───────► B   (original)
-//   A ───────► C   (original)
-//   A ·······► P   (artificial, kSubgraphOrderEdge)
-//   B ───────► C   (original, intra-subgraph)
-//   C ───────► D   (original, member → external)
-//   P ·······► B   (artificial, latency 0)
-//   P ·······► C   (artificial, latency 0)
+//   A ───────► B       (original)
+//   A ───────► C       (original)
+//   A ·······► P_start (artificial, kSubgraphOrderEdge)
+//   P_start ·► B       (artificial, latency 0)
+//   P_start ·► C       (artificial, latency 0)
+//   B ───────► C       (original, intra-subgraph)
+//   B ·······► P_end   (artificial, kSubgraphOrderEdge)
+//   C ·······► P_end   (artificial, kSubgraphOrderEdge)
+//   C ───────► D       (original, member → external)
+//   P_end ···► D       (artificial, kSubgraphOrderEdge)
 //
-// The original A→B, A→C, B→C, C→D edges remain. Members B and C
-// each gain one extra predecessor (the artificial P→M edge) which
-// keeps them out of any ready list until P is scheduled. P itself
-// is gated on A (its sole ext_predecessor) being scheduled.
+// Members B and C each gain one extra predecessor (the artificial
+// P_start → M edge) which keeps them out of any ready list until
+// P_start is scheduled. P_end is gated on every member having been
+// scheduled. External successor D is gated both by the real
+// member→D edge AND by the artificial P_end→D edge, so it can't
+// become ready until the subgraph has fully exited.
 //
 // Node-storage discipline. ScheduleEdge stores raw `ScheduleNode *`
 // pointers into the `nodes_` SmallVector. A vector reallocation
 // would invalidate every stored edge pointer (silent UB). Two
 // mechanisms keep this safe:
-//   1. BuildFromSUnits reserves `2 * sunits.size() + 2` slots up
-//      front — enough headroom to add one proxy per real
-//      instruction (the worst-case proxy count) plus the
-//      entry/exit sentinels, all without reallocating.
+//   1. BuildFromSUnits reserves `3 * sunits.size() + 2` slots up
+//      front — enough headroom to add up to two proxies per real
+//      instruction (worst case: every instruction is its own
+//      subgraph) plus the entry/exit sentinels, all without
+//      reallocating.
 //   2. EmplaceNode hard-fails with report_fatal_error if it would
 //      ever cause `nodes_` to grow past its reserved capacity.
 // Together these let post-construction passes (e.g.,
@@ -217,22 +228,29 @@ public:
   ScheduleNode(SUnit *su, std::string debug_name,
                ScheduleGraph *top_level_graph);
 
-  /// Create a subgraph-proxy node owning a SubgraphInfo. The
-  /// SubgraphInfo holds the subgraph's members, debug name, and
-  /// external predecessors/successors; the proxy is the handle for
-  /// the subgraph in the outer scheduling graph (used by
-  /// scope-stacked Schedule dispatch — see AMDGPUClusteringDesign.md
-  /// Approach B). Ownership of `info` transfers into this node; the
-  /// info's lifetime then equals this node's lifetime, which equals
-  /// the graph's lifetime. Both `info` and `top_level_graph` must be
-  /// non-null.
+  /// Create the START subgraph-proxy node owning a SubgraphInfo.
+  /// The SubgraphInfo holds the subgraph's members, debug name, and
+  /// external predecessors/successors; the start proxy is the
+  /// boundary marker on the predecessor side (it pushes a scope
+  /// when scheduled). Ownership of `info` transfers into this node;
+  /// the info's lifetime then equals this node's lifetime, which
+  /// equals the graph's lifetime. Both `info` and `top_level_graph`
+  /// must be non-null.
   ScheduleNode(std::unique_ptr<SubgraphInfo> info,
                ScheduleGraph *top_level_graph);
 
+  /// Create the END subgraph-proxy node that back-references an
+  /// already-existing SubgraphInfo. The end proxy is the boundary
+  /// marker on the successor side (it pops the scope when
+  /// scheduled). It does NOT own `info` — the START proxy does;
+  /// the end proxy holds only a raw back-pointer. Both `info` and
+  /// `top_level_graph` must be non-null.
+  ScheduleNode(SubgraphInfo *info, ScheduleGraph *top_level_graph);
+
   /// True if this node represents a single scheduling unit (wraps
   /// one SUnit — either a real MachineInstr-backed SUnit or a
-  /// synthetic entry/exit sentinel). False if this node is a
-  /// subgraph proxy that stands in for a group of other nodes.
+  /// synthetic entry/exit sentinel). False if this node is any
+  /// kind of subgraph proxy (start or end).
   ///
   /// Partitions every ScheduleNode exactly once, together with
   /// IsSubgraphProxy. Used by Schedule dispatch, trackers, and
@@ -241,9 +259,24 @@ public:
     return std::holds_alternative<SUnit *>(content_);
   }
 
-  /// True if this node is a subgraph proxy (represents a contained
-  /// group of scheduling units). Inverse of IsSchedulingUnit.
+  /// True if this node is a subgraph proxy of either flavor
+  /// (start or end). Inverse of IsSchedulingUnit. Useful for
+  /// trackers / pressure / length code that should self-skip on
+  /// any proxy regardless of which boundary it marks.
   bool IsSubgraphProxy() const { return !IsSchedulingUnit(); }
+
+  /// True if this node is the START proxy of a subgraph (owns the
+  /// SubgraphInfo, gates entry into the subgraph scope).
+  bool IsSubgraphStartProxy() const {
+    return std::holds_alternative<std::unique_ptr<SubgraphInfo>>(content_);
+  }
+
+  /// True if this node is the END proxy of a subgraph (raw
+  /// back-pointer to the SubgraphInfo, gates exit from the
+  /// subgraph scope).
+  bool IsSubgraphEndProxy() const {
+    return std::holds_alternative<SubgraphInfo *>(content_);
+  }
 
   /// Access the wrapped SUnit. Only valid for scheduling-unit nodes.
   SUnit *GetSUnit() const {
@@ -251,9 +284,10 @@ public:
     return std::get<SUnit *>(content_);
   }
 
-  /// Access the owned SubgraphInfo. Only valid for subgraph-proxy
-  /// nodes. Returns a raw pointer; ownership stays with this node.
-  /// Reports fatal error on misuse (with the offending node id).
+  /// Access the SubgraphInfo associated with this proxy node. Works
+  /// for either the start proxy (returns the owned info) or the end
+  /// proxy (returns the back-referenced info). Reports fatal error
+  /// if called on a scheduling-unit node.
   SubgraphInfo *GetSubgraphInfo() const;
 
   /// The subgraph proxy this node belongs to (the visibility-rule
@@ -351,7 +385,13 @@ private:
 
   int64_t id_;
   int graph_local_id_;
-  std::variant<SUnit *, std::unique_ptr<SubgraphInfo>> content_;
+  // Three alternatives, one per node kind:
+  //   index 0 (SUnit *):                   scheduling-unit node
+  //   index 1 (unique_ptr<SubgraphInfo>):  start proxy (owns info)
+  //   index 2 (SubgraphInfo *):            end proxy (back-references info)
+  // The variant index IS the discriminator — see IsSchedulingUnit /
+  // IsSubgraphStartProxy / IsSubgraphEndProxy.
+  std::variant<SUnit *, std::unique_ptr<SubgraphInfo>, SubgraphInfo *> content_;
   SmallVector<ScheduleEdge> successors_;
   SmallVector<ScheduleEdge> predecessors_;
   SmallVector<RegWithLaneMask> reg_defs_;
