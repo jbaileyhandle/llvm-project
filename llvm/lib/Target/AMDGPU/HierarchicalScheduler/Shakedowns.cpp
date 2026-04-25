@@ -194,6 +194,23 @@ void RunTestDAGShakedown() {
   // cyclic->ValidateAndComputeTopologicalOrder();
 }
 
+// Helper: check edge set against expected, with kind kSubgraphOrderEdge.
+// Uses set comparison + NumX() == set.size() to catch both missing /
+// extra targets and duplicate edges to the same target.
+bool CheckEdgeSet(ArrayRef<ScheduleEdge> edges, int num_edges,
+                  const std::set<ScheduleNode *> &expected) {
+  std::set<ScheduleNode *> actual;
+  bool kinds_ok = true;
+  for (const ScheduleEdge &edge : edges) {
+    if (edge.kind_ != ScheduleEdge::kSubgraphOrderEdge) {
+      kinds_ok = false;
+    }
+    actual.insert(edge.node_);
+  }
+  return kinds_ok && actual == expected &&
+         num_edges == static_cast<int>(expected.size());
+}
+
 // Exercises ScheduleGraph::InsertSubgraphProxies on BuildTestDAG.
 // BuildTestDAG layout (7 nodes, indexed in emplacement order):
 //   0=A, 1=C, 2=D, 3=E, 4=F, 5=G, 6=H
@@ -204,16 +221,25 @@ void RunTestDAGShakedown() {
 //   - Successors of members not in S: G (via F→G).
 // Expect: ext_predecessors = [A], ext_successors = [G].
 //
-// After InsertSubgraphProxies:
-//   - One new proxy node, IsSubgraphProxy(), parent_subgraph_proxy
-//     == nullptr (top-level), GetSubgraphInfo()->debug_name == "S".
-//   - Members C, D, E, F have parent_subgraph_proxy == proxy.
-//   - Non-members A, G, H have null parent_subgraph_proxy.
-//   - proxy's incoming edge set == {A}, all kSubgraphOrderEdge.
-//   - proxy's outgoing edge set == {C, D, E, F}, all
-//     kSubgraphOrderEdge.
-//   - graph.Size() == 8 (was 7 + 1 proxy).
+// After InsertSubgraphProxies (TWO proxies per subgraph):
+//   - graph.Size() == 9 (was 7 + start + end).
 //   - graph.NumSchedulingUnits() == 7 (proxies excluded).
+//   - Exactly one IsSubgraphStartProxy and one IsSubgraphEndProxy.
+//   - Start proxy: parent_subgraph_proxy == nullptr (top-level),
+//       GetSubgraphInfo()->debug_name == "S",
+//       SubgraphInfo->subgraph_proxy == start,
+//       predecessors set == {A}, successors set == {C,D,E,F}.
+//   - End proxy: parent_subgraph_proxy == start (lives in subgraph
+//       scope), GetSubgraphInfo() returns the same info object,
+//       SubgraphInfo->end_proxy == end,
+//       predecessors set == {C,D,E,F}, successors set == {G}.
+//   - Members C, D, E, F have parent_subgraph_proxy == start.
+//   - Non-members A, G, H have null parent_subgraph_proxy.
+//   - The member↔proxy edge directions are guaranteed by
+//     AddSuccessor's edge-symmetry contract: start's successors
+//     == {C,D,E,F} implies each member has start as a predecessor,
+//     and end's predecessors == {C,D,E,F} implies each member has
+//     end as a successor. No separate per-member edge counts needed.
 //   - Topological order is recomputed (cycle-free).
 void RunInsertSubgraphProxiesShakedown() {
   auto graph = ScheduleGraph::BuildTestDAG();
@@ -248,40 +274,59 @@ void RunInsertSubgraphProxiesShakedown() {
   infos.push_back(std::move(info));
   graph->InsertSubgraphProxies(std::move(infos));
 
-  // The proxy is the only IsSubgraphProxy node (and there should
-  // be exactly one).
-  ScheduleNode *proxy = nullptr;
-  int proxy_count = 0;
+  // Locate start and end proxies. There should be exactly one of
+  // each.
+  ScheduleNode *start = nullptr;
+  ScheduleNode *end = nullptr;
+  int start_count = 0;
+  int end_count = 0;
   for (ScheduleNode &n : graph->Nodes()) {
-    if (n.IsSubgraphProxy()) {
-      ++proxy_count;
-      proxy = &n;
+    if (n.IsSubgraphStartProxy()) {
+      ++start_count;
+      start = &n;
+    }
+    if (n.IsSubgraphEndProxy()) {
+      ++end_count;
+      end = &n;
     }
   }
 
   // ── Verify post-insertion structure ────────────────────────────
   bool size_ok =
-      graph->Size() == 8 && graph->NumSchedulingUnits() == 7;
+      graph->Size() == 9 && graph->NumSchedulingUnits() == 7;
   llvm::outs() << "  Graph size: total=" << graph->Size()
                << " scheduling_units=" << graph->NumSchedulingUnits()
                << "  " << (size_ok ? "PASS" : "FAIL") << "\n";
 
-  bool proxy_basic_ok =
-      proxy_count == 1 && proxy != nullptr &&
-      proxy->IsSubgraphProxy() &&
-      proxy->GetParentSubgraphProxy() == nullptr &&
-      proxy->GetSubgraphInfo()->debug_name == "S" &&
-      proxy->GetSubgraphInfo()->subgraph_proxy == proxy;
-  llvm::outs() << "  Proxy node: count=" << proxy_count
-               << " name=\""
-               << (proxy ? proxy->GetSubgraphInfo()->debug_name : "")
-               << "\"  " << (proxy_basic_ok ? "PASS" : "FAIL") << "\n";
+  bool counts_ok = start_count == 1 && end_count == 1 &&
+                   start != nullptr && end != nullptr;
+  llvm::outs() << "  Proxy counts: start=" << start_count
+               << " end=" << end_count << "  "
+               << (counts_ok ? "PASS" : "FAIL") << "\n";
+
+  bool start_basic_ok =
+      counts_ok && start->IsSubgraphStartProxy() &&
+      start->GetParentSubgraphProxy() == nullptr &&
+      start->GetSubgraphInfo()->debug_name == "S" &&
+      start->GetSubgraphInfo()->subgraph_proxy == start;
+  llvm::outs() << "  Start proxy: name=\""
+               << (start ? start->GetSubgraphInfo()->debug_name : "")
+               << "\" parent=" << (start_basic_ok ? "null" : "WRONG")
+               << "  " << (start_basic_ok ? "PASS" : "FAIL") << "\n";
+
+  bool end_basic_ok =
+      counts_ok && end->IsSubgraphEndProxy() &&
+      end->GetParentSubgraphProxy() == start &&
+      end->GetSubgraphInfo() == start->GetSubgraphInfo() &&
+      end->GetSubgraphInfo()->end_proxy == end;
+  llvm::outs() << "  End proxy: parent=start info==start_info  "
+               << (end_basic_ok ? "PASS" : "FAIL") << "\n";
 
   bool member_parents_ok =
-      c->GetParentSubgraphProxy() == proxy &&
-      d->GetParentSubgraphProxy() == proxy &&
-      e->GetParentSubgraphProxy() == proxy &&
-      f->GetParentSubgraphProxy() == proxy;
+      c->GetParentSubgraphProxy() == start &&
+      d->GetParentSubgraphProxy() == start &&
+      e->GetParentSubgraphProxy() == start &&
+      f->GetParentSubgraphProxy() == start;
   bool nonmember_parents_ok =
       a->GetParentSubgraphProxy() == nullptr &&
       g->GetParentSubgraphProxy() == nullptr &&
@@ -295,45 +340,37 @@ void RunInsertSubgraphProxiesShakedown() {
                        : "FAIL")
                << "\n";
 
-  // Verify proxy's incoming edges: set == {A}, all
-  // kSubgraphOrderEdge. The set-equality check catches missing or
-  // extra targets; the NumPredecessors() == set size check catches
-  // duplicate edges to the same target (they'd collapse to one set
-  // entry but inflate NumPredecessors).
-  std::set<ScheduleNode *> expected_preds = {a};
-  std::set<ScheduleNode *> actual_preds;
-  bool pred_kinds_ok = true;
-  for (const ScheduleEdge &edge : proxy->Predecessors()) {
-    if (edge.kind_ != ScheduleEdge::kSubgraphOrderEdge) {
-      pred_kinds_ok = false;
-    }
-    actual_preds.insert(edge.node_);
-  }
-  bool preds_ok = pred_kinds_ok && actual_preds == expected_preds &&
-                  proxy->NumPredecessors() ==
-                      static_cast<int>(expected_preds.size());
-  llvm::outs() << "  proxy predecessors: count="
-               << proxy->NumPredecessors() << " expected_set={A}  "
-               << (preds_ok ? "PASS" : "FAIL") << "\n";
-
-  // Verify proxy's outgoing edges: set == {C,D,E,F}, all
-  // kSubgraphOrderEdge.
-  std::set<ScheduleNode *> expected_succs = {c, d, e, f};
-  std::set<ScheduleNode *> actual_succs;
-  bool succ_kinds_ok = true;
-  for (const ScheduleEdge &edge : proxy->Successors()) {
-    if (edge.kind_ != ScheduleEdge::kSubgraphOrderEdge) {
-      succ_kinds_ok = false;
-    }
-    actual_succs.insert(edge.node_);
-  }
-  bool succs_ok = succ_kinds_ok && actual_succs == expected_succs &&
-                  proxy->NumSuccessors() ==
-                      static_cast<int>(expected_succs.size());
-  llvm::outs() << "  proxy successors: count="
-               << proxy->NumSuccessors()
+  // Start proxy edges: predecessors == {A}, successors == {C,D,E,F}.
+  bool start_preds_ok =
+      counts_ok && CheckEdgeSet(start->Predecessors(),
+                                start->NumPredecessors(), {a});
+  llvm::outs() << "  Start proxy predecessors: count="
+               << (start ? start->NumPredecessors() : -1)
+               << " expected_set={A}  "
+               << (start_preds_ok ? "PASS" : "FAIL") << "\n";
+  bool start_succs_ok =
+      counts_ok && CheckEdgeSet(start->Successors(),
+                                start->NumSuccessors(), {c, d, e, f});
+  llvm::outs() << "  Start proxy successors: count="
+               << (start ? start->NumSuccessors() : -1)
                << " expected_set={C,D,E,F}  "
-               << (succs_ok ? "PASS" : "FAIL") << "\n";
+               << (start_succs_ok ? "PASS" : "FAIL") << "\n";
+
+  // End proxy edges: predecessors == {C,D,E,F}, successors == {G}.
+  bool end_preds_ok =
+      counts_ok && CheckEdgeSet(end->Predecessors(),
+                                end->NumPredecessors(), {c, d, e, f});
+  llvm::outs() << "  End proxy predecessors: count="
+               << (end ? end->NumPredecessors() : -1)
+               << " expected_set={C,D,E,F}  "
+               << (end_preds_ok ? "PASS" : "FAIL") << "\n";
+  bool end_succs_ok =
+      counts_ok && CheckEdgeSet(end->Successors(),
+                                end->NumSuccessors(), {g});
+  llvm::outs() << "  End proxy successors: count="
+               << (end ? end->NumSuccessors() : -1)
+               << " expected_set={G}  "
+               << (end_succs_ok ? "PASS" : "FAIL") << "\n";
 
   // Topological order is recomputed by InsertSubgraphProxies.
   bool topo_ok = graph->IsTopoSorted();

@@ -596,22 +596,32 @@ public:
     InvalidateDerivedData();
   }
 
-  /// Add subgraph-proxy nodes to this graph, one per SubgraphInfo
-  /// in `infos`. For each SubgraphInfo:
-  ///   1. Emplace a proxy node owning the SubgraphInfo (ownership
-  ///      of the unique_ptr transfers in here).
-  ///   2. Set the SubgraphInfo's subgraph_proxy backpointer.
+  /// Add subgraph-proxy nodes to this graph, TWO per SubgraphInfo
+  /// in `infos` (start proxy + end proxy). For each SubgraphInfo:
+  ///   1. Emplace the START proxy node owning the SubgraphInfo
+  ///      (ownership of the unique_ptr transfers in here).
+  ///   2. Set the SubgraphInfo's subgraph_proxy backpointer (= start).
   ///   3. Set parent_subgraph_proxy on each member (was nullptr
-  ///      → now the proxy).
-  ///   4. Add a kSubgraphOrderEdge edge from each ext_predecessor
-  ///      to the proxy (gates proxy readiness on externals).
-  ///   5. Add a kSubgraphOrderEdge edge from the proxy to each
-  ///      member (gates each member's readiness on the proxy
-  ///      being scheduled).
+  ///      → now the start proxy).
+  ///   4. Add a kSubgraphOrderEdge from each ext_predecessor to the
+  ///      start proxy (gates start readiness on externals).
+  ///   5. Add a kSubgraphOrderEdge from the start proxy to each
+  ///      member (gates each member's readiness on start).
+  ///   6. Emplace the END proxy node, holding a raw back-pointer to
+  ///      the SubgraphInfo (ownership stays with start). Set
+  ///      end_proxy's parent_subgraph_proxy to the start proxy so
+  ///      the end proxy lives INSIDE the subgraph scope.
+  ///   7. Set the SubgraphInfo's end_proxy backpointer.
+  ///   8. Add a kSubgraphOrderEdge from each member to the end
+  ///      proxy (gates end readiness on every member having been
+  ///      scheduled).
+  ///   9. Add a kSubgraphOrderEdge from the end proxy to each
+  ///      ext_successor (gates external successors on subgraph exit).
   ///
-  /// `infos` is consumed: each unique_ptr is moved into a proxy
-  /// node. Original member-to-member and member-to-external edges
-  /// are NOT modified.
+  /// `infos` is consumed: each unique_ptr is moved into a start
+  /// proxy node. Original member-to-member and member-to-external
+  /// edges are NOT modified — they keep their data latencies for
+  /// the length tracker; the new artificials are purely additive.
   ///
   /// Preconditions are checked internally with report_fatal_error
   /// (Phase 1b — flat two-level only):

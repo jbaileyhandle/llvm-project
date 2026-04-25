@@ -293,41 +293,71 @@ void CheckMembersDisjoint(
 
 } // anonymous namespace
 
-// Mutation step for one SubgraphInfo: emplace its proxy node,
-// transfer ownership of the SubgraphInfo into the proxy, set the
-// SubgraphInfo's subgraph_proxy backpointer, set
-// parent_subgraph_proxy on each member, and add the artificial
-// kSubgraphOrderEdge edges (P -> proxy for each ext_predecessor,
-// proxy -> M for each member).
+// Mutation step for one SubgraphInfo: emplace BOTH its start and
+// end proxy nodes, transfer SubgraphInfo ownership into the start
+// proxy (the end proxy holds a raw back-pointer), set
+// parent_subgraph_proxy on members and on the end proxy itself,
+// and add four families of kSubgraphOrderEdge artificials:
+//   - ext_predecessor → start_proxy  (gates start on external preds)
+//   - start_proxy → member           (gates members on start being scheduled)
+//   - member → end_proxy             (gates end on every member being scheduled)
+//   - end_proxy → ext_successor      (gates external succs on subgraph exit)
+//
+// Original member↔external real edges are NOT touched — they keep
+// their data latencies for the length tracker. The artificials are
+// purely additive.
 //
 // Member function (rather than anonymous-namespace helper) because
 // EmplaceNode is private — only ScheduleGraph members can call it.
 //
-// Note: the proxy's own parent_subgraph_proxy_ is left at its
-// default (nullptr). Under the flat Phase 1b shape every subgraph
-// is top-level — the proxy has no containing subgraph. When
-// nesting lands in a future phase, the parent subgraph's
-// InsertSubgraphProxies pass will set the sub-proxy's
-// parent_subgraph_proxy when the sub-proxy appears as one of the
-// parent's members. The flat case never produces that situation
+// Note on parent_subgraph_proxy assignment under the flat (two-level)
+// shape:
+//   - start_proxy's own parent_subgraph_proxy_ stays at default
+//     nullptr — every subgraph is top-level under flat Phase 2,
+//     so the start proxy lives in the base scope.
+//   - end_proxy's parent_subgraph_proxy_ is set to start_proxy so
+//     the end proxy lives INSIDE the subgraph scope (it gets
+//     released into that scope and is the node whose Schedule call
+//     pops the scope).
+// When nesting lands in a future phase, the enclosing subgraph's
+// InsertSubgraphProxies pass will overwrite the start proxy's
+// parent_subgraph_proxy if the start proxy appears as one of its
+// members. The flat case never produces that situation
 // (CheckNoNestedMembers rules it out).
 void ScheduleGraph::EmplaceProxyAndWireEdges(
     std::unique_ptr<SubgraphInfo> info_ptr) {
   // Capture the raw pointer before std::move null-s out info_ptr.
   // The SubgraphInfo object stays at the same heap address; only
-  // the unique_ptr's ownership transfers into the proxy ctor.
+  // the unique_ptr's ownership transfers into the start-proxy ctor.
   SubgraphInfo *info = info_ptr.get();
-  ScheduleNode &proxy = EmplaceNode(std::move(info_ptr), this);
 
-  info->subgraph_proxy = &proxy;
+  ScheduleNode &start_proxy = EmplaceNode(std::move(info_ptr), this);
+  info->subgraph_proxy = &start_proxy;
   for (ScheduleNode *m : info->members) {
-    m->SetParentSubgraphProxy(&proxy);
+    m->SetParentSubgraphProxy(&start_proxy);
   }
   for (ScheduleNode *p : info->ext_predecessors) {
-    AddEdge(p, &proxy, ScheduleEdge::kSubgraphOrderEdge, /*latency=*/0);
+    AddEdge(p, &start_proxy, ScheduleEdge::kSubgraphOrderEdge,
+            /*latency=*/0);
   }
   for (ScheduleNode *m : info->members) {
-    AddEdge(&proxy, m, ScheduleEdge::kSubgraphOrderEdge, /*latency=*/0);
+    AddEdge(&start_proxy, m, ScheduleEdge::kSubgraphOrderEdge,
+            /*latency=*/0);
+  }
+
+  // End proxy: takes a raw SubgraphInfo* (ownership stays with the
+  // start proxy). Lives inside the subgraph scope, so its
+  // parent_subgraph_proxy is the start proxy.
+  ScheduleNode &end_proxy = EmplaceNode(info, this);
+  info->end_proxy = &end_proxy;
+  end_proxy.SetParentSubgraphProxy(&start_proxy);
+  for (ScheduleNode *m : info->members) {
+    AddEdge(m, &end_proxy, ScheduleEdge::kSubgraphOrderEdge,
+            /*latency=*/0);
+  }
+  for (ScheduleNode *s : info->ext_successors) {
+    AddEdge(&end_proxy, s, ScheduleEdge::kSubgraphOrderEdge,
+            /*latency=*/0);
   }
 }
 
