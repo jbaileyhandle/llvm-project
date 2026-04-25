@@ -533,15 +533,16 @@ public:
 
   /// Reserve capacity in nodes_ sized for a graph that starts with
   /// `initial_count` nodes and may subsequently have up to
-  /// `initial_count` subgraph proxies inserted (plus 2 entry/exit
-  /// sentinels). This is the headroom InsertSubgraphProxies needs
-  /// to emplace proxies without reallocating nodes_ — and a
-  /// reallocation would invalidate every ScheduleNode * stored in
-  /// any ScheduleEdge. Every graph builder (BuildFromSUnits +
-  /// the test-DAG factories) calls this exactly once, before
-  /// emplacing any nodes.
+  /// `initial_count` subgraphs inserted, where each subgraph adds
+  /// TWO proxy nodes (start and end). Plus 2 entry/exit sentinels.
+  /// Total: initial_count + 2*initial_count + 2 = 3*initial_count + 2.
+  /// This is the headroom InsertSubgraphProxies needs to emplace
+  /// proxies without reallocating nodes_ — and a reallocation would
+  /// invalidate every ScheduleNode * stored in any ScheduleEdge.
+  /// Every graph builder (BuildFromSUnits + the test-DAG factories)
+  /// calls this exactly once, before emplacing any nodes.
   void ReserveNodes(int initial_count) {
-    nodes_.reserve(initial_count * 2 + 2);
+    nodes_.reserve(initial_count * 3 + 2);
   }
 
   /// Add an edge from `from` to `to`. The graph routes all edge

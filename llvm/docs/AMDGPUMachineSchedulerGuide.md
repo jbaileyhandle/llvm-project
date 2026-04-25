@@ -1997,6 +1997,177 @@ not themaxWavesPerEU starting point.
   payoff unclear without measurement. Revisit once the simple
   per-pass design is proven.
 
+- **Memory op clustering: decide our stance.** Upstream installs
+  `BaseMemOpClusterMutation` on our DAG via the scheduler factory
+  (`AMDGPUTargetMachine.cpp:1324`), so cluster information is
+  already on the SUnits when our `schedule()` runs. We have not
+  yet decided what to do with it.
+
+  **The mutation produces TWO different kinds of edges, and the
+  distinction matters.** For a load cluster pair `A → B`, after
+  `BaseMemOpClusterMutation::clusterNeighboringMemOps`
+  (`MachineScheduler.cpp:2155-2173`):
+
+  1. **One `SDep::Cluster` edge** `A → B`. **Weak.** Does NOT
+     gate readiness — `WeakPredsLeft` increments instead of
+     `NumPredsLeft`. Its only role is to set
+     `NextClusterSucc = B` when `A` is scheduled
+     (`MachineScheduler.cpp:983-1028`); the strategy then prefers
+     `B` as a tiebreaker among ready candidates. Pure priority
+     hint.
+
+  2. **N `SDep::Artificial` edges** `B → Succ` for every original
+     successor `Succ` of `A` (and the symmetric construction for
+     stores: `Pred → A` for each predecessor of `B`). **Strong.**
+     These DO gate readiness: any consumer of `A` now also
+     depends on `B`, so it cannot be scheduled until both are
+     placed — which is what prevents `A`'s consumers from
+     slipping between `A` and `B`. This is the part that does the
+     real work of keeping cluster members close.
+
+  So upstream "memory op clustering" is really two mechanisms
+  glued together: **strong window-narrowing edges** (the
+  artificials) plus a **weak priority hint** (the cluster edge).
+  The cluster edge alone guarantees nothing. The artificials
+  alone guarantee no consumer of `A` slips between `A` and `B`,
+  but **unrelated** nodes (those with no path to/from `A`) can
+  still be inserted between them — neither mechanism stops that.
+  True contiguity is only achieved when the heuristic happens to
+  cooperate.
+
+  Note also that `SDep::Artificial` is generic — many other DAG
+  mutations add artificial edges (e.g.,
+  `AMDGPUMacroFusionDAGMutation`,
+  `AMDGPUExportClusteringDAGMutation`, the `IGroupLP` mutation),
+  and there is no mark on the SDep saying "this artificial came
+  from cluster mutation." If our scheduler ever wants to reason
+  about clusters specifically, we have to look at `isCluster()`
+  edges, not at `isArtificial()` ones.
+
+  **Stances open for our scheduler.**
+
+  1. **Suppress.** Disable `BaseMemOpClusterMutation` outright
+     (or drop both kinds of edges in our importer) so neither
+     the artificials nor the hint ever reach our DFS. Right
+     answer if total benefit < flexibility cost.
+  2. **Ignore (current behavior).** Drop weak edges in our
+     importer, but keep the strong artificials. `IsStrongEdge()`
+     excludes `kCluster`, and the length tracker excludes them
+     via `IsLatencyEdge()`; the artificials are `kArtificial`
+     and ARE respected. So consumers of `A` still cannot slip
+     between `A` and `B`, but we lose the priority hint —
+     unrelated independent nodes will get inserted between
+     cluster members more often than they would in MISched.
+  3. **Favor (soft).** Recreate MISched-style tiebreaking inside
+     our DFS. Track a `next_cluster_*` pointer when a clustered
+     node is scheduled; when multiple candidates are otherwise
+     tied, prefer the one that completes a recent cluster.
+     Closes the gap described in option 2 without changing
+     correctness semantics.
+  4. **Enforce (subgraph promotion).** Walk `kCluster`-connected
+     components, build a `SubgraphInfo` per component, hand them
+     to `InsertSubgraphProxies`. The proxy + scope-stack
+     mechanism is strictly stronger than what either MISched or
+     OptSched does today — non-member nodes literally cannot
+     become ready while a subgraph's scope is active, so even
+     unrelated independent nodes are blocked from slipping in.
+     Re-entrancy rejection (topo cycle through the artificial
+     proxy edges) silently filters out components that would
+     form invalid subgraphs.
+
+  **What other schedulers do, with the cluster-vs-artificial
+  distinction in mind.** GCNMaxOccupancy (MISched-based) honors
+  the strong artificial edges as ordering (no choice — they're
+  strong) and uses the weak cluster edge as a soft tiebreaker via
+  `NextClusterSucc`/`NextClusterPred` in `tryCandidate`
+  (`GCNSchedStrategy.cpp:466-472`); pressure or other criteria
+  can outvote the cluster preference. The MISched comment at
+  line 3818 of `MachineScheduler.cpp` is candid: "best effort to
+  set things up for a post-RA pass."
+
+  OptSched runs two passes (`OptSchedDDGWrapperBasic.cpp:417`,
+  `sched_region.hip.cpp:359-365`). The first pass calls
+  `convertEdges(SU, IgnoreArtificialEdges=true)`, which lumps
+  cluster *and* generic-artificial together and drops them all —
+  so the first-pass DDG has neither the priority hint nor the
+  window-narrowing edges. The second pass calls
+  `addArtificialEdges()`, which re-runs `convertEdges` with
+  `IgnoreRealEdges=true` to admit exactly those skipped edges,
+  inserting both kinds as plain `DEP_OTHER` ordering edges
+  flagged `IsArtificial=true`. Important: even the second pass
+  is treating cluster info as hard *ordering*, not as *adjacency*.
+  Promoting a weak hint to hard ordering is stronger than
+  MISched (the hint can no longer be outvoted) but it's not
+  contiguity — unrelated independent nodes can still slip
+  between cluster members in either scheduler.
+
+  **Open empirical questions: a cost/benefit problem.** The
+  decision is whether the upside from clustering outweighs the
+  downside paid in scheduling flexibility. Three things to
+  measure on the benchmarks we care about:
+
+  1. **How often does the clustering mutation suggest a
+     cluster?** I.e., how many `SDep::Cluster` edges does
+     `BaseMemOpClusterMutation` emit per region, and across what
+     fraction of memops? This is the *opportunity rate* — the
+     number of cases where clustering is even on the table. If
+     the rate is low, none of the downstream questions matter
+     much.
+
+  2. **When a cluster is honored and `SILoadStoreOptimizer`
+     (Appendix D) merges its members into a wider memory op
+     (e.g., two `BUFFER_LOAD_DWORD` → one
+     `BUFFER_LOAD_DWORDX2`), how much performance does that
+     merge actually buy us?** This is a hardware question about
+     gfx906's memory pipeline — issue slots, pipe occupancy,
+     latency hiding, register-write bandwidth. We don't
+     currently know the answer. Possibilities range from "wider
+     op is essentially free per-byte loaded — close to 2x
+     speedup over two narrow ops" to "wider op uses similar
+     pipe time as one narrow op — modest win at best." The
+     number sets the *value of each successful merge*.
+     Multiplying by question 1 gives total upside of clustering
+     (assuming we honor the suggestions and the optimizer can
+     do its job).
+
+  3. **How much harm do the cluster mutation's edges do to
+     scheduling flexibility?** The cost paid by all the edges
+     introduced — paid whether or not any merge happens. The
+     strong artificial successor copies in particular force a
+     substantial reduction in legal orderings, since every
+     consumer of `A` now also waits on `B`. That can cost
+     register pressure, schedule length, or occupancy. To
+     measure: schedule the same regions with and without
+     `BaseMemOpClusterMutation` enabled, compare final
+     occupancy / pressure / length / runtime.
+
+  Putting them together: if (1) × (2) > (3), pursue clustering
+  — the question is then which of options 3 or 4 best captures
+  the upside. If (1) × (2) < (3), the right answer is option 1
+  (suppress) — strictly stronger than the current "ignore the
+  hint, keep the artificials" posture.
+
+  See Appendix C for the upstream clustering pipeline, and
+  section 10.10 for how subgraph proxies (the option-4
+  mechanism) fit into the planned hierarchical pipeline.
+
+- **`ScheduleConstructor::ScheduleByIndex` captures a dangling
+  ready-list reference across `scopes_.push_back`.** The function
+  starts with `auto &ready_list = scopes_.back().ready` and later
+  does `scopes_.push_back(...)` (when scheduling a start proxy).
+  `scopes_` is a `std::vector<SubgraphScheduleScope>` with no
+  reservation, so `push_back` can reallocate, moving each
+  `SubgraphScheduleScope` (and its contained `SmallVector ready`)
+  to a new address. The `ready_list` reference is then dangling
+  for the subsequent `ReadyListEraseAt(ready_list, index)` call.
+  Today this works by luck — `scopes_` rarely grows past its
+  initial capacity. Fix: erase from `ready_list` BEFORE mutating
+  `scopes_`, or reserve `scopes_` capacity at construction. The
+  end-proxy refactor will reorder operations to fix this as a
+  side effect (erase-then-mutate); confirm the fix lands, and
+  consider a `scopes_.reserve(...)` at construction for defense
+  in depth (max stack depth = subgraph nesting depth + 1).
+
 - **Pointer-vs-reference convention audit.** The Google C++ Style
   Guide rules for argument and member types are:
   - `const T&` for input-only arguments that are never null and
