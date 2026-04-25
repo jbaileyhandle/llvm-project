@@ -19,9 +19,13 @@
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
+#include "SubgraphInfo.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
+#include <memory>
+#include <set>
+#include <vector>
 
 using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
@@ -188,6 +192,154 @@ void RunTestDAGShakedown() {
   // with graph ToString. Uncomment to re-test:
   // auto cyclic = ScheduleGraph::BuildTestDAGWithCycle();
   // cyclic->ValidateAndComputeTopologicalOrder();
+}
+
+// Exercises ScheduleGraph::InsertSubgraphProxies on BuildTestDAG.
+// BuildTestDAG layout (7 nodes, indexed in emplacement order):
+//   0=A, 1=C, 2=D, 3=E, 4=F, 5=G, 6=H
+// Edges: A→H, A→C, A→D, C→D, C→E, D→F, E→F, H→G, F→G.
+//
+// Subgraph S = {C, D, E, F}. Walking members' edges:
+//   - Predecessors of members not in S: A (via A→C, A→D).
+//   - Successors of members not in S: G (via F→G).
+// Expect: ext_predecessors = [A], ext_successors = [G].
+//
+// After InsertSubgraphProxies:
+//   - One new proxy node, IsSubgraphProxy(), parent_subgraph_proxy
+//     == nullptr (top-level), GetSubgraphInfo()->debug_name == "S".
+//   - Members C, D, E, F have parent_subgraph_proxy == proxy.
+//   - Non-members A, G, H have null parent_subgraph_proxy.
+//   - proxy's incoming edge set == {A}, all kSubgraphOrderEdge.
+//   - proxy's outgoing edge set == {C, D, E, F}, all
+//     kSubgraphOrderEdge.
+//   - graph.Size() == 8 (was 7 + 1 proxy).
+//   - graph.NumSchedulingUnits() == 7 (proxies excluded).
+//   - Topological order is recomputed (cycle-free).
+void RunInsertSubgraphProxiesShakedown() {
+  auto graph = ScheduleGraph::BuildTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+
+  // BuildTestDAG emplaces in order [A, C, D, E, F, G, H].
+  ScheduleNode *a = &graph->Nodes()[0];
+  ScheduleNode *c = &graph->Nodes()[1];
+  ScheduleNode *d = &graph->Nodes()[2];
+  ScheduleNode *e = &graph->Nodes()[3];
+  ScheduleNode *f = &graph->Nodes()[4];
+  ScheduleNode *g = &graph->Nodes()[5];
+  ScheduleNode *h = &graph->Nodes()[6];
+
+  // Construct the SubgraphInfo. The ctor walks members' edges to
+  // populate ext_predecessors / ext_successors.
+  SmallVector<ScheduleNode *, 4> members = {c, d, e, f};
+  auto info = std::make_unique<SubgraphInfo>(members, "S");
+
+  // ── Verify boundary computation BEFORE insertion ────────────────
+  bool boundary_ok = info->ext_predecessors.size() == 1 &&
+                     info->ext_predecessors[0] == a &&
+                     info->ext_successors.size() == 1 &&
+                     info->ext_successors[0] == g;
+  llvm::outs() << "  SubgraphInfo boundary: ext_predecessors=["
+               << info->ext_predecessors.size() << "] ext_successors=["
+               << info->ext_successors.size() << "]  "
+               << (boundary_ok ? "PASS" : "FAIL") << "\n";
+
+  // ── Insert ─────────────────────────────────────────────────────
+  std::vector<std::unique_ptr<SubgraphInfo>> infos;
+  infos.push_back(std::move(info));
+  graph->InsertSubgraphProxies(std::move(infos));
+
+  // The proxy is the only IsSubgraphProxy node (and there should
+  // be exactly one).
+  ScheduleNode *proxy = nullptr;
+  int proxy_count = 0;
+  for (ScheduleNode &n : graph->Nodes()) {
+    if (n.IsSubgraphProxy()) {
+      ++proxy_count;
+      proxy = &n;
+    }
+  }
+
+  // ── Verify post-insertion structure ────────────────────────────
+  bool size_ok =
+      graph->Size() == 8 && graph->NumSchedulingUnits() == 7;
+  llvm::outs() << "  Graph size: total=" << graph->Size()
+               << " scheduling_units=" << graph->NumSchedulingUnits()
+               << "  " << (size_ok ? "PASS" : "FAIL") << "\n";
+
+  bool proxy_basic_ok =
+      proxy_count == 1 && proxy != nullptr &&
+      proxy->IsSubgraphProxy() &&
+      proxy->GetParentSubgraphProxy() == nullptr &&
+      proxy->GetSubgraphInfo()->debug_name == "S" &&
+      proxy->GetSubgraphInfo()->subgraph_proxy == proxy;
+  llvm::outs() << "  Proxy node: count=" << proxy_count
+               << " name=\""
+               << (proxy ? proxy->GetSubgraphInfo()->debug_name : "")
+               << "\"  " << (proxy_basic_ok ? "PASS" : "FAIL") << "\n";
+
+  bool member_parents_ok =
+      c->GetParentSubgraphProxy() == proxy &&
+      d->GetParentSubgraphProxy() == proxy &&
+      e->GetParentSubgraphProxy() == proxy &&
+      f->GetParentSubgraphProxy() == proxy;
+  bool nonmember_parents_ok =
+      a->GetParentSubgraphProxy() == nullptr &&
+      g->GetParentSubgraphProxy() == nullptr &&
+      h->GetParentSubgraphProxy() == nullptr;
+  llvm::outs() << "  parent_subgraph_proxy: members="
+               << (member_parents_ok ? "set" : "WRONG")
+               << " non-members="
+               << (nonmember_parents_ok ? "null" : "WRONG") << "  "
+               << ((member_parents_ok && nonmember_parents_ok)
+                       ? "PASS"
+                       : "FAIL")
+               << "\n";
+
+  // Verify proxy's incoming edges: set == {A}, all
+  // kSubgraphOrderEdge. The set-equality check catches missing or
+  // extra targets; the NumPredecessors() == set size check catches
+  // duplicate edges to the same target (they'd collapse to one set
+  // entry but inflate NumPredecessors).
+  std::set<ScheduleNode *> expected_preds = {a};
+  std::set<ScheduleNode *> actual_preds;
+  bool pred_kinds_ok = true;
+  for (const ScheduleEdge &edge : proxy->Predecessors()) {
+    if (edge.kind_ != ScheduleEdge::kSubgraphOrderEdge) {
+      pred_kinds_ok = false;
+    }
+    actual_preds.insert(edge.node_);
+  }
+  bool preds_ok = pred_kinds_ok && actual_preds == expected_preds &&
+                  proxy->NumPredecessors() ==
+                      static_cast<int>(expected_preds.size());
+  llvm::outs() << "  proxy predecessors: count="
+               << proxy->NumPredecessors() << " expected_set={A}  "
+               << (preds_ok ? "PASS" : "FAIL") << "\n";
+
+  // Verify proxy's outgoing edges: set == {C,D,E,F}, all
+  // kSubgraphOrderEdge.
+  std::set<ScheduleNode *> expected_succs = {c, d, e, f};
+  std::set<ScheduleNode *> actual_succs;
+  bool succ_kinds_ok = true;
+  for (const ScheduleEdge &edge : proxy->Successors()) {
+    if (edge.kind_ != ScheduleEdge::kSubgraphOrderEdge) {
+      succ_kinds_ok = false;
+    }
+    actual_succs.insert(edge.node_);
+  }
+  bool succs_ok = succ_kinds_ok && actual_succs == expected_succs &&
+                  proxy->NumSuccessors() ==
+                      static_cast<int>(expected_succs.size());
+  llvm::outs() << "  proxy successors: count="
+               << proxy->NumSuccessors()
+               << " expected_set={C,D,E,F}  "
+               << (succs_ok ? "PASS" : "FAIL") << "\n";
+
+  // Topological order is recomputed by InsertSubgraphProxies.
+  bool topo_ok = graph->IsTopoSorted();
+  llvm::outs() << "  Topological order recomputed: "
+               << (topo_ok ? "yes" : "no") << "  "
+               << (topo_ok ? "PASS" : "FAIL") << "\n";
 }
 
 // Verifies ScheduleLengthTracker::GetLengthLowerBound against hand-
@@ -839,6 +991,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
   RunContinuousScoreTableSweepShakedown(st);
   RunTestDAGShakedown();
+  RunInsertSubgraphProxiesShakedown();
   RunLengthLowerBoundShakedown(st);
 
   for (auto &region : regions_) {

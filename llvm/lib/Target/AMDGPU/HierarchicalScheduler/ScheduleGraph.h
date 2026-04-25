@@ -56,6 +56,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULEGRAPH_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULEGRAPH_H
 
+#include "SubgraphInfo.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -87,7 +88,6 @@ class ScheduleConstructor;
 class ScheduleGraph;
 class ScheduleNode;
 struct ReducedGraph;
-struct SubgraphInfo;
 
 /// A register paired with the lane mask indicating which sub-register
 /// lanes are relevant. Used on entry/exit nodes where LiveIntervals
@@ -531,6 +531,19 @@ public:
   /// proxies exist, so this equals Size(). Lazily counted; cached.
   int NumSchedulingUnits() const;
 
+  /// Reserve capacity in nodes_ sized for a graph that starts with
+  /// `initial_count` nodes and may subsequently have up to
+  /// `initial_count` subgraph proxies inserted (plus 2 entry/exit
+  /// sentinels). This is the headroom InsertSubgraphProxies needs
+  /// to emplace proxies without reallocating nodes_ — and a
+  /// reallocation would invalidate every ScheduleNode * stored in
+  /// any ScheduleEdge. Every graph builder (BuildFromSUnits +
+  /// the test-DAG factories) calls this exactly once, before
+  /// emplacing any nodes.
+  void ReserveNodes(int initial_count) {
+    nodes_.reserve(initial_count * 2 + 2);
+  }
+
   /// Add an edge from `from` to `to`. The graph routes all edge
   /// additions through here so that derived caches (topo, cp,
   /// reduced, dom, ...) are invalidated automatically — see
@@ -541,6 +554,53 @@ public:
     from->AddSuccessor(ScheduleEdge(to, kind, latency));
     InvalidateDerivedData();
   }
+
+  /// Add subgraph-proxy nodes to this graph, one per SubgraphInfo
+  /// in `infos`. For each SubgraphInfo:
+  ///   1. Emplace a proxy node owning the SubgraphInfo (ownership
+  ///      of the unique_ptr transfers in here).
+  ///   2. Set the SubgraphInfo's subgraph_proxy backpointer.
+  ///   3. Set parent_subgraph_proxy on each member (was nullptr
+  ///      → now the proxy).
+  ///   4. Add a kSubgraphOrderEdge edge from each ext_predecessor
+  ///      to the proxy (gates proxy readiness on externals).
+  ///   5. Add a kSubgraphOrderEdge edge from the proxy to each
+  ///      member (gates each member's readiness on the proxy
+  ///      being scheduled).
+  ///
+  /// `infos` is consumed: each unique_ptr is moved into a proxy
+  /// node. Original member-to-member and member-to-external edges
+  /// are NOT modified.
+  ///
+  /// Preconditions are checked internally with report_fatal_error
+  /// (Phase 1b — flat two-level only):
+  ///   - No node appears as a member of more than one SubgraphInfo.
+  ///   - Every member is a scheduling unit (no nesting — members
+  ///     are not themselves subgraph proxies).
+  ///
+  /// On return, the graph is in a queryable state for the
+  /// scheduler:
+  ///   - Topological order is recomputed. Its cycle check IS the
+  ///     re-entrancy detector for the just-inserted subgraphs:
+  ///     the artificial edges close any path through an external
+  ///     node between two members, so re-entrancy surfaces as a
+  ///     graph cycle reported by
+  ///     ValidateAndComputeTopologicalOrder.
+  ///   - Critical-path-from-exit is recomputed (scheduler
+  ///     precondition).
+  ///
+  /// Reduced graph and dominator tree are NOT recomputed. Those
+  /// analyses are inputs to subgraph-formation heuristics; once
+  /// subgraphs have been formed and inserted here, the formation
+  /// work is done and they hold no further value. (They would
+  /// also be measuring a different graph — one with proxy nodes
+  /// and artificial edges — so the post-insertion versions
+  /// wouldn't match what the formation pass was working with
+  /// anyway.)
+  ///
+  /// No-op if `infos` is empty: no mutation, no recompute.
+  void InsertSubgraphProxies(
+      std::vector<std::unique_ptr<SubgraphInfo>> infos);
 
   /// Umbrella entry point: verify single-source / single-sink (under
   /// both the strong-edge and all-edge interpretations, for safety)
@@ -775,6 +835,13 @@ private:
     InvalidateDerivedData();
     return nodes_.back();
   }
+
+  /// Mutation step for one SubgraphInfo, called by
+  /// InsertSubgraphProxies. Emplaces a proxy node owning the
+  /// SubgraphInfo, sets backpointer + parent_subgraph_proxy, adds
+  /// the kSubgraphOrderEdge artificial edges. See implementation
+  /// for the full step list.
+  void EmplaceProxyAndWireEdges(std::unique_ptr<SubgraphInfo> info);
 
   // --- Construction helpers (used by BuildFromSUnits) ---
 

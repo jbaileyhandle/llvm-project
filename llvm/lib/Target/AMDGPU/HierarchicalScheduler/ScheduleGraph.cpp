@@ -12,6 +12,8 @@
 #include "SubgraphInfo.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -240,6 +242,104 @@ int ScheduleGraph::NumSchedulingUnits() const {
   return *cached_num_scheduling_units_;
 }
 
+namespace {
+
+/// Precondition check for InsertSubgraphProxies: every member of
+/// every SubgraphInfo is a scheduling unit. Nested subgraphs are
+/// deferred to a future phase; until then a subgraph proxy
+/// appearing as a member is treated as a malformed input.
+void CheckNoNestedMembers(
+    ArrayRef<std::unique_ptr<SubgraphInfo>> infos) {
+  for (const auto &info : infos) {
+    for (ScheduleNode *m : info->members) {
+      if (!m->IsSchedulingUnit()) {
+        report_fatal_error(
+            "InsertSubgraphProxies: SubgraphInfo \"" +
+            Twine(info->debug_name) +
+            "\" has a member that is itself a subgraph proxy "
+            "(node " +
+            Twine(m->GetId()) +
+            "); nested subgraphs are not yet supported");
+      }
+    }
+  }
+}
+
+/// Precondition check for InsertSubgraphProxies: each node appears
+/// as a member of at most one SubgraphInfo.
+void CheckMembersDisjoint(
+    ArrayRef<std::unique_ptr<SubgraphInfo>> infos) {
+  SmallPtrSet<ScheduleNode *, 32> seen;
+  for (const auto &info : infos) {
+    for (ScheduleNode *m : info->members) {
+      if (!seen.insert(m).second) {
+        report_fatal_error(
+            "InsertSubgraphProxies: node " + Twine(m->GetId()) +
+            " appears as a member of more than one SubgraphInfo");
+      }
+    }
+  }
+}
+
+} // anonymous namespace
+
+// Mutation step for one SubgraphInfo: emplace its proxy node,
+// transfer ownership of the SubgraphInfo into the proxy, set the
+// SubgraphInfo's subgraph_proxy backpointer, set
+// parent_subgraph_proxy on each member, and add the artificial
+// kSubgraphOrderEdge edges (P -> proxy for each ext_predecessor,
+// proxy -> M for each member).
+//
+// Member function (rather than anonymous-namespace helper) because
+// EmplaceNode is private — only ScheduleGraph members can call it.
+//
+// Note: the proxy's own parent_subgraph_proxy_ is left at its
+// default (nullptr). Under the flat Phase 1b shape every subgraph
+// is top-level — the proxy has no containing subgraph. When
+// nesting lands in a future phase, the parent subgraph's
+// InsertSubgraphProxies pass will set the sub-proxy's
+// parent_subgraph_proxy when the sub-proxy appears as one of the
+// parent's members. The flat case never produces that situation
+// (CheckNoNestedMembers rules it out).
+void ScheduleGraph::EmplaceProxyAndWireEdges(
+    std::unique_ptr<SubgraphInfo> info_ptr) {
+  // Capture the raw pointer before std::move null-s out info_ptr.
+  // The SubgraphInfo object stays at the same heap address; only
+  // the unique_ptr's ownership transfers into the proxy ctor.
+  SubgraphInfo *info = info_ptr.get();
+  ScheduleNode &proxy = EmplaceNode(std::move(info_ptr), this);
+
+  info->subgraph_proxy = &proxy;
+  for (ScheduleNode *m : info->members) {
+    m->SetParentSubgraphProxy(&proxy);
+  }
+  for (ScheduleNode *p : info->ext_predecessors) {
+    AddEdge(p, &proxy, ScheduleEdge::kSubgraphOrderEdge, /*latency=*/0);
+  }
+  for (ScheduleNode *m : info->members) {
+    AddEdge(&proxy, m, ScheduleEdge::kSubgraphOrderEdge, /*latency=*/0);
+  }
+}
+
+void ScheduleGraph::InsertSubgraphProxies(
+    std::vector<std::unique_ptr<SubgraphInfo>> infos) {
+  if (infos.empty()) {
+    return;
+  }
+
+  CheckNoNestedMembers(infos);
+  CheckMembersDisjoint(infos);
+
+  for (auto &info_ptr : infos) {
+    EmplaceProxyAndWireEdges(std::move(info_ptr));
+  }
+
+  // Topo recompute also re-runs cycle detection, our re-entrancy
+  // catch for the just-inserted subgraphs.
+  ValidateAndComputeTopologicalOrder();
+  ComputeCriticalPathFromExit();
+}
+
 // Kahn's algorithm: iteratively remove nodes with no unmet predecessors.
 void ScheduleGraph::ValidateAndComputeTopologicalOrder(
     bool include_weak_edges) {
@@ -444,15 +544,12 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
                                const RegionInfo &region) {
   auto graph = std::make_unique<ScheduleGraph>();
 
-  // Reserve generously: 2x SUnits + 2 entry/exit nodes. The 2x
-  // factor leaves headroom for future subgraph-insertion passes that
-  // add subgraph proxy nodes (one per subgraph). Without enough
-  // headroom, EmplaceNode would fail assertertion (and rightly so — 
-  // reallocating nodes_ would invalidate every ScheduleNode * stored in any
-  // ScheduleEdge anywhere in the graph). Worst case for subgraph
-  // formation is one proxy per real instruction, so 2x should 
-  // cover it.
-  graph->nodes_.reserve(sunits.size() * 2 + 2);
+  // ReserveNodes provides 2x SUnits + 2 entry/exit nodes of
+  // capacity — the 2x covers the worst-case subgraph-proxy count
+  // (one proxy per real instruction). See ReserveNodes for why
+  // this matters (preventing nodes_ reallocation that would
+  // invalidate stored ScheduleNode * pointers in ScheduleEdges).
+  graph->ReserveNodes(static_cast<int>(sunits.size()));
 
   // Slot indices at the region's top and bottom. Used by Phase 3 to
   // query LiveIntervals for live-in/live-out registers at the
@@ -710,7 +807,7 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAG() {
 
   // 7 nodes: A, C, D, E, F, G, H (leaves wrapping nullptr since we
   // have no real SUnits).
-  graph->nodes_.reserve(7);
+  graph->ReserveNodes(7);
   ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
   ScheduleNode &c = graph->EmplaceNode(nullptr, "C", graph.get());
   ScheduleNode &d = graph->EmplaceNode(nullptr, "D", graph.get());
@@ -739,7 +836,7 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAG() {
 std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildLengthLowerBoundTestDAG() {
   auto graph = std::make_unique<ScheduleGraph>();
 
-  graph->nodes_.reserve(6);
+  graph->ReserveNodes(6);
   ScheduleNode &n0 = graph->EmplaceNode(nullptr, "N0", graph.get());
   ScheduleNode &n1 = graph->EmplaceNode(nullptr, "N1", graph.get());
   ScheduleNode &n2 = graph->EmplaceNode(nullptr, "N2", graph.get());
@@ -766,7 +863,7 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAGWithCycle() {
   auto graph = std::make_unique<ScheduleGraph>();
 
   // 3 nodes with a cycle: A → B → C → B
-  graph->nodes_.reserve(3);
+  graph->ReserveNodes(3);
   ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
   ScheduleNode &b = graph->EmplaceNode(nullptr, "B", graph.get());
   ScheduleNode &c = graph->EmplaceNode(nullptr, "C", graph.get());
