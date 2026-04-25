@@ -40,11 +40,10 @@ void RegisterTracker::ExtractRegOps(ArrayRef<ScheduleNode *> nodes,
                                     const TargetRegisterInfo &tri) {
   for (ScheduleNode *node : nodes) {
     if (!node->IsSchedulingUnit()) {
-      std::string msg =
-          "RegisterTracker does not yet support subgraph proxies. "
-          "Node: " +
-          node->ToString();
-      report_fatal_error(StringRef(msg));
+      // Subgraph proxies have no register effect (synthetic node).
+      // Skip extraction; Schedule/Unschedule below also self-skip
+      // for proxies.
+      continue;
     }
 
     // Read defs/uses from the node (populated during graph construction
@@ -91,6 +90,14 @@ void RegisterTracker::BuildRegStates(const MachineRegisterInfo &mri,
 }
 
 void RegisterTracker::Schedule(const ScheduleNode *node) {
+  // Subgraph proxies have no register effect (synthetic node).
+  // Early return so ScheduleConstructor can call trackers
+  // uniformly without branching on node kind. Symmetric with
+  // Unschedule.
+  if (!node->IsSchedulingUnit()) {
+    return;
+  }
+
   // Save peak pressure before this step (for Unschedule to restore).
   std::array<int, kNumRegTypes> saved_peak;
   for (int i = 0; i < kNumRegTypes; ++i) {
@@ -140,6 +147,12 @@ void RegisterTracker::Schedule(const ScheduleNode *node) {
 }
 
 void RegisterTracker::Unschedule(const ScheduleNode *node) {
+  // Symmetric with Schedule: proxies were no-ops, so undo is also
+  // a no-op.
+  if (!node->IsSchedulingUnit()) {
+    return;
+  }
+
   auto ops_it = instr_reg_ops_.find(node);
   if (ops_it != instr_reg_ops_.end()) {
     const InstrRegOps &ops = ops_it->second;

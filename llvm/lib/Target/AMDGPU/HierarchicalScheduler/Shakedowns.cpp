@@ -131,7 +131,7 @@ void CheckOneLengthLowerBoundRun(ScheduleGraph &graph,
   int reverse_mismatches = 0;
   llvm::outs() << "  LB on " << label << " (reverse):";
   for (int i = graph.Size() - 1; i >= 0; --i) {
-    tracker.Unschedule();
+    tracker.Unschedule(graph.GetTopoOrder()[i]);
     lb = tracker.GetLengthLowerBound();
     llvm::outs() << " " << lb;
     if (lb != expected_lb[i]) {
@@ -657,7 +657,7 @@ void RunScheduleLengthTrackerShakedown(ScheduleGraph &graph,
   llvm::outs() << "  Schedule length trace (unschedule):\n";
   int reverse_violations = 0;
   for (int i = static_cast<int>(graph.GetTopoOrder().size()) - 1; i >= 0; --i) {
-    tracker.Unschedule();
+    tracker.Unschedule(graph.GetTopoOrder()[i]);
     int lb = tracker.GetLengthLowerBound();
     int expected = lb_after[i];
     llvm::outs() << "    undo  " << tracker.Describe()

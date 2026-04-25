@@ -98,12 +98,12 @@ public:
   ///
   /// For scheduling-unit nodes with a MachineInstr, extracts
   /// defs/uses with lane masks. For entry/exit nodes (no MI), reads
-  /// from ScheduleNode::RegDefs()/RegUses().
+  /// from ScheduleNode::RegDefs()/RegUses(). Subgraph proxies are
+  /// silently skipped (their per-topo-index slot stays empty —
+  /// ScheduleConstructor's dispatch filters them at runtime).
   ///
   /// LiveIntervals is needed for accurate use-mask extraction on
   /// multi-lane registers.
-  ///
-  /// Reports fatal error if a subgraph proxy is encountered.
   /// Warns if the MachineFunction contains non-inlined function calls.
   GCNRegisterTracker(const ScheduleGraph &graph,
                      const MachineFunction &mf,
@@ -338,9 +338,6 @@ private:
   static void ExtractFromNodeRegLists(const ScheduleNode *node,
                                       NodeRegInfo &info,
                                       const MachineRegisterInfo &mri);
-
-  /// Placeholder: fatal error for subgraph proxies (not yet supported).
-  static void ExtractFromSubgraphProxy(const ScheduleNode *node);
 
   // --- Schedule helpers ---
 

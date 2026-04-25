@@ -87,11 +87,11 @@ ScheduleLengthTracker::ScheduleLengthTracker(const ScheduleGraph &graph,
 // ============================================================================
 
 void ScheduleLengthTracker::Schedule(const ScheduleNode *node) {
+  // Subgraph proxies are synthetic and consume no cycles. Early
+  // return so ScheduleConstructor can call trackers uniformly
+  // without branching on node kind. Symmetric with Unschedule.
   if (!node->IsSchedulingUnit()) {
-    report_fatal_error(
-        "ScheduleLengthTracker: cannot schedule subgraph proxy " +
-        Twine(node->GetId()) +
-        ". Subgraph-proxy scheduling is not yet implemented.");
+    return;
   }
 
   int ready_cycle = ComputeReadyCycle(node);
@@ -100,7 +100,14 @@ void ScheduleLengthTracker::Schedule(const ScheduleNode *node) {
   UpdateLengthLowerBoundMax(node, ready_cycle);
 }
 
-void ScheduleLengthTracker::Unschedule() {
+void ScheduleLengthTracker::Unschedule(const ScheduleNode *node) {
+  // Symmetric with Schedule: proxies were no-ops, so undo is also
+  // a no-op. The `node` parameter is here purely for this filter
+  // — undo data lives self-contained in undo_stack_.back().
+  if (!node->IsSchedulingUnit()) {
+    return;
+  }
+
   if (undo_stack_.empty()) {
     report_fatal_error("ScheduleLengthTracker: Unschedule without matching "
                        "Schedule");

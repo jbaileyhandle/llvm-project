@@ -123,15 +123,6 @@ void GCNRegisterTracker::ExtractFromNodeRegLists(
   }
 }
 
-void GCNRegisterTracker::ExtractFromSubgraphProxy(
-    const ScheduleNode *node) {
-  std::string msg =
-      "GCNRegisterTracker does not yet support subgraph proxies. "
-      "Node: " +
-      node->ToString();
-  report_fatal_error(StringRef(msg));
-}
-
 // ============================================================================
 // Construction
 // ============================================================================
@@ -180,7 +171,14 @@ void GCNRegisterTracker::ExtractNodeRegInfo(const ScheduleGraph &graph,
   node_reg_info_by_topo_index_.assign(graph.Size(), NodeRegInfo{});
   for (const ScheduleNode &node : graph.Nodes()) {
     if (!node.IsSchedulingUnit()) {
-      ExtractFromSubgraphProxy(&node);
+      // Subgraph proxies are synthetic and have no register
+      // effect. Leave their slot in node_reg_info_by_topo_index_
+      // default-constructed (empty NodeRegInfo) — that's the
+      // semantically correct zero-effect entry. Trackers never
+      // see proxies at runtime anyway: ScheduleConstructor's
+      // dispatch filters them, and the Schedule/Unschedule
+      // safety-net guards below catch any dispatch bug that
+      // would let one through.
       continue;
     }
 
@@ -244,6 +242,13 @@ void GCNRegisterTracker::ProcessUses(const NodeRegInfo &info,
 }
 
 void GCNRegisterTracker::Schedule(const ScheduleNode *node) {
+  // Subgraph proxies have no register effect (synthetic node).
+  // Early return so ScheduleConstructor can call trackers
+  // uniformly without branching on node kind. Symmetric with
+  // Unschedule.
+  if (!node->IsSchedulingUnit()) {
+    return;
+  }
   ScheduleStep step;
   step.saved_max = max_pressure_;
 
@@ -320,6 +325,11 @@ void GCNRegisterTracker::UndoUses(const NodeRegInfo &info,
 }
 
 void GCNRegisterTracker::Unschedule(const ScheduleNode *node) {
+  // Symmetric with Schedule: proxies were no-ops, so undo is also
+  // a no-op.
+  if (!node->IsSchedulingUnit()) {
+    return;
+  }
   if (undo_stack_.empty()) {
     report_fatal_error("GCNRegisterTracker: Unschedule without matching "
                        "Schedule");

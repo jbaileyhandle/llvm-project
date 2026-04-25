@@ -80,9 +80,11 @@ public:
   /// updates bubble count, and advances the cycle counter.
   void Schedule(const ScheduleNode *node);
 
-  /// Reverse the last Schedule() call. The tracker remembers what
-  /// was last scheduled — no argument needed.
-  void Unschedule();
+  /// Reverse the last Schedule() call. The undo data is
+  /// self-contained on undo_stack_; the `node` parameter exists
+  /// only so the tracker can self-skip subgraph proxies (matching
+  /// Schedule's early-return).
+  void Unschedule(const ScheduleNode *node);
 
   /// Current schedule length — the cycle at which the next instruction
   /// would be placed. After scheduling all N instructions, this is the

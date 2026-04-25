@@ -259,7 +259,8 @@ private:
   /// Stack of active scheduling scopes. scopes_.back() is the current
   /// scope — the one DFS picks from and that Schedule/Unschedule
   /// operate on. Invariant: scopes_.size() >= 1; scopes_[0] is the
-  /// base scope. Phase 0 never pushes past size 1.
+  /// base scope. Phase 2+ pushes additional scopes when subgraph
+  /// proxies are scheduled (one scope per active subgraph).
   std::vector<SubgraphScheduleScope> scopes_;
 
   /// Comparator defining ready-list sort order within each scope.
@@ -279,14 +280,16 @@ private:
   /// base scope's ready list from the graph.
   void InitReadyList();
 
-  /// Return the ready list of the scope that `node` belongs in.
-  /// Used by Release / Unrelease / Unschedule's re-insert — anywhere
-  /// a node is transitioning into or out of ready-list membership.
+  /// Return the ready list of the scope that `node` belongs in (its
+  /// "home scope"). Used by Release / Unrelease / Unschedule's
+  /// re-insert — anywhere a node is transitioning into or out of
+  /// ready-list membership.
   ///
-  /// Phase 0: ignores `node` and returns the base scope's ready
-  /// list (only one scope exists). Phase 2 will swap the body to
-  /// `FindScopeOnStack(node->GetParentSubgraphProxy()).ready`; the
-  /// callers don't have to change.
+  /// Routes via FindScopeOnStack(node->GetParentSubgraphProxy()):
+  ///   - Top-level node (parent_subgraph_proxy == nullptr): finds
+  ///     the base scope (its subgraph_proxy is also nullptr).
+  ///   - Member of a currently-active subgraph X: finds the
+  ///     pushed scope whose subgraph_proxy is X.
   ///
   /// Distinct from `scopes_.back().ready`, which is what
   /// Schedule / ScheduleByIndex operate on. Those sites are
@@ -294,9 +297,23 @@ private:
   /// release sites are semantically "node's home scope."
   SmallVectorImpl<const ScheduleNode *> &
   GetReadyListForNode(const ScheduleNode *node) {
-    (void)node;
-    return scopes_[0].ready;
+    return FindScopeOnStack(node->GetParentSubgraphProxy()).ready;
   }
+
+  /// Walk scopes_ from top to find the scope whose subgraph_proxy
+  /// equals `target_proxy`. report_fatal_error if not found —
+  /// callers rely on the invariant that every node's
+  /// parent_subgraph_proxy points to a scope currently on the
+  /// stack at the moment its pred_count reaches 0 (the
+  /// proxy→member artificial edge guarantees this for members,
+  /// and the base scope's subgraph_proxy=nullptr matches every
+  /// top-level node's parent_subgraph_proxy=nullptr).
+  ///
+  /// Top-down walk: same-scope releases (the common case for
+  /// intra-subgraph successors when DFS is inside that subgraph)
+  /// hit on iteration 1.
+  SubgraphScheduleScope &
+  FindScopeOnStack(const ScheduleNode *target_proxy);
 
   /// Return the index of `node` in `ready_list`, or -1 if absent.
   /// Binary search under ready_comparator_ (O(log K)).

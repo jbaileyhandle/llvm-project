@@ -28,17 +28,23 @@ ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
       pressure_tracker_(graph, mf, lis),
       length_tracker_(graph, st),
       ready_comparator_(ready_cmp) {
-  // Check for subgraph proxies (not yet supported at this layer).
-  for (const ScheduleNode &node : graph.Nodes()) {
-    if (!node.IsSchedulingUnit()) {
-      report_fatal_error(
-          "ScheduleConstructor does not yet support subgraph "
-          "proxies. Node: " +
-          Twine(node.GetId()));
+  InitReadyList();
+}
+
+ScheduleConstructor::SubgraphScheduleScope &
+ScheduleConstructor::FindScopeOnStack(const ScheduleNode *target_proxy) {
+  // Top-down walk: same-scope releases (most successors are
+  // intra-scope when DFS is inside a subgraph) hit on iteration 1.
+  for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+    if (it->subgraph_proxy == target_proxy) {
+      return *it;
     }
   }
-
-  InitReadyList();
+  report_fatal_error(
+      "ScheduleConstructor::FindScopeOnStack: no scope on stack "
+      "matches target_proxy. The artificial proxy→member edges and "
+      "the base scope's subgraph_proxy=nullptr should make this "
+      "unreachable.");
 }
 
 // ============================================================================
@@ -179,16 +185,31 @@ void ScheduleConstructor::ScheduleByIndex(int index) {
 
   ++schedule_call_count_;
 
-  // Update trackers.
+  // Update Trackers
+  // Trackers self-skip for subgraph proxies (no register or cycle
+  // effect — see each tracker's Schedule for the early-return).
+  // We call them uniformly here.
   pressure_tracker_.Schedule(node);
   length_tracker_.Schedule(node);
 
-  // Remove from the current scope's ready list and append to
-  // schedule order.
+  // Subgraph-proxy nodes push a new scope so members released
+  // below land somewhere (FindScopeOnStack lookup on each
+  // member's parent_subgraph_proxy will return this new scope).
+  // ready_list above (captured by reference) refers to the
+  // pre-push top-of-stack and stays valid for the EraseAt below.
+  if (node->IsSubgraphProxy()) {
+    scopes_.push_back(
+        SubgraphScheduleScope{/*subgraph_proxy=*/node, /*ready=*/{}});
+  }
+
+  // Remove from the current (pre-push) scope's ready list and
+  // append to schedule order. schedule_order_ holds both real
+  // nodes and proxies (proxies are filtered at ApplyScheduleOrder
+  // time).
   ReadyListEraseAt(ready_list, index);
   schedule_order_.push_back(node);
 
-  // Release successors.
+  // Release successors
   ReleaseSuccessors(node);
 }
 
@@ -201,17 +222,35 @@ void ScheduleConstructor::Unschedule() {
   const ScheduleNode *node = schedule_order_.back();
   schedule_order_.pop_back();
 
-  // Reverse successor release.
+  // Reverse successor release. For a proxy: increments member
+  // pred_counts back above 0 and removes those members from the
+  // pushed scope. After this, the pushed scope's ready list
+  // should be empty.
   UnreleaseSuccessors(node);
 
-  // Add the node back to its home scope's ready list at its sorted
-  // position. Goes through GetReadyListForNode (not
-  // scopes_.back().ready) because in Phase 2 a real node's home
-  // scope may differ from the active scope during un-release.
+  // Pop the scope that this proxy pushed in Schedule (mirror of
+  // the Schedule push). Asserts the scope was correctly drained
+  // by un-release.
+  if (node->IsSubgraphProxy()) {
+    if (!scopes_.back().ready.empty()) {
+      report_fatal_error(
+          "ScheduleConstructor::Unschedule(proxy): pushed scope's "
+          "ready list is non-empty after un-release; round-trip "
+          "invariant violated");
+    }
+    scopes_.pop_back();
+  }
+
+  // Re-insert the node back into its home scope's ready list at
+  // its sorted position. Routes via GetReadyListForNode rather
+  // than scopes_.back().ready because the home scope may not be
+  // the current top (e.g. for a member node un-released while
+  // we're unwinding back through several scope levels).
   ReadyListInsert(GetReadyListForNode(node), node);
 
-  // Undo trackers (reverse order of Schedule).
-  length_tracker_.Unschedule();
+  // Undo trackers (reverse order of Schedule). Trackers self-skip
+  // for subgraph proxies — see each tracker's Unschedule.
+  length_tracker_.Unschedule(node);
   pressure_tracker_.Unschedule(node);
 }
 
