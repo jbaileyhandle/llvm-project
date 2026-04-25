@@ -558,6 +558,40 @@ public:
   /// Edges: A→B, B→C, C→B
   static std::unique_ptr<ScheduleGraph> BuildTestDAGWithCycle();
 
+  /// Build a synthetic test DAG used by RunSubgraphContiguityShakedown
+  /// to demonstrate that wrapping {A, B, C} as a subgraph forces the
+  /// chain to be scheduled contiguously, even when an unconstrained
+  /// scheduler would have interleaved X and Y between A and B to fill
+  /// the latency bubbles.
+  ///
+  /// Structure (6 nodes — E is a synthetic exit so the graph has a
+  /// single source A and single sink E, satisfying
+  /// ValidateAndComputeTopologicalOrder's invariants):
+  ///
+  ///     A ──0──► X ──0──► E
+  ///     A ──0──► Y ──0──► E
+  ///     A ──5──► B ──5──► C ──0──► E
+  ///
+  /// In the UNCLUSTERED graph, X and Y depend only on A. After A is
+  /// scheduled, they are immediately ready; a topo-asc picker
+  /// schedules them while B's ready cycle is still in the future —
+  /// filling the bubble. Resulting length: 12 cycles.
+  ///
+  /// In the CLUSTERED graph (after wrapping {A, B, C} as a subgraph),
+  /// X, Y, and E become external successors of the subgraph (E via
+  /// C→E), so InsertSubgraphProxies adds artificial end_proxy → X,
+  /// end_proxy → Y, end_proxy → E edges. Topology then FORCES X and
+  /// Y to come after end_proxy in any valid topo order — they
+  /// cannot be scheduled until the chain has fully exited. Resulting
+  /// length: 14 cycles. The 2-cycle delta is the bubble that X and Y
+  /// filled in the unclustered case.
+  ///
+  /// The X-vs-chain ordering is structurally forced (by the new
+  /// artificial edges), not dependent on Kahn's-FIFO seed order,
+  /// so the test outcome is deterministic regardless of internal
+  /// topo-sort details.
+  static std::unique_ptr<ScheduleGraph> BuildContiguityTestDAG();
+
   /// Human-readable identifier for this graph. Format: "graph[ID]"
   std::string ToString() const;
 

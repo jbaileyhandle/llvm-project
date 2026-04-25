@@ -379,6 +379,119 @@ void RunInsertSubgraphProxiesShakedown() {
                << (topo_ok ? "PASS" : "FAIL") << "\n";
 }
 
+// Demonstrates that wrapping {A, B, C} as a subgraph forces the
+// chain to be scheduled contiguously, even when the unconstrained
+// scheduler would have interleaved X and Y between A and B/C to
+// fill the latency bubbles.
+//
+// See ScheduleGraph::BuildContiguityTestDAG for the DAG shape and
+// the cycle-by-cycle reasoning for the expected lengths (11 cycles
+// unclustered, 13 cycles clustered — the 2-cycle delta is the
+// bubble that X+Y filled in the unclustered case).
+//
+// Uses the default topo-asc ready comparator; greedy "pick first
+// ready" scheduling. Both checks are PASS/FAIL:
+//   1. clustered length > unclustered length  (proves contiguity
+//      changed scheduler behavior, not just that the proxy
+//      machinery ran).
+//   2. A, B, C appear at consecutive positions in the clustered
+//      schedule_order (filtering out the proxies — see the
+//      ApplyScheduleOrder filter for the same idea in production).
+void RunSubgraphContiguityShakedown(const MachineFunction &mf,
+                                    const LiveIntervals &lis) {
+  llvm::outs() << "  Subgraph contiguity shakedown:\n";
+
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(mf.getSubtarget());
+
+  // Greedy schedule helper: runs Schedule(first ready) until done,
+  // returns the constructor for length / schedule_order inspection.
+  auto greedy_schedule = [&](ScheduleGraph &graph) {
+    ScheduleConstructor sc(graph, st, mf, lis);
+    int safety = graph.Size() + 1;
+    while (!sc.IsDone()) {
+      if (--safety < 0) {
+        report_fatal_error(
+            "contiguity shakedown: greedy loop did not finish in "
+            "graph.Size()+1 steps");
+      }
+      const auto &ready = sc.GetReadyList();
+      if (ready.empty()) {
+        report_fatal_error(
+            "contiguity shakedown: ready list empty before IsDone");
+      }
+      sc.Schedule(ready.front());
+    }
+    return sc;
+  };
+
+  // ── Unclustered run ────────────────────────────────────────────
+  auto unclustered = ScheduleGraph::BuildContiguityTestDAG();
+  unclustered->ValidateAndComputeTopologicalOrder();
+  unclustered->ComputeCriticalPathFromExit();
+  ScheduleConstructor sc_unclustered = greedy_schedule(*unclustered);
+  int unclustered_length = sc_unclustered.GetLengthTracker().GetCurrentCycle();
+
+  // ── Clustered run ──────────────────────────────────────────────
+  auto clustered = ScheduleGraph::BuildContiguityTestDAG();
+  clustered->ValidateAndComputeTopologicalOrder();
+  // Identify members by their emplacement positions in
+  // BuildContiguityTestDAG: [A, X, Y, B, C].
+  ScheduleNode *a = &clustered->Nodes()[0];
+  ScheduleNode *b = &clustered->Nodes()[3];
+  ScheduleNode *c = &clustered->Nodes()[4];
+  SmallVector<ScheduleNode *, 4> members = {a, b, c};
+  auto info = std::make_unique<SubgraphInfo>(members, "ABC_chain");
+  std::vector<std::unique_ptr<SubgraphInfo>> infos;
+  infos.push_back(std::move(info));
+  clustered->InsertSubgraphProxies(std::move(infos));
+  // InsertSubgraphProxies recomputes critical path internally.
+  ScheduleConstructor sc_clustered = greedy_schedule(*clustered);
+  int clustered_length = sc_clustered.GetLengthTracker().GetCurrentCycle();
+
+  // ── Check 1: clustered length must exceed unclustered length ──
+  bool length_ok = clustered_length > unclustered_length;
+  llvm::outs() << "    Length: unclustered=" << unclustered_length
+               << " clustered=" << clustered_length
+               << " (clustered > unclustered required)  "
+               << (length_ok ? "PASS" : "FAIL") << "\n";
+
+  // ── Check 2: A, B, C must appear consecutively in the
+  //    clustered schedule_order (after filtering out proxies) ────
+  ArrayRef<const ScheduleNode *> order = sc_clustered.GetScheduleOrder();
+  // Refer to the same A, B, C pointers from the clustered graph.
+  ScheduleNode *clustered_a = a;
+  ScheduleNode *clustered_b = b;
+  ScheduleNode *clustered_c = c;
+  int idx_a = -1;
+  int idx_b = -1;
+  int idx_c = -1;
+  int filtered_idx = 0;
+  for (const ScheduleNode *n : order) {
+    if (n->IsSubgraphProxy()) {
+      continue;
+    }
+    if (n == clustered_a) {
+      idx_a = filtered_idx;
+    } else if (n == clustered_b) {
+      idx_b = filtered_idx;
+    } else if (n == clustered_c) {
+      idx_c = filtered_idx;
+    }
+    ++filtered_idx;
+  }
+  bool consecutive_ok = idx_a >= 0 && idx_b == idx_a + 1 &&
+                        idx_c == idx_b + 1;
+  llvm::outs() << "    Chain positions in (proxy-filtered) order: "
+               << "A=" << idx_a << " B=" << idx_b << " C=" << idx_c
+               << " (consecutive required)  "
+               << (consecutive_ok ? "PASS" : "FAIL") << "\n";
+
+  if (!length_ok || !consecutive_ok) {
+    report_fatal_error("RunSubgraphContiguityShakedown failed");
+  }
+}
+
 // Verifies ScheduleLengthTracker::GetLengthLowerBound against hand-
 // computed expected sequences on two synthetic DAGs. Builds both
 // graphs internally — this shakedown is self-contained and does not
@@ -1029,6 +1142,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunContinuousScoreTableSweepShakedown(st);
   RunTestDAGShakedown();
   RunInsertSubgraphProxiesShakedown();
+  RunSubgraphContiguityShakedown(MF, *LIS);
   RunLengthLowerBoundShakedown(st);
 
   for (auto &region : regions_) {

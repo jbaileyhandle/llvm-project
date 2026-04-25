@@ -899,6 +899,36 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildLengthLowerBoundTestDAG() {
   return graph;
 }
 
+std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildContiguityTestDAG() {
+  auto graph = std::make_unique<ScheduleGraph>();
+
+  // 6 nodes: A, X, Y, B, C, E. E is a synthetic exit so the graph
+  // has exactly one source (A) and one sink (E) —
+  // ValidateAndComputeTopologicalOrder requires this. Emplacement
+  // order does not affect the test outcome.
+  graph->ReserveNodes(6);
+  ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
+  ScheduleNode &x = graph->EmplaceNode(nullptr, "X", graph.get());
+  ScheduleNode &y = graph->EmplaceNode(nullptr, "Y", graph.get());
+  ScheduleNode &b = graph->EmplaceNode(nullptr, "B", graph.get());
+  ScheduleNode &c = graph->EmplaceNode(nullptr, "C", graph.get());
+  ScheduleNode &e = graph->EmplaceNode(nullptr, "E", graph.get());
+
+  // X, Y depend only on A (latency 0 — they become ready the cycle
+  // after A is scheduled). The chain A→B→C carries latency 5
+  // between each link. All non-chain leaves funnel into E with
+  // latency 0 so the graph has a single sink.
+  graph->AddEdge(&a, &x, ScheduleEdge::kData, /*latency=*/0);
+  graph->AddEdge(&a, &y, ScheduleEdge::kData, /*latency=*/0);
+  graph->AddEdge(&a, &b, ScheduleEdge::kData, /*latency=*/5);
+  graph->AddEdge(&b, &c, ScheduleEdge::kData, /*latency=*/5);
+  graph->AddEdge(&x, &e, ScheduleEdge::kData, /*latency=*/0);
+  graph->AddEdge(&y, &e, ScheduleEdge::kData, /*latency=*/0);
+  graph->AddEdge(&c, &e, ScheduleEdge::kData, /*latency=*/0);
+
+  return graph;
+}
+
 std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAGWithCycle() {
   auto graph = std::make_unique<ScheduleGraph>();
 
