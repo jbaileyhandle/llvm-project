@@ -9,6 +9,7 @@
 #include "GCNRegPressure.h"
 #include "RegionInfo.h"
 #include "ScheduleConstructor.h"
+#include "SubgraphInfo.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/CodeGen/LiveIntervals.h"
@@ -141,6 +142,21 @@ ScheduleNode::ScheduleNode(SUnit *su, std::string debug_name,
   ExtractRegInfo();
 }
 
+ScheduleNode::ScheduleNode(std::unique_ptr<SubgraphInfo> info,
+                           ScheduleGraph *top_level_graph)
+    : id_(GetAndIncrementScheduleId()),
+      graph_local_id_(top_level_graph->GetAndIncrementGraphLocalId()),
+      content_(std::move(info)) {}
+
+SubgraphInfo *ScheduleNode::GetSubgraphInfo() const {
+  if (!IsSubgraphProxy()) {
+    report_fatal_error(
+        "GetSubgraphInfo called on scheduling-unit node " +
+        Twine(id_));
+  }
+  return std::get<std::unique_ptr<SubgraphInfo>>(content_).get();
+}
+
 void ScheduleNode::ExtractRegInfo() {
   if (!IsSchedulingUnit()) {
     return;
@@ -167,11 +183,10 @@ void ScheduleNode::ExtractRegInfo() {
 std::string ScheduleNode::ToString() const {
   std::string result = "[" + std::to_string(id_);
 
-  if (!IsSchedulingUnit()) {
-    // Subgraph-proxy formatting lands with Phase 1 (when proxies
-    // actually become constructible). Unreachable today since the
-    // proxy ctor has been removed pending Phase 1.
-    result += ":proxy]";
+  if (IsSubgraphProxy()) {
+    SubgraphInfo *info = GetSubgraphInfo();
+    result += ":proxy(" + info->debug_name + "," +
+              std::to_string(info->members.size()) + ")]";
     return result;
   }
 

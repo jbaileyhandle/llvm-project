@@ -1,35 +1,55 @@
-//===- ScheduleGraph.h - Hierarchical scheduling graph ----------*- C++ -*-===//
+//===- ScheduleGraph.h - Schedule graph -------------------------*- C++ -*-===//
 //
-// Defines ScheduleNode and ScheduleGraph, which together form a recursive
-// graph structure for hierarchical scheduling.
+// Defines ScheduleNode and ScheduleGraph, the data structures for
+// scheduling an AMDGPU region.
 //
-// A ScheduleNode is either:
-//   - A scheduling unit: wraps a single SUnit (instruction or
-//     entry/exit sentinel). IsSchedulingUnit() == true.
-//   - A subgraph proxy: stands in for a group of ScheduleNodes.
-//     IsSubgraphProxy() == true.
+// A ScheduleNode is one of:
+//   - A scheduling unit (IsSchedulingUnit() == true): wraps a
+//     single SUnit — a real MachineInstr-backed instruction or a
+//     synthetic entry/exit sentinel.
+//   - A subgraph proxy (IsSubgraphProxy() == true): owns a
+//     SubgraphInfo that holds the membership and external interface
+//     of a subgraph the proxy stands in for.
 //
-// A ScheduleGraph is a collection of ScheduleNodes with edges between them.
-// The same types are used at every level of the hierarchy, enabling uniform
-// traversal and algorithm application regardless of depth.
+// A ScheduleGraph is a FLAT collection of ScheduleNodes with edges
+// between them. There is no nested-ScheduleGraph hierarchy: under
+// the single-graph-hybrid design (Approach B,
+// AMDGPUClusteringDesign.md), proxies and their subgraph members
+// coexist in the same graph. The proxy is gated on the subgraph's
+// external predecessors via kSubgraphOrderEdge artificial edges, and
+// each member is gated on its proxy via the same edge kind. The
+// original member-to-member and member-to-external edges are never
+// rewritten.
 //
-// Example hierarchy:
+// Example layout: subgraph S = {B, C}, external pred A, external
+// succ D. The graph holds A, B, C, D, P (P = proxy for S):
 //
-//   Level 2:  ScheduleGraph { GroupA, GroupB }
-//                 |              |
-//                 v              v
-//   Level 1:  ScheduleGraph    ScheduleGraph
-//             { X, Y, Z }     { W, V }
-//               |  |  |         |  |
-//               v  v  v         v  v
-//   Level 0:  leaf leaf leaf  leaf leaf
-//             (SUnit)         (SUnit)
+//   A ───────► B   (original)
+//   A ───────► C   (original)
+//   A ·······► P   (artificial, kSubgraphOrderEdge)
+//   B ───────► C   (original, intra-subgraph)
+//   C ───────► D   (original, member → external)
+//   P ·······► B   (artificial, latency 0)
+//   P ·······► C   (artificial, latency 0)
 //
-// IMPORTANT: All nodes must be added to a graph before any edges are added.
-// ScheduleEdge stores raw pointers into the nodes_ vector. If a node is
-// added after edges exist, the vector may reallocate to a new buffer,
-// invalidating all existing edge pointers. BuildFromSUnits enforces this
-// by reserving the vector upfront and adding all nodes before any edges.
+// The original A→B, A→C, B→C, C→D edges remain. Members B and C
+// each gain one extra predecessor (the artificial P→M edge) which
+// keeps them out of any ready list until P is scheduled. P itself
+// is gated on A (its sole ext_predecessor) being scheduled.
+//
+// Node-storage discipline. ScheduleEdge stores raw `ScheduleNode *`
+// pointers into the `nodes_` SmallVector. A vector reallocation
+// would invalidate every stored edge pointer (silent UB). Two
+// mechanisms keep this safe:
+//   1. BuildFromSUnits reserves `2 * sunits.size() + 2` slots up
+//      front — enough headroom to add one proxy per real
+//      instruction (the worst-case proxy count) plus the
+//      entry/exit sentinels, all without reallocating.
+//   2. EmplaceNode hard-fails with report_fatal_error if it would
+//      ever cause `nodes_` to grow past its reserved capacity.
+// Together these let post-construction passes (e.g.,
+// InsertSubgraphProxies for Approach B) add proxy nodes after the
+// graph has edges, without invalidating any edge pointers.
 //
 //===----------------------------------------------------------------------===//
 
@@ -67,6 +87,7 @@ class ScheduleConstructor;
 class ScheduleGraph;
 class ScheduleNode;
 struct ReducedGraph;
+struct SubgraphInfo;
 
 /// A register paired with the lane mask indicating which sub-register
 /// lanes are relevant. Used on entry/exit nodes where LiveIntervals
@@ -196,12 +217,17 @@ public:
   ScheduleNode(SUnit *su, std::string debug_name,
                ScheduleGraph *top_level_graph);
 
-  // NOTE: a subgraph-proxy ctor will be added in Phase 1 of the
-  // subgraph work (AMDGPUClusteringDesign.md Approach B), taking a
-  // SubgraphInfo* rather than a unique_ptr<ScheduleGraph>. The
-  // Approach-A group-node ctor previously in this position was
-  // removed since its data shape no longer matches the planned
-  // model.
+  /// Create a subgraph-proxy node owning a SubgraphInfo. The
+  /// SubgraphInfo holds the subgraph's members, debug name, and
+  /// external predecessors/successors; the proxy is the handle for
+  /// the subgraph in the outer scheduling graph (used by
+  /// scope-stacked Schedule dispatch — see AMDGPUClusteringDesign.md
+  /// Approach B). Ownership of `info` transfers into this node; the
+  /// info's lifetime then equals this node's lifetime, which equals
+  /// the graph's lifetime. Both `info` and `top_level_graph` must be
+  /// non-null.
+  ScheduleNode(std::unique_ptr<SubgraphInfo> info,
+               ScheduleGraph *top_level_graph);
 
   /// True if this node represents a single scheduling unit (wraps
   /// one SUnit — either a real MachineInstr-backed SUnit or a
@@ -223,6 +249,22 @@ public:
   SUnit *GetSUnit() const {
     assert(IsSchedulingUnit() && "GetSUnit called on subgraph proxy");
     return std::get<SUnit *>(content_);
+  }
+
+  /// Access the owned SubgraphInfo. Only valid for subgraph-proxy
+  /// nodes. Returns a raw pointer; ownership stays with this node.
+  /// Reports fatal error on misuse (with the offending node id).
+  SubgraphInfo *GetSubgraphInfo() const;
+
+  /// The subgraph proxy this node belongs to (the visibility-rule
+  /// key for scope-stacked scheduling). Null if this node lives at
+  /// the top level of the graph hierarchy. Populated by
+  /// InsertSubgraphProxies for each subgraph's members.
+  ScheduleNode *GetParentSubgraphProxy() const {
+    return parent_subgraph_proxy_;
+  }
+  void SetParentSubgraphProxy(ScheduleNode *proxy) {
+    parent_subgraph_proxy_ = proxy;
   }
 
   /// Read-only edge access.
@@ -259,10 +301,11 @@ public:
   int GetGraphLocalId() const { return graph_local_id_; }
 
   /// Human-readable description of this node. Format:
-  ///   Leaf with instruction:  "[3] S_LOAD_DWORD ..."
-  ///   Leaf with debug name:   "[7:A]"
-  ///   Leaf with null SUnit:   "[7]"
-  ///   Group node:             "[12:graph(5)]"  (5 = subgraph size)
+  ///   Scheduling unit (instr):    "[3] S_LOAD_DWORD ..."
+  ///   Scheduling unit (debug):    "[7:A]"
+  ///   Scheduling unit (no SU):    "[7]"
+  ///   Subgraph proxy:             "[12:proxy(name,5)]"
+  ///                               (members.size() = 5)
   std::string ToString() const;
 
   /// Registers defined and used by this node, with lane masks
@@ -308,13 +351,22 @@ private:
 
   int64_t id_;
   int graph_local_id_;
-  std::variant<SUnit *, std::unique_ptr<ScheduleGraph>> content_;
+  std::variant<SUnit *, std::unique_ptr<SubgraphInfo>> content_;
   SmallVector<ScheduleEdge> successors_;
   SmallVector<ScheduleEdge> predecessors_;
   SmallVector<RegWithLaneMask> reg_defs_;
   SmallVector<RegWithLaneMask> reg_uses_;
   int topo_index_ = -1;
   std::string debug_name_;
+
+  /// The proxy of the subgraph that contains this node as a direct
+  /// member, or null if this node sits at the top level of the
+  /// graph hierarchy. Acts as the visibility-rule key for
+  /// scope-stacked scheduling: this node is visible at scope `S`
+  /// iff this field equals `S.subgraph_proxy`. Populated by
+  /// InsertSubgraphProxies; see GetParentSubgraphProxy /
+  /// SetParentSubgraphProxy.
+  ScheduleNode *parent_subgraph_proxy_ = nullptr;
 };
 
 /// A graph of ScheduleNodes. Used at every level of the hierarchy:
