@@ -141,14 +141,8 @@ ScheduleNode::ScheduleNode(SUnit *su, std::string debug_name,
   ExtractRegInfo();
 }
 
-ScheduleNode::ScheduleNode(std::unique_ptr<ScheduleGraph> subgraph,
-                           ScheduleGraph *top_level_graph)
-    : id_(GetAndIncrementScheduleId()),
-      graph_local_id_(top_level_graph->GetAndIncrementGraphLocalId()),
-      content_(std::move(subgraph)) {}
-
 void ScheduleNode::ExtractRegInfo() {
-  if (!IsLeaf()) {
+  if (!IsSchedulingUnit()) {
     return;
   }
   SUnit *su = GetSUnit();
@@ -173,8 +167,11 @@ void ScheduleNode::ExtractRegInfo() {
 std::string ScheduleNode::ToString() const {
   std::string result = "[" + std::to_string(id_);
 
-  if (!IsLeaf()) {
-    result += ":" + GetSubgraph()->ToString() + "]";
+  if (!IsSchedulingUnit()) {
+    // Subgraph-proxy formatting lands with Phase 1 (when proxies
+    // actually become constructible). Unreachable today since the
+    // proxy ctor has been removed pending Phase 1.
+    result += ":proxy]";
     return result;
   }
 
@@ -206,13 +203,6 @@ std::string ScheduleNode::ToString() const {
   return result;
 }
 
-int ScheduleNode::LeafSize() const {
-  if (IsLeaf()) {
-    return 1;
-  }
-  return GetSubgraph()->LeafSize();
-}
-
 // --- ScheduleGraph ---
 
 ScheduleGraph::ScheduleGraph()
@@ -225,15 +215,14 @@ std::string ScheduleGraph::ToString() const {
          std::to_string(Size()) + " nodes)";
 }
 
-int ScheduleGraph::LeafSize() const {
-  if (!cached_leaf_size_.has_value()) {
-    int count = 0;
-    for (const ScheduleNode &node : nodes_) {
-      count += node.LeafSize();
-    }
-    cached_leaf_size_ = count;
+int ScheduleGraph::NumSchedulingUnits() const {
+  if (!cached_num_scheduling_units_.has_value()) {
+    cached_num_scheduling_units_ =
+        static_cast<int>(llvm::count_if(nodes_, [](const ScheduleNode &n) {
+          return n.IsSchedulingUnit();
+        }));
   }
-  return *cached_leaf_size_;
+  return *cached_num_scheduling_units_;
 }
 
 // Kahn's algorithm: iteratively remove nodes with no unmet predecessors.
@@ -314,7 +303,7 @@ void ScheduleGraph::InvalidateDerivedData() {
   graph_length_floor_.reset();
   reduced_graph_.reset();
   dom_tree_.reset();
-  cached_leaf_size_.reset();
+  cached_num_scheduling_units_.reset();
   // input_schedule_constructor_ is NOT cleared; it's a Phase-4 artifact
   // tied to the original SUnit emplacement order, not a structural
   // derivation that changes when the graph mutates.
@@ -359,7 +348,7 @@ void ScheduleGraph::ComputeCriticalPathFromExit() {
   // is the longest latency-weighted path through the whole graph.
   int cp_at_source = critical_path_from_exit_by_topo_index_[0];
   critical_path_length_ = cp_at_source;
-  graph_length_floor_ = std::max(LeafSize(), cp_at_source + 1);
+  graph_length_floor_ = std::max(NumSchedulingUnits(), cp_at_source + 1);
 }
 
 void ScheduleGraph::ComputeTransitiveReduction() {

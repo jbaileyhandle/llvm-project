@@ -40,9 +40,10 @@ void ScheduleLengthTracker::ValidateGraph(const ScheduleGraph &graph,
 
   // Check each node.
   for (const ScheduleNode &node : graph.Nodes()) {
-    if (!node.IsLeaf()) {
-      // Group node: validate its subgraph recursively.
-      ValidateGraph(*node.GetSubgraph(), st);
+    if (!node.IsSchedulingUnit()) {
+      // Subgraph proxies carry no SUnit — nothing to check here.
+      // Phase 1 will revisit whether any proxy-level invariants
+      // belong in this validator; for now, skip.
       continue;
     }
 
@@ -86,10 +87,11 @@ ScheduleLengthTracker::ScheduleLengthTracker(const ScheduleGraph &graph,
 // ============================================================================
 
 void ScheduleLengthTracker::Schedule(const ScheduleNode *node) {
-  if (!node->IsLeaf()) {
-    report_fatal_error("ScheduleLengthTracker: cannot schedule group node " +
-                       Twine(node->GetId()) +
-                       ". Group node scheduling is not yet implemented.");
+  if (!node->IsSchedulingUnit()) {
+    report_fatal_error(
+        "ScheduleLengthTracker: cannot schedule subgraph proxy " +
+        Twine(node->GetId()) +
+        ". Subgraph-proxy scheduling is not yet implemented.");
   }
 
   int ready_cycle = ComputeReadyCycle(node);
@@ -159,11 +161,11 @@ void ScheduleLengthTracker::UpdateLengthLowerBoundMax(
 
 int ScheduleLengthTracker::GetLengthLowerBound() const {
   // Constructor enforces cp_from_exit availability, so no per-call
-  // check here. LeafSize counts every leaf node (including entry/exit,
-  // which the tracker treats as consuming one cycle each); future
-  // subgraph proxies in a hierarchical graph are excluded, since
-  // they're not scheduled.
-  int num_unscheduled = graph_->LeafSize() - GetNumScheduled();
+  // check here. NumSchedulingUnits counts every scheduling-unit node
+  // (including entry/exit sentinels, which the tracker treats as
+  // consuming one cycle each); subgraph proxies are excluded, since
+  // they are synthetic and don't advance the cycle counter.
+  int num_unscheduled = graph_->NumSchedulingUnits() - GetNumScheduled();
   return std::max(current_cycle_ + num_unscheduled, max_scheduled_plus_cp_);
 }
 

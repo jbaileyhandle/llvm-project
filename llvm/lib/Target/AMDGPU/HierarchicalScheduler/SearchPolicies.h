@@ -61,7 +61,8 @@ class DfsMinimizeLengthPolicy {
       const ScheduleConstructor &best_schedule_constructor);
 
   // End the search globally once best matches the graph-level length
-  // floor (max(LeafSize, cp_length + 1)) — no schedule can be shorter,
+  // floor (max(NumSchedulingUnits, cp_length + 1)) — no schedule can
+  // be shorter,
   // so further exploration is pointless. The bound check in
   // ShouldBoundSearch handles incremental pruning; this is the cheap
   // "we hit the optimum" exit.

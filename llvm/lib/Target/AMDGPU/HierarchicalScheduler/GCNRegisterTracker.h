@@ -96,14 +96,14 @@ public:
   /// Construct from graph nodes and MachineFunction. Derives
   /// MachineRegisterInfo and TargetRegisterInfo from the MF.
   ///
-  /// For leaf nodes with a MachineInstr, extracts defs/uses with
-  /// lane masks. For entry/exit nodes (no MI), reads from
-  /// ScheduleNode::RegDefs()/RegUses().
+  /// For scheduling-unit nodes with a MachineInstr, extracts
+  /// defs/uses with lane masks. For entry/exit nodes (no MI), reads
+  /// from ScheduleNode::RegDefs()/RegUses().
   ///
   /// LiveIntervals is needed for accurate use-mask extraction on
   /// multi-lane registers.
   ///
-  /// Reports fatal error if a group node (subgraph) is encountered.
+  /// Reports fatal error if a subgraph proxy is encountered.
   /// Warns if the MachineFunction contains non-inlined function calls.
   GCNRegisterTracker(const ScheduleGraph &graph,
                      const MachineFunction &mf,
@@ -328,7 +328,7 @@ private:
   static void AddRegMask(SmallVectorImpl<RegMask> &entries,
                          unsigned reg, LaneBitmask mask);
 
-  /// Extract from a leaf node with a MachineInstr.
+  /// Extract from a scheduling-unit node with a MachineInstr.
   static void ExtractFromMachineInstr(const ScheduleNode *node,
                                       NodeRegInfo &info,
                                       const MachineRegisterInfo &mri,
@@ -339,8 +339,8 @@ private:
                                       NodeRegInfo &info,
                                       const MachineRegisterInfo &mri);
 
-  /// Placeholder: fatal error for group nodes (not yet supported).
-  static void ExtractFromGroupNode(const ScheduleNode *node);
+  /// Placeholder: fatal error for subgraph proxies (not yet supported).
+  static void ExtractFromSubgraphProxy(const ScheduleNode *node);
 
   // --- Schedule helpers ---
 

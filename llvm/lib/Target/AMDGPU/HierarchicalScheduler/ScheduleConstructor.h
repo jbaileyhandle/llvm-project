@@ -8,9 +8,11 @@
 // Copyable — for search algorithms (beam search) that need to branch
 // and explore multiple schedule orderings from the same state.
 //
-// Currently supports leaf-only graphs. Group nodes (subgraphs) will
-// be handled by a future HierarchicalScheduleConstructor layer that
-// decomposes groups into leaf sequences and delegates to this class.
+// Currently supports scheduling-unit-only graphs. Subgraph proxies
+// (the Approach-B handle for grouped nodes — see
+// AMDGPUClusteringDesign.md) will be handled by a future Phase 2
+// extension that adds Schedule/Unschedule dispatch on
+// IsSubgraphProxy and a scope push/pop on proxy-schedule.
 //
 // Usage:
 //   ScheduleConstructor sc(graph, subtarget, mri, tri, lis);

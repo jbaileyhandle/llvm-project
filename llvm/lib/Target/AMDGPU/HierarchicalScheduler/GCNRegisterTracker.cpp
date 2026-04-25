@@ -123,9 +123,12 @@ void GCNRegisterTracker::ExtractFromNodeRegLists(
   }
 }
 
-void GCNRegisterTracker::ExtractFromGroupNode(const ScheduleNode *node) {
-  std::string msg = "GCNRegisterTracker does not yet support group nodes "
-                    "(subgraphs). Node: " + node->ToString();
+void GCNRegisterTracker::ExtractFromSubgraphProxy(
+    const ScheduleNode *node) {
+  std::string msg =
+      "GCNRegisterTracker does not yet support subgraph proxies. "
+      "Node: " +
+      node->ToString();
   report_fatal_error(StringRef(msg));
 }
 
@@ -176,8 +179,8 @@ void GCNRegisterTracker::ExtractNodeRegInfo(const ScheduleGraph &graph,
   // correct no-op.
   node_reg_info_by_topo_index_.assign(graph.Size(), NodeRegInfo{});
   for (const ScheduleNode &node : graph.Nodes()) {
-    if (!node.IsLeaf()) {
-      ExtractFromGroupNode(&node);
+    if (!node.IsSchedulingUnit()) {
+      ExtractFromSubgraphProxy(&node);
       continue;
     }
 

@@ -28,12 +28,13 @@ ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
       pressure_tracker_(graph, mf, lis),
       length_tracker_(graph, st),
       ready_comparator_(ready_cmp) {
-  // Check for group nodes.
+  // Check for subgraph proxies (not yet supported at this layer).
   for (const ScheduleNode &node : graph.Nodes()) {
-    if (!node.IsLeaf()) {
-      report_fatal_error("ScheduleConstructor does not yet support group "
-                         "nodes. Node: " +
-                         Twine(node.GetId()));
+    if (!node.IsSchedulingUnit()) {
+      report_fatal_error(
+          "ScheduleConstructor does not yet support subgraph "
+          "proxies. Node: " +
+          Twine(node.GetId()));
     }
   }
 

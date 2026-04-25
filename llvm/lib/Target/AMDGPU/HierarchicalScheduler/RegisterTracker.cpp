@@ -11,9 +11,10 @@
 //     the tracker falls back to safe defaults. Our virtual-only model is
 //     a comparable approximation. If this proves too inaccurate, we can
 //     add physical register tracking later.
-//   - Group nodes (subgraphs) are not yet supported. We report a fatal
-//     error if any are encountered. Handling group nodes will require
-//     computing aggregate register effects at subgraph boundaries.
+//   - Subgraph proxies are not yet supported. We report a fatal
+//     error if any are encountered. Handling proxies will require
+//     dispatching schedule actions at the ScheduleConstructor layer
+//     so trackers only ever see scheduling-unit nodes.
 //
 //===----------------------------------------------------------------------===//
 
@@ -38,9 +39,11 @@ void RegisterTracker::ExtractRegOps(ArrayRef<ScheduleNode *> nodes,
                                     const MachineRegisterInfo &mri,
                                     const TargetRegisterInfo &tri) {
   for (ScheduleNode *node : nodes) {
-    if (!node->IsLeaf()) {
-      std::string msg = "RegisterTracker does not yet support group nodes "
-                        "(subgraphs). Node: " + node->ToString();
+    if (!node->IsSchedulingUnit()) {
+      std::string msg =
+          "RegisterTracker does not yet support subgraph proxies. "
+          "Node: " +
+          node->ToString();
       report_fatal_error(StringRef(msg));
     }
 

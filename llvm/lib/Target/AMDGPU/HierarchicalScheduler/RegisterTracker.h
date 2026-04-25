@@ -55,10 +55,11 @@ enum class RegType {
 class RegisterTracker {
 public:
   /// Initialize from a set of ScheduleNodes. Extracts register defs/uses
-  /// from each leaf node's MachineInstr (skipping group nodes and nodes
-  /// without MachineInstrs). Classifies virtual registers by type (SGPR,
-  /// VGPR, AGPR), computes weights (number of 32-bit physical registers
-  /// each virtual register occupies), and counts total uses per register.
+  /// from each scheduling-unit node's MachineInstr (skipping subgraph
+  /// proxies and nodes without MachineInstrs). Classifies virtual
+  /// registers by type (SGPR, VGPR, AGPR), computes weights (number
+  /// of 32-bit physical registers each virtual register occupies),
+  /// and counts total uses per register.
   RegisterTracker(ArrayRef<ScheduleNode *> nodes,
                   const MachineRegisterInfo &mri,
                   const TargetRegisterInfo &tri);
@@ -137,7 +138,7 @@ private:
 
   /// Extract register defs/uses from each node's MachineInstr into
   /// instr_reg_ops_. Skips boundary nodes and physical registers.
-  /// Reports fatal error for group nodes (not yet supported).
+  /// Reports fatal error for subgraph proxies (not yet supported).
   void ExtractRegOps(ArrayRef<ScheduleNode *> nodes,
                      const MachineRegisterInfo &mri,
                      const TargetRegisterInfo &tri);

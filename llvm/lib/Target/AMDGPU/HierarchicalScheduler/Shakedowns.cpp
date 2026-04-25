@@ -335,7 +335,7 @@ void VerifyGCNRegisterTracker(ScheduleGraph &graph,
   // Map from MachineInstr* to its index in order for labeling.
   DenseMap<MachineInstr *, ScheduleNode *> mi_to_node;
   for (ScheduleNode *node : order) {
-    if (!node->IsLeaf()) {
+    if (!node->IsSchedulingUnit()) {
       continue;
     }
     SUnit *su = node->GetSUnit();
@@ -392,7 +392,7 @@ void VerifyGCNRegisterTracker(ScheduleGraph &graph,
   for (ScheduleNode *node : order) {
     tracker.Schedule(node);
 
-    SUnit *su = node->IsLeaf() ? node->GetSUnit() : nullptr;
+    SUnit *su = node->IsSchedulingUnit() ? node->GetSUnit() : nullptr;
     bool has_mi = su && su->getInstr();
 
     if (has_mi && mi_idx < static_cast<int>(llvm_pressures.size())) {
@@ -469,17 +469,17 @@ void RunScheduleLengthTrackerShakedown(ScheduleGraph &graph,
   }
 
   // --- Forward LB invariants ---
-  // (a) LB at empty state == LeafSize (current_cycle=0, no contribution
-  //     from scheduled set).
+  // (a) LB at empty state == NumSchedulingUnits (current_cycle=0, no
+  //     contribution from scheduled set).
   // (b) LB at fully scheduled state == final length (current_cycle_),
   //     i.e., tight bound at completion.
   // (c) LB is monotonically non-decreasing along the forward pass
   //     (first term is non-decreasing by IssueWidth=1; second term is
   //     a running max).
   int forward_violations = 0;
-  if (lb_after.front() != graph.LeafSize()) {
+  if (lb_after.front() != graph.NumSchedulingUnits()) {
     llvm::outs() << "  LB-at-empty mismatch: got " << lb_after.front()
-                 << ", expected " << graph.LeafSize() << "\n";
+                 << ", expected " << graph.NumSchedulingUnits() << "\n";
     ++forward_violations;
   }
   if (lb_after.back() != tracker.GetCurrentCycle()) {
@@ -845,7 +845,8 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {
       llvm::outs() << "  Region: " << region.GetNumInstrs()
                    << " instrs, graph: " << graph.Size()
-                   << " nodes (" << graph.LeafSize() << " leaves)"
+                   << " nodes (" << graph.NumSchedulingUnits()
+                   << " scheduling units)"
                    << ", topo order size: " << graph.GetTopoOrder().size()
                    << "\n";
 

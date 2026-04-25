@@ -4,8 +4,10 @@
 // graph structure for hierarchical scheduling.
 //
 // A ScheduleNode is either:
-//   - A leaf: wraps a single SUnit (instruction)
-//   - A group: owns a subgraph (ScheduleGraph) of ScheduleNodes
+//   - A scheduling unit: wraps a single SUnit (instruction or
+//     entry/exit sentinel). IsSchedulingUnit() == true.
+//   - A subgraph proxy: stands in for a group of ScheduleNodes.
+//     IsSubgraphProxy() == true.
 //
 // A ScheduleGraph is a collection of ScheduleNodes with edges between them.
 // The same types are used at every level of the hierarchy, enabling uniform
@@ -168,49 +170,59 @@ struct ScheduleEdge {
   bool IsLatencyEdge() const { return kind_ <= kArtificial; }
 };
 
-/// A node in a ScheduleGraph. Either a leaf (wrapping a single SUnit) or a
-/// group (owning a subgraph of ScheduleNodes). Uses std::variant to make
-/// the leaf/group distinction type-safe — it is impossible to have both
-/// an SUnit and a subgraph, or neither.
+/// A node in a ScheduleGraph. Either a scheduling unit (wrapping a
+/// single SUnit) or a subgraph proxy (standing in for a group of
+/// other scheduling units — see AMDGPUClusteringDesign.md for the
+/// subgraph mechanism). Uses std::variant to make the unit/proxy
+/// distinction type-safe — it is impossible to have both an SUnit
+/// and a subgraph payload, or neither.
 ///
 /// Note: assert() is compiled out in release builds (NDEBUG is defined),
-/// so the GetSUnit/GetSubgraph checks have zero cost in production. They
-/// exist only to catch misuse during development and debug builds.
+/// so the GetSUnit check has zero cost in production. It exists only
+/// to catch misuse during development and debug builds.
 class ScheduleNode {
 public:
-  /// Create a leaf node wrapping a single SUnit. The node's graph-local
-  /// id is drawn from `top_level_graph`'s counter — that is, the root
-  /// of the graph hierarchy this node will live in. For a flat (non-
-  /// nested) graph this is just the graph being built.
-  /// Must not be null.
+  /// Create a scheduling-unit node wrapping a single SUnit. The
+  /// node's graph-local id is drawn from `top_level_graph`'s counter
+  /// — that is, the root of the graph hierarchy this node will live
+  /// in. For a flat (non-nested) graph this is just the graph being
+  /// built. `top_level_graph` must not be null; `su` may be null (see
+  /// the debug-name overload below).
   ScheduleNode(SUnit *su, ScheduleGraph *top_level_graph);
 
-  /// Create a leaf node with a debug name (for test DAGs without real SUnits).
-  /// Must not be null.
+  /// Create a scheduling-unit node with a debug name (for test DAGs
+  /// without real SUnits). `top_level_graph` must not be null; `su`
+  /// may be null.
   ScheduleNode(SUnit *su, std::string debug_name,
                ScheduleGraph *top_level_graph);
 
-  /// Create a group node owning a subgraph. `top_level_graph` is the
-  /// root of the hierarchy this wrapping node will live in (NOT the
-  /// wrapped subgraph itself).
-  /// Must not be null.
-  ScheduleNode(std::unique_ptr<ScheduleGraph> subgraph,
-               ScheduleGraph *top_level_graph);
+  // NOTE: a subgraph-proxy ctor will be added in Phase 1 of the
+  // subgraph work (AMDGPUClusteringDesign.md Approach B), taking a
+  // SubgraphInfo* rather than a unique_ptr<ScheduleGraph>. The
+  // Approach-A group-node ctor previously in this position was
+  // removed since its data shape no longer matches the planned
+  // model.
 
-  bool IsLeaf() const {
+  /// True if this node represents a single scheduling unit (wraps
+  /// one SUnit — either a real MachineInstr-backed SUnit or a
+  /// synthetic entry/exit sentinel). False if this node is a
+  /// subgraph proxy that stands in for a group of other nodes.
+  ///
+  /// Partitions every ScheduleNode exactly once, together with
+  /// IsSubgraphProxy. Used by Schedule dispatch, trackers, and
+  /// graph-level unit counting.
+  bool IsSchedulingUnit() const {
     return std::holds_alternative<SUnit *>(content_);
   }
 
-  /// Access the wrapped SUnit. Only valid for leaf nodes.
-  SUnit *GetSUnit() const {
-    assert(IsLeaf() && "GetSUnit called on group node");
-    return std::get<SUnit *>(content_);
-  }
+  /// True if this node is a subgraph proxy (represents a contained
+  /// group of scheduling units). Inverse of IsSchedulingUnit.
+  bool IsSubgraphProxy() const { return !IsSchedulingUnit(); }
 
-  /// Access the owned subgraph. Only valid for group nodes.
-  ScheduleGraph *GetSubgraph() const {
-    assert(!IsLeaf() && "GetSubgraph called on leaf node");
-    return std::get<std::unique_ptr<ScheduleGraph>>(content_).get();
+  /// Access the wrapped SUnit. Only valid for scheduling-unit nodes.
+  SUnit *GetSUnit() const {
+    assert(IsSchedulingUnit() && "GetSUnit called on subgraph proxy");
+    return std::get<SUnit *>(content_);
   }
 
   /// Read-only edge access.
@@ -229,10 +241,6 @@ public:
       return a.node_->GetTopoIndex() < b.node_->GetTopoIndex();
     });
   }
-
-  /// For leaf nodes, returns 1. For group nodes, recursively counts the
-  /// total number of leaf nodes across all subgraphs.
-  int LeafSize() const;
 
   /// Topological index. Set by ScheduleGraph::ComputeTopologicalOrder().
   /// -1 means not yet computed.
@@ -259,9 +267,10 @@ public:
 
   /// Registers defined and used by this node, with lane masks
   /// indicating which sub-register lanes are affected. Populated
-  /// during graph construction from MachineInstr (leaf nodes via
-  /// ExtractRegInfo — full mask), LiveIntervals (entry/exit nodes —
-  /// per-lane mask), or subgraph boundaries (group nodes, future).
+  /// during graph construction from MachineInstr (scheduling-unit
+  /// nodes via ExtractRegInfo — full mask), LiveIntervals (entry/exit
+  /// nodes — per-lane mask), or subgraph boundaries (subgraph
+  /// proxies, future Phase 1).
   ArrayRef<RegWithLaneMask> RegDefs() const { return reg_defs_; }
   ArrayRef<RegWithLaneMask> RegUses() const { return reg_uses_; }
   void AddRegDef(Register reg, LaneBitmask mask) {
@@ -465,8 +474,10 @@ public:
   ArrayRef<ScheduleNode> Nodes() const { return nodes_; }
   int Size() const { return static_cast<int>(nodes_.size()); }
 
-  /// Total number of leaf nodes across all levels of the hierarchy.
-  int LeafSize() const;
+  /// Total number of scheduling-unit nodes in this graph (real +
+  /// entry/exit sentinels; excludes subgraph proxies). Phase 0: no
+  /// proxies exist, so this equals Size(). Lazily counted; cached.
+  int NumSchedulingUnits() const;
 
   /// Add an edge from `from` to `to`. The graph routes all edge
   /// additions through here so that derived caches (topo, cp,
@@ -547,11 +558,12 @@ public:
   int GetCriticalPathLength() const { return *critical_path_length_; }
 
   /// Lower bound on schedule length implied by graph structure alone:
-  ///   max(LeafSize, GetCriticalPathLength() + 1)
-  /// LeafSize covers the IssueWidth=1 floor (one cycle per leaf);
-  /// CriticalPathLength + 1 covers the latency-chain floor (the +1
-  /// is the cycle the latency-sink itself occupies). For chain-like
-  /// graphs CP+1 dominates; for parallel/branchy graphs LeafSize can.
+  ///   max(NumSchedulingUnits, GetCriticalPathLength() + 1)
+  /// NumSchedulingUnits covers the IssueWidth=1 floor (one cycle per
+  /// unit); CriticalPathLength + 1 covers the latency-chain floor
+  /// (the +1 is the cycle the latency-sink itself occupies). For
+  /// chain-like graphs CP+1 dominates; for parallel/branchy graphs
+  /// NumSchedulingUnits can.
   /// Cached during ComputeCriticalPathFromExit; caller must ensure
   /// HasCriticalPathFromExit().
   int GetGraphLengthFloor() const { return *graph_length_floor_; }
@@ -660,14 +672,16 @@ private:
   /// InvalidateDerivedData.
   std::optional<int> critical_path_length_;
 
-  /// Cached max(LeafSize, critical_path_length_ + 1). Populated at the
-  /// end of ComputeCriticalPathFromExit; reset in InvalidateDerivedData.
+  /// Cached max(NumSchedulingUnits, critical_path_length_ + 1).
+  /// Populated at the end of ComputeCriticalPathFromExit; reset in
+  /// InvalidateDerivedData.
   std::optional<int> graph_length_floor_;
 
-  /// Lazily-computed leaf-node count (see LeafSize()). Populated on
-  /// first call; cleared on any graph mutation via
-  /// InvalidateDerivedData. `mutable` so LeafSize() can stay const.
-  mutable std::optional<int> cached_leaf_size_;
+  /// Lazily-computed scheduling-unit count (see NumSchedulingUnits()).
+  /// Populated on first call; cleared on any graph mutation via
+  /// InvalidateDerivedData. `mutable` so NumSchedulingUnits() can
+  /// stay const.
+  mutable std::optional<int> cached_num_scheduling_units_;
 
   std::unique_ptr<ReducedGraph> reduced_graph_;
   std::unique_ptr<DominatorTree> dom_tree_;

@@ -183,10 +183,11 @@ void ScheduleDAGHierarchicalScheduler::ApplyScheduleOrder(
     const ScheduleConstructor &sc) {
   std::vector<SUnit *> sunit_order;
   for (const ScheduleNode *node : sc.GetScheduleOrder()) {
-    if (!node->IsLeaf()) {
-      report_fatal_error("ApplyScheduleOrder: encountered a group node "
-                         "in the schedule order. Only leaf nodes are "
-                         "supported.");
+    if (!node->IsSchedulingUnit()) {
+      report_fatal_error(
+          "ApplyScheduleOrder: encountered a subgraph proxy in "
+          "the schedule order. Only scheduling-unit nodes are "
+          "supported.");
     }
     SUnit *su = node->GetSUnit();
     if (su) {
