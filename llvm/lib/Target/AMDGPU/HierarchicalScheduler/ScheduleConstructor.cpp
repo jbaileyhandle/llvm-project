@@ -185,31 +185,38 @@ void ScheduleConstructor::ScheduleByIndex(int index) {
 
   ++schedule_call_count_;
 
-  // Update Trackers
   // Trackers self-skip for subgraph proxies (no register or cycle
   // effect — see each tracker's Schedule for the early-return).
   // We call them uniformly here.
   pressure_tracker_.Schedule(node);
   length_tracker_.Schedule(node);
 
-  // Subgraph-proxy nodes push a new scope so members released
-  // below land somewhere (FindScopeOnStack lookup on each
-  // member's parent_subgraph_proxy will return this new scope).
-  // ready_list above (captured by reference) refers to the
-  // pre-push top-of-stack and stays valid for the EraseAt below.
-  if (node->IsSubgraphProxy()) {
+  // Erase from current scope's ready list FIRST. ready_list must
+  // not be touched after this point — the scope mutation below can
+  // realloc scopes_ (push) or destroy the referenced scope (pop)
+  // and dangle the reference either way.
+  ReadyListEraseAt(ready_list, index);
+
+  // Scope mutation. Start proxy pushes a new scope so members
+  // released below land somewhere (each member's
+  // parent_subgraph_proxy is this start, so GetReadyListForNode
+  // routes them into the just-pushed scope). End proxy pops the
+  // now-drained subgraph scope so ext_successors released below
+  // land in the parent scope.
+  if (node->IsSubgraphStartProxy()) {
     scopes_.push_back(
         SubgraphScheduleScope{/*subgraph_proxy=*/node, /*ready=*/{}});
+  } else if (node->IsSubgraphEndProxy()) {
+    scopes_.pop_back();
   }
 
-  // Remove from the current (pre-push) scope's ready list and
-  // append to schedule order. schedule_order_ holds both real
+  // Append to schedule order. schedule_order_ holds both real
   // nodes and proxies (proxies are filtered at ApplyScheduleOrder
   // time).
-  ReadyListEraseAt(ready_list, index);
   schedule_order_.push_back(node);
 
-  // Release successors
+  // Release successors into their home scopes (now correctly set
+  // up by the scope mutation above).
   ReleaseSuccessors(node);
 }
 
@@ -222,23 +229,47 @@ void ScheduleConstructor::Unschedule() {
   const ScheduleNode *node = schedule_order_.back();
   schedule_order_.pop_back();
 
-  // Reverse successor release. For a proxy: increments member
-  // pred_counts back above 0 and removes those members from the
-  // pushed scope. After this, the pushed scope's ready list
-  // should be empty.
+  // Inverse of ReleaseSuccessors. For each strong successor of
+  // node whose pred_count reached 0 during the matching Schedule
+  // (i.e., that successor is currently in some scope's ready
+  // list), erase it from that ready list and bump the count back
+  // above 0.
   UnreleaseSuccessors(node);
 
-  // Pop the scope that this proxy pushed in Schedule (mirror of
-  // the Schedule push). Asserts the scope was correctly drained
-  // by un-release.
-  if (node->IsSubgraphProxy()) {
+  // Mirror of ScheduleByIndex's scope mutation. Inverse op, in
+  // reverse:
+  //   Start proxy: Schedule pushed a new scope; Unschedule pops
+  //                it. The pushed scope must be empty after
+  //                un-release (any member still in it would
+  //                indicate a round-trip bug — members are
+  //                un-released in their own LIFO Unschedule
+  //                calls, which come BEFORE the start proxy's).
+  //   End proxy:   Schedule popped the subgraph scope; Unschedule
+  //                pushes it back, empty. The end proxy is
+  //                un-scheduled BEFORE any member (members were
+  //                scheduled before end_proxy, so are un-scheduled
+  //                after), so the just-pushed scope is correctly
+  //                empty at this moment — members will reinsert
+  //                themselves into it during their own subsequent
+  //                Unschedule calls.
+  if (node->IsSubgraphStartProxy()) {
     if (!scopes_.back().ready.empty()) {
       report_fatal_error(
-          "ScheduleConstructor::Unschedule(proxy): pushed scope's "
-          "ready list is non-empty after un-release; round-trip "
-          "invariant violated");
+          "ScheduleConstructor::Unschedule(start proxy): pushed "
+          "scope's ready list is non-empty after un-release; "
+          "round-trip invariant violated");
     }
     scopes_.pop_back();
+  } else if (node->IsSubgraphEndProxy()) {
+    // Push back the subgraph scope this end proxy popped at
+    // Schedule time. The end proxy lives in this scope (its
+    // parent_subgraph_proxy IS the start proxy that defines the
+    // scope), so GetReadyListForNode(end_proxy) below routes it
+    // into the just-pushed scope.
+    scopes_.push_back(
+        SubgraphScheduleScope{
+            /*subgraph_proxy=*/node->GetParentSubgraphProxy(),
+            /*ready=*/{}});
   }
 
   // Re-insert the node back into its home scope's ready list at
