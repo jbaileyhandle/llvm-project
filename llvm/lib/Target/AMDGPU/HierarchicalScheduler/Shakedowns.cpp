@@ -336,6 +336,152 @@ void RunSubgraphFormationPhase1Shakedown() {
                << (repopulated ? "PASS\n" : "FAIL\n");
 }
 
+// Phase 2 of subgraph formation: exercises SubgraphFormationTree on
+// BuildTestDAG. Uses the dom tree dumped by RunTestDAGShakedown:
+//   A is the root.
+//     A's children: H, C, G.
+//     C's children: D, E, F.
+//   (idom mapping: H,C,G→A; D,E,F→C; A→ROOT.)
+//
+// At splitter threshold 4, only H is a splitter (max outgoing edge
+// H→G=5; every other max ≤ 4). So:
+//   - subtree_node_count: A=7, C=4, others=1
+//   - subtree_splitter_count: A=1, H=1, others=0
+//
+// IsInSubtreeOf semantics tested across ancestor / sibling / self
+// triples — cheaper than re-deriving expected dfs_pre/dfs_post,
+// which depend on Kahn's FIFO order.
+//
+// RecordEmission test:
+//   - Mark E. Then E.emitted, C.descendants_emitted,
+//     A.descendants_emitted; D / F / H / G untouched.
+//   - Re-mark E (idempotency). EmitPoints unchanged.
+//   - Mark D. D.emitted, A.descendants_emitted (already true, walk
+//     stops). EmitPoints == [E, D] (insertion order).
+void RunSubgraphFormationPhase2Shakedown() {
+  llvm::outs() << "  RunSubgraphFormationPhase2Shakedown:\n";
+  auto graph = ScheduleGraph::BuildTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeTransitiveReduction();
+  graph->ComputeDominatorTree();
+
+  // Build with threshold 4 → only H is a splitter.
+  auto is_splitter = [](const ScheduleNode *n) {
+    return IsSubgraphSplitter(n, /*latency_threshold=*/4);
+  };
+  SubgraphFormationTree tree =
+      SubgraphFormationTree::BuildFromDominatorTree(
+          *graph, graph->GetDominatorTree(), is_splitter);
+
+  // BuildTestDAG emplaces in order [A, C, D, E, F, G, H].
+  ScheduleNode *a = &graph->Nodes()[0];
+  ScheduleNode *c = &graph->Nodes()[1];
+  ScheduleNode *d = &graph->Nodes()[2];
+  ScheduleNode *e = &graph->Nodes()[3];
+  ScheduleNode *f = &graph->Nodes()[4];
+  ScheduleNode *g = &graph->Nodes()[5];
+  ScheduleNode *h = &graph->Nodes()[6];
+
+  SubgraphFormationTreeNode *tA = tree.GetNode(a);
+  SubgraphFormationTreeNode *tC = tree.GetNode(c);
+  SubgraphFormationTreeNode *tD = tree.GetNode(d);
+  SubgraphFormationTreeNode *tE = tree.GetNode(e);
+  SubgraphFormationTreeNode *tF = tree.GetNode(f);
+  SubgraphFormationTreeNode *tG = tree.GetNode(g);
+  SubgraphFormationTreeNode *tH = tree.GetNode(h);
+
+  // 1) Tree shape: parent and child counts.
+  bool root_ok = tree.Root() == tA && tA->parent == nullptr;
+  llvm::outs() << "    Root is A with no parent: "
+               << (root_ok ? "PASS\n" : "FAIL\n");
+  bool a_kids = static_cast<int>(tA->children.size()) == 3;
+  bool c_kids = static_cast<int>(tC->children.size()) == 3;
+  bool h_kids = tH->children.empty() && tD->children.empty() &&
+                tE->children.empty() && tF->children.empty() &&
+                tG->children.empty();
+  llvm::outs() << "    Children counts (A=3 C=3 leaves=0): "
+               << (a_kids && c_kids && h_kids ? "PASS\n" : "FAIL\n");
+
+  bool parents_ok = tH->parent == tA && tC->parent == tA &&
+                    tG->parent == tA && tD->parent == tC &&
+                    tE->parent == tC && tF->parent == tC;
+  llvm::outs() << "    Parent links match dom tree: "
+               << (parents_ok ? "PASS\n" : "FAIL\n");
+
+  // 2) Subtree counts.
+  bool counts_ok =
+      tA->subtree_node_count == 7 && tA->subtree_splitter_count == 1 &&
+      tC->subtree_node_count == 4 && tC->subtree_splitter_count == 0 &&
+      tH->subtree_node_count == 1 && tH->subtree_splitter_count == 1 &&
+      tD->subtree_node_count == 1 && tD->subtree_splitter_count == 0 &&
+      tE->subtree_node_count == 1 && tE->subtree_splitter_count == 0 &&
+      tF->subtree_node_count == 1 && tF->subtree_splitter_count == 0 &&
+      tG->subtree_node_count == 1 && tG->subtree_splitter_count == 0;
+  llvm::outs() << "    Subtree counts: "
+               << (counts_ok ? "PASS\n" : "FAIL\n");
+
+  // 3) is_splitter cached on tree nodes.
+  bool splitter_cached_ok = !tA->is_splitter && !tC->is_splitter &&
+                            !tD->is_splitter && !tE->is_splitter &&
+                            !tF->is_splitter && !tG->is_splitter &&
+                            tH->is_splitter;
+  llvm::outs() << "    is_splitter cached on tree nodes (only H): "
+               << (splitter_cached_ok ? "PASS\n" : "FAIL\n");
+
+  // 4) IsInSubtreeOf semantics. Self-inclusive, transitive, asymmetric.
+  bool subtree_ok =
+      // Self.
+      SubgraphFormationTree::IsInSubtreeOf(tA, tA) &&
+      SubgraphFormationTree::IsInSubtreeOf(tE, tE) &&
+      // Direct child.
+      SubgraphFormationTree::IsInSubtreeOf(tH, tA) &&
+      SubgraphFormationTree::IsInSubtreeOf(tE, tC) &&
+      // Grandchild.
+      SubgraphFormationTree::IsInSubtreeOf(tD, tA) &&
+      SubgraphFormationTree::IsInSubtreeOf(tF, tA) &&
+      // Siblings — neither contains the other.
+      !SubgraphFormationTree::IsInSubtreeOf(tH, tC) &&
+      !SubgraphFormationTree::IsInSubtreeOf(tC, tH) &&
+      !SubgraphFormationTree::IsInSubtreeOf(tD, tE) &&
+      !SubgraphFormationTree::IsInSubtreeOf(tE, tD) &&
+      // Descendant->ancestor: false (ancestor is not in descendant's
+      // subtree).
+      !SubgraphFormationTree::IsInSubtreeOf(tA, tE) &&
+      !SubgraphFormationTree::IsInSubtreeOf(tC, tE);
+  llvm::outs() << "    IsInSubtreeOf semantics: "
+               << (subtree_ok ? "PASS\n" : "FAIL\n");
+
+  // 5) RecordEmission propagation + EmitPoints idempotency.
+  tree.RecordEmission(tE);
+  bool after_e_ok = tE->emitted && !tE->descendants_emitted &&
+                    !tC->emitted && tC->descendants_emitted &&
+                    !tA->emitted && tA->descendants_emitted &&
+                    !tD->emitted && !tD->descendants_emitted &&
+                    !tH->emitted && !tH->descendants_emitted &&
+                    !tF->emitted && !tF->descendants_emitted &&
+                    !tG->emitted && !tG->descendants_emitted &&
+                    tree.EmitPoints().size() == 1 &&
+                    tree.EmitPoints()[0] == tE;
+  llvm::outs() << "    RecordEmission(E): flags + EmitPoints: "
+               << (after_e_ok ? "PASS\n" : "FAIL\n");
+
+  // Re-emit — must be a no-op.
+  tree.RecordEmission(tE);
+  bool idempotent_ok = tree.EmitPoints().size() == 1;
+  llvm::outs() << "    RecordEmission idempotent: "
+               << (idempotent_ok ? "PASS\n" : "FAIL\n");
+
+  // Emit a sibling (D). A.descendants_emitted is already set so the
+  // parent walk should short-circuit at A.
+  tree.RecordEmission(tD);
+  bool after_d_ok = tD->emitted &&
+                    tree.EmitPoints().size() == 2 &&
+                    tree.EmitPoints()[0] == tE &&
+                    tree.EmitPoints()[1] == tD;
+  llvm::outs() << "    RecordEmission(D): EmitPoints == [E, D]: "
+               << (after_d_ok ? "PASS\n" : "FAIL\n");
+}
+
 // Helper: check edge set against expected, with kind kSubgraphOrderEdge.
 // Uses set comparison + NumX() == set.size() to catch both missing /
 // extra targets and duplicate edges to the same target.
@@ -1287,6 +1433,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunSubgraphContiguityShakedown(MF, *LIS);
   RunLengthLowerBoundShakedown(st);
   RunSubgraphFormationPhase1Shakedown();
+  RunSubgraphFormationPhase2Shakedown();
 
   for (auto &region : regions_) {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {
