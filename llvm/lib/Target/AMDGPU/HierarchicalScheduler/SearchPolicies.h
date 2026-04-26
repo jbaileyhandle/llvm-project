@@ -131,6 +131,16 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
   static bool ShouldEndSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);
+
+  // Override SearchPolicyBase: occupancy-max also takes the
+  // TopDownSingleSplitterOnly minimal pipeline. The bracketing
+  // groups the splitter's downstream slice into a contiguous
+  // schedule region, which keeps consumer-side pressure peaks
+  // local instead of letting unrelated work spread peaks across
+  // the region.
+  static SubgraphFormationPolicy MakeFormationPolicy() {
+    return SubgraphFormationPolicy::TopDownSingleSplitterOnly();
+  }
 };
 
 } // namespace hierarchical_scheduler
