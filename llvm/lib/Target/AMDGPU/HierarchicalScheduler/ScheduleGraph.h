@@ -69,6 +69,7 @@
 
 #include "SubgraphInfo.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -785,6 +786,31 @@ public:
   /// Access the reduced graph. Only valid after ComputeTransitiveReduction().
   const ReducedGraph &GetReducedGraph() const { return *reduced_graph_; }
 
+  /// Whether ComputeTransitiveReduction() has been called and its
+  /// reachability matrix is available. Same lifetime as the reduced
+  /// graph itself — both are populated together and cleared together
+  /// in InvalidateDerivedData.
+  bool HasReachability() const {
+    return !reachability_by_topo_index_.empty();
+  }
+
+  /// Does the node at topo index `from_topo_idx` reach the node at
+  /// topo index `to_topo_idx` along directed edges in the original
+  /// (non-reduced) graph? A node always reaches itself.
+  ///
+  /// Bare lookup; caller is responsible for ensuring HasReachability
+  /// (HasReachability() == IsReduced()).
+  bool IsReachableInDag(int from_topo_idx, int to_topo_idx) const {
+    return reachability_by_topo_index_[from_topo_idx].test(to_topo_idx);
+  }
+
+  /// Convenience: same as the topo-index form, but takes node
+  /// pointers and unpacks the topo indices internally.
+  bool IsReachableInDag(const ScheduleNode *from,
+                        const ScheduleNode *to) const {
+    return IsReachableInDag(from->GetTopoIndex(), to->GetTopoIndex());
+  }
+
   /// Compute the dominator tree from the transitively reduced graph.
   /// Stores the result internally. Requires transitive reduction to have
   /// been computed first.
@@ -881,6 +907,18 @@ private:
   mutable std::optional<int> cached_num_scheduling_units_;
 
   std::unique_ptr<ReducedGraph> reduced_graph_;
+
+  /// Per-node DAG-reachability bitvectors, populated at the end of
+  /// ComputeTransitiveReduction (the matrix is built there anyway as
+  /// a working set for redundancy detection — we just keep it
+  /// instead of discarding). reachability_by_topo_index_[i].test(j)
+  /// is true iff the node at topo index i can reach the node at
+  /// topo index j along directed edges. Outer size == graph size;
+  /// each inner BitVector has graph-size bits. Storage cost: V^2/8
+  /// bytes per graph (~125 KB at V=1000, ~500 KB at V=2000).
+  /// Cleared by InvalidateDerivedData.
+  std::vector<BitVector> reachability_by_topo_index_;
+
   std::unique_ptr<DominatorTree> dom_tree_;
   std::unique_ptr<ScheduleConstructor> input_schedule_constructor_;
 

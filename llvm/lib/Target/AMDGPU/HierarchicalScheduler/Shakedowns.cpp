@@ -13,12 +13,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "ScheduleDAGHierarchicalScheduler.h"
+#include "DominatorTree.h"
 #include "GCNRegisterTracker.h"
 #include "GCNSubtarget.h"
 #include "RegisterTracker.h"
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
+#include "SubgraphFormation.h"
 #include "SubgraphInfo.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -192,6 +194,146 @@ void RunTestDAGShakedown() {
   // with graph ToString. Uncomment to re-test:
   // auto cyclic = ScheduleGraph::BuildTestDAGWithCycle();
   // cyclic->ValidateAndComputeTopologicalOrder();
+}
+
+// Phase 1 of subgraph formation: exercises IsSubgraphSplitter, the
+// retained reachability matrix on ScheduleGraph, and the GetIDom
+// node-pointer overload on DominatorTree. Uses BuildTestDAG, whose
+// edges/latencies are known statically:
+//   A→H=1  A→C=2  A→D=3
+//   C→D=1  C→E=4
+//   D→F=2  E→F=1
+//   H→G=5  F→G=2
+//
+// Splitter status (max outgoing latency-edge per node):
+//   A=3, C=4, D=2, E=1, F=2, G=0 (no outgoing), H=5
+// Predicate fires iff max > threshold:
+//   threshold=4 → only H is a splitter.
+//   threshold=3 → C and H.
+//   threshold=2 → A, C, H.
+//
+// Reachability (reflexive + transitive closure of the directed graph):
+//   A reaches everyone (A,C,D,E,F,G,H).
+//   C reaches C,D,E,F,G.
+//   D reaches D,F,G.
+//   E reaches E,F,G.
+//   F reaches F,G.
+//   G reaches only G.
+//   H reaches H,G.
+void RunSubgraphFormationPhase1Shakedown() {
+  llvm::outs() << "  RunSubgraphFormationPhase1Shakedown:\n";
+  auto graph = ScheduleGraph::BuildTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeTransitiveReduction();
+  graph->ComputeDominatorTree();
+
+  // BuildTestDAG emplacement order: [A, C, D, E, F, G, H]
+  ScheduleNode *a = &graph->Nodes()[0];
+  ScheduleNode *c = &graph->Nodes()[1];
+  ScheduleNode *d = &graph->Nodes()[2];
+  ScheduleNode *e = &graph->Nodes()[3];
+  ScheduleNode *f = &graph->Nodes()[4];
+  ScheduleNode *g = &graph->Nodes()[5];
+  ScheduleNode *h = &graph->Nodes()[6];
+
+  // 1) IsSubgraphSplitter at three thresholds.
+  struct SplitterCase {
+    int threshold;
+    // Bits in node order [A, C, D, E, F, G, H].
+    bool expected[7];
+  };
+  const SplitterCase splitter_cases[] = {
+      {4, {false, false, false, false, false, false, true}},
+      {3, {false, true,  false, false, false, false, true}},
+      {2, {true,  true,  false, false, false, false, true}},
+  };
+  ScheduleNode *nodes[] = {a, c, d, e, f, g, h};
+  const char *names[] = {"A", "C", "D", "E", "F", "G", "H"};
+  for (const SplitterCase &sc : splitter_cases) {
+    int mismatches = 0;
+    llvm::outs() << "    Splitter status (threshold=" << sc.threshold << "):";
+    for (int i = 0; i < 7; ++i) {
+      bool got = IsSubgraphSplitter(nodes[i], sc.threshold);
+      llvm::outs() << " " << names[i] << "=" << (got ? "T" : "F");
+      if (got != sc.expected[i]) {
+        ++mismatches;
+      }
+    }
+    llvm::outs() << (mismatches == 0 ? "  PASS\n" : "  FAIL\n");
+  }
+
+  // 2) IsReachableInDag for one row per source — every node tested as
+  // target. The reachability matrix is reflexive + transitive over
+  // the directed graph (computed and retained inside
+  // ComputeTransitiveReduction).
+  struct ReachCase {
+    ScheduleNode *from;
+    const char *from_name;
+    // Expected reachability to [A, C, D, E, F, G, H] in that order.
+    bool expected[7];
+  };
+  const ReachCase reach_cases[] = {
+      {a, "A", {true,  true,  true,  true,  true,  true,  true }},
+      {c, "C", {false, true,  true,  true,  true,  true,  false}},
+      {d, "D", {false, false, true,  false, true,  true,  false}},
+      {e, "E", {false, false, false, true,  true,  true,  false}},
+      {f, "F", {false, false, false, false, true,  true,  false}},
+      {g, "G", {false, false, false, false, false, true,  false}},
+      {h, "H", {false, false, false, false, false, true,  true }},
+  };
+  for (const ReachCase &rc : reach_cases) {
+    int mismatches = 0;
+    llvm::outs() << "    Reachable from " << rc.from_name << ":";
+    for (int i = 0; i < 7; ++i) {
+      bool got = graph->IsReachableInDag(rc.from, nodes[i]);
+      if (got) {
+        llvm::outs() << " " << names[i];
+      }
+      if (got != rc.expected[i]) {
+        ++mismatches;
+      }
+    }
+    llvm::outs() << (mismatches == 0 ? "  PASS\n" : "  FAIL\n");
+  }
+
+  // 3) GetIDom node-pointer overload agrees with the topo-index form
+  // for every node.
+  const DominatorTree &dom = graph->GetDominatorTree();
+  int dom_mismatches = 0;
+  for (int i = 0; i < 7; ++i) {
+    int by_node = dom.GetIDom(nodes[i]);
+    int by_idx = dom.GetIDomByTopoIndex(nodes[i]->GetTopoIndex());
+    if (by_node != by_idx) {
+      ++dom_mismatches;
+    }
+  }
+  llvm::outs() << "    DominatorTree::GetIDom(node) matches "
+               << "GetIDomByTopoIndex(): "
+               << (dom_mismatches == 0 ? "PASS\n" : "FAIL\n");
+
+  // 4) Reachability cache lifecycle: a graph mutation
+  // (InsertSubgraphProxies) routes through InvalidateDerivedData,
+  // which must clear the matrix. Re-running ComputeTransitiveReduction
+  // must repopulate it.
+  bool initially_present = graph->HasReachability();
+  llvm::outs() << "    HasReachability after build: "
+               << (initially_present ? "PASS\n" : "FAIL\n");
+
+  // Add one trivial subgraph to force invalidation (any AddEdge call
+  // would also work, but InsertSubgraphProxies is the realistic
+  // mutation here).
+  std::vector<std::unique_ptr<SubgraphInfo>> infos;
+  std::vector<ScheduleNode *> members = {c, d, e, f};
+  infos.push_back(std::make_unique<SubgraphInfo>(members, "S"));
+  graph->InsertSubgraphProxies(std::move(infos));
+  bool cleared = !graph->HasReachability();
+  llvm::outs() << "    HasReachability cleared after mutation: "
+               << (cleared ? "PASS\n" : "FAIL\n");
+
+  graph->ComputeTransitiveReduction();
+  bool repopulated = graph->HasReachability();
+  llvm::outs() << "    HasReachability repopulated after recompute: "
+               << (repopulated ? "PASS\n" : "FAIL\n");
 }
 
 // Helper: check edge set against expected, with kind kSubgraphOrderEdge.
@@ -1144,6 +1286,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunInsertSubgraphProxiesShakedown();
   RunSubgraphContiguityShakedown(MF, *LIS);
   RunLengthLowerBoundShakedown(st);
+  RunSubgraphFormationPhase1Shakedown();
 
   for (auto &region : regions_) {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {

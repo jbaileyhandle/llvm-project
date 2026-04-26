@@ -457,6 +457,7 @@ void ScheduleGraph::InvalidateDerivedData() {
   critical_path_length_.reset();
   graph_length_floor_.reset();
   reduced_graph_.reset();
+  reachability_by_topo_index_.clear();
   dom_tree_.reset();
   cached_num_scheduling_units_.reset();
   // input_schedule_constructor_ is NOT cleared; it's a Phase-4 artifact
@@ -515,12 +516,15 @@ void ScheduleGraph::ComputeTransitiveReduction() {
 
   int num_nodes = Size();
 
-  // One BitVector per node, each of size num_nodes. reachable[i] tracks
-  // which nodes are reachable from the node at topo index i (including
-  // itself).
-  std::vector<BitVector> reachable(num_nodes, BitVector(num_nodes, false));
+  // One BitVector per node, each of size num_nodes.
+  // reachability_by_topo_index_[i] tracks which nodes are reachable
+  // from the node at topo index i (including itself). Built up here
+  // as a working set for redundancy detection, then kept as a graph
+  // member (subgraph formation in particular consumes it; see
+  // AMDGPUSubgraphFormationDesign.md §4.3).
+  reachability_by_topo_index_.assign(num_nodes, BitVector(num_nodes, false));
   for (int topo_idx = 0; topo_idx < num_nodes; ++topo_idx) {
-    reachable[topo_idx].set(topo_idx);
+    reachability_by_topo_index_[topo_idx].set(topo_idx);
   }
 
   auto reduced = std::make_unique<ReducedGraph>(num_nodes);
@@ -540,7 +544,7 @@ void ScheduleGraph::ComputeTransitiveReduction() {
     for (const ScheduleEdge &succ_edge : curr_node->Successors()) {
       int succ_topo_idx = succ_edge.node_->GetTopoIndex();
 
-      if (reachable[curr_topo_idx].test(succ_topo_idx)) {
+      if (reachability_by_topo_index_[curr_topo_idx].test(succ_topo_idx)) {
         // Already reachable via a closer path — edge is redundant.
         continue;
       }
@@ -550,7 +554,8 @@ void ScheduleGraph::ComputeTransitiveReduction() {
       reduced->predecessors_by_topo_index[succ_topo_idx].push_back(curr_topo_idx);
 
       // Merge the successor's reachable set into ours.
-      reachable[curr_topo_idx] |= reachable[succ_topo_idx];
+      reachability_by_topo_index_[curr_topo_idx] |=
+          reachability_by_topo_index_[succ_topo_idx];
     }
   }
 

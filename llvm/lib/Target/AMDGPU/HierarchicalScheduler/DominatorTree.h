@@ -40,6 +40,13 @@ public:
   /// (including single-root DAGs where the root's idom is -1).
   int GetIDomByTopoIndex(int topo_idx) const { return idom_by_topo_index_[topo_idx]; }
 
+  /// Convenience: same as GetIDomByTopoIndex but takes a node pointer
+  /// and unpacks the topo index internally. Returns the topo index of
+  /// the immediate dominator (or -1 for the virtual-root case).
+  int GetIDom(const ScheduleNode *node) const {
+    return GetIDomByTopoIndex(node->GetTopoIndex());
+  }
+
   /// Does node at topo index |dominator| dominate node at topo index |node|?
   /// A node dominates itself. The virtual root (-1) dominates everything.
   bool Dominates(int dominator, int node) const;

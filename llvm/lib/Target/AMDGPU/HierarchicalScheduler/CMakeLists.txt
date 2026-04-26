@@ -22,6 +22,7 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/BranchAndBoundSearch.cpp
   HierarchicalScheduler/SearchPolicies.cpp
   HierarchicalScheduler/SubgraphInfo.cpp
+  HierarchicalScheduler/SubgraphFormation.cpp
   PARENT_SCOPE
 )
 
