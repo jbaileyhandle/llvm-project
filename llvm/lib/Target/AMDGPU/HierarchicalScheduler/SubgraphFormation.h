@@ -2,7 +2,7 @@
 //
 // Subgraph formation: given a freshly built ScheduleGraph (after
 // BuildFromSUnits + ValidateAndComputeTopologicalOrder +
-// ComputeTransitiveReduction + ComputeDominatorTree), produce a list
+// ComputeTransitiveReductionAndReachability + ComputeDominatorTree), produce a list
 // of SubgraphInfos ready to be handed to
 // ScheduleGraph::InsertSubgraphProxies. Uses the dominator tree plus
 // a latency-based "splitter" notion to decide where to cut the graph
@@ -406,7 +406,7 @@ struct SplitterSplitResult {
 ///
 /// Reachability is read from the graph's cached matrix
 /// (ScheduleGraph::IsReachableInDag), so the graph must have had
-/// ComputeTransitiveReduction run since the last mutation.
+/// ComputeTransitiveReductionAndReachability run since the last mutation.
 SplitterSplitResult SplitEmitPoint(SubgraphFormationTreeNode *emit_point,
                                    const ScheduleGraph &graph,
                                    SplitterPartitionPolicy policy);
@@ -471,6 +471,32 @@ struct SubgraphFormationPolicy {
   /// Produces fewer, larger subgraphs.
   static SubgraphFormationPolicy TopDownAggressive();
 };
+
+/// Top-level entry point for subgraph formation. Runs on a freshly
+/// built ScheduleGraph (after BuildFromSUnits). Steps:
+///   1. Make sure the prerequisite analyses are in place (topo
+///      order, transitive reduction + reachability cache, dominator
+///      tree). All idempotent — re-running is cheap if they're
+///      already current.
+///   2. Build the formation tree from the dom tree, caching
+///      is_splitter on every node.
+///   3. Run each pass in policy.pipeline.passes against the tree.
+///   4. Materialize SubgraphInfos via BuildSubgraphInfos
+///      (single-splitter emit points are split per
+///      policy.splitter_partition; multi/zero-splitter emit as-is;
+///      singletons filtered).
+///   5. Hand ownership to the graph via InsertSubgraphProxies; the
+///      vector is moved and emptied.
+///   6. Re-derive topo + critical-path so downstream consumers see
+///      the post-mutation graph.
+///
+/// Returns nothing: ownership of every SubgraphInfo transfers into
+/// the graph (specifically into each subgraph's start proxy node).
+/// No-op behavior if the pipeline doesn't emit any subgraphs:
+/// InsertSubgraphProxies short-circuits on an empty vector and the
+/// final re-derive runs to keep behavior uniform regardless.
+void FormSubgraphs(ScheduleGraph &graph,
+                   const SubgraphFormationPolicy &policy);
 
 } // namespace hierarchical_scheduler
 } // namespace llvm

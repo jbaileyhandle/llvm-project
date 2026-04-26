@@ -390,5 +390,50 @@ SubgraphFormationPolicy SubgraphFormationPolicy::TopDownAggressive() {
   return p;
 }
 
+// --- End-to-end driver (§7) ----------------------------------------------
+
+void FormSubgraphs(ScheduleGraph &graph,
+                   const SubgraphFormationPolicy &policy) {
+  // 1. Prerequisite analyses. Each ScheduleGraph::Compute* call is
+  // cache-aware (early-returns if its result is already current),
+  // so re-running on a freshly built graph that hasn't seen them
+  // yet pays the full cost; re-running on a graph that already has
+  // them costs O(1) per check.
+  graph.ValidateAndComputeTopologicalOrder();
+  graph.ComputeTransitiveReductionAndReachability();
+  graph.ComputeDominatorTree();
+
+  // 2. Formation tree.
+  auto is_splitter = [&policy](const ScheduleNode *n) {
+    return IsSubgraphSplitter(n, policy.latency_threshold);
+  };
+  SubgraphFormationTree tree =
+      SubgraphFormationTree::BuildFromDominatorTree(
+          graph, graph.GetDominatorTree(), is_splitter);
+
+  // 3. Pipeline.
+  for (auto &pass : policy.pipeline.passes) {
+    pass(tree);
+  }
+
+  // 4. Materialize. Single-splitter emit points get partitioned
+  // here; multi/zero-splitter emit as-is; singletons are dropped.
+  std::vector<std::unique_ptr<SubgraphInfo>> infos =
+      BuildSubgraphInfos(tree.EmitPoints(), graph,
+                         policy.splitter_partition);
+
+  // 5. Mutate. InsertSubgraphProxies takes the vector by value and
+  // moves each unique_ptr into its start proxy node. No-op if
+  // `infos` is empty (and in that case the graph isn't mutated, so
+  // the re-derive below short-circuits).
+  graph.InsertSubgraphProxies(std::move(infos));
+
+  // 6. Re-derive topo + critical-path so downstream consumers see
+  // the post-mutation graph (proxies + artificial edges). Both
+  // calls early-return if no mutation happened above.
+  graph.ValidateAndComputeTopologicalOrder();
+  graph.ComputeCriticalPathFromExit();
+}
+
 } // namespace hierarchical_scheduler
 } // namespace llvm

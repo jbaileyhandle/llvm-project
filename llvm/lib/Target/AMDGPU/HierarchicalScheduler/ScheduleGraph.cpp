@@ -383,7 +383,15 @@ void ScheduleGraph::InsertSubgraphProxies(
 // Kahn's algorithm: iteratively remove nodes with no unmet predecessors.
 void ScheduleGraph::ValidateAndComputeTopologicalOrder(
     bool include_weak_edges) {
+  // Cache-aware: skip if a current order exists AND it was computed
+  // with the same include_weak_edges mode. Cleared by any graph
+  // mutation via InvalidateDerivedData.
+  if (IsTopoSorted() &&
+      topo_order_include_weak_edges_ == include_weak_edges) {
+    return;
+  }
   ComputeTopologicalOrder(include_weak_edges);
+  topo_order_include_weak_edges_ = include_weak_edges;
   CheckSingleSourceSingleSink(*this, /*include_weak_edges=*/false);
   CheckSingleSourceSingleSink(*this, /*include_weak_edges=*/true);
 }
@@ -453,6 +461,7 @@ void ScheduleGraph::ComputeTopologicalOrder(bool include_weak_edges) {
 
 void ScheduleGraph::InvalidateDerivedData() {
   topo_order_.clear();
+  topo_order_include_weak_edges_.reset();
   critical_path_from_exit_by_topo_index_.clear();
   critical_path_length_.reset();
   graph_length_floor_.reset();
@@ -466,6 +475,13 @@ void ScheduleGraph::InvalidateDerivedData() {
 }
 
 void ScheduleGraph::ComputeCriticalPathFromExit() {
+  // Cache-aware: skip if cp is already current. Cleared by any
+  // graph mutation via InvalidateDerivedData (which also clears
+  // topo, so the not-topo-sorted check below would re-trigger if
+  // anything got invalidated).
+  if (HasCriticalPathFromExit()) {
+    return;
+  }
   if (!IsTopoSorted()) {
     std::string msg = "ComputeCriticalPathFromExit called on " + ToString() +
                       " before ComputeTopologicalOrder";
@@ -507,9 +523,15 @@ void ScheduleGraph::ComputeCriticalPathFromExit() {
   graph_length_floor_ = std::max(NumSchedulingUnits(), cp_at_source + 1);
 }
 
-void ScheduleGraph::ComputeTransitiveReduction() {
+void ScheduleGraph::ComputeTransitiveReductionAndReachability() {
+  // Cache-aware: skip if reduced graph + reachability are already
+  // current. They're populated together and cleared together in
+  // InvalidateDerivedData, so HasReducedGraph is the right gate.
+  if (HasReducedGraph()) {
+    return;
+  }
   if (!IsTopoSorted()) {
-    std::string msg = "ComputeTransitiveReduction called on " + ToString() +
+    std::string msg = "ComputeTransitiveReductionAndReachability called on " + ToString() +
                       " before ComputeTopologicalOrder";
     report_fatal_error(llvm::StringRef(msg));
   }
@@ -563,9 +585,13 @@ void ScheduleGraph::ComputeTransitiveReduction() {
 }
 
 void ScheduleGraph::ComputeDominatorTree() {
-  if (!IsReduced()) {
+  // Cache-aware: skip if dom tree already current.
+  if (HasDominatorTree()) {
+    return;
+  }
+  if (!HasReducedGraph()) {
     std::string msg = "ComputeDominatorTree called on " + ToString() +
-                      " before ComputeTransitiveReduction";
+                      " before ComputeTransitiveReductionAndReachability";
     report_fatal_error(llvm::StringRef(msg));
   }
 

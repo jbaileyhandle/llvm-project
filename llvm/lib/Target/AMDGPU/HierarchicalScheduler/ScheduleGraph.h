@@ -833,15 +833,17 @@ public:
   /// of size V (V/64 word operations). For sparse DAGs with E ~ kV edges
   /// (k = average degree), this gives ~kV^2/64 total word operations.
   /// Temporary space: one BitVector per node = V^2/8 bytes total.
-  void ComputeTransitiveReduction();
+  void ComputeTransitiveReductionAndReachability();
 
-  /// Whether ComputeTransitiveReduction() has been called.
-  bool IsReduced() const { return reduced_graph_ != nullptr; }
+  /// Whether ComputeTransitiveReductionAndReachability() has been called and its
+  /// result is still cached (cleared on any graph mutation via
+  /// InvalidateDerivedData).
+  bool HasReducedGraph() const { return reduced_graph_ != nullptr; }
 
-  /// Access the reduced graph. Only valid after ComputeTransitiveReduction().
+  /// Access the reduced graph. Only valid after ComputeTransitiveReductionAndReachability().
   const ReducedGraph &GetReducedGraph() const { return *reduced_graph_; }
 
-  /// Whether ComputeTransitiveReduction() has been called and its
+  /// Whether ComputeTransitiveReductionAndReachability() has been called and its
   /// reachability matrix is available. Same lifetime as the reduced
   /// graph itself — both are populated together and cleared together
   /// in InvalidateDerivedData.
@@ -854,7 +856,7 @@ public:
   /// (non-reduced) graph? A node always reaches itself.
   ///
   /// Bare lookup; caller is responsible for ensuring HasReachability
-  /// (HasReachability() == IsReduced()).
+  /// (HasReachability() == HasReducedGraph()).
   bool IsReachableInDag(int from_topo_idx, int to_topo_idx) const {
     return reachability_by_topo_index_[from_topo_idx].test(to_topo_idx);
   }
@@ -940,6 +942,13 @@ private:
   /// or invalidated since." IsTopoSorted() = !topo_order_.empty().
   std::vector<ScheduleNode *> topo_order_;
 
+  /// The include_weak_edges value used to compute the cached
+  /// topo_order_. Read by ValidateAndComputeTopologicalOrder's
+  /// early-return guard so it can recompute when called with a
+  /// different mode rather than returning a stale order. nullopt
+  /// when topo_order_ is empty.
+  std::optional<bool> topo_order_include_weak_edges_;
+
   /// Populated by ComputeCriticalPathFromExit. Indexed by
   /// ScheduleNode::GetTopoIndex(). Empty == "not computed or
   /// invalidated since." Sized to Size() (one slot per node).
@@ -964,7 +973,7 @@ private:
   std::unique_ptr<ReducedGraph> reduced_graph_;
 
   /// Per-node DAG-reachability bitvectors, populated at the end of
-  /// ComputeTransitiveReduction (the matrix is built there anyway as
+  /// ComputeTransitiveReductionAndReachability (the matrix is built there anyway as
   /// a working set for redundancy detection — we just keep it
   /// instead of discarding). reachability_by_topo_index_[i].test(j)
   /// is true iff the node at topo index i can reach the node at

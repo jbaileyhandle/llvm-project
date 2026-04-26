@@ -42,7 +42,7 @@ void CheckTransitiveReduction(ScheduleGraph &graph) {
     original_edge_count += node.NumSuccessors();
   }
 
-  graph.ComputeTransitiveReduction();
+  graph.ComputeTransitiveReductionAndReachability();
   const ReducedGraph &reduced = graph.GetReducedGraph();
 
   int reduced_edge_count = 0;
@@ -224,7 +224,7 @@ void RunSubgraphFormationPhase1Shakedown() {
   llvm::outs() << "  RunSubgraphFormationPhase1Shakedown:\n";
   auto graph = ScheduleGraph::BuildTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
-  graph->ComputeTransitiveReduction();
+  graph->ComputeTransitiveReductionAndReachability();
   graph->ComputeDominatorTree();
 
   // BuildTestDAG emplacement order: [A, C, D, E, F, G, H]
@@ -265,7 +265,7 @@ void RunSubgraphFormationPhase1Shakedown() {
   // 2) IsReachableInDag for one row per source — every node tested as
   // target. The reachability matrix is reflexive + transitive over
   // the directed graph (computed and retained inside
-  // ComputeTransitiveReduction).
+  // ComputeTransitiveReductionAndReachability).
   struct ReachCase {
     ScheduleNode *from;
     const char *from_name;
@@ -313,7 +313,7 @@ void RunSubgraphFormationPhase1Shakedown() {
 
   // 4) Reachability cache lifecycle: a graph mutation
   // (InsertSubgraphProxies) routes through InvalidateDerivedData,
-  // which must clear the matrix. Re-running ComputeTransitiveReduction
+  // which must clear the matrix. Re-running ComputeTransitiveReductionAndReachability
   // must repopulate it.
   bool initially_present = graph->HasReachability();
   llvm::outs() << "    HasReachability after build: "
@@ -330,7 +330,7 @@ void RunSubgraphFormationPhase1Shakedown() {
   llvm::outs() << "    HasReachability cleared after mutation: "
                << (cleared ? "PASS\n" : "FAIL\n");
 
-  graph->ComputeTransitiveReduction();
+  graph->ComputeTransitiveReductionAndReachability();
   bool repopulated = graph->HasReachability();
   llvm::outs() << "    HasReachability repopulated after recompute: "
                << (repopulated ? "PASS\n" : "FAIL\n");
@@ -362,7 +362,7 @@ void RunSubgraphFormationPhase2Shakedown() {
   llvm::outs() << "  RunSubgraphFormationPhase2Shakedown:\n";
   auto graph = ScheduleGraph::BuildTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
-  graph->ComputeTransitiveReduction();
+  graph->ComputeTransitiveReductionAndReachability();
   graph->ComputeDominatorTree();
 
   // Build with threshold 4 → only H is a splitter.
@@ -503,7 +503,7 @@ TestDAGFormationTree BuildTestDAGFormationTree(int latency_threshold) {
   TestDAGFormationTree out;
   out.graph = ScheduleGraph::BuildTestDAG();
   out.graph->ValidateAndComputeTopologicalOrder();
-  out.graph->ComputeTransitiveReduction();
+  out.graph->ComputeTransitiveReductionAndReachability();
   out.graph->ComputeDominatorTree();
   auto is_splitter = [latency_threshold](const ScheduleNode *n) {
     return IsSubgraphSplitter(n, latency_threshold);
@@ -694,7 +694,7 @@ void RunSubgraphFormationPhase4Shakedown() {
       -> std::vector<std::unique_ptr<SubgraphInfo>> {
     auto graph = ScheduleGraph::BuildSubgraphFormationTestDAG();
     graph->ValidateAndComputeTopologicalOrder();
-    graph->ComputeTransitiveReduction();
+    graph->ComputeTransitiveReductionAndReachability();
     graph->ComputeDominatorTree();
     auto is_splitter = [&policy](const ScheduleNode *n) {
       return IsSubgraphSplitter(n, policy.latency_threshold);
@@ -779,7 +779,7 @@ void RunSubgraphFormationPhase4Shakedown() {
   {
     auto graph = ScheduleGraph::BuildSubgraphFormationTestDAG();
     graph->ValidateAndComputeTopologicalOrder();
-    graph->ComputeTransitiveReduction();
+    graph->ComputeTransitiveReductionAndReachability();
     graph->ComputeDominatorTree();
     auto is_splitter = [](const ScheduleNode *n) {
       return IsSubgraphSplitter(n, /*latency_threshold=*/32);
@@ -800,6 +800,138 @@ void RunSubgraphFormationPhase4Shakedown() {
     llvm::outs() << "    Singleton emit point suppressed: "
                  << (ok ? "PASS\n" : "FAIL\n");
   }
+}
+
+// Phase 5 part 1: deterministic end-to-end check of FormSubgraphs
+// on the §8 worked-example DAG. Verifies the full driver wiring —
+// analyses run, pipeline picks the right emit point, materializer
+// produces the right SubgraphInfo, InsertSubgraphProxies attaches
+// proxies, and the post-mutation re-derive populates topo + cp.
+//
+// Expected output: BottomUpDefault → exactly one subgraph with
+// members {D, E, F} (the §8 BottomUp result). Graph grows by 2
+// nodes (start + end proxy).
+void RunSubgraphFormationPhase5Shakedown() {
+  llvm::outs() << "  RunSubgraphFormationPhase5Shakedown:\n";
+  auto graph = ScheduleGraph::BuildSubgraphFormationTestDAG();
+  int num_real_nodes_before = graph->Size();
+  auto policy = SubgraphFormationPolicy::BottomUpDefault();
+  FormSubgraphs(*graph, policy);
+
+  // Locate the start proxies and pull their SubgraphInfos so we
+  // can assert on actual member contents — the driver wiring is
+  // what's being verified here, so going through ToString /
+  // GetSubgraphInfo proves the proxies hold real data.
+  std::vector<SubgraphInfo *> start_infos;
+  int got_ends = 0;
+  for (ScheduleNode &n : graph->Nodes()) {
+    if (n.IsSubgraphStartProxy()) {
+      start_infos.push_back(n.GetSubgraphInfo());
+    }
+    if (n.IsSubgraphEndProxy()) {
+      ++got_ends;
+    }
+  }
+
+  // Single subgraph {D, E, F} expected.
+  std::vector<std::vector<std::string>> expected_member_sets = {
+      {"D", "E", "F"},
+  };
+  bool counts_ok =
+      static_cast<int>(start_infos.size()) ==
+          static_cast<int>(expected_member_sets.size()) &&
+      got_ends == static_cast<int>(start_infos.size());
+  bool members_ok = counts_ok;
+  if (counts_ok) {
+    for (size_t i = 0; i < start_infos.size(); ++i) {
+      if (SortedMemberNames(*start_infos[i]) != expected_member_sets[i]) {
+        members_ok = false;
+      }
+    }
+  }
+  bool size_ok = graph->Size() ==
+                 num_real_nodes_before + 2 * static_cast<int>(start_infos.size());
+  bool topo_ok = graph->IsTopoSorted();
+  bool cp_ok = graph->HasCriticalPathFromExit();
+  bool ok = counts_ok && members_ok && size_ok && topo_ok && cp_ok;
+  llvm::outs() << "    §8 DAG: starts=" << start_infos.size()
+               << " ends=" << got_ends
+               << " members=" << (members_ok ? "match" : "MISMATCH");
+  if (!members_ok) {
+    llvm::outs() << " got:";
+    for (SubgraphInfo *info : start_infos) {
+      llvm::outs() << " {";
+      bool first = true;
+      for (const std::string &n : SortedMemberNames(*info)) {
+        if (!first) {
+          llvm::outs() << ",";
+        }
+        llvm::outs() << n;
+        first = false;
+      }
+      llvm::outs() << "}";
+    }
+  }
+  llvm::outs() << " size=" << num_real_nodes_before << "→" << graph->Size()
+               << " topo=" << (topo_ok ? "y" : "n")
+               << " cp=" << (cp_ok ? "y" : "n")
+               << "  " << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Umbrella for all SubgraphFormation shakedowns that don't need a
+// real region. Phases 1–5 are independent and can run in any order;
+// grouping them keeps RunAllShakedowns's body short.
+void RunAllSubgraphFormationShakedowns() {
+  RunSubgraphFormationPhase1Shakedown();
+  RunSubgraphFormationPhase2Shakedown();
+  RunSubgraphFormationPhase3Shakedown();
+  RunSubgraphFormationPhase4Shakedown();
+  RunSubgraphFormationPhase5Shakedown();
+}
+
+// Phase 5 part 2: smoke test on a real region's graph. Real DAGs
+// vary by codegen — we can't assert specific subgraph contents, just
+// that FormSubgraphs runs to completion and leaves the graph
+// internally consistent (proxy counts match: 1 start + 1 end per
+// emitted subgraph; size grew by exactly 2 * subgraphs_added; topo
+// and cp are populated).
+void RunFormSubgraphsRealRegionSmokeTest(ScheduleGraph &graph) {
+  llvm::outs() << "  RunFormSubgraphsRealRegionSmokeTest:\n";
+  int num_real_nodes_before = graph.Size();
+  int starts_before = 0, ends_before = 0;
+  for (const ScheduleNode &n : graph.Nodes()) {
+    if (n.IsSubgraphStartProxy()) {
+      ++starts_before;
+    }
+    if (n.IsSubgraphEndProxy()) {
+      ++ends_before;
+    }
+  }
+  auto policy = SubgraphFormationPolicy::BottomUpDefault();
+  FormSubgraphs(graph, policy);
+
+  int got_starts = 0, got_ends = 0;
+  for (const ScheduleNode &n : graph.Nodes()) {
+    if (n.IsSubgraphStartProxy()) {
+      ++got_starts;
+    }
+    if (n.IsSubgraphEndProxy()) {
+      ++got_ends;
+    }
+  }
+  int subgraphs_added = got_starts - starts_before;
+  bool counts_match = (got_ends - ends_before) == subgraphs_added;
+  bool size_match = graph.Size() ==
+                    num_real_nodes_before + 2 * subgraphs_added;
+  bool topo_ok = graph.IsTopoSorted();
+  bool cp_ok = graph.HasCriticalPathFromExit();
+  bool ok = counts_match && size_match && topo_ok && cp_ok;
+  llvm::outs() << "    Real region: N=" << num_real_nodes_before
+               << " formed=" << subgraphs_added
+               << " new_size=" << graph.Size()
+               << " topo=" << (topo_ok ? "y" : "n")
+               << " cp=" << (cp_ok ? "y" : "n")
+               << "  " << (ok ? "PASS\n" : "FAIL\n");
 }
 
 // Helper: check edge set against expected, with kind kSubgraphOrderEdge.
@@ -1752,10 +1884,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunInsertSubgraphProxiesShakedown();
   RunSubgraphContiguityShakedown(MF, *LIS);
   RunLengthLowerBoundShakedown(st);
-  RunSubgraphFormationPhase1Shakedown();
-  RunSubgraphFormationPhase2Shakedown();
-  RunSubgraphFormationPhase3Shakedown();
-  RunSubgraphFormationPhase4Shakedown();
+  RunAllSubgraphFormationShakedowns();
 
   for (auto &region : regions_) {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {
@@ -1770,6 +1899,17 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
       if (&region == &regions_.front()) {
         RunRegionShakedowns(graph, MF, *LIS, EntrySU, ExitSU);
       }
+    });
+  }
+
+  // FormSubgraphs smoke test on the first region's graph. Runs in
+  // its own WithRegionGraph block so it gets a clean (no-proxy)
+  // ScheduleGraph — RunRegionShakedowns above operates on the
+  // unmutated graph it was originally written against, and we
+  // don't want FormSubgraphs to mutate that out from under it.
+  if (!regions_.empty()) {
+    WithRegionGraph(regions_.front(), [&](ScheduleGraph &graph) {
+      RunFormSubgraphsRealRegionSmokeTest(graph);
     });
   }
 }
