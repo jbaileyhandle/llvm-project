@@ -482,6 +482,168 @@ void RunSubgraphFormationPhase2Shakedown() {
                << (after_d_ok ? "PASS\n" : "FAIL\n");
 }
 
+// Helper: build a fresh dom tree + formation tree on BuildTestDAG at
+// the given splitter threshold. Returns the graph (kept alive by the
+// caller) and the tree, plus pointers to the seven named nodes A, C,
+// D, E, F, G, H. Each Phase 3 sub-test wants a clean tree so the
+// per-pass guards see no leftover state from a previous test.
+struct TestDAGFormationTree {
+  std::unique_ptr<ScheduleGraph> graph;
+  SubgraphFormationTree tree;
+  ScheduleNode *a;
+  ScheduleNode *c;
+  ScheduleNode *d;
+  ScheduleNode *e;
+  ScheduleNode *f;
+  ScheduleNode *g;
+  ScheduleNode *h;
+};
+
+TestDAGFormationTree BuildTestDAGFormationTree(int latency_threshold) {
+  TestDAGFormationTree out;
+  out.graph = ScheduleGraph::BuildTestDAG();
+  out.graph->ValidateAndComputeTopologicalOrder();
+  out.graph->ComputeTransitiveReduction();
+  out.graph->ComputeDominatorTree();
+  auto is_splitter = [latency_threshold](const ScheduleNode *n) {
+    return IsSubgraphSplitter(n, latency_threshold);
+  };
+  out.tree = SubgraphFormationTree::BuildFromDominatorTree(
+      *out.graph, out.graph->GetDominatorTree(), is_splitter);
+  // BuildTestDAG emplaces in order [A, C, D, E, F, G, H].
+  out.a = &out.graph->Nodes()[0];
+  out.c = &out.graph->Nodes()[1];
+  out.d = &out.graph->Nodes()[2];
+  out.e = &out.graph->Nodes()[3];
+  out.f = &out.graph->Nodes()[4];
+  out.g = &out.graph->Nodes()[5];
+  out.h = &out.graph->Nodes()[6];
+  return out;
+}
+
+// Phase 3: per-decision-rule passes on BuildTestDAG.
+//
+// Dom tree (verified by RunTestDAGShakedown's dump):
+//   A → {H, C, G};   C → {D, E, F};   leaves H, D, E, F, G.
+//
+// Splitter status by latency threshold (max outgoing edge per node:
+// A=3, C=4, D=2, E=1, F=2, G=0, H=5):
+//   - threshold=4 → only H is a splitter.
+//   - threshold=1 → A, C, D, F, H are splitters; E (max=1), G (max=0)
+//     are not.
+//
+// At threshold=4:
+//   subtree_node_count:     A=7, C=4, others=1
+//   subtree_splitter_count: A=1, H=1, others=0
+// At threshold=1:
+//   subtree_splitter_count: A=5, C=3 (C, D, F), H=1, D=1, F=1,
+//                           E=0, G=0
+//
+// Test outcomes (each assertion gets a fresh tree):
+//   1. BottomUpSingleSplitterPass @ thr=4 → emit A only.
+//      H has the splitter but its subtree_node_count==1, so we
+//      ascend; A is the only qualifying ancestor.
+//   2. TopDownSingleSplitterPass @ thr=4 → emit A only.
+//      A is the highest qualifying node (rule fires immediately).
+//   3. MultiSplitterRescuePass @ thr=1 → emit C only. Picked because
+//      it exercises the descendant-emit guard meaningfully: C has
+//      subtree_splitter_count==3 > 1 AND
+//      subtree_node_count==4 > subtree_splitter_count==3 (E is the
+//      bubble-filler material), so C qualifies first in post-order;
+//      A inherits descendants_emitted from C and skips. With thr=0,
+//      A would emit instead and the walk would terminate before
+//      exercising any deeper rescue.
+//   4. LargeSplitterFreeRescuePass @ thr=4, size=3 → emit C only.
+//      C is splitter-free with subtree_node_count==4 > 3. (Note: A
+//      has 1 splitter so it does NOT qualify here.)
+//   5. LargeSplitterFreeRescuePass @ thr=4, size=4 → no emissions.
+//      C's subtree_node_count==4 not > 4.
+//   6. SiblingRescuePass @ thr=4, min_size=0, after manual
+//      RecordEmission(C) → cascading trigger at A; H and G qualify
+//      (clean siblings, subtree_node_count==1 > 0). Final EmitPoints
+//      == [C, H, G] (insertion order).
+//   7. Cross-pass composition: BottomUp @ thr=4 then TopDown @ thr=4
+//      → second pass emits nothing (everything either emitted or
+//      descendants_emitted).
+void RunSubgraphFormationPhase3Shakedown() {
+  llvm::outs() << "  RunSubgraphFormationPhase3Shakedown:\n";
+
+  // 1. BottomUpSingleSplitterPass @ threshold=4.
+  {
+    auto t = BuildTestDAGFormationTree(/*latency_threshold=*/4);
+    BottomUpSingleSplitterPass(t.tree);
+    auto pts = t.tree.EmitPoints();
+    bool ok = pts.size() == 1 && pts[0]->schedule_node == t.a;
+    llvm::outs() << "    BottomUpSingleSplitterPass @ thr=4 → emit A: "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+
+  // 2. TopDownSingleSplitterPass @ threshold=4.
+  {
+    auto t = BuildTestDAGFormationTree(/*latency_threshold=*/4);
+    TopDownSingleSplitterPass(t.tree);
+    auto pts = t.tree.EmitPoints();
+    bool ok = pts.size() == 1 && pts[0]->schedule_node == t.a;
+    llvm::outs() << "    TopDownSingleSplitterPass @ thr=4 → emit A: "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+
+  // 3. MultiSplitterRescuePass @ threshold=1 → emit C (not A).
+  {
+    auto t = BuildTestDAGFormationTree(/*latency_threshold=*/1);
+    MultiSplitterRescuePass(t.tree);
+    auto pts = t.tree.EmitPoints();
+    bool ok = pts.size() == 1 && pts[0]->schedule_node == t.c;
+    llvm::outs() << "    MultiSplitterRescuePass @ thr=1 → emit C: "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+
+  // 4. LargeSplitterFreeRescuePass @ thr=4, size=3 → emit C.
+  {
+    auto t = BuildTestDAGFormationTree(/*latency_threshold=*/4);
+    LargeSplitterFreeRescuePass(t.tree, /*size_threshold=*/3);
+    auto pts = t.tree.EmitPoints();
+    bool ok = pts.size() == 1 && pts[0]->schedule_node == t.c;
+    llvm::outs() << "    LargeSplitterFreeRescuePass size=3 → emit C: "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+
+  // 5. LargeSplitterFreeRescuePass @ thr=4, size=4 → no emissions.
+  {
+    auto t = BuildTestDAGFormationTree(/*latency_threshold=*/4);
+    LargeSplitterFreeRescuePass(t.tree, /*size_threshold=*/4);
+    auto pts = t.tree.EmitPoints();
+    bool ok = pts.empty();
+    llvm::outs() << "    LargeSplitterFreeRescuePass size=4 → no emit: "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+
+  // 6. SiblingRescuePass @ thr=4, min_size=0, after pre-emitting C.
+  {
+    auto t = BuildTestDAGFormationTree(/*latency_threshold=*/4);
+    t.tree.RecordEmission(t.tree.GetNode(t.c));
+    SiblingRescuePass(t.tree, /*min_size=*/0);
+    auto pts = t.tree.EmitPoints();
+    bool ok = pts.size() == 3 && pts[0]->schedule_node == t.c &&
+              pts[1]->schedule_node == t.h && pts[2]->schedule_node == t.g;
+    llvm::outs() << "    SiblingRescuePass after pre-emit C "
+                    "→ EmitPoints == [C, H, G]: "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+
+  // 7. Cross-pass composition: BottomUp then TopDown — second is no-op.
+  {
+    auto t = BuildTestDAGFormationTree(/*latency_threshold=*/4);
+    BottomUpSingleSplitterPass(t.tree);
+    int after_bottom_up = t.tree.EmitPoints().size();
+    TopDownSingleSplitterPass(t.tree);
+    int after_top_down = t.tree.EmitPoints().size();
+    bool ok = after_bottom_up == 1 && after_top_down == 1;
+    llvm::outs() << "    BottomUp then TopDown: TopDown is no-op: "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+}
+
 // Helper: check edge set against expected, with kind kSubgraphOrderEdge.
 // Uses set comparison + NumX() == set.size() to catch both missing /
 // extra targets and duplicate edges to the same target.
@@ -1434,6 +1596,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunLengthLowerBoundShakedown(st);
   RunSubgraphFormationPhase1Shakedown();
   RunSubgraphFormationPhase2Shakedown();
+  RunSubgraphFormationPhase3Shakedown();
 
   for (auto &region : regions_) {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {

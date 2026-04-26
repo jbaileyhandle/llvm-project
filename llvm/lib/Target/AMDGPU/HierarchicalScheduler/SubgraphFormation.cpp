@@ -144,5 +144,108 @@ void SubgraphFormationTree::RecordEmission(SubgraphFormationTreeNode *node) {
   }
 }
 
+// --- Per-decision-rule passes (§5 of design doc) -------------------------
+
+void BottomUpSingleSplitterPass(SubgraphFormationTree &tree) {
+  PostOrderApply(tree.Root(), [&tree](SubgraphFormationTreeNode *n) {
+    if (n->emitted || n->descendants_emitted) {
+      return;
+    }
+    if (n->subtree_splitter_count == 1 && n->subtree_node_count > 1) {
+      tree.RecordEmission(n);
+    }
+  });
+}
+
+void TopDownSingleSplitterPass(SubgraphFormationTree &tree) {
+  PreOrderApplyWithSkip(tree.Root(), [&tree](SubgraphFormationTreeNode *n) {
+    // Three-way dispatch — each behaviorally distinct:
+    if (n->emitted) {
+      // Subtree already wrapped by a prior pass. Nothing to do here
+      // and no need to descend (members are wholly consumed).
+      return true;
+    }
+    if (n->descendants_emitted) {
+      // Some descendant emitted; emitting *here* would nest. But an
+      // unrelated child branch could still satisfy the rule
+      // independently — descend, and the emitted descendants get
+      // caught by the `emitted` branch when visited.
+      return false;
+    }
+    if (n->subtree_splitter_count == 1 && n->subtree_node_count > 1) {
+      tree.RecordEmission(n);
+      return true; // Subtree consumed; skip descent.
+    }
+    return false;
+  });
+}
+
+void MultiSplitterRescuePass(SubgraphFormationTree &tree) {
+  PostOrderApply(tree.Root(), [&tree](SubgraphFormationTreeNode *n) {
+    if (n->emitted || n->descendants_emitted) {
+      return;
+    }
+    // The node_count > splitter_count guard ensures the resulting
+    // (multi-splitter) subgraph has bubble-filler material inside its
+    // scope — without it, every member would be a splitter and there
+    // would be nothing to overlap with their multi-cycle bubbles.
+    if (n->subtree_splitter_count > 1 &&
+        n->subtree_node_count > n->subtree_splitter_count) {
+      tree.RecordEmission(n);
+    }
+  });
+}
+
+void LargeSplitterFreeRescuePass(SubgraphFormationTree &tree,
+                                 int size_threshold) {
+  PostOrderApply(tree.Root(),
+                 [&tree, size_threshold](SubgraphFormationTreeNode *n) {
+                   if (n->emitted || n->descendants_emitted) {
+                     return;
+                   }
+                   if (n->subtree_splitter_count == 0 &&
+                       n->subtree_node_count > size_threshold) {
+                     tree.RecordEmission(n);
+                   }
+                 });
+}
+
+void SiblingRescuePass(SubgraphFormationTree &tree, int min_size) {
+  PreOrderApplyWithSkip(tree.Root(),
+                        [&tree, min_size](SubgraphFormationTreeNode *n) {
+    if (n->emitted) {
+      return true; // Subtree wholly consumed; skip descent.
+    }
+    // Cascading trigger: rescue fires at any non-emitted node when
+    // any descendant of any child has been emitted (immediate-child
+    // emit OR deeper). Captures the case where cohesion was
+    // identified deep in one branch and we want sibling branches to
+    // get the chance to be wrapped too.
+    bool trigger = false;
+    for (auto *c : n->children) {
+      if (c->emitted || c->descendants_emitted) {
+        trigger = true;
+        break;
+      }
+    }
+    if (trigger) {
+      for (auto *c : n->children) {
+        // Clean-subtree guard: rescuing a subtree with emissions
+        // inside would create overlap (rescue would share members
+        // with the inner subgraph).
+        if (c->emitted || c->descendants_emitted) {
+          continue;
+        }
+        // Min-size guard: a small rescue is mostly proxy overhead.
+        if (c->subtree_node_count <= min_size) {
+          continue;
+        }
+        tree.RecordEmission(c);
+      }
+    }
+    return false; // Continue descending into non-emitted children.
+  });
+}
+
 } // namespace hierarchical_scheduler
 } // namespace llvm

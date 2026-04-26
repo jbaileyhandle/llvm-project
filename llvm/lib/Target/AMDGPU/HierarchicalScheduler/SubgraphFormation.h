@@ -109,6 +109,23 @@ struct SubgraphFormationTreeNode {
 /// a future post-dom backbone can be a parallel factory.
 class SubgraphFormationTree {
  public:
+  SubgraphFormationTree() = default;
+
+  // Move-only. Per-node parent / children / root_ / emit_points_
+  // pointers index into nodes_; copying the tree would copy the
+  // vector to a new heap buffer while leaving every internal pointer
+  // aimed at the old one (silent corruption). Move is fine because
+  // std::vector move just transfers the existing buffer — its
+  // address, and so every internal pointer, stays valid.
+  //
+  // Defaulting moves explicitly is required because user-declaring
+  // the deleted copies would otherwise also suppress the implicit
+  // move ops (which would break factory-by-value returns).
+  SubgraphFormationTree(const SubgraphFormationTree &) = delete;
+  SubgraphFormationTree &operator=(const SubgraphFormationTree &) = delete;
+  SubgraphFormationTree(SubgraphFormationTree &&) = default;
+  SubgraphFormationTree &operator=(SubgraphFormationTree &&) = default;
+
   /// Build a formation tree from `graph`'s dominator tree. The
   /// result has one tree node per ScheduleNode, indexed internally
   /// by topo index. `is_splitter` is invoked once per node and the
@@ -281,6 +298,57 @@ void PreOrderApplyWithSkipIterative(SubgraphFormationTreeNode *root, Fn fn) {
     }
   }
 }
+
+// --- Per-decision-rule passes --------------------------------------------
+//
+// Each pass is a free function that takes SubgraphFormationTree &
+// and mutates it via RecordEmission. Reading any one pass tells you
+// exactly what its rule does — no flags, no shared business logic.
+// Every pass is guarded against double-emission and nesting (with
+// one nuance for top-down passes — see TopDownSingleSplitterPass)
+// so pipelines can chain them in any order without nesting bugs.
+// See AMDGPUSubgraphFormationDesign.md §5.
+
+/// Emit at the lowest dom-subtree on each branch where the subtree
+/// has exactly one splitter and more than one node. "Lowest"
+/// emerges from post-order + the descendant-emit guard: the deepest
+/// qualifying node on each branch wins; once it emits, ancestors
+/// see descendants_emitted == true and skip.
+void BottomUpSingleSplitterPass(SubgraphFormationTree &tree);
+
+/// Emit at the highest dom-subtree on each branch where the subtree
+/// has exactly one splitter and more than one node. Pre-order with
+/// subtree-skip: when a node satisfies the rule, emit it and skip
+/// descent. The descendants_emitted guard is intentionally
+/// non-blocking — see implementation for the three-way dispatch.
+void TopDownSingleSplitterPass(SubgraphFormationTree &tree);
+
+/// Bottom-up. Emit where the subtree has more than one splitter AND
+/// more nodes than splitters (so there's non-splitter material
+/// inside the resulting scope to fill bubbles).
+void MultiSplitterRescuePass(SubgraphFormationTree &tree);
+
+/// Bottom-up. Emit where the subtree has zero splitters and more
+/// than `size_threshold` nodes. The threshold is policy — a guess
+/// to be tuned with measurement; the design doc default is 24.
+void LargeSplitterFreeRescuePass(SubgraphFormationTree &tree,
+                                 int size_threshold);
+
+/// NOT in default pipelines. Top-down, parent-centric. At each
+/// non-emitted node, if any descendant of any child has been emitted
+/// (cascading trigger), rescue clean siblings — children that are
+/// themselves untouched and whose subtree has more than `min_size`
+/// nodes.
+///
+/// Known unsoundness: when InsertSubgraphProxies wraps the rescued
+/// subtree, the artificial end_proxy → ext_succ edges can reach into
+/// sibling subtrees that the cascading-trigger sibling owns,
+/// serializing what was previously parallel work and (in the worst
+/// case) delaying critical-path nodes by unrelated bubble-filler.
+/// See the §5.5 "Known unsoundness" note in
+/// AMDGPUSubgraphFormationDesign.md. The pass exists as an opt-in
+/// primitive for experimentation; default pipelines omit it.
+void SiblingRescuePass(SubgraphFormationTree &tree, int min_size);
 
 } // namespace hierarchical_scheduler
 } // namespace llvm
