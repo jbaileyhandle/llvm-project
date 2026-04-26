@@ -73,6 +73,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/CodeGen/Register.h"
 #include "llvm/MC/LaneBitmask.h"
 #include "llvm/CodeGen/ScheduleDAG.h"
@@ -343,6 +344,12 @@ public:
   ///                               (members.size() = 5)
   std::string ToString() const;
 
+  /// The name passed to the debug-name constructor (empty string for
+  /// nodes constructed without one). Useful for tests and shakedowns
+  /// that want to assert on identity by name without parsing
+  /// ToString.
+  StringRef GetDebugName() const { return debug_name_; }
+
   /// Registers defined and used by this node, with lane masks
   /// indicating which sub-register lanes are affected. Populated
   /// during graph construction from MachineInstr (scheduling-unit
@@ -592,6 +599,54 @@ public:
   /// so the test outcome is deterministic regardless of internal
   /// topo-sort details.
   static std::unique_ptr<ScheduleGraph> BuildContiguityTestDAG();
+
+  /// Build the §8 worked-example DAG from
+  /// AMDGPUSubgraphFormationDesign.md. Used by Phase 4 of the
+  /// subgraph-formation shakedowns to exercise the BottomUp vs
+  /// TopDown single-splitter pass distinction and both
+  /// SplitterPartitionPolicy variants.
+  ///
+  /// 10 nodes (A as source, Exit as sink). S is the unique splitter
+  /// — its outgoing S→D edge has latency 50, every other edge has
+  /// latency 1. At the formation default threshold of 32, only S
+  /// fires the IsSubgraphSplitter predicate.
+  ///
+  /// Edges (latency 1 except where noted):
+  ///   A→P       A→Q
+  ///   P→P2      P→S
+  ///   Q→Q2      Q→S
+  ///   S→D=50    S→E
+  ///   D→F       E→F
+  ///   P2→Exit   Q2→Exit   F→Exit
+  ///
+  /// Resulting dom tree:
+  ///   A → {P, Q, S, Exit}
+  ///   P → {P2}
+  ///   Q → {Q2}
+  ///   S → {D, E, F}
+  ///
+  /// Subtree counts at threshold=32:
+  ///   subtree_node_count: A=10, P=2, Q=2, S=4, others=1
+  ///   subtree_splitter_count: A=1, S=1, others=0
+  ///
+  /// Pass outcomes (single-splitter variants only — there's just one
+  /// splitter so the multi-splitter and large-no-splitter rescue
+  /// passes don't fire on this DAG):
+  ///   - BottomUpSingleSplitterPass: emit S (lowest single-splitter
+  ///     subtree); BuildSubgraphInfos with the default
+  ///     kBundleDescendantsAndIndependents policy then partitions
+  ///     {S, D, E, F} into ancestors_of_splitter={} (suppressed)
+  ///     and descendants_or_other={D, E, F} → ONE subgraph {D, E, F}.
+  ///   - TopDownSingleSplitterPass: emit A (highest single-splitter
+  ///     subtree); the split partitions everything except S into
+  ///     ancestors_of_splitter={A, P, Q} and
+  ///     descendants_or_other={P2, Q2, D, E, F, Exit} → TWO
+  ///     subgraphs.
+  ///   - Same TopDown emit point, alternate
+  ///     kSplitDescendantsAndIndependents policy: ancestors_of_splitter
+  ///     ={A, P, Q}, descendants_of_splitter={D, E, F, Exit},
+  ///     independents={P2, Q2} → THREE subgraphs.
+  static std::unique_ptr<ScheduleGraph> BuildSubgraphFormationTestDAG();
 
   /// Human-readable identifier for this graph. Format: "graph[ID]"
   std::string ToString() const;

@@ -934,6 +934,47 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildContiguityTestDAG() {
   return graph;
 }
 
+std::unique_ptr<ScheduleGraph>
+ScheduleGraph::BuildSubgraphFormationTestDAG() {
+  auto graph = std::make_unique<ScheduleGraph>();
+
+  // 10 nodes: A (source), P, Q, P2, Q2, S (splitter), D, E, F, Exit
+  // (sink). Emplacement order is also the natural Kahn's-FIFO topo
+  // order seed, but the test asserts on node identity (via pointer
+  // lookup) rather than on topo index, so the emplacement order is
+  // not load-bearing.
+  graph->ReserveNodes(10);
+  ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
+  ScheduleNode &p = graph->EmplaceNode(nullptr, "P", graph.get());
+  ScheduleNode &q = graph->EmplaceNode(nullptr, "Q", graph.get());
+  ScheduleNode &p2 = graph->EmplaceNode(nullptr, "P2", graph.get());
+  ScheduleNode &q2 = graph->EmplaceNode(nullptr, "Q2", graph.get());
+  ScheduleNode &s = graph->EmplaceNode(nullptr, "S", graph.get());
+  ScheduleNode &d = graph->EmplaceNode(nullptr, "D", graph.get());
+  ScheduleNode &e = graph->EmplaceNode(nullptr, "E", graph.get());
+  ScheduleNode &f = graph->EmplaceNode(nullptr, "F", graph.get());
+  ScheduleNode &exit = graph->EmplaceNode(nullptr, "Exit", graph.get());
+
+  // S→D has latency 50, exceeding the default formation threshold
+  // of 32 — that single edge makes S the unique splitter on this DAG.
+  // All other edges latency 1 so they fall well below threshold.
+  graph->AddEdge(&a, &p, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&a, &q, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&p, &p2, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&p, &s, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&q, &q2, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&q, &s, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&s, &d, ScheduleEdge::kData, /*latency=*/50);
+  graph->AddEdge(&s, &e, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&d, &f, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&e, &f, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&p2, &exit, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&q2, &exit, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&f, &exit, ScheduleEdge::kData, /*latency=*/1);
+
+  return graph;
+}
+
 std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAGWithCycle() {
   auto graph = std::make_unique<ScheduleGraph>();
 

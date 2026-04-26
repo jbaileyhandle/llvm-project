@@ -247,5 +247,148 @@ void SiblingRescuePass(SubgraphFormationTree &tree, int min_size) {
   });
 }
 
+// --- Splitting + BuildSubgraphInfos (§4.4, §4.5) -------------------------
+
+namespace {
+
+// Walk an emit-point's subtree once, gathering members and locating
+// the splitter. The single-splitter caller invariant (verified at
+// call site) guarantees exactly one splitter exists.
+void CollectSubtreeMembersAndFindSplitter(
+    SubgraphFormationTreeNode *emit_point,
+    SmallVectorImpl<ScheduleNode *> &members_out,
+    ScheduleNode *&splitter_out) {
+  splitter_out = nullptr;
+  PostOrderApply(emit_point,
+                 [&members_out, &splitter_out](SubgraphFormationTreeNode *n) {
+                   members_out.push_back(n->schedule_node);
+                   if (n->is_splitter) {
+                     splitter_out = n->schedule_node;
+                   }
+                 });
+}
+
+// If `members` has at least 2 entries, package them into a new
+// SubgraphInfo with name "subgraph_<id>", incrementing `next_id`.
+// Singletons are dropped (proxy overhead would outweigh benefit).
+void EmitIfLargeEnough(
+    ArrayRef<ScheduleNode *> members,
+    int &next_id,
+    std::vector<std::unique_ptr<SubgraphInfo>> &out) {
+  if (members.size() < 2) {
+    return;
+  }
+  std::string name = "subgraph_" + std::to_string(next_id++);
+  out.push_back(std::make_unique<SubgraphInfo>(members, name));
+}
+
+} // namespace
+
+SplitterSplitResult SplitEmitPoint(SubgraphFormationTreeNode *emit_point,
+                                   const ScheduleGraph &graph,
+                                   SplitterPartitionPolicy policy) {
+  SmallVector<ScheduleNode *, 16> members;
+  ScheduleNode *splitter = nullptr;
+  CollectSubtreeMembersAndFindSplitter(emit_point, members, splitter);
+  if (splitter == nullptr) {
+    report_fatal_error("SplitEmitPoint called on emit point without a "
+                       "splitter — caller invariant violated");
+  }
+
+  SplitterSplitResult result;
+  int splitter_idx = splitter->GetTopoIndex();
+  for (ScheduleNode *m : members) {
+    if (m == splitter) {
+      // Splitter is standalone — not a member of any group.
+      continue;
+    }
+    int member_idx = m->GetTopoIndex();
+    bool reaches_splitter = graph.IsReachableInDag(member_idx, splitter_idx);
+    if (reaches_splitter) {
+      result.ancestors_of_splitter.push_back(m);
+      continue;
+    }
+    if (policy == SplitterPartitionPolicy::kBundleDescendantsAndIndependents) {
+      result.descendants_or_other.push_back(m);
+    } else if (graph.IsReachableInDag(splitter_idx, member_idx)) {
+      result.descendants_of_splitter.push_back(m);
+    } else {
+      result.independents.push_back(m);
+    }
+  }
+  return result;
+}
+
+std::vector<std::unique_ptr<SubgraphInfo>> BuildSubgraphInfos(
+    ArrayRef<SubgraphFormationTreeNode *> emit_points,
+    const ScheduleGraph &graph,
+    SplitterPartitionPolicy policy) {
+  std::vector<std::unique_ptr<SubgraphInfo>> out;
+  int next_id = 0;
+  for (SubgraphFormationTreeNode *ep : emit_points) {
+    if (ep->subtree_splitter_count == 1) {
+      // Single-splitter — split and emit each non-empty group.
+      SplitterSplitResult split = SplitEmitPoint(ep, graph, policy);
+      EmitIfLargeEnough(split.ancestors_of_splitter, next_id, out);
+      if (policy == SplitterPartitionPolicy::kBundleDescendantsAndIndependents) {
+        EmitIfLargeEnough(split.descendants_or_other, next_id, out);
+      } else {
+        EmitIfLargeEnough(split.descendants_of_splitter, next_id, out);
+        EmitIfLargeEnough(split.independents, next_id, out);
+      }
+    } else {
+      // 0 or 2+ splitters — emit the whole subtree as one
+      // SubgraphInfo. The multi-splitter rescue pass already
+      // verified subtree_node_count > subtree_splitter_count, so
+      // there's enough non-splitter material in scope to fill
+      // bubbles.
+      SmallVector<ScheduleNode *, 16> members;
+      PostOrderApply(ep, [&members](SubgraphFormationTreeNode *n) {
+        members.push_back(n->schedule_node);
+      });
+      EmitIfLargeEnough(members, next_id, out);
+    }
+  }
+  return out;
+}
+
+// --- Pipelines (§6) ------------------------------------------------------
+//
+// Each entry in pipeline.passes is a std::function<void(tree &)> —
+// a one-argument callable. BottomUpSingleSplitterPass etc. already
+// match that signature, so they go in directly.
+// LargeSplitterFreeRescuePass takes a second arg (size_threshold)
+// so we wrap it in a lambda that binds the threshold; same pattern
+// would apply to SiblingRescuePass(tree, min_size) if it were ever
+// added to a default pipeline.
+
+SubgraphFormationPolicy SubgraphFormationPolicy::BottomUpDefault() {
+  SubgraphFormationPolicy p;
+  int t = p.large_subtree_threshold;
+  p.pipeline.passes = {
+      BottomUpSingleSplitterPass,
+      MultiSplitterRescuePass,
+      [t](SubgraphFormationTree &tree) {
+        LargeSplitterFreeRescuePass(tree, t);
+      },
+      // SiblingRescuePass deliberately omitted — see §5.5.
+  };
+  return p;
+}
+
+SubgraphFormationPolicy SubgraphFormationPolicy::TopDownAggressive() {
+  SubgraphFormationPolicy p;
+  int t = p.large_subtree_threshold;
+  p.pipeline.passes = {
+      TopDownSingleSplitterPass,    // <-- only difference vs BottomUpDefault
+      MultiSplitterRescuePass,
+      [t](SubgraphFormationTree &tree) {
+        LargeSplitterFreeRescuePass(tree, t);
+      },
+      // SiblingRescuePass deliberately omitted — see §5.5.
+  };
+  return p;
+}
+
 } // namespace hierarchical_scheduler
 } // namespace llvm

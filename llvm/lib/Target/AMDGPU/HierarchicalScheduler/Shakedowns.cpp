@@ -644,6 +644,164 @@ void RunSubgraphFormationPhase3Shakedown() {
   }
 }
 
+// Helper: members of a SubgraphInfo as a sorted vector of debug
+// names — makes set-equality comparisons readable in PASS / FAIL
+// messages without depending on the order BuildSubgraphInfos
+// discovered them.
+std::vector<std::string> SortedMemberNames(const SubgraphInfo &info) {
+  std::vector<std::string> out;
+  out.reserve(info.members.size());
+  for (ScheduleNode *m : info.members) {
+    out.push_back(m->GetDebugName().str());
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+// Phase 4: pipelines + BuildSubgraphInfos on the §8 worked-example
+// DAG (BuildSubgraphFormationTestDAG). The DAG is designed so the
+// single-splitter passes diverge meaningfully — BottomUp picks the
+// deepest qualifying subtree (S, with 4 nodes), TopDown picks the
+// highest (A, with all 10) — and so the partition policies produce
+// different group counts.
+//
+// Expected outputs (member sets — order doesn't matter, but the
+// per-emit-point order from BuildSubgraphInfos is deterministic):
+//
+// BottomUpDefault → 1 SubgraphInfo:
+//   subgraph_0 = {D, E, F}
+//   (Emit point S; split puts {D,E,F} in descendants_or_other;
+//    ancestors_of_splitter is empty since S is the dom-root of
+//    its own subtree.)
+//
+// TopDownAggressive default policy → 2 SubgraphInfos:
+//   subgraph_0 = {A, P, Q}                           (ancestors)
+//   subgraph_1 = {P2, Q2, D, E, F, Exit}             (descendants_or_other)
+//
+// TopDownAggressive alternate (kSplitDescendantsAndIndependents) → 3:
+//   subgraph_0 = {A, P, Q}                           (ancestors)
+//   subgraph_1 = {D, E, F, Exit}                     (descendants_of_splitter)
+//   subgraph_2 = {P2, Q2}                            (independents)
+//
+// Singleton suppression check: synthetic emit point on a 1-node
+// subtree (any leaf) routed through BuildSubgraphInfos must produce
+// no SubgraphInfo (size-2 minimum filter).
+void RunSubgraphFormationPhase4Shakedown() {
+  llvm::outs() << "  RunSubgraphFormationPhase4Shakedown:\n";
+
+  auto run_pipeline =
+      [](const SubgraphFormationPolicy &policy)
+      -> std::vector<std::unique_ptr<SubgraphInfo>> {
+    auto graph = ScheduleGraph::BuildSubgraphFormationTestDAG();
+    graph->ValidateAndComputeTopologicalOrder();
+    graph->ComputeTransitiveReduction();
+    graph->ComputeDominatorTree();
+    auto is_splitter = [&policy](const ScheduleNode *n) {
+      return IsSubgraphSplitter(n, policy.latency_threshold);
+    };
+    SubgraphFormationTree tree =
+        SubgraphFormationTree::BuildFromDominatorTree(
+            *graph, graph->GetDominatorTree(), is_splitter);
+    for (auto &pass : policy.pipeline.passes) {
+      pass(tree);
+    }
+    return BuildSubgraphInfos(tree.EmitPoints(), *graph,
+                              policy.splitter_partition);
+  };
+
+  auto check_subgraphs =
+      [](StringRef label,
+         ArrayRef<std::unique_ptr<SubgraphInfo>> got,
+         ArrayRef<std::vector<std::string>> expected) {
+    bool ok = got.size() == expected.size();
+    if (ok) {
+      for (int i = 0, n = got.size(); i < n; ++i) {
+        if (SortedMemberNames(*got[i]) != expected[i]) {
+          ok = false;
+        }
+      }
+    }
+    llvm::outs() << "    " << label << ": got " << got.size()
+                 << " subgraph(s)";
+    if (!ok) {
+      llvm::outs() << " — members:";
+      for (const auto &info : got) {
+        llvm::outs() << " {";
+        bool first = true;
+        for (const std::string &n : SortedMemberNames(*info)) {
+          if (!first) {
+            llvm::outs() << ",";
+          }
+          llvm::outs() << n;
+          first = false;
+        }
+        llvm::outs() << "}";
+      }
+    }
+    llvm::outs() << (ok ? "  PASS\n" : "  FAIL\n");
+  };
+
+  // 1) BottomUpDefault → {D, E, F}
+  {
+    auto policy = SubgraphFormationPolicy::BottomUpDefault();
+    auto infos = run_pipeline(policy);
+    std::vector<std::vector<std::string>> expected = {{"D", "E", "F"}};
+    check_subgraphs("BottomUpDefault", infos, expected);
+  }
+
+  // 2) TopDownAggressive default policy.
+  {
+    auto policy = SubgraphFormationPolicy::TopDownAggressive();
+    auto infos = run_pipeline(policy);
+    std::vector<std::vector<std::string>> expected = {
+        {"A", "P", "Q"},
+        {"D", "E", "Exit", "F", "P2", "Q2"},
+    };
+    check_subgraphs("TopDownAggressive bundle", infos, expected);
+  }
+
+  // 3) TopDownAggressive split policy.
+  {
+    auto policy = SubgraphFormationPolicy::TopDownAggressive();
+    policy.splitter_partition =
+        SplitterPartitionPolicy::kSplitDescendantsAndIndependents;
+    auto infos = run_pipeline(policy);
+    std::vector<std::vector<std::string>> expected = {
+        {"A", "P", "Q"},
+        {"D", "E", "Exit", "F"},
+        {"P2", "Q2"},
+    };
+    check_subgraphs("TopDownAggressive split", infos, expected);
+  }
+
+  // 4) Singleton suppression: hand-craft an emit point on a leaf
+  //    (subtree_node_count==1) and verify BuildSubgraphInfos drops it.
+  {
+    auto graph = ScheduleGraph::BuildSubgraphFormationTestDAG();
+    graph->ValidateAndComputeTopologicalOrder();
+    graph->ComputeTransitiveReduction();
+    graph->ComputeDominatorTree();
+    auto is_splitter = [](const ScheduleNode *n) {
+      return IsSubgraphSplitter(n, /*latency_threshold=*/32);
+    };
+    SubgraphFormationTree tree =
+        SubgraphFormationTree::BuildFromDominatorTree(
+            *graph, graph->GetDominatorTree(), is_splitter);
+    // P2 is a leaf with subtree_node_count==1, no splitter — falls
+    // into the "0 splitters" arm of BuildSubgraphInfos and gets
+    // dropped by the size-2 floor.
+    SubgraphFormationTreeNode *p2 = tree.GetNode(&graph->Nodes()[3]);
+    tree.RecordEmission(p2);
+    auto infos =
+        BuildSubgraphInfos(tree.EmitPoints(), *graph,
+                           SplitterPartitionPolicy::
+                               kBundleDescendantsAndIndependents);
+    bool ok = infos.empty();
+    llvm::outs() << "    Singleton emit point suppressed: "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+}
+
 // Helper: check edge set against expected, with kind kSubgraphOrderEdge.
 // Uses set comparison + NumX() == set.size() to catch both missing /
 // extra targets and duplicate edges to the same target.
@@ -1597,6 +1755,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunSubgraphFormationPhase1Shakedown();
   RunSubgraphFormationPhase2Shakedown();
   RunSubgraphFormationPhase3Shakedown();
+  RunSubgraphFormationPhase4Shakedown();
 
   for (auto &region : regions_) {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {

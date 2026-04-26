@@ -19,8 +19,11 @@
 
 #include "DominatorTree.h"
 #include "ScheduleGraph.h"
+#include "SubgraphInfo.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include <functional>
+#include <memory>
 #include <vector>
 
 namespace llvm {
@@ -349,6 +352,125 @@ void LargeSplitterFreeRescuePass(SubgraphFormationTree &tree,
 /// AMDGPUSubgraphFormationDesign.md. The pass exists as an opt-in
 /// primitive for experimentation; default pipelines omit it.
 void SiblingRescuePass(SubgraphFormationTree &tree, int min_size);
+
+// --- Pipelines + BuildSubgraphInfos (§4.4, §4.5, §6 of design doc) -------
+
+/// How to partition the non-splitter members of a single-splitter
+/// emit point. See §4.4 of the design doc. Both policies produce
+/// the same `ancestors_of_splitter` group (members that reach the
+/// splitter in the DAG) and treat the splitter itself as a
+/// standalone non-subgraph node; they differ only on how they
+/// handle the rest.
+enum class SplitterPartitionPolicy {
+  /// Default. Everything that doesn't reach the splitter goes into
+  /// a single "descendants_or_other" group. Simpler partition; the
+  /// resulting bundle's proxy ext_predecessors include the splitter
+  /// so the whole bundle gates on it.
+  kBundleDescendantsAndIndependents,
+
+  /// Alternate. Split the non-ancestor members into DAG-descendants
+  /// of the splitter (those it reaches) and independents (neither
+  /// direction). Independents become their own subgraph, free to
+  /// schedule without waiting on the splitter.
+  kSplitDescendantsAndIndependents,
+};
+
+/// Output of SplitEmitPoint. Ancestors / descendants / independents
+/// are split according to SplitterPartitionPolicy; empty member
+/// vectors are valid and get filtered downstream by
+/// BuildSubgraphInfos's size-2 minimum.
+struct SplitterSplitResult {
+  /// Subtree members that reach the splitter in the DAG. Non-empty
+  /// only when the splitter is not the dom-root of the emit point's
+  /// subtree.
+  SmallVector<ScheduleNode *> ancestors_of_splitter;
+
+  /// Bundle of "everything not in ancestors_of_splitter."
+  /// Only populated when policy == kBundleDescendantsAndIndependents.
+  SmallVector<ScheduleNode *> descendants_or_other;
+
+  /// Subtree members that the splitter reaches in the DAG.
+  /// Only populated when policy == kSplitDescendantsAndIndependents.
+  SmallVector<ScheduleNode *> descendants_of_splitter;
+
+  /// Subtree members that neither reach nor are reached by the
+  /// splitter. Only populated when policy ==
+  /// kSplitDescendantsAndIndependents.
+  SmallVector<ScheduleNode *> independents;
+};
+
+/// Partition the members of a single-splitter emit point. The
+/// caller guarantees `emit_point->subtree_splitter_count == 1`;
+/// the splitter is found by walking the emit_point subtree. The
+/// splitter itself is left standalone (not a member of any group).
+///
+/// Reachability is read from the graph's cached matrix
+/// (ScheduleGraph::IsReachableInDag), so the graph must have had
+/// ComputeTransitiveReduction run since the last mutation.
+SplitterSplitResult SplitEmitPoint(SubgraphFormationTreeNode *emit_point,
+                                   const ScheduleGraph &graph,
+                                   SplitterPartitionPolicy policy);
+
+/// Materialize SubgraphInfos from the pipeline's emit points.
+/// Per-emit-point dispatch by splitter count (§3.5):
+///   - 0 splitters: emit the subtree's members as one SubgraphInfo.
+///   - 1 splitter: split via SplitEmitPoint; emit each non-empty
+///     resulting group.
+///   - 2+ splitters: emit the subtree's members as one SubgraphInfo
+///     as-is (no splitting — the multi-splitter rescue pass already
+///     verified the nc > sc bubble-filler invariant).
+/// In every case, a per-group ≥ 2 minimum filters out singletons
+/// (one-member subgraphs add proxy overhead with no benefit).
+std::vector<std::unique_ptr<SubgraphInfo>> BuildSubgraphInfos(
+    ArrayRef<SubgraphFormationTreeNode *> emit_points,
+    const ScheduleGraph &graph,
+    SplitterPartitionPolicy policy);
+
+/// An ordered list of formation passes. Each pass takes the shared
+/// SubgraphFormationTree by reference and mutates it via
+/// RecordEmission. Pipelines are configuration: different policy
+/// choices (bottom-up vs top-down, etc.) become different pipeline
+/// constants rather than scattered conditionals.
+struct SubgraphFormationPipeline {
+  std::vector<std::function<void(SubgraphFormationTree &)>> passes;
+};
+
+/// Top-level configuration object. Picks a splitter threshold,
+/// rescue thresholds, partition policy, and an ordered pipeline
+/// of passes. Two factory methods (BottomUpDefault,
+/// TopDownAggressive) build the canonical configurations; callers
+/// can mutate the returned struct to tweak.
+struct SubgraphFormationPolicy {
+  /// Latency threshold for IsSubgraphSplitter. Default 32 cycles
+  /// catches memory loads on AMDGPU gfx906.
+  int latency_threshold = 32;
+
+  /// Size threshold for LargeSplitterFreeRescuePass.
+  int large_subtree_threshold = 24;
+
+  /// Min size for SiblingRescuePass (when used). Subtrees ≤ this
+  /// are skipped — too small to be worth wrapping.
+  int sibling_rescue_min_size = 1;
+
+  /// Which partition policy BuildSubgraphInfos applies to
+  /// single-splitter emit points.
+  SplitterPartitionPolicy splitter_partition =
+      SplitterPartitionPolicy::kBundleDescendantsAndIndependents;
+
+  /// The pass sequence. Initialized by the factory methods below.
+  SubgraphFormationPipeline pipeline;
+
+  /// BottomUpDefault: emit at the lowest single-splitter subtrees,
+  /// then multi-splitter rescue, then large-no-splitter rescue.
+  /// SiblingRescuePass deliberately omitted (see §5.5).
+  static SubgraphFormationPolicy BottomUpDefault();
+
+  /// TopDownAggressive: same as BottomUpDefault but with the
+  /// top-down single-splitter pass — emits at the HIGHEST
+  /// single-splitter subtree on each branch instead of the lowest.
+  /// Produces fewer, larger subgraphs.
+  static SubgraphFormationPolicy TopDownAggressive();
+};
 
 } // namespace hierarchical_scheduler
 } // namespace llvm
