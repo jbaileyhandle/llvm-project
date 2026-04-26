@@ -12,6 +12,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SEARCHPOLICIES_H
 
 #include "ScheduleConstructor.h"
+#include "SubgraphFormation.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace llvm {
@@ -19,11 +20,25 @@ namespace hierarchical_scheduler {
 
 class ScheduleNode;
 
+// Common defaults for all search policies. Currently just provides a
+// "no formation" default that derived policies can override when they
+// want subgraph formation applied to the graph before search. Static
+// methods are inherited (not virtual): if a derived class doesn't
+// declare its own MakeFormationPolicy, lookup finds the base's
+// version and DfsSearch sees an empty SubgraphFormationPolicy → the
+// formation step is a one-call no-op (FormSubgraphs early-returns on
+// an empty pipeline).
+class SearchPolicyBase {
+ public:
+  // Default: no formation. Override in a derived policy to opt in.
+  static SubgraphFormationPolicy MakeFormationPolicy() { return {}; }
+};
+
 // Policy for DFS when the objective is to minimize schedule length for
 // a single region, SUBJECT TO not dropping the region's register-only
 // occupancy below the function-wide ceiling set by an earlier
 // occupancy pass.
-class DfsMinimizeLengthPolicy {
+class DfsMinimizeLengthPolicy : public SearchPolicyBase {
  public:
   static constexpr ScheduleMetric kMetric =
       ScheduleMetric::kMinimizeScheduleLength;
@@ -69,11 +84,20 @@ class DfsMinimizeLengthPolicy {
   static bool ShouldEndSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);
+
+  // Override SearchPolicyBase: length-min wants top-down
+  // single-splitter formation with descendants + independents
+  // bundled. The bracketing tightens the length-LB bound (subgraph
+  // members can't drift apart to fill unrelated bubbles), reducing
+  // branching during DFS.
+  static SubgraphFormationPolicy MakeFormationPolicy() {
+    return SubgraphFormationPolicy::TopDownSingleSplitterOnly();
+  }
 };
 
 // Policy for DFS when the objective is to maximize register-only
 // occupancy for a single region.
-class DfsMaximizeOccupancyPolicy {
+class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
  public:
   // Use the continuous score, not the integer one. The integer
   // metric ties any two schedules in the same occupancy bracket;

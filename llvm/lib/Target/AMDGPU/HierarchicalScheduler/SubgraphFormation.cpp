@@ -390,10 +390,31 @@ SubgraphFormationPolicy SubgraphFormationPolicy::TopDownAggressive() {
   return p;
 }
 
+SubgraphFormationPolicy SubgraphFormationPolicy::TopDownSingleSplitterOnly() {
+  SubgraphFormationPolicy p;
+  p.pipeline.passes = {
+      TopDownSingleSplitterPass,
+  };
+  // Explicit (matches the default), so the partition choice is
+  // visible at the factory: independents merge into the
+  // descendants_or_other group rather than becoming their own
+  // subgraph.
+  p.splitter_partition =
+      SplitterPartitionPolicy::kBundleDescendantsAndIndependents;
+  return p;
+}
+
 // --- End-to-end driver (§7) ----------------------------------------------
 
 void FormSubgraphs(ScheduleGraph &graph,
                    const SubgraphFormationPolicy &policy) {
+  // Empty pipeline → nothing to do, and we skip the prereq
+  // analyses (TR / dom) so callers that pass an empty policy as a
+  // "no formation" sentinel pay nothing beyond this check.
+  if (policy.pipeline.passes.empty()) {
+    return;
+  }
+
   // 1. Prerequisite analyses. Each ScheduleGraph::Compute* call is
   // cache-aware (early-returns if its result is already current),
   // so re-running on a freshly built graph that hasn't seen them

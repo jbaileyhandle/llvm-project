@@ -470,6 +470,14 @@ struct SubgraphFormationPolicy {
   /// single-splitter subtree on each branch instead of the lowest.
   /// Produces fewer, larger subgraphs.
   static SubgraphFormationPolicy TopDownAggressive();
+
+  /// TopDownSingleSplitterOnly: just TopDownSingleSplitterPass —
+  /// no multi-splitter or large-splitter-free rescues. Same
+  /// single-splitter subgraphs as TopDownAggressive but without
+  /// the rescue-pass additions, so the fewest emit points of any
+  /// built-in pipeline. Useful as a minimal first deployment target
+  /// for production wiring.
+  static SubgraphFormationPolicy TopDownSingleSplitterOnly();
 };
 
 /// Top-level entry point for subgraph formation. Runs on a freshly

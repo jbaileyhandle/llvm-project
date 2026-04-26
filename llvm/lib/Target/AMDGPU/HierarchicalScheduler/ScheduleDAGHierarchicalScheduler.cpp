@@ -183,11 +183,12 @@ void ScheduleDAGHierarchicalScheduler::ApplyScheduleOrder(
     const ScheduleConstructor &sc) {
   std::vector<SUnit *> sunit_order;
   for (const ScheduleNode *node : sc.GetScheduleOrder()) {
+    // Subgraph proxies appear in schedule_order_ for scope-stack
+    // bookkeeping (start = push, end = pop) but don't correspond to
+    // any MachineInstr — filter them out here. Real instruction
+    // ordering lives entirely on the scheduling-unit nodes.
     if (!node->IsSchedulingUnit()) {
-      report_fatal_error(
-          "ApplyScheduleOrder: encountered a subgraph proxy in "
-          "the schedule order. Only scheduling-unit nodes are "
-          "supported.");
+      continue;
     }
     SUnit *su = node->GetSUnit();
     if (su) {
