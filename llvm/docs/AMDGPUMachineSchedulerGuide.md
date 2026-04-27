@@ -2168,6 +2168,31 @@ not themaxWavesPerEU starting point.
   consider a `scopes_.reserve(...)` at construction for defense
   in depth (max stack depth = subgraph nesting depth + 1).
 
+- **History-based domination: investigate novelty of pressure-side
+  scheme.** The planned history-based domination optimization (see
+  `AMDGPUHistoryDominationDesign.md`) tracks per-partition
+  `(best_prefix_peak, best_postfix_peak)` for register pressure,
+  exploiting the fact that a partition fully decouples prefix and
+  postfix register pressure (prefix order doesn't constrain
+  postfix order or pressure once the boundary live set is fixed).
+  The decoupling property itself is well-known register-pressure
+  scheduling theory (foundational to Sethi-Ullman numbering for
+  trees, etc.), and the history-based domination framework comes
+  from Shobaki / OptSched. The specific combination — applying the
+  decoupling within Shobaki's history-domination framework with
+  two scalars per partition — is one we haven't found explicitly
+  documented in either the OptSched code (which uses a unified
+  cost formulation: `CostHistEnumTreeNode` tracks aggregate
+  cost / partial cost / peak cost across the whole schedule) or in
+  the Shobaki papers we've skimmed. It might be (a) implicit in
+  OptSched but missed in our investigation, (b) in another paper
+  we haven't read, (c) considered too obvious to publish, or
+  (d) genuinely a small refinement. Worth a more thorough
+  literature pass at some point — read all of Shobaki's
+  history-domination papers, search for other work combining B&B
+  scheduling with prefix/postfix decomposition for register
+  pressure. If novel, worth writing up.
+
 - **Pointer-vs-reference convention audit.** The Google C++ Style
   Guide rules for argument and member types are:
   - `const T&` for input-only arguments that are never null and
