@@ -866,6 +866,15 @@ Now suppose a third visit arrives at {A, B, C} with prefix_peak =
 
 ## 10. Implementation Phases
 
+Reorganized so length history goes end-to-end before pressure work
+begins. Tracker classes and their DFS wiring are split into
+separate phases so each tracker's logic can be tested in isolation
+before behavior changes in production.
+
+End-to-end checkpoints: after Phase 2b, length DFS uses
+history-based pruning in production. After Phase 4b, occupancy DFS
+does too.
+
 Each phase commits independently. Shakedowns added per phase.
 
 ### Phase 1 — ScheduledSetTracker
@@ -889,7 +898,43 @@ Shakedowns:
 - Frontier counts: synthetic graph with known structure, verify
   scheduled_pred_count and frontier membership at each step.
 
-### Phase 2 — Forward register tracker records pressure
+### Phase 2a — LengthHistoryTracker class
+
+Tracker built and exercised in isolation; not yet wired into
+DfsSearch.
+
+- New `LengthHistoryTracker.{h,cpp}`. Per-partition Pareto frontier
+  of `(end_cycle, frontier_lbs)` entries.
+- API: `ShouldPrune(tracker, end_cycle)`,
+  `Insert(tracker, end_cycle)`. Pareto maintenance internal.
+
+Shakedowns: hand-build a tracker, insert entries directly, verify:
+- `Insert` adds an entry when no existing entry dominates.
+- `Insert` skips when a dominating entry exists.
+- `Insert` discards previously-stored entries dominated by the new
+  one (Pareto trim).
+- `ShouldPrune` returns true iff some existing entry dominates the
+  query.
+- Bitset disambiguation works on hash collisions (synthetic case
+  where two different scheduled sets happen to share a signature).
+
+### Phase 2b — Length DFS wiring (LENGTH END-TO-END)
+
+**Production behavior changes after this phase.**
+
+- Add `LengthHistoryTracker length_history_` to `DfsSearch`.
+- Add `if constexpr (Policy::kUseLengthHistory)` block in `Recurse`
+  for prune check + insert.
+- Set `DfsMinimizeLengthPolicy::kUseLengthHistory = true`.
+
+Shakedowns:
+- End-to-end on hip_stencil and dfs_test: length DFS produces same
+  best schedule as without history, but with reduced
+  `schedule_call_count`.
+
+### Phase 3 — Forward register tracker records per-instruction pressure
+
+Prerequisite for Phase 4a. Doesn't affect length history.
 
 - Add `pressure_history_` vector to `GCNForwardRegisterTracker`.
 - On `Schedule`: push current pressure. On `Unschedule`: pop.
@@ -901,53 +946,54 @@ Shakedowns:
 - Suffix-max correctness: schedule a known-shape graph, check
   suffix-max values match hand-computed.
 
-### Phase 3 (optional) — Tracker enablement policy flags
+### Phase 4a — PressureHistoryTracker class
 
-- Add `kUseLengthTracker`, `kUseForwardRegisterTracker` to
-  `SearchPolicyBase` (default false, override true on existing
-  policies).
-- Conditionally construct/maintain trackers in `ScheduleConstructor`
-  based on these flags.
+Tracker built and exercised in isolation; not yet wired into
+DfsSearch.
 
-Useful as a refactor before adding more trackers — sets up the
-opt-in pattern uniformly. Skippable if we're willing to keep
-trackers always-on for now.
+- New `PressureHistoryTracker.{h,cpp}`. One entry per partition
+  with `(best_prefix_peak, best_postfix_peak)`.
+- API: `ShouldPrune(tracker, current_prefix_peak, ceiling)`,
+  `RecordPrefixPeak(tracker, current_prefix_peak)`,
+  `RecordPostfixPeakForPartition(tracker, postfix_peak)`.
 
-### Phase 4 — LengthHistoryTracker
+Shakedowns: hand-build a tracker, exercise each operation, verify:
+- Prefix dominance fires when `current_prefix_peak >
+  best_prefix_peak`.
+- Total-bound prune fires when `max(current_prefix_peak,
+  best_postfix_peak) >= ceiling`.
+- `RecordPrefixPeak` lowers `best_prefix_peak` (only).
+- `RecordPostfixPeakForPartition` lowers `best_postfix_peak`
+  (only).
+- Bitset disambiguation on hash collisions.
 
-- New `LengthHistoryTracker.{h,cpp}`.
-- Add `LengthHistoryTracker length_history_` to `DfsSearch`.
-- Add `if constexpr (Policy::kUseLengthHistory)` block in `Recurse`
-  for prune check + insert.
-- Set `DfsMinimizeLengthPolicy::kUseLengthHistory = true`.
+### Phase 4b — Occupancy DFS wiring (PRESSURE END-TO-END)
 
-Shakedowns:
-- Synthetic DAG where two orderings reach same partition with
-  identical end_cycle / frontier LBs; verify second visit is
-  pruned and table size stays at 1.
-- Synthetic DAG where two orderings reach same partition with
-  different metrics; verify Pareto frontier is maintained.
-- End-to-end on hip_stencil and dfs_test: DFS produces same best
-  schedule as without history, but with reduced
-  `schedule_call_count`.
+**Production behavior changes after this phase.**
 
-### Phase 5 — PressureHistoryTracker
-
-- New `PressureHistoryTracker.{h,cpp}`.
 - Add `PressureHistoryTracker pressure_history_` to `DfsSearch`.
 - Add `if constexpr (Policy::kUsePressureHistory)` blocks:
-  - In `Recurse`: prune check + `RecordPrefixPeak`.
+  - In `Recurse`: prefix-dominance + total-bound prune;
+    `RecordPrefixPeak`.
   - At `IsDone`: suffix-max over forward tracker's pressure
     history; update postfix peaks for each partition on the path.
 - Set `DfsMaximizeOccupancyPolicy::kUsePressureHistory = true`.
 
 Shakedowns:
-- Synthetic DAG where two orderings reach same partition with
-  different prefix_peak; verify worse one is pruned.
-- Verify total-bound prune fires when prefix + postfix exceeds
-  ceiling.
 - End-to-end on dfs_test (which exercises occupancy DFS):
   reduced `schedule_call_count`, same final occupancy.
+
+### Phase 5 (optional sidequest) — Tracker enablement policy flags
+
+Pure cleanup; can be done at any time, including not at all.
+
+- Add `kUseLengthTracker`, `kUseForwardRegisterTracker` to
+  `SearchPolicyBase` (default false, override true on existing
+  policies).
+- Conditionally construct/maintain trackers in `ScheduleConstructor`
+  based on these flags. Avoids wasted tracker work for passes that
+  don't need a given tracker (e.g., occupancy doesn't need length
+  tracker).
 
 ---
 
