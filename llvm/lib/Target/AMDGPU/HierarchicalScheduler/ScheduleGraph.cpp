@@ -501,12 +501,9 @@ void ScheduleGraph::ComputeCriticalPathFromExit() {
       if (!edge.IsLatencyEdge()) {
         continue;
       }
-      // Clamp to 1: at IssueWidth=1, every strong edge forces at least
-      // one cycle of separation between predecessor and successor, even
-      // when the model assigns latency_=0 (kAnti, kArtificial, and
-      // kBarrier non-store->load all default to 0). Without the clamp
-      // the cp ignores those ordering chains entirely.
-      int weight = std::max(1, edge.latency_);
+      // Per-edge cycle delta: max of the edge's modeled latency
+      // and the source's IssueWidth=1 issue-slot consumption.
+      int weight = std::max(edge.Latency(), node->IssueSlotsConsumed());
       int cp = weight +
                critical_path_from_exit_by_topo_index_[edge.node_->GetTopoIndex()];
       if (cp > max_cp) {

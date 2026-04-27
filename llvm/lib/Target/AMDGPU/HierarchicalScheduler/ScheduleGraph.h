@@ -202,6 +202,27 @@ struct ScheduleEdge {
   /// edges by max(1, edge.latency_), so model-zero strong edges still
   /// account for the IssueWidth=1 ordering gap.
   bool IsLatencyEdge() const { return kind_ <= kArtificial; }
+
+  /// Latency in cycles imposed by this edge alone (the data-flow
+  /// piece). Returns latency_ for latency-bearing edges, 0 for
+  /// non-latency strong edges (kSubgraphOrderEdge — proxies have
+  /// no data latency to model).
+  ///
+  /// Note: this is NOT the full per-edge cycle delta. The full
+  /// delta for "successor.cycle ≥ predecessor.cycle + delta" is
+  ///   max(edge.Latency(), predecessor->IssueSlotsConsumed())
+  /// which combines the latency floor (this method) with the
+  /// IssueWidth=1 issue-slot floor (ScheduleNode::IssueSlotsConsumed).
+  /// Three callers (ScheduleLengthTracker::ComputeReadyCycle,
+  /// ScheduleGraph::ComputeCriticalPathFromExit,
+  /// ScheduledSetTracker frontier-LB) combine the two helpers
+  /// inline at the use site.
+  int Latency() const {
+    if (!IsLatencyEdge()) {
+      return 0;
+    }
+    return latency_;
+  }
 };
 
 /// A node in a ScheduleGraph. Either a scheduling unit (wrapping a
@@ -278,6 +299,25 @@ public:
   /// subgraph scope).
   bool IsSubgraphEndProxy() const {
     return std::holds_alternative<SubgraphInfo *>(content_);
+  }
+
+  /// Issue slots this node consumes when scheduled. 1 for
+  /// scheduling units (real instructions and entry/exit
+  /// sentinels — they take a slot at IssueWidth=1, forcing the
+  /// next-issued instruction to a later cycle). 0 for subgraph
+  /// proxies (they're scope-management bookkeeping; don't issue,
+  /// don't push the next issue cycle forward).
+  ///
+  /// Used together with ScheduleEdge::Latency() to compute the
+  /// per-edge "successor.cycle ≥ predecessor.cycle + delta"
+  /// constraint, where delta = max(edge.Latency(),
+  /// predecessor->IssueSlotsConsumed()) — the latency floor maxed
+  /// against the issue-slot floor.
+  int IssueSlotsConsumed() const {
+    if (IsSchedulingUnit()) {
+      return 1;
+    }
+    return 0;
   }
 
   /// Access the wrapped SUnit. Only valid for scheduling-unit nodes.
@@ -680,8 +720,30 @@ public:
   /// reduced, dom, ...) are invalidated automatically — see
   /// InvalidateDerivedData. Callers should NOT call ScheduleNode
   /// methods to add edges directly; that path is private.
+  ///
+  /// Asserts no proxy → proxy edges. Current formation produces
+  /// only real → proxy, proxy → real, and real → real edges
+  /// (verified: ext_predecessors / ext_successors of each
+  /// SubgraphInfo are computed before any proxy is inserted, so
+  /// they only reference real instructions). Cross-subgraph
+  /// ordering is achieved through real nodes plus the scope
+  /// mechanism, not through direct proxy ↔ proxy edges.
+  ///
+  /// Several callers (ScheduleLengthTracker::ComputeReadyCycle,
+  /// ScheduleGraph::ComputeCriticalPathFromExit, ScheduledSetTracker
+  /// frontier-LB) combine ScheduleEdge::Latency with the
+  /// predecessor's IssueSlotsConsumed to compute per-edge cycle
+  /// delta, assuming at least one endpoint is a real instruction.
+  /// If we ever introduce proxy → proxy edges (e.g., for direct
+  /// cross-subgraph ordering), revisit those callers — the
+  /// formula needs to consider both endpoints' IssueSlotsConsumed.
+  /// The assert fires loudly if the invariant breaks.
   void AddEdge(ScheduleNode *from, ScheduleNode *to,
                ScheduleEdge::Kind kind, int latency = 0) {
+    assert(!(from->IsSubgraphProxy() && to->IsSubgraphProxy()) &&
+           "ScheduleGraph::AddEdge: proxy → proxy edges are not "
+           "currently supported; per-edge cycle-delta computation "
+           "assumes at least one real-instruction endpoint");
     from->AddSuccessor(ScheduleEdge(to, kind, latency));
     InvalidateDerivedData();
   }

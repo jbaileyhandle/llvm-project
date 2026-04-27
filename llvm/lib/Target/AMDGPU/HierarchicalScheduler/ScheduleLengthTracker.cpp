@@ -124,15 +124,33 @@ void ScheduleLengthTracker::Unschedule(const ScheduleNode *node) {
 
 int ScheduleLengthTracker::ComputeReadyCycle(
     const ScheduleNode *node) const {
-  // Only latency-carrying edges constrain readiness (see
-  // ScheduleEdge::IsLatencyEdge for the single source of truth).
+  // ready_cycle is the max over:
+  //   (a) current_cycle_ — IssueWidth=1 global floor: no two
+  //       instructions co-issue, so `node` (a scheduling unit)
+  //       must come at least one cycle after the most-recently-
+  //       scheduled instruction even when that instruction isn't
+  //       a predecessor.
+  //   (b) per scheduled predecessor P:
+  //         P.cycle + max(edge.Latency(), P.IssueSlotsConsumed())
+  //       The inner max combines the data-latency floor (from the
+  //       edge) with the IssueWidth=1 issue-slot floor (P consumes
+  //       a slot if it's a real instruction — proxies don't).
+  //
+  // The IsLatencyEdge filter excludes kSubgraphOrderEdge, which
+  // is the only non-latency strong edge kind in the current
+  // encoding. Both endpoints of the surviving edges are scheduling
+  // units (verified by the proxy → proxy assert in
+  // ScheduleGraph::AddEdge), so P.IssueSlotsConsumed() == 1 here;
+  // the inner max simplifies to max(latency_, 1).
   int ready_cycle = current_cycle_;
   for (const ScheduleEdge &edge : node->Predecessors()) {
     if (!edge.IsLatencyEdge()) {
       continue;
     }
     int pred_cycle = GetScheduledCycle(edge.node_);
-    int pred_ready = pred_cycle + edge.latency_;
+    int pred_ready = pred_cycle +
+                     std::max(edge.Latency(),
+                              edge.node_->IssueSlotsConsumed());
     if (pred_ready > ready_cycle) {
       ready_cycle = pred_ready;
     }
