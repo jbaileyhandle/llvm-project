@@ -56,6 +56,7 @@
 #include "GCNRegisterTracker.h"
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
+#include "ScheduledSetTracker.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include <vector>
@@ -195,6 +196,9 @@ public:
   const ScheduleLengthTracker &GetLengthTracker() const {
     return length_tracker_;
   }
+  const ScheduledSetTracker &GetScheduledSetTracker() const {
+    return scheduled_set_tracker_;
+  }
 
   /// Access the graph.
   const ScheduleGraph &GetGraph() const { return *graph_; }
@@ -236,6 +240,7 @@ private:
   const ScheduleGraph *graph_;
   GCNRegisterTracker pressure_tracker_;
   ScheduleLengthTracker length_tracker_;
+  ScheduledSetTracker scheduled_set_tracker_;
 
   /// Nodes scheduled so far, in order.
   SmallVector<const ScheduleNode *> schedule_order_;

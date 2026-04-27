@@ -20,6 +20,7 @@
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
+#include "ScheduledSetTracker.h"
 #include "SubgraphFormation.h"
 #include "SubgraphInfo.h"
 #include "llvm/CodeGen/LiveIntervals.h"
@@ -1232,6 +1233,240 @@ void RunSubgraphContiguityShakedown(const MachineFunction &mf,
   }
 }
 
+// Verifies ScheduledSetTracker via several scenarios on synthetic
+// graphs. Each subtest constructs a fresh graph + ScheduleLengthTracker
+// + ScheduledSetTracker and drives Schedule/Unschedule sequences.
+//
+// BuildTestDAG layout (from BuildTestDAG()'s docstring), 7 nodes:
+//   A → H (latency 1), A → C (latency 2), A → D (latency 3),
+//   C → D (latency 1), C → E (latency 4),
+//   D → F (latency 2), E → F (latency 1),
+//   H → G (latency 5), F → G (latency 2)
+// Topo order produced by Kahn's: [A, H, C, D, E, F, G].
+void RunScheduledSetTrackerShakedown(const GCNSubtarget &st) {
+  llvm::outs() << "  RunScheduledSetTrackerShakedown:\n";
+
+  // --- Empty initial state on BuildTestDAG ---
+  {
+    auto graph = ScheduleGraph::BuildTestDAG();
+    graph->ValidateAndComputeTopologicalOrder();
+    graph->ComputeCriticalPathFromExit();
+    ScheduleLengthTracker length_tracker(*graph, st);
+    ScheduledSetTracker scheduled_set_tracker(graph.get(), &length_tracker);
+    bool ok = scheduled_set_tracker.GetPrefixSignature() == 0 &&
+              scheduled_set_tracker.GetScheduledSet().none() &&
+              scheduled_set_tracker.GetFrontier().empty();
+    llvm::outs() << "    Empty initial state: "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+
+  // --- Schedule(A) then Schedule(H): hand-checked frontier+LBs ---
+  // After Schedule(A) at cycle 0:
+  //   frontier = {H, C, D}
+  //   LB(H) = 0 + max(1, A.IssueSlotsConsumed=1) = 1
+  //   LB(C) = 0 + max(2, 1)                       = 2
+  //   LB(D) = 0 + max(3, 1)                       = 3
+  // After Schedule(H) at cycle 1:
+  //   frontier = {C, D, G}    (H removed; H→G adds G)
+  //   LB(G) = 1 + max(5, 1) = 6 ; LB(C), LB(D) unchanged.
+  {
+    auto graph = ScheduleGraph::BuildTestDAG();
+    graph->ValidateAndComputeTopologicalOrder();
+    graph->ComputeCriticalPathFromExit();
+    ArrayRef<ScheduleNode *> topo = graph->GetTopoOrder();
+    ScheduleNode *a = topo[0];
+    ScheduleNode *h = topo[1];
+    ScheduleNode *c = topo[2];
+    ScheduleNode *d = topo[3];
+    ScheduleNode *g = topo[6];
+
+    ScheduleLengthTracker length_tracker(*graph, st);
+    ScheduledSetTracker scheduled_set_tracker(graph.get(), &length_tracker);
+
+    length_tracker.Schedule(a);
+    scheduled_set_tracker.Schedule(a);
+    const auto &fr1 = scheduled_set_tracker.GetFrontier();
+    bool a_ok = fr1.size() == 3 &&
+                fr1.lookup(h->GetTopoIndex()).lower_bound == 1 &&
+                fr1.lookup(c->GetTopoIndex()).lower_bound == 2 &&
+                fr1.lookup(d->GetTopoIndex()).lower_bound == 3;
+    llvm::outs() << "    Schedule(A): frontier {H=1,C=2,D=3}: "
+                 << (a_ok ? "PASS\n" : "FAIL\n");
+
+    length_tracker.Schedule(h);
+    scheduled_set_tracker.Schedule(h);
+    const auto &fr2 = scheduled_set_tracker.GetFrontier();
+    bool h_ok = fr2.size() == 3 && fr2.count(h->GetTopoIndex()) == 0 &&
+                fr2.lookup(c->GetTopoIndex()).lower_bound == 2 &&
+                fr2.lookup(d->GetTopoIndex()).lower_bound == 3 &&
+                fr2.lookup(g->GetTopoIndex()).lower_bound == 6;
+    llvm::outs() << "    +Schedule(H): frontier {C=2,D=3,G=6}: "
+                 << (h_ok ? "PASS\n" : "FAIL\n");
+  }
+
+  // --- Round-trip on BuildTestDAG ---
+  // Schedule everything in topo order, Unschedule everything in
+  // reverse — final state must match empty initial state.
+  {
+    auto graph = ScheduleGraph::BuildTestDAG();
+    graph->ValidateAndComputeTopologicalOrder();
+    graph->ComputeCriticalPathFromExit();
+    ScheduleLengthTracker length_tracker(*graph, st);
+    ScheduledSetTracker scheduled_set_tracker(graph.get(), &length_tracker);
+    ArrayRef<ScheduleNode *> topo = graph->GetTopoOrder();
+
+    for (ScheduleNode *node : topo) {
+      length_tracker.Schedule(node);
+      scheduled_set_tracker.Schedule(node);
+    }
+    for (auto it = topo.rbegin(); it != topo.rend(); ++it) {
+      scheduled_set_tracker.Unschedule(*it);
+      length_tracker.Unschedule(*it);
+    }
+    bool ok = scheduled_set_tracker.GetPrefixSignature() == 0 &&
+              scheduled_set_tracker.GetScheduledSet().none() &&
+              scheduled_set_tracker.GetFrontier().empty();
+    llvm::outs() << "    Round-trip on BuildTestDAG: "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+
+  // --- Order invariance for {A, H, C} ---
+  // XOR is commutative, so scheduling {A, H, C} as A→H→C should
+  // give the same prefix signature and bitset as A→C→H.
+  {
+    auto build = [&]() {
+      auto g = ScheduleGraph::BuildTestDAG();
+      g->ValidateAndComputeTopologicalOrder();
+      g->ComputeCriticalPathFromExit();
+      return g;
+    };
+    auto graph1 = build();
+    auto graph2 = build();
+    ArrayRef<ScheduleNode *> topo1 = graph1->GetTopoOrder();
+    ArrayRef<ScheduleNode *> topo2 = graph2->GetTopoOrder();
+
+    ScheduleLengthTracker lt1(*graph1, st);
+    ScheduledSetTracker sub1(graph1.get(), &lt1);
+    lt1.Schedule(topo1[0]); sub1.Schedule(topo1[0]); // A
+    lt1.Schedule(topo1[1]); sub1.Schedule(topo1[1]); // H
+    lt1.Schedule(topo1[2]); sub1.Schedule(topo1[2]); // C
+
+    ScheduleLengthTracker lt2(*graph2, st);
+    ScheduledSetTracker sub2(graph2.get(), &lt2);
+    lt2.Schedule(topo2[0]); sub2.Schedule(topo2[0]); // A
+    lt2.Schedule(topo2[2]); sub2.Schedule(topo2[2]); // C
+    lt2.Schedule(topo2[1]); sub2.Schedule(topo2[1]); // H
+
+    bool ok =
+        sub1.GetPrefixSignature() == sub2.GetPrefixSignature() &&
+        sub1.GetScheduledSet() == sub2.GetScheduledSet();
+    llvm::outs() << "    Order invariance for {A,H,C}: "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+
+  // --- Multi-edge A → H on BuildTestDAG (existing A→H lat=1 plus
+  //     a second added A→H lat=4) ---
+  // The earlier "recompute overwrites count" bug was multi-edge-
+  // specific. With the current "no stored count, always recompute"
+  // design that bug class is gone, but exercise the path
+  // explicitly: after Schedule(A), LB(H) should be max of the two
+  // contributions = max(0+max(1,1), 0+max(4,1)) = 4. After the
+  // Schedule(A)/Schedule(H)/Unschedule(H)/Unschedule(A) round-trip,
+  // frontier must restore cleanly.
+  {
+    auto graph = ScheduleGraph::BuildTestDAG();
+    // Indices in BuildTestDAG emplacement order: A=0, C=1, D=2,
+    // E=3, F=4, G=5, H=6.
+    ScheduleNode *a = &graph->Nodes()[0];
+    ScheduleNode *h = &graph->Nodes()[6];
+    graph->AddEdge(a, h, ScheduleEdge::kData, /*latency=*/4);
+    graph->ValidateAndComputeTopologicalOrder();
+    graph->ComputeCriticalPathFromExit();
+    ScheduleLengthTracker length_tracker(*graph, st);
+    ScheduledSetTracker scheduled_set_tracker(graph.get(), &length_tracker);
+
+    length_tracker.Schedule(a);
+    scheduled_set_tracker.Schedule(a);
+    bool lb_after_a =
+        scheduled_set_tracker.GetFrontier().lookup(h->GetTopoIndex()).lower_bound == 4;
+
+    length_tracker.Schedule(h);
+    scheduled_set_tracker.Schedule(h);
+    bool h_gone = scheduled_set_tracker.GetFrontier().count(h->GetTopoIndex()) == 0;
+
+    scheduled_set_tracker.Unschedule(h);
+    length_tracker.Unschedule(h);
+    bool h_back_with_lb_4 =
+        scheduled_set_tracker.GetFrontier().lookup(h->GetTopoIndex()).lower_bound == 4;
+
+    scheduled_set_tracker.Unschedule(a);
+    length_tracker.Unschedule(a);
+    // After Unschedule(A), no real preds scheduled — entire frontier
+    // empty (A was the only scheduled node).
+    bool empty_after_a = scheduled_set_tracker.GetFrontier().empty();
+
+    bool ok = lb_after_a && h_gone && h_back_with_lb_4 && empty_after_a;
+    llvm::outs() << "    Multi-edge A→H (×2, lats 1 and 4): "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+
+  // --- Subgraph proxies present ---
+  // Run formation on a DAG that produces at least one subgraph.
+  // Then drive the tracker across the whole graph and verify:
+  //   - proxies appear in the bitset (proxy state is part of the
+  //     search-state identity).
+  //   - proxies NEVER appear in the frontier (proxy contributions
+  //     to LB are 0; the tracker skips proxies from frontier
+  //     mechanics by design).
+  //   - round-trip restores cleanly.
+  {
+    auto graph = ScheduleGraph::BuildSubgraphFormationTestDAG();
+    int n_real_before = graph->Size();
+    auto policy = SubgraphFormationPolicy::TopDownSingleSplitterOnly();
+    FormSubgraphs(*graph, policy);
+    bool subgraph_formed = graph->Size() > n_real_before;
+
+    ScheduleLengthTracker length_tracker(*graph, st);
+    ScheduledSetTracker scheduled_set_tracker(graph.get(), &length_tracker);
+    ArrayRef<ScheduleNode *> topo = graph->GetTopoOrder();
+
+    bool proxy_in_frontier_ever = false;
+    for (ScheduleNode *node : topo) {
+      length_tracker.Schedule(node);
+      scheduled_set_tracker.Schedule(node);
+      for (const auto &kv : scheduled_set_tracker.GetFrontier()) {
+        if (topo[kv.first]->IsSubgraphProxy()) {
+          proxy_in_frontier_ever = true;
+        }
+      }
+    }
+    bool proxy_in_scheduled_set = false;
+    for (int i = 0; i < graph->Size(); ++i) {
+      if (topo[i]->IsSubgraphProxy() &&
+          scheduled_set_tracker.GetScheduledSet().test(i)) {
+        proxy_in_scheduled_set = true;
+      }
+    }
+    bool all_scheduled =
+        scheduled_set_tracker.GetScheduledSet().count() == graph->Size();
+
+    for (auto it = topo.rbegin(); it != topo.rend(); ++it) {
+      scheduled_set_tracker.Unschedule(*it);
+      length_tracker.Unschedule(*it);
+    }
+    bool round_trip_ok = scheduled_set_tracker.GetPrefixSignature() == 0 &&
+                         scheduled_set_tracker.GetScheduledSet().none() &&
+                         scheduled_set_tracker.GetFrontier().empty();
+
+    bool ok = subgraph_formed && all_scheduled &&
+              proxy_in_scheduled_set && !proxy_in_frontier_ever &&
+              round_trip_ok;
+    llvm::outs() << "    Subgraphs present (proxies in bitset, "
+                    "absent from frontier, round-trip): "
+                 << (ok ? "PASS\n" : "FAIL\n");
+  }
+}
+
 // Verifies ScheduleLengthTracker::GetLengthLowerBound against hand-
 // computed expected sequences on two synthetic DAGs. Builds both
 // graphs internally — this shakedown is self-contained and does not
@@ -1582,7 +1817,14 @@ void RunScheduleConstructorShakedown(ScheduleGraph &graph,
   ScheduleConstructor sc(graph, st, mf, lis);
 
   // --- Forward pass: always pick the first ready node ---
+  // Also tracks expected state of ScheduledSetTracker: after each
+  // Schedule, the just-scheduled node's bit must be set and the
+  // scheduled-set count must match the number of Schedule calls.
+  // Catches a regression where ScheduleConstructor stops driving
+  // the tracker (would not show up in pure round-trip checks).
   llvm::outs() << "  ScheduleConstructor trace:\n";
+  int expected_scheduled_count = 0;
+  bool tracker_state_ok = true;
   while (!sc.IsDone()) {
     const auto &ready = sc.GetReadyList();
     if (ready.empty()) {
@@ -1591,8 +1833,23 @@ void RunScheduleConstructorShakedown(ScheduleGraph &graph,
     }
     const ScheduleNode *node = *ready.begin();
     sc.Schedule(node);
+    ++expected_scheduled_count;
+    const ScheduledSetTracker &scheduled_set_tracker =
+        sc.GetScheduledSetTracker();
+    if (!scheduled_set_tracker.GetScheduledSet().test(
+            node->GetTopoIndex()) ||
+        scheduled_set_tracker.GetScheduledSet().count() !=
+            expected_scheduled_count) {
+      tracker_state_ok = false;
+    }
     llvm::outs() << "    " << node->ToString() << "\n"
                  << "      " << sc.Describe() << "\n";
+  }
+  llvm::outs() << "  ScheduledSetTracker driven by ScheduleConstructor: "
+               << (tracker_state_ok ? "PASS\n" : "FAIL\n");
+  if (!tracker_state_ok) {
+    report_fatal_error("ScheduledSetTracker not properly driven by "
+                       "ScheduleConstructor::Schedule");
   }
 
   llvm::outs() << "  ScheduleConstructor (arbitrary): "
@@ -1605,9 +1862,15 @@ void RunScheduleConstructorShakedown(ScheduleGraph &graph,
   }
 
   // --- Verify round-trip ---
-  bool pass = (sc.GetNumScheduled() == 0 &&
-               sc.GetLengthTracker().GetCurrentCycle() == 0 &&
-               sc.GetLengthTracker().GetTotalBubbles() == 0);
+  const ScheduledSetTracker &final_scheduled_set_tracker =
+      sc.GetScheduledSetTracker();
+  bool pass =
+      (sc.GetNumScheduled() == 0 &&
+       sc.GetLengthTracker().GetCurrentCycle() == 0 &&
+       sc.GetLengthTracker().GetTotalBubbles() == 0 &&
+       final_scheduled_set_tracker.GetPrefixSignature() == 0 &&
+       final_scheduled_set_tracker.GetScheduledSet().none() &&
+       final_scheduled_set_tracker.GetFrontier().empty());
   llvm::outs() << "  ScheduleConstructor round-trip: "
                << sc.Describe()
                << (pass ? "  PASS" : "  FAIL") << "\n";
@@ -1884,6 +2147,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunInsertSubgraphProxiesShakedown();
   RunSubgraphContiguityShakedown(MF, *LIS);
   RunLengthLowerBoundShakedown(st);
+  RunScheduledSetTrackerShakedown(st);
   RunAllSubgraphFormationShakedowns();
 
   for (auto &region : regions_) {

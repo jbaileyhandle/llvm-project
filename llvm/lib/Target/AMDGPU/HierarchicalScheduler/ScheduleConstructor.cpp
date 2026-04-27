@@ -27,6 +27,10 @@ ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
     : graph_(&graph),
       pressure_tracker_(graph, mf, lis),
       length_tracker_(graph, st),
+      // scheduled_set_tracker_ depends on length_tracker_ for cycle
+      // lookups; declared after it in the class so member init order
+      // is correct.
+      scheduled_set_tracker_(&graph, &length_tracker_),
       ready_comparator_(ready_cmp) {
   InitReadyList();
 }
@@ -188,8 +192,12 @@ void ScheduleConstructor::ScheduleByIndex(int index) {
   // Trackers self-skip for subgraph proxies (no register or cycle
   // effect — see each tracker's Schedule for the early-return).
   // We call them uniformly here.
+  // ScheduleSetTracker.Schedule must come AFTER length_tracker_'s
+  // — its frontier-LB computation reads the just-scheduled node's
+  // cycle from length_tracker_.
   pressure_tracker_.Schedule(node);
   length_tracker_.Schedule(node);
+  scheduled_set_tracker_.Schedule(node);
 
   // Erase from current scope's ready list FIRST. ready_list must
   // not be touched after this point — the scope mutation below can
@@ -281,6 +289,7 @@ void ScheduleConstructor::Unschedule() {
 
   // Undo trackers (reverse order of Schedule). Trackers self-skip
   // for subgraph proxies — see each tracker's Unschedule.
+  scheduled_set_tracker_.Unschedule(node);
   length_tracker_.Unschedule(node);
   pressure_tracker_.Unschedule(node);
 }
