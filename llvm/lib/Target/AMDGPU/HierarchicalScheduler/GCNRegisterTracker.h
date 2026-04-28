@@ -41,6 +41,7 @@
 
 #include "GCNRegPressure.h"
 #include "ScheduleGraph.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/MC/LaneBitmask.h"
@@ -119,6 +120,23 @@ public:
   const GCNRegPressure &GetCurrentPressure() const { return cur_pressure_; }
   const GCNRegPressure &GetPeakPressure() const { return max_pressure_; }
   const LiveRegSet &GetLiveRegs() const { return live_regs_; }
+
+  /// Per-step record of cur_pressure_ after each Schedule call,
+  /// indexed by the scheduling step (the schedule order). Includes
+  /// entries for both real instructions and subgraph proxies; proxy
+  /// steps duplicate the previous value (proxies don't change
+  /// pressure). Pop-on-Unschedule keeps the vector aligned with the
+  /// current schedule prefix.
+  ///
+  /// Used by the pressure history-domination machinery
+  /// (PressureHistoryTracker) to derive postfix peaks via suffix-
+  /// max once a complete schedule has been built. Suffix-max over
+  /// duplicate-valued proxy entries reduces to suffix-max over
+  /// real-instruction pressures, so proxy entries are absorbed
+  /// without affecting peaks.
+  ArrayRef<GCNRegPressure> GetPressureHistory() const {
+    return pressure_history_;
+  }
 
   /// Occupancy based on peak register pressure only (SGPR and VGPR
   /// limits). Does NOT account for LDS or launch bounds.
@@ -284,6 +302,9 @@ private:
   GCNRegPressure cur_pressure_;
   GCNRegPressure max_pressure_;
   std::vector<ScheduleStep> undo_stack_;
+
+  /// See GetPressureHistory.
+  std::vector<GCNRegPressure> pressure_history_;
 
   const MachineFunction *mf_;
   const GCNSubtarget *st_;

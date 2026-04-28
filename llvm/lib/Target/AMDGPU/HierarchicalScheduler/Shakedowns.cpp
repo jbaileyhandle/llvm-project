@@ -1954,9 +1954,13 @@ void RunGCNRegisterTrackerShakedown(ScheduleGraph &graph,
   GCNRegisterTracker tracker(graph, mf, lis);
 
   // --- Forward pass: schedule in topo order ---
+  // Capture cur_pressure_ after each Schedule call so we can
+  // cross-check against pressure_history_ entry-by-entry below.
+  SmallVector<GCNRegPressure> expected_history;
   llvm::outs() << "  GCN register pressure trace (topo order):\n";
   for (ScheduleNode *node : graph.GetTopoOrder()) {
     tracker.Schedule(node);
+    expected_history.push_back(tracker.GetCurrentPressure());
     llvm::outs() << "    " << node->ToString() << "\n";
     llvm::outs() << "      " << tracker.DescribeRegOps(node) << "\n";
     llvm::outs() << "      " << tracker.DescribePressure() << "\n";
@@ -1967,6 +1971,19 @@ void RunGCNRegisterTrackerShakedown(ScheduleGraph &graph,
                << " all_factors_region_only="
                << tracker.GetAllFactorsRegionOnlyOccupancy()
                << "\n";
+
+  // --- Verify pressure_history_ matches expected, entry by entry ---
+  ArrayRef<GCNRegPressure> history = tracker.GetPressureHistory();
+  bool history_match =
+      history.size() == expected_history.size();
+  for (size_t i = 0; history_match && i < history.size(); ++i) {
+    if (!(history[i] == expected_history[i])) {
+      history_match = false;
+    }
+  }
+  llvm::outs() << "  pressure_history_ matches per-step cur_pressure_ "
+                  "(length " << history.size() << "): "
+               << (history_match ? "PASS\n" : "FAIL\n");
 
   // --- Reverse pass: unschedule in reverse topo order ---
   llvm::outs() << "  GCN register pressure trace (unschedule):\n";
@@ -1983,10 +2000,13 @@ void RunGCNRegisterTrackerShakedown(ScheduleGraph &graph,
                final_pressure.getVGPRNum(false) == 0 &&
                final_peak.getSGPRNum() == 0 &&
                final_peak.getVGPRNum(false) == 0 &&
-               tracker.GetLiveRegs().empty());
+               tracker.GetLiveRegs().empty() &&
+               tracker.GetPressureHistory().empty());
   llvm::outs() << "  Round-trip result: "
                << tracker.DescribePressure()
                << "  live_regs=" << tracker.GetLiveRegs().size()
+               << "  pressure_history_size="
+               << tracker.GetPressureHistory().size()
                << (pass ? "  PASS" : "  FAIL") << "\n";
   if (!pass) {
     report_fatal_error("GCNRegisterTracker round-trip test failed: "

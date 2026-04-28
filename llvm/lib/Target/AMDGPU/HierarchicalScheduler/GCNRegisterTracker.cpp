@@ -242,33 +242,39 @@ void GCNRegisterTracker::ProcessUses(const NodeRegInfo &info,
 }
 
 void GCNRegisterTracker::Schedule(const ScheduleNode *node) {
-  // Subgraph proxies have no register effect (synthetic node).
-  // Early return so ScheduleConstructor can call trackers
-  // uniformly without branching on node kind. Symmetric with
-  // Unschedule.
-  if (!node->IsSchedulingUnit()) {
-    return;
-  }
-  ScheduleStep step;
-  step.saved_max = max_pressure_;
+  // Subgraph proxies have no register effect (synthetic node);
+  // skip the pressure-update / undo-step path for them. We still
+  // push a pressure_history_ entry at the end (the unchanged
+  // cur_pressure_) so the vector's length tracks every Schedule
+  // call, real or proxy.
+  if (node->IsSchedulingUnit()) {
+    ScheduleStep step;
+    step.saved_max = max_pressure_;
 
-  const NodeRegInfo &info =
-      node_reg_info_by_topo_index_[node->GetTopoIndex()];
-  // Empty info (no defs and no uses) is valid — ProcessDefs /
-  // ProcessUses loop zero times.
-  if constexpr (kModel == PressureModel::kAMDGPU) {
-    // Defs first, peak, then dying uses.
-    ProcessDefs(info, step);
-    max_pressure_ = max(max_pressure_, cur_pressure_);
-    ProcessUses(info, step);
-  } else {
-    // Dying uses first, then defs, then peak.
-    ProcessUses(info, step);
-    ProcessDefs(info, step);
-    max_pressure_ = max(max_pressure_, cur_pressure_);
+    const NodeRegInfo &info =
+        node_reg_info_by_topo_index_[node->GetTopoIndex()];
+    // Empty info (no defs and no uses) is valid — ProcessDefs /
+    // ProcessUses loop zero times.
+    if constexpr (kModel == PressureModel::kAMDGPU) {
+      // Defs first, peak, then dying uses.
+      ProcessDefs(info, step);
+      max_pressure_ = max(max_pressure_, cur_pressure_);
+      ProcessUses(info, step);
+    } else {
+      // Dying uses first, then defs, then peak.
+      ProcessUses(info, step);
+      ProcessDefs(info, step);
+      max_pressure_ = max(max_pressure_, cur_pressure_);
+    }
+
+    undo_stack_.push_back(std::move(step));
   }
 
-  undo_stack_.push_back(std::move(step));
+  // After any cur_pressure_ update (real path) or no-op (proxy
+  // path), record the post-step pressure. "Pressure after step k"
+  // semantics; lets PressureHistoryTracker derive postfix peaks
+  // via suffix-max.
+  pressure_history_.push_back(cur_pressure_);
 }
 
 void GCNRegisterTracker::UndoDefs(const ScheduleStep &step) {
@@ -326,7 +332,10 @@ void GCNRegisterTracker::UndoUses(const NodeRegInfo &info,
 
 void GCNRegisterTracker::Unschedule(const ScheduleNode *node) {
   // Symmetric with Schedule: proxies were no-ops, so undo is also
-  // a no-op.
+  // a no-op for cur_pressure_. Pop pressure_history_ unconditionally
+  // first — every Schedule call (proxy or real) pushed an entry, so
+  // every Unschedule pops one.
+  pressure_history_.pop_back();
   if (!node->IsSchedulingUnit()) {
     return;
   }
