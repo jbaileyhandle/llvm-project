@@ -64,8 +64,9 @@ bool LengthHistoryTracker::DoesDominate(const Entry &a, const Entry &b) {
 }
 
 bool LengthHistoryTracker::IsDominated() const {
-  PartitionKey key = scheduled_set_tracker_->GetPartitionKey();
-  auto it = table_.find(key);
+  // Lookup via view — no bitset copy.
+  PartitionKeyView view = scheduled_set_tracker_->GetPartitionKeyView();
+  auto it = table_.find_as(view);
   if (it == table_.end()) {
     return false;
   }
@@ -79,13 +80,33 @@ bool LengthHistoryTracker::IsDominated() const {
 }
 
 bool LengthHistoryTracker::IsDominatedElseInsert() {
-  PartitionKey key = scheduled_set_tracker_->GetPartitionKey();
+  PartitionKeyView view = scheduled_set_tracker_->GetPartitionKeyView();
   Entry query{length_tracker_->GetCurrentCycle(), GetFrontierLbsSnapshot()};
 
-  // operator[] default-constructs the bucket if absent. Safe to do
-  // up front: if no dominator exists we'll be inserting anyway, and
-  // the empty bucket costs nothing if we early-return.
-  SmallVector<Entry, 2> &bucket = table_[key];
+  // Lookup via view — no bitset copy in the existing-bucket path.
+  // We construct an owning PartitionKey only when we have to insert
+  // into a previously-unseen partition (below).
+  auto it = table_.find_as(view);
+
+  if (it == table_.end()) {
+    // First visit to this partition. Build the owning key, push the
+    // query into a fresh bucket. No dominator can exist (empty
+    // bucket → no entries to compare against).
+    if (total_entries_ + 1 > kMaxEntries) {
+      report_fatal_error(
+          "LengthHistoryTracker: insertion would exceed kMaxEntries (" +
+          Twine(kMaxEntries) + "); search produced too many partitions "
+          "for the current dominance pruning to control");
+    }
+    PartitionKey key = scheduled_set_tracker_->GetPartitionKey();
+    table_[key].push_back(std::move(query));
+    ++total_entries_;
+    return false;
+  }
+
+  // Bucket exists. Mutate it directly via the iterator; no key copy
+  // needed.
+  SmallVector<Entry, 2> &bucket = it->second;
 
   // Single-pass walk: look for an existing dominator while
   // collecting indices of entries the query dominates. If a

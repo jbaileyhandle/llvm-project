@@ -81,6 +81,21 @@ struct PartitionKey {
   BitVector scheduled_set;
 };
 
+/// Non-owning lookup view over a PartitionKey. Pairs the signature
+/// with a pointer-to-bitset borrowed from the source tracker.
+/// Useful with DenseMap::find_as to look up a partition without
+/// copying the bitset (a hot path inside DfsSearch). Only the
+/// owning PartitionKey can be inserted; views are lookup-only.
+///
+/// Lifetime: the borrowed bitset must outlive the view. In the
+/// production path, the view is a transient local in
+/// LengthHistoryTracker / PressureHistoryTracker, dereferenced
+/// immediately by find_as.
+struct PartitionKeyView {
+  uint32_t signature;
+  const BitVector *scheduled_set;
+};
+
 /// Per-frontier-node info maintained by ScheduledSetTracker.
 struct FrontierEntry {
   /// Lower bound on this node's earliest issue cycle, computed
@@ -164,17 +179,20 @@ class ScheduledSetTracker {
   }
 
   /// Bundle the current scheduled-set's identity (signature +
-  /// bitset) for use as a DenseMap key in history trackers.
-  ///
-  /// Note: this currently copies the bitset. For DFS workloads that
-  /// query history on every visit, that copy may show up in
-  /// profiles; a heterogeneous-lookup scheme (PartitionKeyView with
-  /// DenseMap::find_as) would let lookups avoid the copy and reserve
-  /// it for actual insertions. Keep the copy-based version until
-  /// tests establish the correctness baseline; switch to the view-
-  /// based scheme as a focused follow-up.
+  /// bitset) for use as a DenseMap key in history trackers. Copies
+  /// the bitset; reserve for the insertion path. Lookups should
+  /// use GetPartitionKeyView() with DenseMap::find_as instead.
   PartitionKey GetPartitionKey() const {
     return {prefix_signature_, scheduled_set_};
+  }
+
+  /// Non-owning view over the current scheduled-set's identity.
+  /// Use with DenseMap::find_as to look up a partition without
+  /// copying the bitset. The view is valid until the next
+  /// Schedule/Unschedule on this tracker (which mutates the
+  /// underlying scheduled_set_).
+  PartitionKeyView GetPartitionKeyView() const {
+    return {prefix_signature_, &scheduled_set_};
   }
 
  private:
@@ -256,6 +274,7 @@ class ScheduledSetTracker {
 template <>
 struct DenseMapInfo<hierarchical_scheduler::PartitionKey> {
   using PartitionKey = hierarchical_scheduler::PartitionKey;
+  using PartitionKeyView = hierarchical_scheduler::PartitionKeyView;
 
   static PartitionKey getEmptyKey() { return {0, BitVector(0)}; }
   static PartitionKey getTombstoneKey() { return {0, BitVector(1)}; }
@@ -266,6 +285,17 @@ struct DenseMapInfo<hierarchical_scheduler::PartitionKey> {
 
   static bool isEqual(const PartitionKey &a, const PartitionKey &b) {
     return a.scheduled_set == b.scheduled_set;
+  }
+
+  // Heterogeneous-lookup overloads for DenseMap::find_as. Lets
+  // history trackers look up a partition without first copying its
+  // bitset into a full PartitionKey.
+  static unsigned getHashValue(const PartitionKeyView &v) {
+    return v.signature;
+  }
+
+  static bool isEqual(const PartitionKeyView &v, const PartitionKey &k) {
+    return *v.scheduled_set == k.scheduled_set;
   }
 };
 
