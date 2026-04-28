@@ -24,6 +24,7 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/SubgraphInfo.cpp
   HierarchicalScheduler/SubgraphFormation.cpp
   HierarchicalScheduler/ScheduledSetTracker.cpp
+  HierarchicalScheduler/LengthHistoryTracker.cpp
   PARENT_SCOPE
 )
 

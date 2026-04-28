@@ -19,6 +19,7 @@
 #include "RegisterTracker.h"
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
+#include "LengthHistoryTracker.h"
 #include "ScheduleLengthTracker.h"
 #include "ScheduledSetTracker.h"
 #include "SubgraphFormation.h"
@@ -1467,6 +1468,316 @@ void RunScheduledSetTrackerShakedown(const GCNSubtarget &st) {
   }
 }
 
+// Fixture for LengthHistoryTracker shakedowns. Owns the graph and
+// the three trackers (length, scheduled-set, history) so each test
+// gets a fresh, fully-wired stack. Heap allocation via unique_ptr
+// keeps tracker pointers stable across move/return.
+struct LengthHistoryTrackerFixture {
+  std::unique_ptr<ScheduleGraph> graph;
+  std::unique_ptr<ScheduleLengthTracker> length_tracker;
+  std::unique_ptr<ScheduledSetTracker> scheduled_set_tracker;
+  std::unique_ptr<LengthHistoryTracker> length_history_tracker;
+  // Common BuildTestDAG node handles. Topo indices: A=0, H=1,
+  // C=2, D=3.
+  ScheduleNode *a;
+  ScheduleNode *h;
+  ScheduleNode *c;
+  ScheduleNode *d;
+};
+
+static LengthHistoryTrackerFixture
+BuildLengthHistoryTrackerFixture(const GCNSubtarget &st) {
+  LengthHistoryTrackerFixture fixture;
+  fixture.graph = ScheduleGraph::BuildTestDAG();
+  fixture.graph->ValidateAndComputeTopologicalOrder();
+  fixture.graph->ComputeCriticalPathFromExit();
+  ArrayRef<ScheduleNode *> topo = fixture.graph->GetTopoOrder();
+  fixture.a = topo[0];
+  fixture.h = topo[1];
+  fixture.c = topo[2];
+  fixture.d = topo[3];
+  fixture.length_tracker =
+      std::make_unique<ScheduleLengthTracker>(*fixture.graph, st);
+  fixture.scheduled_set_tracker = std::make_unique<ScheduledSetTracker>(
+      fixture.graph.get(), fixture.length_tracker.get());
+  fixture.length_history_tracker = std::make_unique<LengthHistoryTracker>(
+      fixture.scheduled_set_tracker.get(), fixture.length_tracker.get());
+  return fixture;
+}
+
+// Drive both length and scheduled-set trackers in lockstep. Matches
+// the production order in ScheduleConstructor::ScheduleByIndex.
+static void ScheduleNodeOnFixture(LengthHistoryTrackerFixture &fixture,
+                                  ScheduleNode *node) {
+  fixture.length_tracker->Schedule(node);
+  fixture.scheduled_set_tracker->Schedule(node);
+}
+
+static void UnscheduleNodeOnFixture(LengthHistoryTrackerFixture &fixture,
+                                    ScheduleNode *node) {
+  fixture.scheduled_set_tracker->Unschedule(node);
+  fixture.length_tracker->Unschedule(node);
+}
+
+// Test 1: Empty-table behavior.
+// After construction, no entries; IsDominated returns false even
+// after some scheduling activity has set up a query state.
+static void RunLengthHistoryEmptyShakedown(const GCNSubtarget &st) {
+  auto fixture = BuildLengthHistoryTrackerFixture(st);
+  bool initially_empty =
+      fixture.length_history_tracker->GetTotalEntries() == 0;
+  ScheduleNodeOnFixture(fixture, fixture.a);
+  bool not_dominated_when_empty =
+      !fixture.length_history_tracker->IsDominated();
+  bool ok = initially_empty && not_dominated_when_empty;
+  llvm::outs() << "    Empty-table behavior: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Test 2: GetFrontierLbsSnapshot matches the bound tracker's
+// frontier, sorted by node_topo_idx. After Schedule(A) on
+// BuildTestDAG: frontier {H@1, C@2, D@3}. Topo indices already in
+// ascending order (H=1, C=2, D=3), so sorted snapshot order is
+// (H, C, D).
+static void RunLengthHistorySnapshotShakedown(const GCNSubtarget &st) {
+  auto fixture = BuildLengthHistoryTrackerFixture(st);
+  ScheduleNodeOnFixture(fixture, fixture.a);
+  SmallVector<FrontierLb, 16> snapshot =
+      fixture.length_history_tracker->GetFrontierLbsSnapshot();
+  bool ok = snapshot.size() == 3 &&
+            snapshot[0].node_topo_idx == fixture.h->GetTopoIndex() &&
+            snapshot[0].lower_bound == 1 &&
+            snapshot[1].node_topo_idx == fixture.c->GetTopoIndex() &&
+            snapshot[1].lower_bound == 2 &&
+            snapshot[2].node_topo_idx == fixture.d->GetTopoIndex() &&
+            snapshot[2].lower_bound == 3;
+  llvm::outs() << "    Snapshot matches frontier {H@1, C@2, D@3}: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Test 3: First IsDominatedElseInsert from empty inserts; second
+// call is dominated by what we just inserted (equality dominates).
+static void RunLengthHistoryFirstInsertAndSelfDominanceShakedown(
+    const GCNSubtarget &st) {
+  auto fixture = BuildLengthHistoryTrackerFixture(st);
+  ScheduleNodeOnFixture(fixture, fixture.a);
+  bool first_call_inserted =
+      !fixture.length_history_tracker->IsDominatedElseInsert();
+  bool count_one_after_first =
+      fixture.length_history_tracker->GetTotalEntries() == 1;
+
+  // Same bound state — second IsDominated should hit the entry we
+  // just inserted (equal end_cycle, equal frontier_lbs → dominates).
+  bool dominated_on_second_query =
+      fixture.length_history_tracker->IsDominated();
+  bool second_insert_pruned =
+      fixture.length_history_tracker->IsDominatedElseInsert();
+  bool count_unchanged_after_second =
+      fixture.length_history_tracker->GetTotalEntries() == 1;
+
+  bool ok = first_call_inserted && count_one_after_first &&
+            dominated_on_second_query && second_insert_pruned &&
+            count_unchanged_after_second;
+  llvm::outs() << "    First insert + self-dominance: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Test 4: Strict dominator. Stage an entry strictly better than
+// the query (smaller end_cycle, equal frontier LBs). IsDominated
+// returns true; IsDominatedElseInsert returns true; bucket
+// unchanged.
+static void RunLengthHistoryStrictDominatorShakedown(
+    const GCNSubtarget &st) {
+  auto fixture = BuildLengthHistoryTrackerFixture(st);
+  ScheduleNodeOnFixture(fixture, fixture.a);
+  PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+  // Equal frontier_lbs to query (H=1, C=2, D=3 sorted by topo
+  // idx); end_cycle=0 strictly beats query's end_cycle=1.
+  LengthHistoryTracker::Entry strict_dominator;
+  strict_dominator.end_cycle = 0;
+  strict_dominator.frontier_lbs = {
+      {fixture.h->GetTopoIndex(), 1},
+      {fixture.c->GetTopoIndex(), 2},
+      {fixture.d->GetTopoIndex(), 3},
+  };
+  fixture.length_history_tracker->InsertEntryForTest(key, strict_dominator);
+
+  bool dominated = fixture.length_history_tracker->IsDominated();
+  bool insert_pruned =
+      fixture.length_history_tracker->IsDominatedElseInsert();
+  bool count_unchanged =
+      fixture.length_history_tracker->GetTotalEntries() == 1;
+  bool bucket_unchanged =
+      fixture.length_history_tracker->GetBucketForTest(key).size() == 1;
+
+  bool ok = dominated && insert_pruned && count_unchanged &&
+            bucket_unchanged;
+  llvm::outs() << "    Strict dominator pruning: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Test 5: Pareto trim. Stage an entry strictly worse than the
+// query. IsDominated returns false; IsDominatedElseInsert returns
+// false, removes the dominated entry, and inserts the query.
+// Bucket size stays at 1; total_entries stays at 1.
+static void RunLengthHistoryParetoTrimShakedown(const GCNSubtarget &st) {
+  auto fixture = BuildLengthHistoryTrackerFixture(st);
+  ScheduleNodeOnFixture(fixture, fixture.a);
+  PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+  // end_cycle=5 (worse than query's 1); frontier_lbs all equal.
+  LengthHistoryTracker::Entry strictly_worse;
+  strictly_worse.end_cycle = 5;
+  strictly_worse.frontier_lbs = {
+      {fixture.h->GetTopoIndex(), 1},
+      {fixture.c->GetTopoIndex(), 2},
+      {fixture.d->GetTopoIndex(), 3},
+  };
+  fixture.length_history_tracker->InsertEntryForTest(key, strictly_worse);
+
+  bool not_dominated = !fixture.length_history_tracker->IsDominated();
+  bool insert_succeeded =
+      !fixture.length_history_tracker->IsDominatedElseInsert();
+  // Trim removed strictly_worse; insert added query → count == 1.
+  bool count_one =
+      fixture.length_history_tracker->GetTotalEntries() == 1;
+  ArrayRef<LengthHistoryTracker::Entry> bucket =
+      fixture.length_history_tracker->GetBucketForTest(key);
+  bool bucket_one = bucket.size() == 1;
+  // The remaining entry should be the query (end_cycle=1), not the
+  // strictly_worse one we trimmed (end_cycle=5).
+  bool query_is_what_remains = bucket_one && bucket[0].end_cycle == 1;
+
+  bool ok = not_dominated && insert_succeeded && count_one &&
+            bucket_one && query_is_what_remains;
+  llvm::outs() << "    Pareto trim: " << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Test 6: Incomparable entries co-exist. Stage an entry with a
+// better end_cycle but a worse LB on H. Neither dominates the
+// other; both stay in the bucket after IsDominatedElseInsert.
+static void RunLengthHistoryIncomparableShakedown(const GCNSubtarget &st) {
+  auto fixture = BuildLengthHistoryTrackerFixture(st);
+  ScheduleNodeOnFixture(fixture, fixture.a);
+  PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+  // end_cycle=0 (better than query's 1); H_lb=5 (worse than
+  // query's 1). C and D LBs equal. Neither dominates the other.
+  LengthHistoryTracker::Entry incomparable;
+  incomparable.end_cycle = 0;
+  incomparable.frontier_lbs = {
+      {fixture.h->GetTopoIndex(), 5},
+      {fixture.c->GetTopoIndex(), 2},
+      {fixture.d->GetTopoIndex(), 3},
+  };
+  fixture.length_history_tracker->InsertEntryForTest(key, incomparable);
+
+  bool not_dominated = !fixture.length_history_tracker->IsDominated();
+  bool insert_succeeded =
+      !fixture.length_history_tracker->IsDominatedElseInsert();
+  bool count_two =
+      fixture.length_history_tracker->GetTotalEntries() == 2;
+  bool bucket_two =
+      fixture.length_history_tracker->GetBucketForTest(key).size() == 2;
+
+  bool ok = not_dominated && insert_succeeded && count_two && bucket_two;
+  llvm::outs() << "    Incomparable entries co-exist: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Test 7: GetPartitionKey() integration with the table — distinct
+// schedule states produce distinct PartitionKeys (different
+// scheduled_sets) that the table holds as separate buckets.
+//
+// Uses {A} → {A, H} (both reachable via valid scheduling order),
+// not {A} → {H}, because ScheduleLengthTracker requires scheduled
+// latency-bearing predecessors when computing a node's ready
+// cycle. H's only predecessor is A, so scheduling H without A
+// first would violate that invariant.
+static void RunLengthHistoryDistinctPartitionsShakedown(
+    const GCNSubtarget &st) {
+  auto fixture = BuildLengthHistoryTrackerFixture(st);
+  // Partition 1: {A} scheduled.
+  ScheduleNodeOnFixture(fixture, fixture.a);
+  PartitionKey key_a = fixture.scheduled_set_tracker->GetPartitionKey();
+  bool a_inserted =
+      !fixture.length_history_tracker->IsDominatedElseInsert();
+
+  // Partition 2: {A, H} scheduled.
+  ScheduleNodeOnFixture(fixture, fixture.h);
+  PartitionKey key_ah = fixture.scheduled_set_tracker->GetPartitionKey();
+  bool ah_inserted =
+      !fixture.length_history_tracker->IsDominatedElseInsert();
+
+  bool count_two =
+      fixture.length_history_tracker->GetTotalEntries() == 2;
+  bool bucket_a_size_one =
+      fixture.length_history_tracker->GetBucketForTest(key_a).size() == 1;
+  bool bucket_ah_size_one =
+      fixture.length_history_tracker->GetBucketForTest(key_ah).size() == 1;
+
+  bool ok = a_inserted && ah_inserted && count_two &&
+            bucket_a_size_one && bucket_ah_size_one;
+  llvm::outs() << "    GetPartitionKey() integration across "
+                  "distinct partitions: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Test 8: Hash collision across distinct partitions. Hand-craft
+// two PartitionKeys with the same signature but different bitsets.
+// DenseMap probing + isEqual must keep the buckets separate.
+//
+// This synthesizes the collision rather than waiting for one to
+// occur naturally — natural collisions on the per-node signatures
+// produced by BuildTestDAG are vanishingly rare and hard to
+// reproduce.
+static void RunLengthHistoryHashCollisionShakedown(const GCNSubtarget &st) {
+  auto fixture = BuildLengthHistoryTrackerFixture(st);
+  int n = fixture.graph->Size();
+
+  // Two keys, same signature (42), different bitsets. Bitset
+  // sizes match graph.Size() (n >= 2) so neither hits the
+  // sentinel sizes (0 or 1).
+  PartitionKey key1{42, BitVector(n)};
+  key1.scheduled_set.set(0);
+  PartitionKey key2{42, BitVector(n)};
+  key2.scheduled_set.set(1);
+
+  LengthHistoryTracker::Entry entry1;
+  entry1.end_cycle = 100;
+  LengthHistoryTracker::Entry entry2;
+  entry2.end_cycle = 200;
+  fixture.length_history_tracker->InsertEntryForTest(key1, entry1);
+  fixture.length_history_tracker->InsertEntryForTest(key2, entry2);
+
+  ArrayRef<LengthHistoryTracker::Entry> bucket1 =
+      fixture.length_history_tracker->GetBucketForTest(key1);
+  ArrayRef<LengthHistoryTracker::Entry> bucket2 =
+      fixture.length_history_tracker->GetBucketForTest(key2);
+  bool both_buckets_present =
+      bucket1.size() == 1 && bucket2.size() == 1;
+  bool entries_in_correct_buckets =
+      both_buckets_present && bucket1[0].end_cycle == 100 &&
+      bucket2[0].end_cycle == 200;
+  bool count_two =
+      fixture.length_history_tracker->GetTotalEntries() == 2;
+
+  bool ok = both_buckets_present && entries_in_correct_buckets &&
+            count_two;
+  llvm::outs() << "    Hash collision across distinct partitions: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
+  llvm::outs() << "  RunLengthHistoryTrackerShakedown:\n";
+  RunLengthHistoryEmptyShakedown(st);
+  RunLengthHistorySnapshotShakedown(st);
+  RunLengthHistoryFirstInsertAndSelfDominanceShakedown(st);
+  RunLengthHistoryStrictDominatorShakedown(st);
+  RunLengthHistoryParetoTrimShakedown(st);
+  RunLengthHistoryIncomparableShakedown(st);
+  RunLengthHistoryDistinctPartitionsShakedown(st);
+  RunLengthHistoryHashCollisionShakedown(st);
+}
+
 // Verifies ScheduleLengthTracker::GetLengthLowerBound against hand-
 // computed expected sequences on two synthetic DAGs. Builds both
 // graphs internally — this shakedown is self-contained and does not
@@ -2148,6 +2459,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunSubgraphContiguityShakedown(MF, *LIS);
   RunLengthLowerBoundShakedown(st);
   RunScheduledSetTrackerShakedown(st);
+  RunLengthHistoryTrackerShakedown(st);
   RunAllSubgraphFormationShakedowns();
 
   for (auto &region : regions_) {

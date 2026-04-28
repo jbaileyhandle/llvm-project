@@ -16,8 +16,8 @@ namespace hierarchical_scheduler {
 namespace {
 
 // Deterministic seed: signatures reproduce across runs for the same
-// graph topology. 64-bit value chosen arbitrarily.
-constexpr uint64_t kSignatureSeed = 0xDEADBEEFCAFEF00DULL;
+// graph topology. Value chosen arbitrarily.
+constexpr uint32_t kSignatureSeed = 0xCAFEF00DU;
 
 } // namespace
 
@@ -34,13 +34,22 @@ ScheduledSetTracker::ScheduledSetTracker(
   }
 
   int n = graph_->Size();
+  if (n < 2) {
+    // Bitset sizes 0 and 1 are reserved as PartitionKey sentinels in
+    // DenseMapInfo<PartitionKey> (history trackers use PartitionKey
+    // as a DenseMap key). Refuse here so the precondition is checked
+    // once, centrally, instead of in every history tracker.
+    report_fatal_error(
+        "ScheduledSetTracker requires a graph with at least 2 nodes "
+        "(scheduled-set bitset sizes 0 and 1 are reserved as "
+        "PartitionKey sentinels)");
+  }
   per_node_signatures_.resize(n);
   scheduled_set_.resize(n);
 
-  std::mt19937_64 random_generator(kSignatureSeed);
+  std::mt19937 random_generator(kSignatureSeed);
   for (int i = 0; i < n; ++i) {
-    per_node_signatures_[i] =
-        static_cast<int64_t>(random_generator());
+    per_node_signatures_[i] = random_generator();
   }
 }
 

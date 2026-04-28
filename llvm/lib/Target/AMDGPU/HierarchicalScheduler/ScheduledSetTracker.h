@@ -8,8 +8,8 @@
 // the same lockstep pattern. See AMDGPUHistoryDominationDesign.md.
 //
 // State maintained:
-//   - Per-instruction 64-bit signatures, immutable after
-//     construction (deterministic-seeded mt19937_64 — reproducible
+//   - Per-instruction 32-bit signatures, immutable after
+//     construction (deterministic-seeded mt19937 — reproducible
 //     across runs).
 //   - Running prefix XOR signature: XOR of signatures of currently-
 //     scheduled nodes. XOR is commutative, so this is a hash of the
@@ -17,7 +17,9 @@
 //   - Scheduled bitset: one bit per node by topo index. Used by
 //     history trackers as the exact-match key; the XOR signature
 //     is a fast filter for hash-bucket lookup, the bitset confirms
-//     the match.
+//     the match. 32-bit width is sufficient because the bitset is
+//     the absolute disambiguator — the signature is purely a hash
+//     for distribution, not a correctness primitive.
 //   - Frontier: unscheduled real nodes with at least one scheduled
 //     real-instruction latency-bearing predecessor. Each frontier
 //     entry holds a per-prefix lower bound on the node's earliest
@@ -52,6 +54,7 @@
 #include "ScheduleGraph.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseMapInfo.h"
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -60,6 +63,23 @@ namespace llvm {
 namespace hierarchical_scheduler {
 
 class ScheduleLengthTracker;
+
+/// Identifies one scheduled-set partition. The partition is
+/// uniquely determined by the scheduled_set bitset; equality of
+/// PartitionKeys is defined on the bitset alone. The signature is
+/// a precomputed 32-bit hash of that bitset (XOR of per-node
+/// signatures over set members), bundled here so DenseMap doesn't
+/// have to rehash the bitset on every lookup.
+///
+/// Lives here (alongside ScheduledSetTracker) because it represents
+/// "this scheduled-set's identity" — produced by
+/// ScheduledSetTracker::GetPartitionKey() and consumed by the
+/// history trackers (LengthHistoryTracker, PressureHistoryTracker)
+/// as a DenseMap key.
+struct PartitionKey {
+  uint32_t signature;
+  BitVector scheduled_set;
+};
 
 /// Per-frontier-node info maintained by ScheduledSetTracker.
 struct FrontierEntry {
@@ -120,9 +140,16 @@ class ScheduledSetTracker {
   void Schedule(const ScheduleNode *node);
   void Unschedule(const ScheduleNode *node);
 
-  /// 64-bit XOR hash of the currently-scheduled set, including
+  /// 32-bit XOR hash of the currently-scheduled set, including
   /// proxies. O(1).
-  int64_t GetPrefixSignature() const { return prefix_signature_; }
+  ///
+  /// Width is 32-bit because consumers (history trackers' DenseMap
+  /// hashes) take `unsigned`; storing wider would just be discarded
+  /// on lookup. The XOR-of-randoms construction yields uniformly
+  /// random 32-bit values; collisions matter only for hash-bucket
+  /// distribution, since downstream lookups disambiguate by full
+  /// scheduled-set bitset.
+  uint32_t GetPrefixSignature() const { return prefix_signature_; }
 
   /// Bit-per-node scheduled set, indexed by topo index. Includes
   /// proxies. Used by history trackers as the exact-match key
@@ -134,6 +161,20 @@ class ScheduledSetTracker {
   /// latency-bearing predecessor.
   const DenseMap<int, FrontierEntry> &GetFrontier() const {
     return frontier_;
+  }
+
+  /// Bundle the current scheduled-set's identity (signature +
+  /// bitset) for use as a DenseMap key in history trackers.
+  ///
+  /// Note: this currently copies the bitset. For DFS workloads that
+  /// query history on every visit, that copy may show up in
+  /// profiles; a heterogeneous-lookup scheme (PartitionKeyView with
+  /// DenseMap::find_as) would let lookups avoid the copy and reserve
+  /// it for actual insertions. Keep the copy-based version until
+  /// tests establish the correctness baseline; switch to the view-
+  /// based scheme as a focused follow-up.
+  PartitionKey GetPartitionKey() const {
+    return {prefix_signature_, scheduled_set_};
   }
 
  private:
@@ -173,13 +214,13 @@ class ScheduledSetTracker {
   const ScheduleGraph *graph_;
   const ScheduleLengthTracker *length_tracker_;
 
-  /// Per-node random 64-bit signatures, indexed by topo index.
+  /// Per-node random 32-bit signatures, indexed by topo index.
   /// Initialized once in the ctor with a deterministic seed.
-  std::vector<int64_t> per_node_signatures_;
+  std::vector<uint32_t> per_node_signatures_;
 
   /// XOR of signatures of currently-scheduled nodes (proxies
   /// included).
-  int64_t prefix_signature_ = 0;
+  uint32_t prefix_signature_ = 0;
 
   /// Bit per node by topo index; set if node is scheduled
   /// (proxies included).
@@ -190,6 +231,44 @@ class ScheduledSetTracker {
 };
 
 } // namespace hierarchical_scheduler
+
+/// DenseMapInfo specialization for PartitionKey — the C++ hook that
+/// lets DenseMap know how to hash, compare, and sentinel this key
+/// type. Lives in the `llvm` namespace where the primary
+/// `DenseMapInfo` template is declared.
+///
+/// Hash: the signature is already a uniformly-random 32-bit value
+/// (XOR of random per-node signatures), so it serves directly as
+/// the hash with no further mixing.
+///
+/// Equality compares only the bitset: the bitset uniquely identifies
+/// the partition, and the signature is a pure function of the
+/// bitset (XOR of per-node signatures over set members; commutative),
+/// so equal bitsets necessarily have equal signatures. A signature
+/// compare in `isEqual` would be redundant.
+///
+/// Sentinels: real keys always have bitset size == graph.Size(),
+/// which ScheduledSetTracker's constructor enforces to be >= 2.
+/// Sentinels reserve sizes 0 and 1 — sizes that no real key can
+/// ever have. BitVector::operator== compares size first, so a
+/// sentinel (size 0 or 1) can never equal a real key (size >= 2),
+/// regardless of bit contents.
+template <>
+struct DenseMapInfo<hierarchical_scheduler::PartitionKey> {
+  using PartitionKey = hierarchical_scheduler::PartitionKey;
+
+  static PartitionKey getEmptyKey() { return {0, BitVector(0)}; }
+  static PartitionKey getTombstoneKey() { return {0, BitVector(1)}; }
+
+  static unsigned getHashValue(const PartitionKey &k) {
+    return k.signature;
+  }
+
+  static bool isEqual(const PartitionKey &a, const PartitionKey &b) {
+    return a.scheduled_set == b.scheduled_set;
+  }
+};
+
 } // namespace llvm
 
 #endif // LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULEDSETTRACKER_H
