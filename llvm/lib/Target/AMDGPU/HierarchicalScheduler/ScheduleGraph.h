@@ -589,6 +589,28 @@ public:
   /// 11->12 (2nd term jumps via N4, contrib=9+2+1=12).
   static std::unique_ptr<ScheduleGraph> BuildLengthLowerBoundTestDAG();
 
+  /// Build a synthetic test DAG that exercises length history-domination
+  /// pruning. Designed so that:
+  ///   - Optimum length (8) is strictly greater than the length floor
+  ///     (7), so DfsMinimizeLengthPolicy::ShouldEndSearch never fires
+  ///     during a full DFS — the search exhausts.
+  ///   - Two orderings reach the same scheduled-set partition with
+  ///     identical (end_cycle, frontier_lbs) state. The first-visited
+  ///     ordering's entry dominates the second visit, so
+  ///     LengthHistoryTracker::IsDominatedElseInsert returns true and
+  ///     prune_count increments.
+  ///
+  /// Structure (4 nodes, 4 edges — a diamond with asymmetric latencies):
+  ///
+  ///     A --(5)-> B --(1)-> D
+  ///      \                  ^
+  ///       \-(5)-> C --(1)--/
+  ///
+  /// Floor = max(N=4, cp_length+1 = 6+1 = 7) = 7.
+  /// Optimum = 8 (B and C can't both issue at cycle 5 with IssueWidth=1;
+  /// the late one waits one cycle, and D waits one more).
+  static std::unique_ptr<ScheduleGraph> BuildHistoryPruneTestDAG();
+
   /// Build a synthetic test DAG that contains a cycle, for testing that
   /// ComputeTopologicalOrder correctly detects it and calls
   /// report_fatal_error.
@@ -960,6 +982,19 @@ public:
   const ScheduleConstructor &GetInputScheduleConstructor() const {
     return *input_schedule_constructor_;
   }
+
+  /// Test-only: populate input_schedule_constructor_ by Schedule()-
+  /// ing every node in topo order. Synthetic test DAGs (BuildTestDAG
+  /// etc.) lack the entry/exit + region-tied setup that the
+  /// production PopulateInputScheduleConstructor relies on; this
+  /// fallback gives DfsSearch a complete-schedule baseline to
+  /// compare against. Production code should never call this.
+  ///
+  /// Preconditions: ValidateAndComputeTopologicalOrder and
+  /// ComputeCriticalPathFromExit have been called.
+  void PopulateInputScheduleConstructorByTopoOrderForTest(
+      const GCNSubtarget &st, const MachineFunction &mf,
+      const LiveIntervals &lis);
 
 private:
   /// Compute topological order using Kahn's algorithm (iterative

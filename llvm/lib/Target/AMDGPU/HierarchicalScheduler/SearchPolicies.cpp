@@ -9,7 +9,8 @@ using namespace llvm::hierarchical_scheduler;
 
 bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
-    const ScheduleConstructor &best_schedule_constructor) {
+    const ScheduleConstructor &best_schedule_constructor,
+    LengthHistoryTracker &length_history) {
   int best_length =
       best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
   int working_lb =
@@ -19,6 +20,13 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
   }
   if (!schedule_constructor.IsAtOrAboveFunctionOccupancyCeiling()) {
     return true;
+  }
+  if constexpr (kUseLengthHistoryPruning) {
+    // Mutating: records the current prefix in length_history when
+    // it is NOT dominated. See LengthHistoryTracker class comment.
+    if (length_history.IsDominatedElseInsert()) {
+      return true;
+    }
   }
   return false;
 }
@@ -34,7 +42,8 @@ bool DfsMinimizeLengthPolicy::ShouldEndSearch(
 
 bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
-    const ScheduleConstructor &best_schedule_constructor) {
+    const ScheduleConstructor &best_schedule_constructor,
+    LengthHistoryTracker & /*length_history*/) {
   // Continuous-score bound: working's current continuous score is
   // the BEST it'll have at completion (peak pressure only grows
   // as more nodes are scheduled, so score only drops). If working's

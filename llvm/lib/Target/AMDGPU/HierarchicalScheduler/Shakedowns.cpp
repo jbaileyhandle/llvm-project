@@ -13,15 +13,17 @@
 //===----------------------------------------------------------------------===//
 
 #include "ScheduleDAGHierarchicalScheduler.h"
+#include "DfsSearch.h"
 #include "DominatorTree.h"
 #include "GCNRegisterTracker.h"
 #include "GCNSubtarget.h"
+#include "LengthHistoryTracker.h"
 #include "RegisterTracker.h"
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
-#include "LengthHistoryTracker.h"
 #include "ScheduleLengthTracker.h"
 #include "ScheduledSetTracker.h"
+#include "SearchPolicies.h"
 #include "SubgraphFormation.h"
 #include "SubgraphInfo.h"
 #include "llvm/CodeGen/LiveIntervals.h"
@@ -1778,6 +1780,101 @@ void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
   RunLengthHistoryHashCollisionShakedown(st);
 }
 
+// Test policies for the history-vs-no-history comparison shakedown.
+// Both inherit DfsMinimizeLengthPolicy and override ShouldBoundSearch
+// to skip the production LB + occupancy bounds entirely. The two
+// variants differ only in whether ShouldBoundSearch consults the
+// length history tracker. With LB + occupancy bounds disabled, the
+// schedule_call_count gap between the variants is attributable to
+// history pruning alone.
+//
+// ShouldEndSearch is inherited from DfsMinimizeLengthPolicy
+// (terminates when best matches the length floor). The DAG used by
+// the comparison (BuildHistoryPruneTestDAG) has optimum > floor, so
+// end-search never fires and DFS exhausts — leaving room for
+// history pruning to demonstrate value.
+class TestLengthPolicyNoBoundsNoHistory : public DfsMinimizeLengthPolicy {
+ public:
+  static constexpr bool kUseLengthHistoryPruning = false;
+  static bool ShouldBoundSearch(const ScheduleConstructor &,
+                                const ScheduleConstructor &,
+                                LengthHistoryTracker &) {
+    return false;
+  }
+};
+
+class TestLengthPolicyNoBoundsWithHistory : public DfsMinimizeLengthPolicy {
+ public:
+  static constexpr bool kUseLengthHistoryPruning = true;
+  static bool ShouldBoundSearch(const ScheduleConstructor &,
+                                const ScheduleConstructor &,
+                                LengthHistoryTracker &length_history) {
+    return length_history.IsDominatedElseInsert();
+  }
+};
+
+// End-to-end comparison shakedown for length history-based
+// domination. Runs DfsSearch on BuildHistoryPruneTestDAG twice —
+// once with history pruning, once without — using test policies
+// that disable LB and occupancy bounds so the difference between
+// the runs isolates history pruning.
+//
+// Verifies:
+//   - Both produce the same best schedule length (soundness — the
+//     history prune doesn't lose optimal completions).
+//   - The history tracker fired at least one prune (count > 0).
+//   - When prunes fired, the history version made strictly fewer
+//     Schedule calls (each prune fires at a non-leaf prefix and
+//     skips at least one child Schedule call that the no-history
+//     version takes).
+//
+// Skips subgraph formation on both runs (form_subgraphs=false) so
+// the comparison stays stable across formation-policy changes.
+void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
+                                            const MachineFunction &mf,
+                                            const LiveIntervals &lis) {
+  llvm::outs() << "  RunLengthHistoryDfsComparisonShakedown:\n";
+
+  auto graph = ScheduleGraph::BuildHistoryPruneTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPathFromExit();
+  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf, lis);
+
+  DfsSearch<TestLengthPolicyNoBoundsNoHistory> no_hist_search(
+      *graph, st, mf, lis, /*form_subgraphs=*/false);
+  ScheduleConstructor no_hist_best = no_hist_search.Run();
+  int no_hist_length =
+      no_hist_best.GetLengthTracker().GetCurrentCycle();
+  int64_t no_hist_calls = no_hist_search.GetScheduleCallCount();
+
+  DfsSearch<TestLengthPolicyNoBoundsWithHistory> hist_search(
+      *graph, st, mf, lis, /*form_subgraphs=*/false);
+  ScheduleConstructor hist_best = hist_search.Run();
+  int hist_length = hist_best.GetLengthTracker().GetCurrentCycle();
+  int64_t hist_calls = hist_search.GetScheduleCallCount();
+  int hist_prunes =
+      hist_search.GetLengthHistoryTracker().GetTotalPruneCount();
+
+  llvm::outs() << "    no-history: length=" << no_hist_length
+               << " schedule_calls=" << no_hist_calls << "\n";
+  llvm::outs() << "    history:    length=" << hist_length
+               << " schedule_calls=" << hist_calls
+               << " prunes=" << hist_prunes << "\n";
+
+  bool same_length = no_hist_length == hist_length;
+  bool prunes_fired = hist_prunes > 0;
+  // If prunes fired, calls must be strictly less.
+  bool calls_strictly_less_when_pruning =
+      !prunes_fired || hist_calls < no_hist_calls;
+
+  llvm::outs() << "    Same best length (soundness): "
+               << (same_length ? "PASS\n" : "FAIL\n");
+  llvm::outs() << "    History pruning fired (count > 0): "
+               << (prunes_fired ? "PASS\n" : "FAIL\n");
+  llvm::outs() << "    History calls strictly less when pruning: "
+               << (calls_strictly_less_when_pruning ? "PASS\n" : "FAIL\n");
+}
+
 // Verifies ScheduleLengthTracker::GetLengthLowerBound against hand-
 // computed expected sequences on two synthetic DAGs. Builds both
 // graphs internally — this shakedown is self-contained and does not
@@ -2460,6 +2557,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunLengthLowerBoundShakedown(st);
   RunScheduledSetTrackerShakedown(st);
   RunLengthHistoryTrackerShakedown(st);
+  RunLengthHistoryDfsComparisonShakedown(st, MF, *LIS);
   RunAllSubgraphFormationShakedowns();
 
   for (auto &region : regions_) {

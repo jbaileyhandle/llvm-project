@@ -116,6 +116,7 @@ bool LengthHistoryTracker::IsDominatedElseInsert() {
   for (size_t i = 0; i < bucket.size(); ++i) {
     const Entry &existing = bucket[i];
     if (DoesDominate(existing, query)) {
+      ++prune_count_;
       return true;
     }
     if (DoesDominate(query, existing)) {

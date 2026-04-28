@@ -12,6 +12,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_DFSSEARCH_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_DFSSEARCH_H
 
+#include "LengthHistoryTracker.h"
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
 #include "SubgraphFormation.h"
@@ -78,7 +79,14 @@ class DfsSearch {
       : working_schedule_constructor_(
             MaybeFormSubgraphs(graph, form_subgraphs),
             st, mf, lis, &Policy::ReadyCompare),
-        best_schedule_constructor_(graph.GetInputScheduleConstructor()) {
+        best_schedule_constructor_(graph.GetInputScheduleConstructor()),
+        // length_history_ binds to working_'s trackers. Constructed
+        // unconditionally; queried only when Policy::
+        // kUseLengthHistoryPruning is true (the `if constexpr` in
+        // Recurse dead-strips the consult/insert otherwise).
+        length_history_(
+            &working_schedule_constructor_.GetScheduledSetTracker(),
+            &working_schedule_constructor_.GetLengthTracker()) {
     // best_schedule_constructor_ is copy-constructed from the
     // graph's input schedule (built by BuildFromSUnits as Phase 4).
     // That gives us a complete valid schedule matching the region's
@@ -119,6 +127,13 @@ class DfsSearch {
     return working_schedule_constructor_.GetScheduleCallCount();
   }
 
+  // Read-only access to the length history tracker. Useful for
+  // shakedowns that want to inspect prune_count, total_entries, etc.
+  // after Run() returns.
+  const LengthHistoryTracker &GetLengthHistoryTracker() const {
+    return length_history_;
+  }
+
  private:
   // Helper called from the member initializer list. Runs subgraph
   // formation as a side effect (when form_subgraphs is true and
@@ -157,8 +172,14 @@ class DfsSearch {
       return;
     }
 
+    // ShouldBoundSearch covers all prune decisions for this policy,
+    // including history-based domination when the policy opts in.
+    // It MAY MUTATE length_history_ (record the current prefix) as
+    // part of its check — see the policy's ShouldBoundSearch
+    // contract.
     if (Policy::ShouldBoundSearch(working_schedule_constructor_,
-                                  best_schedule_constructor_)) {
+                                  best_schedule_constructor_,
+                                  length_history_)) {
       return;
     }
 
@@ -190,6 +211,13 @@ class DfsSearch {
   // recursive frame propagates the flag back up by checking it
   // after each child Recurse() returns.
   bool should_end_search_ = false;
+
+  // History-based-domination table for length pruning. Bound to
+  // working_schedule_constructor_'s ScheduledSetTracker and
+  // ScheduleLengthTracker. Active only when
+  // Policy::kUseLengthHistoryPruning is true; for other policies
+  // the construction overhead is small but nonzero 
+  LengthHistoryTracker length_history_;
 };
 
 } // namespace hierarchical_scheduler

@@ -11,6 +11,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SEARCHPOLICIES_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SEARCHPOLICIES_H
 
+#include "LengthHistoryTracker.h"
 #include "ScheduleConstructor.h"
 #include "SubgraphFormation.h"
 #include "llvm/ADT/SmallVector.h"
@@ -32,6 +33,18 @@ class SearchPolicyBase {
  public:
   // Default: no formation. Override in a derived policy to opt in.
   static SubgraphFormationPolicy MakeFormationPolicy() { return {}; }
+
+  // History-based-domination pruning opt-in flags. Default false;
+  // concrete policies override to true to enable the corresponding
+  // history table in DfsSearch. The `if constexpr` gate in
+  // DfsSearch::Recurse dead-strips the consult/insert code when the
+  // flag is false, so policies that don't opt in pay nothing at
+  // runtime in the hot recursion (the table is still constructed
+  // but never queried).
+  //
+  // See AMDGPUHistoryDominationDesign.md §8.1.
+  static constexpr bool kUseLengthHistoryPruning = false;
+  static constexpr bool kUsePressureHistoryPruning = false;
 };
 
 // Policy for DFS when the objective is to minimize schedule length for
@@ -53,13 +66,17 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
     return a->GetTopoIndex() < b->GetTopoIndex();
   }
 
-  // Bound the current subtree if either:
+  // Bound the current subtree if any of:
   //   (a) the working schedule's length lower bound is at or above
   //       best's current length — no completion can strictly beat
   //       best; or
   //   (b) the working schedule's register-only occupancy has dropped
   //       below the function ceiling — no completion can recover, and
-  //       we must not degrade occupancy.
+  //       we must not degrade occupancy; or
+  //   (c) (when kUseLengthHistoryPruning is true) some prior visit
+  //       to this same scheduled-set partition recorded a state
+  //       that dominates the current prefix on every Pareto
+  //       dimension — see AMDGPUHistoryDominationDesign.md §5.
   //
   // SOUNDNESS:
   //   (a) LB is monotonically non-decreasing as nodes are scheduled
@@ -71,9 +88,16 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   //       register-only occupancy is monotonically non-increasing.
   //       Once working drops below the function ceiling, no
   //       completion restores it.
+  //   (c) See LengthHistoryTracker class comment.
+  //
+  // SIDE EFFECT: when (c) does NOT prune, the current prefix is
+  // recorded in `length_history` for future-sibling comparison.
+  // (IsDominatedElseInsert combines the check and record so we
+  // don't pay two bucket lookups per visit.)
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
-      const ScheduleConstructor &best_schedule_constructor);
+      const ScheduleConstructor &best_schedule_constructor,
+      LengthHistoryTracker &length_history);
 
   // End the search globally once best matches the graph-level length
   // floor (max(NumSchedulingUnits, cp_length + 1)) — no schedule can
@@ -93,6 +117,14 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   static SubgraphFormationPolicy MakeFormationPolicy() {
     return SubgraphFormationPolicy::TopDownSingleSplitterOnly();
   }
+
+  // Override SearchPolicyBase: enable length history-domination
+  // pruning. DFS records each visited prefix's (end_cycle,
+  // frontier-LBs) in a per-partition Pareto frontier; on a later
+  // visit to the same partition, if any recorded entry dominates
+  // the current prefix on every dimension, the subtree is pruned.
+  // See AMDGPUHistoryDominationDesign.md §5.
+  static constexpr bool kUseLengthHistoryPruning = true;
 };
 
 // Policy for DFS when the objective is to maximize register-only
@@ -118,9 +150,15 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
   // improve on best_schedule_constructor. First cut: always false
   // (never bound). Real bounds are subtle for maximize-occupancy
   // because register pressure is not monotonic.
+  //
+  // `length_history` parameter is unused here — present only because
+  // DfsSearch invokes ShouldBoundSearch with a uniform signature
+  // across policies; this policy doesn't opt into length-history
+  // pruning.
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
-      const ScheduleConstructor &best_schedule_constructor);
+      const ScheduleConstructor &best_schedule_constructor,
+      LengthHistoryTracker &length_history);
 
   // Called on completed schedules after the IsBetterThan/update step.
   // Return true to end the entire search and have DfsSearch::Run

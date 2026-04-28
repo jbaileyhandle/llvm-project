@@ -691,6 +691,16 @@ void ScheduleGraph::AddEdgesBetweenLeafNodes(
   }
 }
 
+void ScheduleGraph::PopulateInputScheduleConstructorByTopoOrderForTest(
+    const GCNSubtarget &st, const MachineFunction &mf,
+    const LiveIntervals &lis) {
+  input_schedule_constructor_ =
+      std::make_unique<ScheduleConstructor>(*this, st, mf, lis);
+  for (ScheduleNode *node : topo_order_) {
+    input_schedule_constructor_->Schedule(node);
+  }
+}
+
 void ScheduleGraph::PopulateInputScheduleConstructor(
     const GCNSubtarget &st, const MachineFunction &mf,
     const LiveIntervals &lis, const RegionInfo &region) {
@@ -994,6 +1004,27 @@ ScheduleGraph::BuildSubgraphFormationTestDAG() {
   graph->AddEdge(&p2, &exit, ScheduleEdge::kData, /*latency=*/1);
   graph->AddEdge(&q2, &exit, ScheduleEdge::kData, /*latency=*/1);
   graph->AddEdge(&f, &exit, ScheduleEdge::kData, /*latency=*/1);
+
+  return graph;
+}
+
+std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildHistoryPruneTestDAG() {
+  auto graph = std::make_unique<ScheduleGraph>();
+
+  // 4 nodes: A, B, C, D. Diamond with both A→{B,C} edges weighted at
+  // latency 5; both {B,C}→D edges at latency 1. See header docstring
+  // for the design rationale (floor < optimum, two orderings of
+  // {A,B,C} reach the same dominating state).
+  graph->ReserveNodes(4);
+  ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
+  ScheduleNode &b = graph->EmplaceNode(nullptr, "B", graph.get());
+  ScheduleNode &c = graph->EmplaceNode(nullptr, "C", graph.get());
+  ScheduleNode &d = graph->EmplaceNode(nullptr, "D", graph.get());
+
+  graph->AddEdge(&a, &b, ScheduleEdge::kData, /*latency=*/5);
+  graph->AddEdge(&a, &c, ScheduleEdge::kData, /*latency=*/5);
+  graph->AddEdge(&b, &d, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&c, &d, ScheduleEdge::kData, /*latency=*/1);
 
   return graph;
 }

@@ -126,6 +126,13 @@ class LengthHistoryTracker {
   /// and stat dumps.
   int GetTotalEntries() const { return total_entries_; }
 
+  /// Total number of times IsDominatedElseInsert returned true
+  /// (i.e., a prior visit dominated the current prefix and the
+  /// caller can prune). Cumulative across the tracker's lifetime.
+  /// Useful for production region stats — reports how often
+  /// history pruning fired during a search.
+  int GetTotalPruneCount() const { return prune_count_; }
+
   /// Snapshot the bound scheduled-set tracker's current frontier as
   /// a node_topo_idx-sorted vector of FrontierLb. Public so tests
   /// can verify the snapshot matches what's stored.
@@ -156,6 +163,7 @@ class LengthHistoryTracker {
   const ScheduleLengthTracker *length_tracker_;
   DenseMap<PartitionKey, SmallVector<Entry, 2>> table_;
   int total_entries_ = 0;
+  int prune_count_ = 0;
 };
 
 } // namespace hierarchical_scheduler
