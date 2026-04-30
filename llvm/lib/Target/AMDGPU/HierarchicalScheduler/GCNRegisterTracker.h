@@ -357,8 +357,7 @@ private:
 
   /// Extract from an entry/exit/test node (no MachineInstr).
   static void ExtractFromNodeRegLists(const ScheduleNode *node,
-                                      NodeRegInfo &info,
-                                      const MachineRegisterInfo &mri);
+                                      NodeRegInfo &info);
 
   // --- Schedule helpers ---
 

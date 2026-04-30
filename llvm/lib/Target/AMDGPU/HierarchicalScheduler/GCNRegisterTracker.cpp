@@ -107,8 +107,7 @@ void GCNRegisterTracker::ExtractFromMachineInstr(
 
 void GCNRegisterTracker::ExtractFromNodeRegLists(
     const ScheduleNode *node,
-    NodeRegInfo &info,
-    const MachineRegisterInfo &mri) {
+    NodeRegInfo &info) {
   for (const RegWithLaneMask &rm : node->RegDefs()) {
     if (!rm.reg.isVirtual()) {
       continue;
@@ -188,7 +187,7 @@ void GCNRegisterTracker::ExtractNodeRegInfo(const ScheduleGraph &graph,
     if (su && su->getInstr()) {
       ExtractFromMachineInstr(&node, info, mri, lis);
     } else {
-      ExtractFromNodeRegLists(&node, info, mri);
+      ExtractFromNodeRegLists(&node, info);
     }
 
     if (!info.defs.empty() || !info.uses.empty()) {
