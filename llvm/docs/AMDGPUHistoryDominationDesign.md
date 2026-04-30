@@ -139,7 +139,7 @@ ScheduleGraph
 
 ScheduleConstructor                          (extended)
   ├── ScheduleLengthTracker                  (existing)
-  ├── GCNForwardRegisterTracker              (existing — extended to record per-
+  ├── GCNRegisterTracker                     (existing — extended to record per-
   │                                           instruction pressure)
   └── ScheduledSetTracker                       NEW
         — self-contained: per-node signatures, prefix XOR signature,
@@ -358,10 +358,18 @@ eviction deferred — see §8.3).
 
 ### 4.3 PressureHistoryTracker
 
-See §6 for the design rationale and pruning logic. Brief shape,
-mirroring `LengthHistoryTracker`'s pattern (constructor binds
-source-of-truth state pointers; per-visit API takes no arguments
-beyond what's available on the bound state):
+See §6 for the design rationale and pruning logic. The tracker is
+**metric-agnostic**: its arg-taking overload of
+`IsDominatedElseRecord` just compares two ints. The metric choice
+(continuous occupancy score, integer occupancy, etc.) is encoded
+upstream by the call site that supplies those ints. A no-arg
+overload exists as a thin wrapper that pulls scores from bound
+register trackers — production call sites use it; test fixtures
+that don't have real register trackers can leave the register-
+tracker pointers null and call the explicit-scores overload
+directly.
+
+Brief shape:
 
 ```cpp
 class PressureHistoryTracker {
@@ -371,43 +379,57 @@ class PressureHistoryTracker {
   struct Entry {
     int best_prefix_score;            // higher = better (we MAXIMIZE)
     int best_postfix_score = INT_MIN; // sentinel: no completion below
-    ScheduleNode *next_node_hint = nullptr;  // fast-forward replay
+    const ScheduleNode *next_node_hint = nullptr;  // fast-forward replay
   };
 
-  /// Bind to:
-  ///   - working ScheduleConstructor's scheduled_set_tracker and
-  ///     forward register tracker (sources of truth for partition
-  ///     key + current_prefix_score),
-  ///   - best ScheduleConstructor's forward register tracker (source
-  ///     of truth for best_so_far_score used in the total-bound
-  ///     prune),
-  ///   - an enqueue_for_replay callback the tracker invokes when
-  ///     case 4 of the prune logic fires (see §6.4). The callback
-  ///     pushes the supplied node onto DfsSearch's replay queue
-  ///     and returns true on success. It returns false (no-op)
-  ///     when the queue is non-empty — see §6.6
-  ///     "no-op-on-non-empty invariant".
-  /// All pointers/callable non-null; must outlive the tracker.
+  /// Bind:
+  ///   - `scheduled_set_tracker` — source of truth for the partition
+  ///     key (signature + bitset). Non-null; must outlive the tracker.
+  ///   - `working_register_tracker` / `best_register_tracker` —
+  ///     sources of truth for current_prefix_score and
+  ///     best_so_far_score that the no-arg overload of
+  ///     IsDominatedElseRecord reads. May be nullptr in test
+  ///     fixtures that only call the explicit-scores overload; in
+  ///     that configuration the no-arg overload fatal-errors.
+  ///     Otherwise must outlive the tracker.
+  ///   - `enqueue_for_replay` — invoked by case 4 of the prune
+  ///     logic (see §6.4) to request a fast-forward step. The
+  ///     callback pushes the supplied node onto DfsSearch's replay
+  ///     queue and returns true on enqueue, false (no-op) when the
+  ///     queue is non-empty (see §6.6 "no-op-on-non-empty
+  ///     invariant"). Must be non-empty.
   PressureHistoryTracker(
       const ScheduledSetTracker *scheduled_set_tracker,
-      const GCNForwardRegisterTracker *working_register_tracker,
-      const GCNForwardRegisterTracker *best_register_tracker,
-      std::function<bool(ScheduleNode *)> enqueue_for_replay);
+      const GCNRegisterTracker *working_register_tracker,
+      const GCNRegisterTracker *best_register_tracker,
+      std::function<bool(const ScheduleNode *)> enqueue_for_replay);
 
-  /// Combined check + record. Returns true if pruning should fire
-  /// (prefix dominance OR total-bound). On miss-prune, records the
-  /// current prefix score in the entry. May call enqueue_for_replay_
-  /// internally when case 4 (§6.4) fires, requesting a fast-forward
-  /// step from DfsSearch. Reads current_prefix_score from
+  /// Production wrapper. Reads current_prefix_score from
   /// working_register_tracker_ and best_so_far_score from
-  /// best_register_tracker_ — no arguments. Mirrors
-  /// LengthHistoryTracker::IsDominatedElseInsert.
+  /// best_register_tracker_, then delegates to the explicit-scores
+  /// overload below. Fatal-errors if either bound register tracker
+  /// is null.
   bool IsDominatedElseRecord();
+
+  /// Real implementation. Combined check + record; returns true if
+  /// pruning should fire (prefix dominance OR total-bound prune;
+  /// see §6.4). On miss-prune, records the current prefix score in
+  /// the entry. May invoke enqueue_for_replay_ when case 4 of the
+  /// prune logic fires.
+  ///
+  /// Metric-agnostic: this overload just compares two ints. The
+  /// caller chooses what those ints represent (continuous score,
+  /// integer occupancy, etc.). Soundness requires the metric used
+  /// here to be at least as fine as the metric the policy is
+  /// optimizing — see §6.2.
+  bool IsDominatedElseRecord(int current_prefix_score,
+                              int best_so_far_score);
 
   /// Called on completion (working_.IsDone()). Walks schedule_order
   /// internally, computes partition keys incrementally, and updates
-  /// best_postfix_score and next_node_hint for every partition along
-  /// the path.
+  /// best_postfix_score and next_node_hint for every partition
+  /// along the path. (Same dual-API pattern as IsDominatedElseRecord
+  /// — explicit-args overload arrives in Phase 4c.)
   void RecordPostfixScoresFromCompletedSchedule();
 
   /// Test-only helpers (parallel to LengthHistoryTracker).
@@ -420,10 +442,10 @@ class PressureHistoryTracker {
 
  private:
   const ScheduledSetTracker *scheduled_set_tracker_;
-  const GCNForwardRegisterTracker *working_register_tracker_;
-  const GCNForwardRegisterTracker *best_register_tracker_;
-  std::function<bool(ScheduleNode *)> enqueue_for_replay_;
-  DenseMap<PartitionKey, Entry, PartitionKeyDenseMapInfo> table_;
+  const GCNRegisterTracker *working_register_tracker_;  // nullable for tests
+  const GCNRegisterTracker *best_register_tracker_;     // nullable for tests
+  std::function<bool(const ScheduleNode *)> enqueue_for_replay_;
+  DenseMap<PartitionKey, Entry> table_;
   int prune_count_ = 0;
 };
 ```
@@ -491,22 +513,33 @@ The shape differs from the original draft in four ways:
    There is no "bucket" — `LengthHistoryTracker`'s bucket
    terminology applies because that map's value is the Pareto
    frontier (a vector); ours collapses to one record.
-3. **No-argument per-visit API.** Like `LengthHistoryTracker`, the
-   tracker binds its source-of-truth state pointers at construction
-   and reads them on every call. The two pieces of data the prune
-   logic needs — current_prefix_score and best_so_far_score —
-   come from the working and best forward register trackers
-   respectively. Call site is just
-   `pressure_history_.IsDominatedElseRecord()`.
+3. **Dual-API: no-arg + explicit-scores overload.** The arg-taking
+   overload `IsDominatedElseRecord(int cur, int best)` is the real
+   implementation; it's metric-agnostic and trivial to test
+   without a real register tracker. The no-arg overload is a thin
+   wrapper that pulls scores from the bound register trackers and
+   delegates. Production callers use the no-arg form (clean call
+   site, `pressure_history_.IsDominatedElseRecord()`); test
+   fixtures bind null register-tracker pointers and call the
+   explicit-scores overload directly. This diverges from
+   `LengthHistoryTracker`'s strict no-arg pattern: length reads
+   multi-dimensional state (`end_cycle` + `frontier_lbs`) where
+   passing args every call would be cumbersome, while pressure is
+   two ints — cheap as args and far simpler for tests.
 4. **Fast-forward via injected callback** (chosen for the
    templating reason above).
 
-The metric is the continuous occupancy score from
-`kMaximizeContinuousRegisterOccupancyScore` — higher is better.
-"Best" means `max`, and total = `min(prefix_score, postfix_score)`
-— the schedule's score is bottlenecked by the worse half. This
-matches what `DfsMaximizeOccupancyPolicy::kMetric` already
-optimizes; no translation between metrics.
+The tracker is **metric-agnostic** — `IsDominatedElseRecord(int,
+int)` just compares ints. Production wiring in Phase 4b passes
+ints from `GCNRegisterTracker::GetContinuousOccupancyScore()` to
+match what `DfsMaximizeOccupancyPolicy::kMetric` already
+optimizes (`kMaximizeContinuousRegisterOccupancyScore`). Higher
+is better; "best" means `max`; total = `min(prefix_score,
+postfix_score)` — the schedule's score is bottlenecked by the
+worse half. The tracker doesn't encode this metric choice; it
+just preserves whatever ordering the int values express. See
+§6.2 for the soundness condition that links the history metric
+to the policy metric.
 
 `INT_MIN` is the postfix sentinel: an entry whose subtree was
 explored without ever recording a completion below it. This
@@ -522,7 +555,7 @@ pop. At completion, the vector has N values; suffix-max gives
 postfix peaks for all partitions on the path.
 
 ```cpp
-class GCNForwardRegisterTracker {
+class GCNRegisterTracker {
   // existing members...
   void Schedule(ScheduleNode *node) {
     // existing live-set update
@@ -711,13 +744,83 @@ The decoupling argument (§6.1) carries over: postfix score is
 partition-determined regardless of prefix order, so prefix and
 postfix can be optimized independently per partition.
 
+#### Metric-agnosticism and the soundness condition
+
+`PressureHistoryTracker` itself does not encode a metric. Its
+core API (`IsDominatedElseRecord(int cur, int best)`) just
+compares ints; production wiring chooses what those ints mean.
+The framing above (continuous occupancy score, higher = better,
+total = `min(prefix, postfix)`) is the metric the production
+caller plugs in to match `DfsMaximizeOccupancyPolicy::kMetric`.
+
+A coarser metric (e.g. integer occupancy) would yield more ties
+and therefore more dominance hits and more pruning — tempting,
+but only sound under a constraint:
+
+> **Soundness condition.** The metric used by the history table
+> must be at least as fine as the metric the policy is
+> optimizing.
+
+Concrete failure mode if this is violated. Suppose the policy
+optimizes the continuous score but history rounds to integer
+occupancy. Two prefixes reach the same partition: prior
+continuous=4500, current continuous=4501; both round to
+occupancy=4. Integer-history says "prior >= current → prune."
+But under continuous, current is strictly better; by the
+decoupling argument, current's reachable completion is also
+strictly better. We just pruned a continuous-better path.
+
+#### Trade-off when the soundness condition IS met
+
+If history and policy use the same metric, the soundness issue
+goes away — but the choice of metric still has an effect, and
+not the simple "coarser = more pruning everywhere" effect one
+might expect.
+
+Integer is more aggressive on **both** pruning mechanisms:
+
+- **History prune.** Coarser metric → more ties between (prior,
+  cur) at the same partition → more `prior >= cur` hits → more
+  dominance prunes.
+- **Bound prune.** The bound check
+  (`DfsMaximizeOccupancyPolicy::ShouldBoundSearch`) is
+  `cur <= best → prune` — non-strict, fires on ties. Integer's
+  cutoff at `cur_int <= 4` covers the entire occupancy-4
+  bracket (continuous-score range ~4000–5000). Continuous's
+  ratcheted `best_cont` — even after climbing to the high end
+  of bracket 4, e.g. 4990 — sits below the 5000 ceiling, so
+  the very-low-pressure corner of bracket 4 (continuous score
+  4991–5000) escapes the prune.
+
+So integer's pruned region is a strict superset of continuous's.
+The trade-off isn't "more prunes here vs. there" — integer just
+prunes more. What you lose with integer is **within-bracket
+precision**: integer prunes away the finer-grained optima
+(lowest register pressure within occupancy 4), while continuous
+explores them at the cost of doing more work.
+
+Be careful not to anchor on the "fine metric → faster best
+ratchet → tighter cutoff → more prunes" intuition. Continuous's
+ratcheted `best_cont` ratchet does happen, but the resulting
+cutoff is still below the integer cutoff implicit at the
+bracket ceiling, so it doesn't out-prune integer.
+
+So the right framing for any future metric knob is "configurable
+optimization metric, with history mirroring it" — not a
+configurable history metric in isolation. With the dual-API
+(§4.3), the tracker stays metric-agnostic; the metric choice
+lives at the call site that supplies the int. Picking integer
+over continuous is a decision about whether you care about
+within-bracket discrimination, not about which prune mechanism
+helps more.
+
 ### 6.3 Per-partition entry
 
 ```cpp
 struct Entry {
   int best_prefix_score;            // higher = better
   int best_postfix_score = INT_MIN; // sentinel; see §6.4
-  ScheduleNode *next_node_hint = nullptr;  // see §6.6
+  const ScheduleNode *next_node_hint = nullptr;  // see §6.6
 };
 ```
 
@@ -884,7 +987,7 @@ to a closure that returns `bool` (whether the push happened):
 
 ```cpp
 // In DfsSearch's constructor, the lambda for the tracker:
-[this](ScheduleNode *n) -> bool {
+[this](const ScheduleNode *n) -> bool {
   if (replay_queue_.empty()) {
     replay_queue_.push(n);
     return true;
@@ -1505,7 +1608,10 @@ wiring, not the tracker logic.
 ### Phase 4a — Prefix tracker logic
 
 Tracker built and exercised in isolation; not yet wired into
-DfsSearch.
+DfsSearch. **Only the explicit-scores overload of
+`IsDominatedElseRecord` ships in 4a** — the no-arg overload
+(which would read scores from bound register trackers) lands in
+Phase 4b alongside the production wiring.
 
 - New `PressureHistoryTracker.{h,cpp}`. Entry struct (full final
   shape — `best_postfix_score = INT_MIN` and
@@ -1513,16 +1619,28 @@ DfsSearch.
   `DenseMap<PartitionKey, Entry>` storage (no Pareto frontier;
   one entry per partition).
 - Constructor binds `ScheduledSetTracker*`, working/best
-  `GCNRegisterTracker*`, and an enqueue callback (no-op until
-  Phase 4f).
-- `IsDominatedElseRecord` implements cases 1 + 2 (insert on miss;
-  prefix dominance prune). Cases 3 + 4 + 5 stubbed.
+  `GCNRegisterTracker*` (nullable; tests pass nullptr), and an
+  enqueue callback (no-op until Phase 4f).
+- `IsDominatedElseRecord(int cur, int best)` implements cases 1
+  + 2 (insert on miss; prefix dominance prune). Cases 3 + 4 + 5
+  stubbed (case 5 reduces to a `max`-update of the prefix score).
+  Tracker is metric-agnostic — just compares ints; the caller's
+  choice of metric is what those ints encode (see §6.2 soundness
+  condition).
 - Stats baked in: `GetTotalPruneCount`, `GetTotalEntries`.
   Test-only `InsertEntryForTest`, `GetEntryForTest`.
 
 Shakedowns: empty-table behavior, first insert + self-dominance,
-strict dominator pruning, distinct partitions get distinct
-entries, hash collision via hand-crafted PartitionKeys.
+strict prior dominator pruning, distinct partitions get distinct
+entries, hash collision via hand-crafted PartitionKeys. Tests
+pass literal ints as scores — no register tracker needed; tests
+construct `PressureHistoryTracker` with nullptr register-tracker
+pointers and a no-op enqueue lambda.
+
+Drop the dead `mri` parameter from
+`GCNRegisterTracker::ExtractFromNodeRegLists` as a small
+piggyback cleanup discovered while scoping the synthetic-test
+question.
 
 ### Phase 4b — Prefix E2E (DFS wiring)
 
@@ -1530,6 +1648,20 @@ entries, hash collision via hand-crafted PartitionKeys.
 
 - Add `kUsePressureHistoryPruning` flag on `SearchPolicyBase`
   (default false).
+- Add the **no-arg overload** `IsDominatedElseRecord()` to
+  `PressureHistoryTracker`: reads
+  `working_register_tracker_->GetContinuousOccupancyScore()`
+  and the corresponding `best`, delegates to the explicit-scores
+  overload. Fatal-errors if either bound register tracker is
+  null. (For now hardcodes `GetContinuousOccupancyScore()` to
+  match `DfsMaximizeOccupancyPolicy::kMetric`. If we ever want a
+  configurable optimization metric, we add a
+  `GetMetricScore(ScheduleMetric)` dispatch on
+  `GCNRegisterTracker` mirroring
+  `ScheduleConstructor::IsBetterThan`'s switch — small, ~10
+  lines — and have the no-arg overload call that. The
+  history-side soundness condition in §6.2 then forces the
+  policy and tracker to use the same dispatch.)
 - `DfsMaximizeOccupancyPolicy::ShouldBoundSearch` updated
   signature (takes both length and pressure trackers); folds
   prefix-dominance call gated by

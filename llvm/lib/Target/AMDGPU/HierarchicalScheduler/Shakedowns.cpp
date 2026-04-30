@@ -18,6 +18,7 @@
 #include "GCNRegisterTracker.h"
 #include "GCNSubtarget.h"
 #include "LengthHistoryTracker.h"
+#include "PressureHistoryTracker.h"
 #include "RegisterTracker.h"
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
@@ -1780,6 +1781,248 @@ void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
   RunLengthHistoryHashCollisionShakedown(st);
 }
 
+// =============================================================================
+// PressureHistoryTracker shakedowns
+// =============================================================================
+//
+// Standalone tests for PressureHistoryTracker's prefix-side logic.
+// The tracker's explicit-scores overload of IsDominatedElseRecord
+// is metric-agnostic — it just compares two ints — so these tests
+// pass literal ints for current_prefix_score and best_so_far_score
+// and don't need a real GCNRegisterTracker. The tracker is
+// constructed with nullptr register-tracker pointers and a no-op
+// enqueue lambda; the no-arg overload is not yet defined.
+
+struct PressureHistoryTrackerFixture {
+  std::unique_ptr<ScheduleGraph> graph;
+  std::unique_ptr<ScheduleLengthTracker> length_tracker;
+  std::unique_ptr<ScheduledSetTracker> scheduled_set_tracker;
+  std::unique_ptr<PressureHistoryTracker> pressure_history_tracker;
+  // Common BuildTestDAG node handles. Topo indices: A=0, H=1,
+  // C=2, D=3.
+  ScheduleNode *a;
+  ScheduleNode *h;
+  ScheduleNode *c;
+  ScheduleNode *d;
+};
+
+static PressureHistoryTrackerFixture
+BuildPressureHistoryTrackerFixture(const GCNSubtarget &st) {
+  PressureHistoryTrackerFixture fixture;
+  fixture.graph = ScheduleGraph::BuildTestDAG();
+  fixture.graph->ValidateAndComputeTopologicalOrder();
+  fixture.graph->ComputeCriticalPathFromExit();
+  ArrayRef<ScheduleNode *> topo = fixture.graph->GetTopoOrder();
+  fixture.a = topo[0];
+  fixture.h = topo[1];
+  fixture.c = topo[2];
+  fixture.d = topo[3];
+  fixture.length_tracker =
+      std::make_unique<ScheduleLengthTracker>(*fixture.graph, st);
+  fixture.scheduled_set_tracker = std::make_unique<ScheduledSetTracker>(
+      fixture.graph.get(), fixture.length_tracker.get());
+  fixture.pressure_history_tracker = std::make_unique<PressureHistoryTracker>(
+      fixture.scheduled_set_tracker.get(),
+      /*working_register_tracker=*/nullptr,
+      /*best_register_tracker=*/nullptr,
+      [](const ScheduleNode *) { return false; });
+  return fixture;
+}
+
+// Drive both length and scheduled-set trackers in lockstep, matching
+// the production order in ScheduleConstructor::ScheduleByIndex.
+static void
+ScheduleNodeOnPressureFixture(PressureHistoryTrackerFixture &fixture,
+                              ScheduleNode *node) {
+  fixture.length_tracker->Schedule(node);
+  fixture.scheduled_set_tracker->Schedule(node);
+}
+
+// Test 1: Empty-table behavior.
+// After construction, total_entries == 0 and prune_count == 0.
+static void RunPressureHistoryEmptyShakedown(const GCNSubtarget &st) {
+  auto fixture = BuildPressureHistoryTrackerFixture(st);
+  bool initially_empty =
+      fixture.pressure_history_tracker->GetTotalEntries() == 0 &&
+      fixture.pressure_history_tracker->GetTotalPruneCount() == 0;
+  llvm::outs() << "    Empty-table behavior: "
+               << (initially_empty ? "PASS\n" : "FAIL\n");
+}
+
+// Test 2: First IsDominatedElseRecord from empty inserts; second
+// call with the same scores is dominated by what we just inserted
+// (equality dominates: prior >= current at equal scores).
+static void RunPressureHistoryFirstInsertAndSelfDominanceShakedown(
+    const GCNSubtarget &st) {
+  auto fixture = BuildPressureHistoryTrackerFixture(st);
+  ScheduleNodeOnPressureFixture(fixture, fixture.a);
+
+  bool first_call_inserted =
+      !fixture.pressure_history_tracker->IsDominatedElseRecord(
+          /*current_prefix_score=*/100, /*best_so_far_score=*/0);
+  bool count_one_after_first =
+      fixture.pressure_history_tracker->GetTotalEntries() == 1;
+
+  // Same partition, same current_prefix_score — prior dominates
+  // (equality counts).
+  bool second_call_pruned =
+      fixture.pressure_history_tracker->IsDominatedElseRecord(
+          /*current_prefix_score=*/100, /*best_so_far_score=*/0);
+  bool count_unchanged_after_second =
+      fixture.pressure_history_tracker->GetTotalEntries() == 1;
+  bool prune_count_one =
+      fixture.pressure_history_tracker->GetTotalPruneCount() == 1;
+
+  bool ok = first_call_inserted && count_one_after_first &&
+            second_call_pruned && count_unchanged_after_second &&
+            prune_count_one;
+  llvm::outs() << "    First insert + self-dominance: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Test 3: Strict prior dominator. Stage an entry with a strictly
+// higher best_prefix_score than the query. IsDominatedElseRecord
+// returns true; entry unchanged; prune count incremented.
+static void
+RunPressureHistoryStrictPriorDominatorShakedown(const GCNSubtarget &st) {
+  auto fixture = BuildPressureHistoryTrackerFixture(st);
+  ScheduleNodeOnPressureFixture(fixture, fixture.a);
+  PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+
+  PressureHistoryTracker::Entry strict_dominator;
+  strict_dominator.best_prefix_score = 200;
+  fixture.pressure_history_tracker->InsertEntryForTest(key, strict_dominator);
+
+  // Query with strictly lower current_prefix_score. Prior 200 >=
+  // current 100 → prune.
+  bool pruned = fixture.pressure_history_tracker->IsDominatedElseRecord(
+      /*current_prefix_score=*/100, /*best_so_far_score=*/0);
+  const PressureHistoryTracker::Entry *after =
+      fixture.pressure_history_tracker->GetEntryForTest(key);
+  bool entry_unchanged = after != nullptr && after->best_prefix_score == 200;
+  bool count_one =
+      fixture.pressure_history_tracker->GetTotalEntries() == 1;
+  bool prune_count_one =
+      fixture.pressure_history_tracker->GetTotalPruneCount() == 1;
+
+  bool ok =
+      pruned && entry_unchanged && count_one && prune_count_one;
+  llvm::outs() << "    Strict prior dominator pruning: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Test 4: Strict update when current is better. Stage an entry
+// with a strictly lower best_prefix_score than the query.
+// IsDominatedElseRecord returns false; entry's best_prefix_score
+// is updated to the larger value; prune count unchanged.
+static void RunPressureHistoryStrictCurrentBetterShakedown(
+    const GCNSubtarget &st) {
+  auto fixture = BuildPressureHistoryTrackerFixture(st);
+  ScheduleNodeOnPressureFixture(fixture, fixture.a);
+  PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+
+  PressureHistoryTracker::Entry strictly_worse_prior;
+  strictly_worse_prior.best_prefix_score = 50;
+  fixture.pressure_history_tracker->InsertEntryForTest(
+      key, strictly_worse_prior);
+
+  // Query with strictly higher current. Prior 50 < current 200 → no
+  // prune; entry updated to 200.
+  bool not_pruned = !fixture.pressure_history_tracker->IsDominatedElseRecord(
+      /*current_prefix_score=*/200, /*best_so_far_score=*/0);
+  const PressureHistoryTracker::Entry *after =
+      fixture.pressure_history_tracker->GetEntryForTest(key);
+  bool entry_updated = after != nullptr && after->best_prefix_score == 200;
+  bool count_one =
+      fixture.pressure_history_tracker->GetTotalEntries() == 1;
+  bool prune_count_zero =
+      fixture.pressure_history_tracker->GetTotalPruneCount() == 0;
+
+  bool ok =
+      not_pruned && entry_updated && count_one && prune_count_zero;
+  llvm::outs() << "    Strict current-better updates entry: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Test 5: Distinct schedule states produce distinct PartitionKeys
+// and the table holds them as separate entries. Uses {A} → {A, H}
+// (both reachable via valid scheduling order) since H requires A
+// scheduled first for ScheduleLengthTracker invariants.
+static void
+RunPressureHistoryDistinctPartitionsShakedown(const GCNSubtarget &st) {
+  auto fixture = BuildPressureHistoryTrackerFixture(st);
+
+  // Partition 1: {A} scheduled.
+  ScheduleNodeOnPressureFixture(fixture, fixture.a);
+  bool a_inserted =
+      !fixture.pressure_history_tracker->IsDominatedElseRecord(
+          /*current_prefix_score=*/100, /*best_so_far_score=*/0);
+
+  // Partition 2: {A, H} scheduled.
+  ScheduleNodeOnPressureFixture(fixture, fixture.h);
+  bool ah_inserted =
+      !fixture.pressure_history_tracker->IsDominatedElseRecord(
+          /*current_prefix_score=*/200, /*best_so_far_score=*/0);
+
+  bool count_two =
+      fixture.pressure_history_tracker->GetTotalEntries() == 2;
+  bool prune_count_zero =
+      fixture.pressure_history_tracker->GetTotalPruneCount() == 0;
+
+  bool ok = a_inserted && ah_inserted && count_two && prune_count_zero;
+  llvm::outs() << "    Distinct partitions get distinct entries: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Test 6: Hash collision across distinct partitions. Hand-craft
+// two PartitionKeys with the same signature but different bitsets.
+// DenseMap probing + DenseMapInfo<PartitionKey>::isEqual (which
+// compares the full bitset) must keep the entries separate.
+static void
+RunPressureHistoryHashCollisionShakedown(const GCNSubtarget &st) {
+  auto fixture = BuildPressureHistoryTrackerFixture(st);
+  int n = fixture.graph->Size();
+
+  // Two keys, same signature (42), different bitsets. Bitset sizes
+  // match graph.Size() (n >= 2) so neither hits the sentinel sizes.
+  PartitionKey key1{42, BitVector(n)};
+  key1.scheduled_set.set(0);
+  PartitionKey key2{42, BitVector(n)};
+  key2.scheduled_set.set(1);
+
+  PressureHistoryTracker::Entry entry1;
+  entry1.best_prefix_score = 100;
+  PressureHistoryTracker::Entry entry2;
+  entry2.best_prefix_score = 200;
+  fixture.pressure_history_tracker->InsertEntryForTest(key1, entry1);
+  fixture.pressure_history_tracker->InsertEntryForTest(key2, entry2);
+
+  const PressureHistoryTracker::Entry *got1 =
+      fixture.pressure_history_tracker->GetEntryForTest(key1);
+  const PressureHistoryTracker::Entry *got2 =
+      fixture.pressure_history_tracker->GetEntryForTest(key2);
+  bool both_present = got1 != nullptr && got2 != nullptr;
+  bool entries_in_correct_slots =
+      both_present && got1->best_prefix_score == 100 &&
+      got2->best_prefix_score == 200;
+  bool count_two =
+      fixture.pressure_history_tracker->GetTotalEntries() == 2;
+
+  bool ok = both_present && entries_in_correct_slots && count_two;
+  llvm::outs() << "    Hash collision across distinct partitions: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+void RunPressureHistoryTrackerShakedown(const GCNSubtarget &st) {
+  llvm::outs() << "  RunPressureHistoryTrackerShakedown:\n";
+  RunPressureHistoryEmptyShakedown(st);
+  RunPressureHistoryFirstInsertAndSelfDominanceShakedown(st);
+  RunPressureHistoryStrictPriorDominatorShakedown(st);
+  RunPressureHistoryStrictCurrentBetterShakedown(st);
+  RunPressureHistoryDistinctPartitionsShakedown(st);
+  RunPressureHistoryHashCollisionShakedown(st);
+}
+
 // Test policies for the history-vs-no-history comparison shakedown.
 // Both inherit DfsMinimizeLengthPolicy and override ShouldBoundSearch
 // to skip the production LB + occupancy bounds entirely. The two
@@ -2577,6 +2820,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunLengthLowerBoundShakedown(st);
   RunScheduledSetTrackerShakedown(st);
   RunLengthHistoryTrackerShakedown(st);
+  RunPressureHistoryTrackerShakedown(st);
   RunLengthHistoryDfsComparisonShakedown(st, MF, *LIS);
   RunAllSubgraphFormationShakedowns();
 
