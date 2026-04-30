@@ -41,6 +41,7 @@
 
 #include "GCNRegPressure.h"
 #include "ScheduleGraph.h"
+#include "ScheduleMetric.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
@@ -206,6 +207,62 @@ public:
                                              unsigned num_vgpr,
                                              unsigned num_sgpr);
 
+  /// Test-only: switch this tracker to a delta-based synthetic
+  /// pressure path. `per_node_vgpr_deltas` is indexed by node
+  /// topo index; each Schedule(node) does
+  ///   test_current_vgpr_ += deltas[node->GetTopoIndex()];
+  ///   cur_pressure_ = GCNRegPressure(test_current_vgpr_);
+  ///   max_pressure_ = max(max_pressure_, cur_pressure_);
+  ///   pressure_history_.push_back(cur_pressure_);
+  /// Unschedule reverses (pop history, restore saved max, subtract
+  /// delta). RegDefs/RegUses on the synthetic nodes are ignored —
+  /// only the deltas drive pressure.
+  ///
+  /// Production GetMetricScore / GetContinuousOccupancyScore /
+  /// pressure_history_ all read max_pressure_ / cur_pressure_, so
+  /// they automatically see the synthetic VGPR counts and report
+  /// scores derived from them. No production-path dispatch needed.
+  ///
+  /// Use only in shakedowns. The deltas can be negative; test
+  /// authors are responsible for keeping the running VGPR count
+  /// non-negative.
+  void EnableTestModeForTest(const std::vector<int> &per_node_vgpr_deltas);
+
+  /// Test-only: true iff EnableTestModeForTest() has been called.
+  bool IsInTestModeForTest() const { return test_mode_; }
+
+  /// Test-only: directly set max_pressure_. Used to seed best_'s
+  /// peak in shakedowns so working can beat it on the first
+  /// IsBetterThan, exercising best-update during test-mode DFS.
+  void SetMaxPressureForTest(GCNRegPressure new_max) {
+    max_pressure_ = new_max;
+  }
+
+  /// Pressure-side score for `metric`, normalized so higher is
+  /// better regardless of the metric's natural direction. Lets
+  /// callers (e.g., PressureHistoryTracker's dominance check)
+  /// stay direction-agnostic — they just compare ints with >.
+  ///
+  /// Dispatch:
+  ///   kMaximizeRegisterOccupancy            → +GetRegisterOnlyOccupancy()
+  ///   kMaximizeContinuousRegisterOccupancyScore
+  ///                                         → +GetContinuousOccupancyScore()
+  ///   kMinimizeRegisterOccupancy            → -GetRegisterOnlyOccupancy()
+  ///   kMinimizeContinuousRegisterOccupancyScore
+  ///                                         → -GetContinuousOccupancyScore()
+  ///
+  /// kMinimizeScheduleLength is length-side, not pressure-side;
+  /// length lives on ScheduleLengthTracker, so this method
+  /// fatal-errors on it.
+  ///
+  /// Note: returned values are absolute scores, NOT differences.
+  /// The negation for minimize variants flips the ordering for
+  /// dominance-style comparisons (`a > b` means "a is better than
+  /// b" in either direction), but the magnitude no longer matches
+  /// the raw register count or score. If you need the raw value,
+  /// call the per-metric getters directly.
+  int GetMetricScore(ScheduleMetric metric) const;
+
   /// Score points per integer occupancy step (the `M` in the formula
   /// above). One full occupancy level is worth this many points.
   static constexpr int kOccScoreMultiplier = 1000;
@@ -305,6 +362,22 @@ private:
 
   /// See GetPressureHistory.
   std::vector<GCNRegPressure> pressure_history_;
+
+  // --- Test-only state (see EnableTestModeForTest) ---
+  bool test_mode_ = false;
+  /// Per-node VGPR delta in test mode, indexed by topo index.
+  /// Schedule applies, Unschedule reverses. cur_pressure_'s
+  /// VGPR32 component holds the running synthetic pressure.
+  std::vector<int> test_vgpr_deltas_;
+
+  /// Test-mode counterparts of Schedule/Unschedule. Called from
+  /// the public Schedule/Unschedule when test_mode_ is true. Apply
+  /// (resp. reverse) the per-node VGPR delta to cur_pressure_,
+  /// update max_pressure_/pressure_history_/undo_stack_ exactly as
+  /// production would. RegDefs/RegUses on the synthetic nodes are
+  /// ignored.
+  void TestSchedule(const ScheduleNode *node);
+  void TestUnschedule(const ScheduleNode *node);
 
   const MachineFunction *mf_;
   const GCNSubtarget *st_;

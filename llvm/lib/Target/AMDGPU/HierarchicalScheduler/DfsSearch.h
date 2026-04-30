@@ -13,6 +13,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_DFSSEARCH_H
 
 #include "LengthHistoryTracker.h"
+#include "PressureHistoryTracker.h"
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
 #include "SubgraphFormation.h"
@@ -86,7 +87,20 @@ class DfsSearch {
         // Recurse dead-strips the consult/insert otherwise).
         length_history_(
             &working_schedule_constructor_.GetScheduledSetTracker(),
-            &working_schedule_constructor_.GetLengthTracker()) {
+            &working_schedule_constructor_.GetLengthTracker()),
+        // pressure_history_ binds to working_'s scheduled-set
+        // tracker for partition keys, and to working/best
+        // pressure trackers for the no-arg score reads. The
+        // metric matches Policy::kMetric so the tracker reads
+        // values consistent with what the search optimizes.
+        // Enqueue callback is a no-op until the replay queue
+        // is wired in.
+        pressure_history_(
+            &working_schedule_constructor_.GetScheduledSetTracker(),
+            &working_schedule_constructor_.GetPressureTracker(),
+            &best_schedule_constructor_.GetPressureTracker(),
+            Policy::kMetric,
+            [](const ScheduleNode *) -> bool { return false; }) {
     // best_schedule_constructor_ is copy-constructed from the
     // graph's input schedule (built by BuildFromSUnits as Phase 4).
     // That gives us a complete valid schedule matching the region's
@@ -134,6 +148,41 @@ class DfsSearch {
     return length_history_;
   }
 
+  // Read-only access to the pressure history tracker. Useful for
+  // shakedowns and per-region stat reporting.
+  const PressureHistoryTracker &GetPressureHistoryTracker() const {
+    return pressure_history_;
+  }
+
+  // Test-only: enable delta-based synthetic pressure on both the
+  // working and best schedule constructors' pressure trackers,
+  // and seed best's max_pressure_ to a deliberately-bad value so
+  // working can beat it on the first IsBetterThan and the search
+  // exercises real best-update behavior. Must be called before
+  // Run(). After this, Schedule(node) applies
+  // per_node_vgpr_deltas[node->GetTopoIndex()] to cur_pressure_'s
+  // VGPR32 component instead of going through GCNRegPressure /
+  // MRI machinery; see GCNRegisterTracker::EnableTestModeForTest
+  // for the full contract.
+  //
+  // best_initial_vgpr_peak default is 255 — saturates past
+  // gfx906's integer-occupancy cliffs so any synthetic working
+  // peak under that beats it. Tests can lower it if they want a
+  // tighter initial bound.
+  void EnableTestModeForTest(const std::vector<int> &per_node_vgpr_deltas,
+                             unsigned best_initial_vgpr_peak = 255) {
+    working_schedule_constructor_.GetPressureTrackerForTest()
+        .EnableTestModeForTest(per_node_vgpr_deltas);
+    // best_ doesn't get Schedule()d directly by DFS; it's only
+    // overwritten via copy assignment from working_ on
+    // IsBetterThan, which carries working's test-mode state along
+    // with everything else. So we only need to seed best_'s
+    // max_pressure_ here, deliberately worse than any synthetic
+    // working completion will reach.
+    best_schedule_constructor_.GetPressureTrackerForTest()
+        .SetMaxPressureForTest(GCNRegPressure(best_initial_vgpr_peak));
+  }
+
  private:
   // Helper called from the member initializer list. Runs subgraph
   // formation as a side effect (when form_subgraphs is true and
@@ -174,12 +223,14 @@ class DfsSearch {
 
     // ShouldBoundSearch covers all prune decisions for this policy,
     // including history-based domination when the policy opts in.
-    // It MAY MUTATE length_history_ (record the current prefix) as
-    // part of its check — see the policy's ShouldBoundSearch
-    // contract.
+    // It MAY MUTATE length_history_ and/or pressure_history_ (record
+    // current state, push fast-forward replay hints onto DfsSearch's
+    // replay queue) as part of its check — see the policy's
+    // ShouldBoundSearch contract and the trackers' class comments.
     if (Policy::ShouldBoundSearch(working_schedule_constructor_,
                                   best_schedule_constructor_,
-                                  length_history_)) {
+                                  length_history_,
+                                  pressure_history_)) {
       return;
     }
 
@@ -216,8 +267,15 @@ class DfsSearch {
   // working_schedule_constructor_'s ScheduledSetTracker and
   // ScheduleLengthTracker. Active only when
   // Policy::kUseLengthHistoryPruning is true; for other policies
-  // the construction overhead is small but nonzero 
+  // the construction overhead is small but nonzero
   LengthHistoryTracker length_history_;
+
+  // History-based-domination table for pressure pruning. Bound to
+  // working's ScheduledSetTracker for partition keys, and to
+  // working/best GCNRegisterTracker for score reads. Active only
+  // when Policy::kUsePressureHistoryPruning is true; otherwise
+  // constructed but never queried.
+  PressureHistoryTracker pressure_history_;
 };
 
 } // namespace hierarchical_scheduler

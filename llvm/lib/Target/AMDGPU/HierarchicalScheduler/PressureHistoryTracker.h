@@ -40,6 +40,7 @@
 
 #include "GCNRegisterTracker.h"
 #include "ScheduleGraph.h"
+#include "ScheduleMetric.h"
 #include "ScheduledSetTracker.h"
 #include "llvm/ADT/DenseMap.h"
 #include <climits>
@@ -79,13 +80,20 @@ class PressureHistoryTracker {
   ///   - `scheduled_set_tracker` — source of truth for the
   ///     partition key. Non-null; must outlive the tracker.
   ///   - `working_register_tracker` / `best_register_tracker` —
-  ///     intended sources of truth for the no-arg overload of
-  ///     IsDominatedElseRecord. May be nullptr in test fixtures
-  ///     that only use the explicit-scores overload (the only
-  ///     overload defined in this revision); the pointers are
-  ///     held for forward-compatibility so the production ctor
-  ///     signature stays stable as no-arg wiring is added later.
-  ///     Otherwise must outlive the tracker.
+  ///     sources of truth for current_prefix_score and
+  ///     best_so_far_score that the no-arg overload of
+  ///     IsDominatedElseRecord reads via the bound metric. May
+  ///     be nullptr in test fixtures that only use the explicit-
+  ///     scores overload; in that configuration the no-arg
+  ///     overload fatal-errors. Otherwise must outlive the
+  ///     tracker.
+  ///   - `metric` — ScheduleMetric used by the no-arg overload
+  ///     to read scores from the bound register trackers via
+  ///     GCNRegisterTracker::GetMetricScore. GetMetricScore
+  ///     normalizes minimize variants so higher = better
+  ///     regardless of direction; length-side metrics
+  ///     fatal-error there because GCNRegisterTracker has no
+  ///     length data.
   ///   - `enqueue_for_replay` — invoked when fast-forward replay
   ///     fires (currently never; held so the constructor
   ///     signature is stable across later phases). Must be
@@ -94,6 +102,7 @@ class PressureHistoryTracker {
       const ScheduledSetTracker *scheduled_set_tracker,
       const GCNRegisterTracker *working_register_tracker,
       const GCNRegisterTracker *best_register_tracker,
+      ScheduleMetric metric,
       std::function<bool(const ScheduleNode *)> enqueue_for_replay);
 
   /// Combined check + record. Reads the partition key from the
@@ -128,6 +137,12 @@ class PressureHistoryTracker {
   bool IsDominatedElseRecord(int current_prefix_score,
                               int best_so_far_score);
 
+  /// Production wrapper. Reads scores from the bound register
+  /// trackers via GCNRegisterTracker::GetMetricScore(metric_),
+  /// then delegates to the explicit-scores overload above.
+  /// Fatal-errors if either bound register tracker is null.
+  bool IsDominatedElseRecord();
+
   /// Total entries across all partitions.
   int GetTotalEntries() const { return static_cast<int>(table_.size()); }
 
@@ -150,6 +165,7 @@ class PressureHistoryTracker {
   const ScheduledSetTracker *scheduled_set_tracker_;
   const GCNRegisterTracker *working_register_tracker_;
   const GCNRegisterTracker *best_register_tracker_;
+  ScheduleMetric metric_;
   std::function<bool(const ScheduleNode *)> enqueue_for_replay_;
   DenseMap<PartitionKey, Entry> table_;
   int prune_count_ = 0;

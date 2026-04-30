@@ -12,6 +12,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SEARCHPOLICIES_H
 
 #include "LengthHistoryTracker.h"
+#include "PressureHistoryTracker.h"
 #include "ScheduleConstructor.h"
 #include "SubgraphFormation.h"
 #include "llvm/ADT/SmallVector.h"
@@ -94,10 +95,16 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   // recorded in `length_history` for future-sibling comparison.
   // (IsDominatedElseInsert combines the check and record so we
   // don't pay two bucket lookups per visit.)
+  //
+  // `pressure_history` parameter is unused here — present only
+  // because DfsSearch invokes ShouldBoundSearch with a uniform
+  // signature across policies; this policy doesn't opt into
+  // pressure-history pruning.
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      LengthHistoryTracker &length_history);
+      LengthHistoryTracker &length_history,
+      PressureHistoryTracker &pressure_history);
 
   // End the search globally once best matches the graph-level length
   // floor (max(NumSchedulingUnits, cp_length + 1)) — no schedule can
@@ -146,19 +153,32 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
     return a->GetTopoIndex() < b->GetTopoIndex();
   }
 
-  // Return true if no completion of the current partial schedule can
-  // improve on best_schedule_constructor. First cut: always false
-  // (never bound). Real bounds are subtle for maximize-occupancy
-  // because register pressure is not monotonic.
+  // Return true if no completion of the current partial schedule
+  // can improve on best_schedule_constructor. Bounds:
+  //   (a) Score-bound: working's GetMetricScore(kMetric) is
+  //       non-increasing as nodes are scheduled (peak pressure
+  //       grows monotonically). If working's score is already
+  //       <= best's, no completion of working can strictly beat
+  //       best.
+  //   (b) History dominance (when kUsePressureHistoryPruning is
+  //       true): the pressure-history tracker reports the
+  //       current state can be pruned. See PressureHistoryTracker
+  //       for what the tracker checks and why pruning is safe.
   //
-  // `length_history` parameter is unused here — present only because
-  // DfsSearch invokes ShouldBoundSearch with a uniform signature
-  // across policies; this policy doesn't opt into length-history
-  // pruning.
+  // SIDE EFFECT: IsDominatedElseRecord can mutate the tracker
+  // (recording state for future comparison) and may invoke the
+  // tracker's enqueue_for_replay callback to push a fast-forward
+  // hint onto DfsSearch's replay queue. See PressureHistoryTracker.
+  //
+  // `length_history` parameter is unused here — present only
+  // because DfsSearch invokes ShouldBoundSearch with a uniform
+  // signature across policies; this policy doesn't opt into
+  // length-history pruning.
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      LengthHistoryTracker &length_history);
+      LengthHistoryTracker &length_history,
+      PressureHistoryTracker &pressure_history);
 
   // Called on completed schedules after the IsBetterThan/update step.
   // Return true to end the entire search and have DfsSearch::Run
@@ -179,6 +199,10 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
   static SubgraphFormationPolicy MakeFormationPolicy() {
     return SubgraphFormationPolicy::TopDownSingleSplitterOnly();
   }
+
+  // Override SearchPolicyBase: enable pressure history-domination
+  // pruning. See PressureHistoryTracker.
+  static constexpr bool kUsePressureHistoryPruning = true;
 };
 
 } // namespace hierarchical_scheduler

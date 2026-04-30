@@ -241,6 +241,10 @@ void GCNRegisterTracker::ProcessUses(const NodeRegInfo &info,
 }
 
 void GCNRegisterTracker::Schedule(const ScheduleNode *node) {
+  if (test_mode_) {
+    TestSchedule(node);
+    return;
+  }
   // Subgraph proxies have no register effect (synthetic node);
   // skip the pressure-update / undo-step path for them. We still
   // push a pressure_history_ entry at the end (the unchanged
@@ -330,6 +334,10 @@ void GCNRegisterTracker::UndoUses(const NodeRegInfo &info,
 }
 
 void GCNRegisterTracker::Unschedule(const ScheduleNode *node) {
+  if (test_mode_) {
+    TestUnschedule(node);
+    return;
+  }
   // Symmetric with Schedule: proxies were no-ops, so undo is also
   // a no-op for cur_pressure_. Pop pressure_history_ unconditionally
   // first — every Schedule call (proxy or real) pushed an entry, so
@@ -361,6 +369,62 @@ void GCNRegisterTracker::Unschedule(const ScheduleNode *node) {
   }
 
   max_pressure_ = step.saved_max;
+}
+
+// ============================================================================
+// Test mode
+// ============================================================================
+
+void GCNRegisterTracker::EnableTestModeForTest(
+    const std::vector<int> &per_node_vgpr_deltas) {
+  if (!undo_stack_.empty() || !test_vgpr_deltas_.empty()) {
+    report_fatal_error("GCNRegisterTracker::EnableTestModeForTest must be "
+                       "called once, before any Schedule()");
+  }
+  test_mode_ = true;
+  test_vgpr_deltas_ = per_node_vgpr_deltas;
+  // cur_pressure_ / max_pressure_ already start at zero from
+  // construction; pressure_history_ already empty. Nothing else
+  // to reset.
+}
+
+void GCNRegisterTracker::TestSchedule(const ScheduleNode *node) {
+  // Apply the per-node VGPR delta to cur_pressure_ via the scalar
+  // GCNRegPressure constructor. The rest of the production state
+  // tracking (max_pressure_, pressure_history_, undo_stack_)
+  // updates the same way as the production path so consumers
+  // (GetMetricScore, GetContinuousOccupancyScore, etc.) read
+  // synthetic values transparently.
+  ScheduleStep step;
+  step.saved_max = max_pressure_;
+  int new_vgpr = static_cast<int>(cur_pressure_.getVGPRNum(false)) +
+                 test_vgpr_deltas_[node->GetTopoIndex()];
+  if (new_vgpr < 0) {
+    report_fatal_error("GCNRegisterTracker test mode: synthetic VGPR went "
+                       "negative; check delta values");
+  }
+  cur_pressure_ = GCNRegPressure(static_cast<unsigned>(new_vgpr));
+  max_pressure_ = max(max_pressure_, cur_pressure_);
+  undo_stack_.push_back(std::move(step));
+  pressure_history_.push_back(cur_pressure_);
+}
+
+void GCNRegisterTracker::TestUnschedule(const ScheduleNode *node) {
+  pressure_history_.pop_back();
+  if (undo_stack_.empty()) {
+    report_fatal_error("GCNRegisterTracker test mode: TestUnschedule without "
+                       "matching TestSchedule");
+  }
+  ScheduleStep step = std::move(undo_stack_.back());
+  undo_stack_.pop_back();
+  max_pressure_ = step.saved_max;
+  int new_vgpr = static_cast<int>(cur_pressure_.getVGPRNum(false)) -
+                 test_vgpr_deltas_[node->GetTopoIndex()];
+  if (new_vgpr < 0) {
+    report_fatal_error("GCNRegisterTracker test mode: VGPR went negative on "
+                       "TestUnschedule (delta sign error?)");
+  }
+  cur_pressure_ = GCNRegPressure(static_cast<unsigned>(new_vgpr));
 }
 
 // ============================================================================
@@ -525,6 +589,25 @@ GCNRegisterTracker::GetOrComputeContinuousOccupancyScoreTables(
 
 unsigned GCNRegisterTracker::GetRegisterOnlyOccupancy() const {
   return max_pressure_.getOccupancy(*st_);
+}
+
+int GCNRegisterTracker::GetMetricScore(ScheduleMetric metric) const {
+  switch (metric) {
+  case ScheduleMetric::kMaximizeRegisterOccupancy:
+    return static_cast<int>(GetRegisterOnlyOccupancy());
+  case ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore:
+    return GetContinuousOccupancyScore();
+  case ScheduleMetric::kMinimizeRegisterOccupancy:
+    return -static_cast<int>(GetRegisterOnlyOccupancy());
+  case ScheduleMetric::kMinimizeContinuousRegisterOccupancyScore:
+    return -GetContinuousOccupancyScore();
+  case ScheduleMetric::kMinimizeScheduleLength:
+    report_fatal_error(
+        "GCNRegisterTracker::GetMetricScore: kMinimizeScheduleLength is "
+        "length-side, not pressure-side; length lives on "
+        "ScheduleLengthTracker");
+  }
+  llvm_unreachable("Unknown ScheduleMetric");
 }
 
 unsigned GCNRegisterTracker::GetConfiguredMachineFunctionOccupancyLimit() const {

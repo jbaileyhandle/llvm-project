@@ -333,6 +333,8 @@ int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
                  << dfs_peak.getVGPRNum(st.hasGFX90AInsts())
                  << " sgpr=" << dfs_peak.getSGPRNum()
                  << " | schedule_calls=" << search.GetScheduleCallCount()
+                 << " | pressure_history_prunes="
+                 << search.GetPressureHistoryTracker().GetTotalPruneCount()
                  << " (N=" << graph.Size() << ")"
                  << " | order changed=" << (changed ? "yes" : "no") << "\n";
 
@@ -385,6 +387,8 @@ void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
                  << " dfs best length=" << dfs_length
                  << " floor=" << graph.GetGraphLengthFloor()
                  << " | schedule_calls=" << search.GetScheduleCallCount()
+                 << " | length_history_prunes="
+                 << search.GetLengthHistoryTracker().GetTotalPruneCount()
                  << " (N=" << graph.Size() << ")"
                  << " | order changed=" << (changed ? "yes" : "no") << "\n";
 

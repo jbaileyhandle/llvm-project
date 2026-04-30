@@ -56,6 +56,7 @@
 #include "GCNRegisterTracker.h"
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
+#include "ScheduleMetric.h"
 #include "ScheduledSetTracker.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
@@ -68,40 +69,6 @@ class LiveIntervals;
 class MachineFunction;
 
 namespace hierarchical_scheduler {
-
-/// Criterion by which two ScheduleConstructor states are compared.
-/// Used with ScheduleConstructor::IsBetterThan. Names are explicit
-/// about direction (kMaximize*, kMinimize*) so the call site doesn't
-/// have to remember which way each metric is "better".
-enum class ScheduleMetric {
-  /// Integer register occupancy (GetRegisterOnlyOccupancy).
-  /// Coarse — schedules in the same occupancy bracket tie.
-  kMaximizeRegisterOccupancy,
-
-  /// Continuous register occupancy score (GetContinuousOccupancyScore).
-  /// Smooth within brackets — useful when search needs to see
-  /// progress toward the next higher bracket.
-  kMaximizeContinuousRegisterOccupancyScore,
-
-  /// Current schedule length in cycles.
-  kMinimizeScheduleLength,
-
-  /// Inverted register occupancy: lower GetRegisterOnlyOccupancy is
-  /// "better." TEST-ONLY — used to drive a search toward worse
-  /// register occupancy so we can verify search infrastructure
-  /// (DFS, etc.) actually explores and selects against the input
-  /// baseline. Not a useful production metric.
-  kMinimizeRegisterOccupancy,
-
-  /// Inverted continuous register occupancy score: lower
-  /// GetContinuousOccupancyScore is "better." TEST-ONLY, parallel
-  /// to kMinimizeRegisterOccupancy but uses the smooth score, so
-  /// schedules that differ in within-bracket pressure (not just
-  /// integer occupancy) are distinguishable. Useful for verifying
-  /// DFS picks WORSE schedules even when no integer-occupancy
-  /// cliff is crossed.
-  kMinimizeContinuousRegisterOccupancyScore,
-};
 
 class ScheduleConstructor {
 public:
@@ -190,6 +157,13 @@ public:
   }
 
   /// Access the underlying trackers for querying metrics.
+  /// Test-only mutable access. Used by DfsSearch::EnableTestModeForTest
+  /// to plumb GCNRegisterTracker::EnableTestModeForTest through.
+  /// Production code uses the const accessor below.
+  GCNRegisterTracker &GetPressureTrackerForTest() {
+    return pressure_tracker_;
+  }
+
   const GCNRegisterTracker &GetPressureTracker() const {
     return pressure_tracker_;
   }

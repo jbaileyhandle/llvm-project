@@ -19,10 +19,12 @@ PressureHistoryTracker::PressureHistoryTracker(
     const ScheduledSetTracker *scheduled_set_tracker,
     const GCNRegisterTracker *working_register_tracker,
     const GCNRegisterTracker *best_register_tracker,
+    ScheduleMetric metric,
     std::function<bool(const ScheduleNode *)> enqueue_for_replay)
     : scheduled_set_tracker_(scheduled_set_tracker),
       working_register_tracker_(working_register_tracker),
       best_register_tracker_(best_register_tracker),
+      metric_(metric),
       enqueue_for_replay_(std::move(enqueue_for_replay)) {
   if (scheduled_set_tracker_ == nullptr) {
     report_fatal_error(
@@ -35,6 +37,19 @@ PressureHistoryTracker::PressureHistoryTracker(
   // working_register_tracker_ and best_register_tracker_ are
   // permitted to be null — see header for the test-fixture
   // contract.
+}
+
+bool PressureHistoryTracker::IsDominatedElseRecord() {
+  if (working_register_tracker_ == nullptr ||
+      best_register_tracker_ == nullptr) {
+    report_fatal_error(
+        "PressureHistoryTracker::IsDominatedElseRecord(): bound register "
+        "trackers must be non-null for the no-arg overload; either bind "
+        "them at construction or call the explicit-scores overload");
+  }
+  return IsDominatedElseRecord(
+      working_register_tracker_->GetMetricScore(metric_),
+      best_register_tracker_->GetMetricScore(metric_));
 }
 
 bool PressureHistoryTracker::IsDominatedElseRecord(

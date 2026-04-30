@@ -1029,6 +1029,29 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildHistoryPruneTestDAG() {
   return graph;
 }
 
+std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildPressureHistoryPruneTestDAG() {
+  auto graph = std::make_unique<ScheduleGraph>();
+
+  // 6 nodes A, B, C, D, E, F. Two parallel two-step chains between
+  // A and F: A→B→D→F and A→C→E→F. See header for the rationale.
+  graph->ReserveNodes(6);
+  ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
+  ScheduleNode &b = graph->EmplaceNode(nullptr, "B", graph.get());
+  ScheduleNode &c = graph->EmplaceNode(nullptr, "C", graph.get());
+  ScheduleNode &d = graph->EmplaceNode(nullptr, "D", graph.get());
+  ScheduleNode &e = graph->EmplaceNode(nullptr, "E", graph.get());
+  ScheduleNode &f = graph->EmplaceNode(nullptr, "F", graph.get());
+
+  graph->AddEdge(&a, &b, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&a, &c, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&b, &d, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&c, &e, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&d, &f, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&e, &f, ScheduleEdge::kData, /*latency=*/1);
+
+  return graph;
+}
+
 std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAGWithCycle() {
   auto graph = std::make_unique<ScheduleGraph>();
 

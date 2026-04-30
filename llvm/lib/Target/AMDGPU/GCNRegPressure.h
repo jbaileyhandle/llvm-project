@@ -42,6 +42,23 @@ struct GCNRegPressure {
     clear();
   }
 
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  /// Construct from scalar register counts. Tuple weights are
+  /// initialized to zero. Useful when synthetic pressure values
+  /// need to be assembled without going through `inc()` (which
+  /// requires MachineRegisterInfo and a real virtual register) —
+  /// e.g., GCNRegisterTracker's test mode.
+  GCNRegPressure(unsigned vgpr32_count, unsigned sgpr32_count = 0,
+                 unsigned agpr32_count = 0) {
+    clear();
+    Value[VGPR32] = vgpr32_count;
+    Value[SGPR32] = sgpr32_count;
+    Value[AGPR32] = agpr32_count;
+  }
+  //========================================================================================
+
   bool empty() const { return getSGPRNum() == 0 && getVGPRNum(false) == 0; }
 
   void clear() { std::fill(&Value[0], &Value[TOTAL_KINDS], 0); }

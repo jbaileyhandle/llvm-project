@@ -1825,6 +1825,7 @@ BuildPressureHistoryTrackerFixture(const GCNSubtarget &st) {
       fixture.scheduled_set_tracker.get(),
       /*working_register_tracker=*/nullptr,
       /*best_register_tracker=*/nullptr,
+      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore,
       [](const ScheduleNode *) { return false; });
   return fixture;
 }
@@ -2041,7 +2042,8 @@ class TestLengthPolicyNoBoundsNoHistory : public DfsMinimizeLengthPolicy {
   static constexpr bool kUseLengthHistoryPruning = false;
   static bool ShouldBoundSearch(const ScheduleConstructor &,
                                 const ScheduleConstructor &,
-                                LengthHistoryTracker &) {
+                                LengthHistoryTracker &,
+                                PressureHistoryTracker &) {
     return false;
   }
 };
@@ -2051,7 +2053,8 @@ class TestLengthPolicyNoBoundsWithHistory : public DfsMinimizeLengthPolicy {
   static constexpr bool kUseLengthHistoryPruning = true;
   static bool ShouldBoundSearch(const ScheduleConstructor &,
                                 const ScheduleConstructor &,
-                                LengthHistoryTracker &length_history) {
+                                LengthHistoryTracker &length_history,
+                                PressureHistoryTracker &) {
     return length_history.IsDominatedElseInsert();
   }
 };
@@ -2112,6 +2115,146 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
 
   llvm::outs() << "    Same best length (soundness): "
                << (same_length ? "PASS\n" : "FAIL\n");
+  llvm::outs() << "    History pruning fired (count > 0): "
+               << (prunes_fired ? "PASS\n" : "FAIL\n");
+  llvm::outs() << "    History calls strictly less when pruning: "
+               << (calls_strictly_less_when_pruning ? "PASS\n" : "FAIL\n");
+}
+
+// =============================================================================
+// PressureHistoryTracker DFS comparison shakedown
+// =============================================================================
+//
+// Test policies for pressure-history-vs-no-pressure-history. Both
+// inherit DfsMaximizeOccupancyPolicy and override
+// ShouldBoundSearch / ShouldEndSearch to disable production
+// bounds. The two variants differ only in whether ShouldBoundSearch
+// consults the pressure-history tracker. With production bounds
+// off, the schedule_call_count gap between the variants is
+// attributable to pressure-history pruning alone.
+
+class TestPressurePolicyNoBoundsNoHistory
+    : public DfsMaximizeOccupancyPolicy {
+ public:
+  static constexpr bool kUsePressureHistoryPruning = false;
+  static bool ShouldBoundSearch(const ScheduleConstructor &,
+                                const ScheduleConstructor &,
+                                LengthHistoryTracker &,
+                                PressureHistoryTracker &) {
+    return false;
+  }
+  static bool ShouldEndSearch(const ScheduleConstructor &,
+                              const ScheduleConstructor &) {
+    return false;
+  }
+};
+
+class TestPressurePolicyNoBoundsWithHistory
+    : public DfsMaximizeOccupancyPolicy {
+ public:
+  static constexpr bool kUsePressureHistoryPruning = true;
+  static bool ShouldBoundSearch(
+      const ScheduleConstructor &,
+      const ScheduleConstructor &,
+      LengthHistoryTracker &,
+      PressureHistoryTracker &pressure_history) {
+    return pressure_history.IsDominatedElseRecord();
+  }
+  static bool ShouldEndSearch(const ScheduleConstructor &,
+                              const ScheduleConstructor &) {
+    return false;
+  }
+};
+
+// End-to-end comparison shakedown for pressure history-based
+// domination. Runs DfsSearch on BuildPressureHistoryPruneTestDAG
+// twice — once with history pruning, once without — using test
+// policies that inherit DfsMaximizeOccupancyPolicy (so kMetric =
+// ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore) and
+// override ShouldBoundSearch / ShouldEndSearch to disable production
+// bounds + the IsAtOrAbove end-search. The difference between the
+// runs is therefore attributable to pressure-history pruning alone.
+// best_'s peak is seeded to a deliberately-bad value (255 VGPRs by
+// default) so any synthetic working completion beats it on the
+// first IsBetterThan, letting both runs exercise real best-update
+// behavior.
+//
+// Synthetic VGPR pressure is driven via GCNRegisterTracker's
+// test mode. Per-node deltas are indexed by topo idx
+// (A=0, B=1, C=2, D=3, E=4, F=5):
+//
+//   A=+1, B=+1, C=+1, D=-1, E=-1, F=-1
+//
+// VGPR cumulative trace per ordering:
+//   [A,B,C,D,E,F]: 1, 2, 3, 2, 1, 0  → peak 3
+//   [A,B,C,E,D,F]: 1, 2, 3, 2, 1, 0  → peak 3
+//   [A,B,D,C,E,F]: 1, 2, 1, 2, 1, 0  → peak 2
+//   [A,C,B,D,E,F]: 1, 2, 3, 2, 1, 0  → peak 3
+//   [A,C,B,E,D,F]: 1, 2, 3, 2, 1, 0  → peak 3
+//   [A,C,E,B,D,F]: 1, 2, 1, 2, 1, 0  → peak 2
+//
+// Min peak across orderings = 2 (the optimum under
+// kMaximizeContinuousRegisterOccupancyScore: lower peak → higher
+// score). Both runs should converge to best_score(peak=2).
+// Multiple orderings reach the same partition with different
+// running peaks, so prefix-dominance pruning fires at several
+// partitions during the with-history run.
+//
+// Verifies:
+//   - Same best score in both runs (soundness — history pruning
+//     doesn't lose the peak=2 optimum).
+//   - The history tracker fires at least one prune.
+//   - With history, schedule_call_count is strictly less than
+//     no-history.
+void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
+                                              const MachineFunction &mf,
+                                              const LiveIntervals &lis) {
+  llvm::outs() << "  RunPressureHistoryDfsComparisonShakedown:\n";
+
+  // kMetric is inherited from DfsMaximizeOccupancyPolicy on both
+  // test policies; reference it explicitly here for the post-Run
+  // score read.
+  constexpr ScheduleMetric kPolicyMetric =
+      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
+
+  auto graph = ScheduleGraph::BuildPressureHistoryPruneTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPathFromExit();
+  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf, lis);
+
+  std::vector<int> vgpr_deltas = {+1, +1, +1, -1, -1, -1};
+
+  DfsSearch<TestPressurePolicyNoBoundsNoHistory> no_hist_search(
+      *graph, st, mf, lis, /*form_subgraphs=*/false);
+  no_hist_search.EnableTestModeForTest(vgpr_deltas);
+  ScheduleConstructor no_hist_best = no_hist_search.Run();
+  int64_t no_hist_calls = no_hist_search.GetScheduleCallCount();
+  int no_hist_score =
+      no_hist_best.GetPressureTracker().GetMetricScore(kPolicyMetric);
+
+  DfsSearch<TestPressurePolicyNoBoundsWithHistory> hist_search(
+      *graph, st, mf, lis, /*form_subgraphs=*/false);
+  hist_search.EnableTestModeForTest(vgpr_deltas);
+  ScheduleConstructor hist_best = hist_search.Run();
+  int64_t hist_calls = hist_search.GetScheduleCallCount();
+  int hist_score =
+      hist_best.GetPressureTracker().GetMetricScore(kPolicyMetric);
+  int hist_prunes =
+      hist_search.GetPressureHistoryTracker().GetTotalPruneCount();
+
+  llvm::outs() << "    no-history: best_score=" << no_hist_score
+               << " schedule_calls=" << no_hist_calls << "\n";
+  llvm::outs() << "    history:    best_score=" << hist_score
+               << " schedule_calls=" << hist_calls
+               << " prunes=" << hist_prunes << "\n";
+
+  bool same_score = no_hist_score == hist_score;
+  bool prunes_fired = hist_prunes > 0;
+  bool calls_strictly_less_when_pruning =
+      !prunes_fired || hist_calls < no_hist_calls;
+
+  llvm::outs() << "    Same best score (soundness): "
+               << (same_score ? "PASS\n" : "FAIL\n");
   llvm::outs() << "    History pruning fired (count > 0): "
                << (prunes_fired ? "PASS\n" : "FAIL\n");
   llvm::outs() << "    History calls strictly less when pruning: "
@@ -2822,6 +2965,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunLengthHistoryTrackerShakedown(st);
   RunPressureHistoryTrackerShakedown(st);
   RunLengthHistoryDfsComparisonShakedown(st, MF, *LIS);
+  RunPressureHistoryDfsComparisonShakedown(st, MF, *LIS);
   RunAllSubgraphFormationShakedowns();
 
   for (auto &region : regions_) {
