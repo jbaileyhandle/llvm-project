@@ -500,6 +500,11 @@ struct SubgraphFormationPolicy {
 ///
 /// Returns nothing: ownership of every SubgraphInfo transfers into
 /// the graph (specifically into each subgraph's start proxy node).
+/// The graph maintains a parallel raw-pointer list accessible via
+/// `ScheduleGraph::GetSubgraphInfos()` — use that for per-region
+/// telemetry or any consumer that needs to enumerate the formed
+/// subgraphs without walking proxy nodes.
+///
 /// No-op behavior if the pipeline doesn't emit any subgraphs:
 /// InsertSubgraphProxies short-circuits on an empty vector and the
 /// final re-derive runs to keep behavior uniform regardless.

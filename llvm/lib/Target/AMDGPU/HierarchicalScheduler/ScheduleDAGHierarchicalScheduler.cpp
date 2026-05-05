@@ -297,6 +297,67 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
                << " (MFI->Occupancy now " << mfi_->getOccupancy() << ")\n";
 }
 
+// Pre-search per-region telemetry: shape of the region the DFS is
+// about to schedule. Pressure / length / formation are all printed
+// so that the same line-set is useful regardless of which driver is
+// running. Subgraph formation already ran inside DfsSearch's ctor by
+// the time this fires.
+static void PrintPreScheduleInfo(const ScheduleGraph &graph,
+                                 const ScheduleConstructor &input,
+                                 const GCNSubtarget &st) {
+  const GCNRegPressure &input_peak =
+      input.GetPressureTracker().GetPeakPressure();
+  llvm::outs()
+      << "    [Pre]  nodes=" << graph.NumSchedulingUnits()
+      << " cp=" << graph.GetCriticalPathLength() << "\n"
+      << "    [Pre]  pressure: input_peak: vgpr="
+      << input_peak.getVGPRNum(st.hasGFX90AInsts())
+      << " sgpr=" << input_peak.getSGPRNum()
+      << " | orig_reg_only_occ="
+      << input.GetPressureTracker().GetRegisterOnlyOccupancy()
+      << " | orig_all_factors_occ="
+      << input.GetPressureTracker().GetAllFactorsRegionOnlyOccupancy()
+      << "\n"
+      << "    [Pre]  length:   input_length="
+      << input.GetLengthTracker().GetCurrentCycle()
+      << " | length_floor=" << graph.GetGraphLengthFloor() << "\n";
+  graph.PrintSubgraphInfos(llvm::outs());
+}
+
+// Post-search per-region telemetry: shape of the schedule DFS
+// produced. Both pressure and length results are emitted (with a
+// `pressure:` / `length:` / `common:` demarcation) regardless of
+// which driver invoked the search — the metrics are always
+// available on the resulting ScheduleConstructor / DfsSearch
+// trackers, and showing both makes cross-pass comparisons easy.
+template <typename PolicyT>
+static void PrintPostScheduleInfo(const ScheduleGraph &graph,
+                                  const ScheduleConstructor &dfs_best,
+                                  const DfsSearch<PolicyT> &search,
+                                  const GCNSubtarget &st,
+                                  bool order_changed) {
+  const GCNRegPressure &dfs_peak =
+      dfs_best.GetPressureTracker().GetPeakPressure();
+  llvm::outs()
+      << "    [Post] pressure: dfs_peak: vgpr="
+      << dfs_peak.getVGPRNum(st.hasGFX90AInsts())
+      << " sgpr=" << dfs_peak.getSGPRNum()
+      << " | dfs_reg_only_occ="
+      << dfs_best.GetPressureTracker().GetRegisterOnlyOccupancy()
+      << " | dfs_all_factors_occ="
+      << dfs_best.GetPressureTracker().GetAllFactorsRegionOnlyOccupancy()
+      << "\n"
+      << "    [Post] length:   dfs_length="
+      << dfs_best.GetLengthTracker().GetCurrentCycle()
+      << " | length_floor=" << graph.GetGraphLengthFloor() << "\n"
+      << "    [Post] common:   schedule_calls=" << search.GetScheduleCallCount()
+      << " | length_history_prunes="
+      << search.GetLengthHistoryTracker().GetTotalPruneCount()
+      << " | pressure_history_prunes="
+      << search.GetPressureHistoryTracker().GetTotalPruneCount()
+      << " | order_changed=" << (order_changed ? "yes" : "no") << "\n";
+}
+
 // Runs DFS with DfsMaximizeOccupancyPolicy on the region's graph and
 // applies whatever schedule it returns. DfsSearch seeds best with the
 // graph's input ScheduleConstructor (the region's current MF-order
@@ -313,30 +374,18 @@ int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
   WithRegionGraph(region, [&](ScheduleGraph &graph) {
     const ScheduleConstructor &input_schedule_constructor =
         graph.GetInputScheduleConstructor();
-    const GCNRegPressure &input_peak =
-        input_schedule_constructor.GetPressureTracker().GetPeakPressure();
 
     DfsSearch<DfsMaximizeOccupancyPolicy> search(graph, st, MF, *LIS);
+    PrintPreScheduleInfo(graph, input_schedule_constructor, st);
+
     ScheduleConstructor dfs_best_schedule_constructor = search.Run();
-    const GCNRegPressure &dfs_peak =
-        dfs_best_schedule_constructor.GetPressureTracker().GetPeakPressure();
 
     bool changed =
         input_schedule_constructor.GetScheduleOrder() !=
             dfs_best_schedule_constructor.GetScheduleOrder();
 
-    // TODO: Remove this debug print once we trust the pass.
-    llvm::outs() << "    [DFS] input peak: vgpr="
-                 << input_peak.getVGPRNum(st.hasGFX90AInsts())
-                 << " sgpr=" << input_peak.getSGPRNum()
-                 << " | dfs best peak: vgpr="
-                 << dfs_peak.getVGPRNum(st.hasGFX90AInsts())
-                 << " sgpr=" << dfs_peak.getSGPRNum()
-                 << " | schedule_calls=" << search.GetScheduleCallCount()
-                 << " | pressure_history_prunes="
-                 << search.GetPressureHistoryTracker().GetTotalPruneCount()
-                 << " (N=" << graph.Size() << ")"
-                 << " | order changed=" << (changed ? "yes" : "no") << "\n";
+    PrintPostScheduleInfo(graph, dfs_best_schedule_constructor, search, st,
+                          changed);
 
     ApplyScheduleOrder(region, dfs_best_schedule_constructor);
 
@@ -371,26 +420,17 @@ void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
   WithRegionGraph(region, [&](ScheduleGraph &graph) {
     const ScheduleConstructor &input_schedule_constructor =
         graph.GetInputScheduleConstructor();
-    int input_length =
-        input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
 
     DfsSearch<DfsMinimizeLengthPolicy> search(graph, st, MF, *LIS);
+    PrintPreScheduleInfo(graph, input_schedule_constructor, st);
+
     ScheduleConstructor dfs_best_schedule_constructor = search.Run();
-    int dfs_length =
-        dfs_best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
 
     bool changed = input_schedule_constructor.GetScheduleOrder() !=
                    dfs_best_schedule_constructor.GetScheduleOrder();
 
-    // TODO: Remove this debug print once we trust the pass.
-    llvm::outs() << "input length=" << input_length
-                 << " dfs best length=" << dfs_length
-                 << " floor=" << graph.GetGraphLengthFloor()
-                 << " | schedule_calls=" << search.GetScheduleCallCount()
-                 << " | length_history_prunes="
-                 << search.GetLengthHistoryTracker().GetTotalPruneCount()
-                 << " (N=" << graph.Size() << ")"
-                 << " | order changed=" << (changed ? "yes" : "no") << "\n";
+    PrintPostScheduleInfo(graph, dfs_best_schedule_constructor, search, st,
+                          changed);
 
     ApplyScheduleOrder(region, dfs_best_schedule_constructor);
   });

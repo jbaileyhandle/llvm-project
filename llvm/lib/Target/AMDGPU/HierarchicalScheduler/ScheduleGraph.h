@@ -854,6 +854,23 @@ public:
   void InsertSubgraphProxies(
       std::vector<std::unique_ptr<SubgraphInfo>> infos);
 
+  /// Read-only access to the SubgraphInfos held by this graph (one
+  /// per subgraph that InsertSubgraphProxies has installed). Sorted
+  /// by member count descending — largest subgraphs first.
+  /// Lifetime matches the graph: each SubgraphInfo is owned by its
+  /// start-proxy node's unique_ptr; this list holds parallel raw
+  /// pointers. Empty if no subgraphs have been formed.
+  ArrayRef<SubgraphInfo *> GetSubgraphInfos() const {
+    return subgraph_infos_;
+  }
+
+  /// Print a per-region formation summary to `os`: one line with
+  /// the subgraph count and total real-node coverage, followed by
+  /// one indented line per subgraph (in `GetSubgraphInfos()` order
+  /// — largest first) with that subgraph's member count and debug
+  /// name.
+  void PrintSubgraphInfos(raw_ostream &os) const;
+
   /// Umbrella entry point: verify single-source / single-sink (under
   /// both the strong-edge and all-edge interpretations, for safety)
   /// and compute topological order. This is the standard "graph
@@ -1109,6 +1126,13 @@ private:
 
   std::unique_ptr<DominatorTree> dom_tree_;
   std::unique_ptr<ScheduleConstructor> input_schedule_constructor_;
+
+  /// Parallel raw pointers to the SubgraphInfos installed by
+  /// InsertSubgraphProxies. The unique_ptrs themselves live on each
+  /// subgraph's start-proxy node; this list is a stable handle for
+  /// consumers that want to enumerate the formed subgraphs without
+  /// walking proxy nodes (per-region telemetry, debug dumps, etc.).
+  std::vector<SubgraphInfo *> subgraph_infos_;
 
   /// Clear all derived caches. Called by every graph-mutating op
   /// (AddEdge, EmplaceNode, future EmplaceSubgraphProxyNode, ...)

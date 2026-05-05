@@ -370,14 +370,41 @@ void ScheduleGraph::InsertSubgraphProxies(
   CheckNoNestedMembers(infos);
   CheckMembersDisjoint(infos);
 
+  subgraph_infos_.reserve(subgraph_infos_.size() + infos.size());
   for (auto &info_ptr : infos) {
+    // Snapshot the raw pointer before ownership moves into the
+    // start-proxy node; the proxy keeps the unique_ptr alive for
+    // the graph's lifetime, so this raw pointer stays valid.
+    subgraph_infos_.push_back(info_ptr.get());
     EmplaceProxyAndWireEdges(std::move(info_ptr));
   }
+
+  // Sort by member count descending so consumers (telemetry, debug
+  // dumps) see the largest subgraphs first.
+  std::sort(subgraph_infos_.begin(), subgraph_infos_.end(),
+            [](const SubgraphInfo *a, const SubgraphInfo *b) {
+              return a->members.size() > b->members.size();
+            });
 
   // Topo recompute also re-runs cycle detection, our re-entrancy
   // catch for the just-inserted subgraphs.
   ValidateAndComputeTopologicalOrder();
   ComputeCriticalPathFromExit();
+}
+
+void ScheduleGraph::PrintSubgraphInfos(raw_ostream &os) const {
+  int total_members_covered = 0;
+  for (const SubgraphInfo *info : subgraph_infos_) {
+    total_members_covered += static_cast<int>(info->members.size());
+  }
+  os << "    [Formation] subgraphs=" << subgraph_infos_.size()
+     << " covered=" << total_members_covered
+     << "/" << NumSchedulingUnits() << "\n";
+  for (size_t i = 0; i < subgraph_infos_.size(); ++i) {
+    const SubgraphInfo *info = subgraph_infos_[i];
+    os << "      [" << i << "] members=" << info->members.size()
+       << " name=" << info->debug_name << "\n";
+  }
 }
 
 // Kahn's algorithm: iteratively remove nodes with no unmet predecessors.
