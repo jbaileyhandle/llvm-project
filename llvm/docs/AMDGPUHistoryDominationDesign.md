@@ -32,6 +32,7 @@ from subgraph formation fit in, and the phasing.
 8. [DfsSearch Integration](#8-dfssearch-integration)
 9. [Worked Example](#9-worked-example)
 10. [Implementation Phases](#10-implementation-phases)
+11. [Retrospective: Postfix Tracking Was Dropped](#11-retrospective-postfix-tracking-was-dropped)
 
 A note on the structure: §6 ("Pressure History") is the part of
 this design that has evolved most. It now covers a score-based
@@ -843,12 +844,20 @@ and let `cur` = `current_prefix_score`.
    dimension. By the decoupling argument, anything our subtree
    could reach is reachable (at no worse score) from the prior
    visit. Outcome: prune.
-3. **Prior `best_postfix_score != INT_MIN`** (real postfix
-   completion was recorded below this partition) and
-   `min(cur, prior.best_postfix_score) <= best_so_far_score`.
-   The total reachable score from our prefix is upper-bounded
-   by that `min`; if it can't beat the running best, no
-   completion below us improves the result. Outcome: prune.
+3. **`min(cur, prior.best_postfix_score) <= best_so_far_score`**
+   (total-bound). The total reachable score from our prefix is
+   upper-bounded by that `min`; if it can't beat the running
+   best, no completion below us improves the result. Outcome:
+   max-update `best_prefix_score = max(prior, cur)` (cur is
+   strictly better than prior on prefix, since case 2 didn't
+   fire), then prune. **Prune also triggers a backward walk**
+   from this partition along our prefix, recording the cobbled
+   chain (our prefix + the existing hint chain from here) into
+   `best_postfix_score` at every partition on our prefix path
+   — see §6.5.
+   (INT_MIN postfix sentinel falls out of this check
+   automatically — `min(any, INT_MIN) = INT_MIN <= best_so_far`
+   for any finite running best.)
 4. **Prior `best_postfix_score != INT_MIN`** and the total bound
    in case 3 does NOT fire AND prior has a non-null
    `next_node_hint`. We're not dominated, the recorded path
@@ -906,27 +915,119 @@ The math falls out automatically through case 3:
 finite running best, so case 3 fires and B is pruned without
 exploration. No "fully pruned" boolean needed.
 
-### 6.5 Postfix recording at completion (backward walk)
+### 6.5 Backward walks (postfix recording on IsDone and case-3 prune)
 
-When DFS reaches `IsDone()`, the working prefix is a complete
-schedule. `RecordPostfixScoresFromCompletedSchedule()` walks
-`schedule_order_` and updates the history table for every
-partition along the path:
+Backward walks update `best_postfix_score` at every partition
+on the walking path. Two events trigger a walk:
 
-For each step `k` from 0 to N (representing the partition
-reached after scheduling the first `k` nodes):
-- Compute the partition X' incrementally (each step adds one
-  node's contribution to the partition signature).
-- Compute the postfix score for X' via suffix-extreme over the
-  forward register tracker's `pressure_history_` (the
-  per-instruction record added in Phase 3).
-- Update `entry.best_postfix_score = max(prior, postfix_score)`.
-- Set `entry.next_node_hint = schedule_order_[k]` — the node
-  scheduled NEXT from X' along this completion's path.
+1. **DFS reaches IsDone** at the end of a complete schedule.
+   The walker has all N per-step scores from the completion's
+   forward execution. The walk's path is the full
+   `schedule_order_`.
 
-The walk is O(N) per completion. Forward register tracker's
-recorded pressure provides the data; one suffix scan gives all
-postfix scores along the path.
+2. **Case 3 prune fires at depth k**. The walker has per-step
+   scores for depths 0 through k−1 (the path our prefix took
+   up to the prune point). The completion captured by the
+   walk is **cobbled**: our prefix to depth k stitched onto
+   the completion that achieved
+   `prior.best_postfix_score` at the prune partition. This
+   cobbled completion is real and achievable in principle (we
+   could trace it via the existing hint chain once the
+   replay machinery lands), so the postfix scores derived
+   from it are valid recordings.
+
+#### The walk routine
+
+The walk is the same routine in both cases, parameterized by
+an initial `running` value:
+- IsDone: `running` starts at the score of the last per-step
+  (no constraint from "after the schedule").
+- Case-3 prune at depth k: `running` starts at
+  `prior.best_postfix_score` of the prune partition — the
+  cobbled chain's score from depth k onward.
+
+Walking backward from the deepest partition on the walk path
+to the shallowest, at each step k:
+
+```
+our_path_at_k = min(per_step_score[k], running_at_(k+1))
+running_at_k  = max(existing_at_X_k, our_path_at_k)
+update best_postfix_at_X_k iff our_path_at_k > existing_at_X_k
+```
+
+The inner `min` says "our prefix's contribution at this step
+is bottlenecked by the smaller of (the score reached at this
+step) and (whatever can be achieved from the next partition
+onward)." The outer `max` says "the chain at this partition
+is the better of (the existing chain from here) and (our
+path's chain via our edge)."
+
+This is **chain-aware**: when we lose at one depth, `running`
+adopts `existing_at_X_k` so that shallower walks compute their
+options against the best-known chain rather than just our
+completion's suffix-min. That matters at shallower partitions
+where our edge `X_(k-1) → X_k` introduces a chain combination
+that prior completions through `X_(k-1)` may not have seen.
+
+#### No backward-walk early stop in 4c
+
+Even when our path loses at depth k+1, our walk at shallower
+depths may still legitimately update `best_postfix` because
+existing values at shallower partitions might not have
+incorporated our specific edge into their chain-aware max.
+Specifically, partitions can be reached from multiple
+predecessor partitions (different orderings of the first k+1
+nodes give different sets at depth k); a prior completion
+may have used a different predecessor than ours and never
+recorded the chain via our edge. Our walk introduces it.
+
+The full walk is O(L) per event (L = N for IsDone, k for
+case-3 prune at depth k) — bounded by graph size. The early-
+stop optimization (§6.6) is deferred to a later phase that
+adds the bookkeeping needed to soundly detect "edge already
+explored."
+
+#### `next_node_hint` update is deferred
+
+The walk routine above only updates `best_postfix_score`. The
+`next_node_hint` field stays nullptr until the replay phases
+land — at which point the same walk also sets the hint to
+`schedule_order[k]` whenever we beat existing (the partition's
+hint then points to the completion that holds its current
+best_postfix).
+
+### 6.6 Edge recording: early-stop optimization for backward walks
+
+Sound early-stop on the backward walk requires knowing whether
+existing values at our walking path have already incorporated
+our specific edges into their chain-aware max. The cleanest
+mechanism: per-entry `explored_next_nodes` set — topo indices
+of next-nodes our edges have been used with at this partition.
+
+**Update.** During a backward walk at partition `X_k`, after
+processing the entry, append `schedule_order[k]->GetTopoIndex()`
+to `explored_next_nodes_at_X_k` (set-if-absent semantics).
+
+**Early-stop check.** At depth k+1 we lost
+(`min(running, per_step_score[k+1]) ≤ existing_at_(k+1)`).
+Look at `explored_next_nodes_at_X_k`. If `schedule_order[k]`
+is in there, `existing_at_X_k` already incorporates the chain
+via our edge → we'll lose at k too → stop walking.
+
+**Staleness gap.** Even with our edge marked explored,
+`existing_at_X_(k+1)` may have been updated upward since the
+prior walk that recorded our edge. Our walk's chain via our
+edge uses the *current* `existing_at_X_(k+1)`, so it could be
+slightly higher than what's recorded in `existing_at_X_k`. The
+under-recording is bounded by the staleness gap and is
+*conservative* for the case-3 prune (slightly less aggressive
+pruning, never over-pruning), so it's safe.
+
+**Why deferred.** The bookkeeping adds a small data structure
+per entry plus update + check logic on the walk hot path. The
+per-walk savings depend on data we don't yet have measurements
+for. Land in the dedicated edge-recording phase (see §10) once
+DFS wiring (4d) gives an actual perf signal.
 
 ### 6.6 Fast-forward via DfsSearch replay queue
 
@@ -1756,6 +1857,195 @@ Pure cleanup; can be done at any time, including not at all.
 - Gate `DfsSearch`'s tracker construction on the flags. Avoids
   the small construction overhead for passes that don't use a
   given tracker.
+
+---
+
+## 11. Retrospective: Postfix Tracking Was Dropped
+
+This section was added after the design above had been substantially
+written and Phase 4b had shipped. It documents why the postfix-side
+machinery (Phase 4c onward — `best_postfix_score`, IsDone-only
+backward walks, case 3 total-bound prune, prune-event walks, edge
+caching, hint replay) was abandoned, and what alternative shapes
+were considered.
+
+The current state of the implementation is:
+- Phase 4a/4b shipped. Pressure-side pruning consists of two
+  mechanisms: the policy's score-bound prune (working's metric
+  score ≤ best's → prune) and `PressureHistoryTracker`'s case 1 +
+  case 2 (insert / prefix-dominance prune). No case 3, no postfix
+  recording, no hints.
+- The `Entry` struct still carries `best_postfix_score = INT_MIN`
+  and `next_node_hint = nullptr` as inert placeholders; nothing
+  reads them. They're left in the struct because removing them is
+  unrelated cleanup and doesn't affect behavior.
+- Phases 4c–4h as described elsewhere in this document are not
+  going to be implemented as written.
+
+### 11.1 The soundness gap that stopped us
+
+Case 3 as specified was: `prune if min(current_prefix_score,
+prior.best_postfix_score) <= best_so_far_score`. For this prune to
+be sound, `prior.best_postfix_score` must be an upper bound on the
+true maximum-postfix-running-min over all completions through the
+partition (i.e. `stored_postfix ≥ true_max_postfix`). Otherwise the
+test fires when `stored ≤ best_so_far` even though some completion
+exists with `min(current_prefix, true_max_postfix) > best_so_far` —
+an unsound prune.
+
+If postfix is recorded only by IsDone backward walks (Phase 4c —
+"Point 1" in the implementation discussion), this invariant fails.
+The reason is that some paths through a partition never reach
+IsDone — they get case-2 pruned somewhere in the partition's
+subtree before completing. Those paths' postfix-running-min
+contributions are never recorded, so the stored value is missing
+them. If one of those missed paths has higher V than any recorded
+path, `stored < true_max_postfix`, and case 3 is unsound.
+
+The case-2-prune-with-prefix-binding pattern is the concrete shape
+where this bites: when the prefix is the running-min bottleneck
+into a partition, two intra-subtree orderings can tie at the same
+running min at a deeper convergent partition Q (because both equal
+the prefix value), so case 2 prunes one of them. But the two
+orderings traversed *different intermediate partitions* on their
+way from P to Q, with different per-partition scores. The pruned
+path's postfix-from-P (which includes those intermediate scores
+plus the rest of the path) can be different from — and higher than
+— the dominator's postfix-from-P. Case 2's prune was sound on its
+own (the pruned path's *completion-final-score* is bounded by the
+dominator's), but the pruned path's *V (postfix-running-min from
+P)* is not bounded by anything we recorded.
+
+This pattern is realistic, not pathological — it shows up any time
+the prefix has a high-pressure region that bottlenecks the running
+min before reaching a multi-path-rich partition. In practice we
+expect it to occur in real workloads.
+
+### 11.2 Walks on every prune event would close the gap, but…
+
+Recording walks on every prune event (Phase 4e — "Point 3") closes
+the soundness gap by making sure every path's V gets a recorded
+contribution. Each walk seeds with `score(prune_partition)` and
+records over-bounds at ancestor partitions; combined via `max`,
+the stored value is a sound over-bound on true_max.
+
+Two problems with this approach:
+
+1. **Cost.** A walk traces back from the prune partition all the
+   way to the empty partition along the path's ancestors — O(N)
+   work per prune. With prunes potentially common during search,
+   total walk work scales as O(prunes × N), competitive with or
+   worse than the search itself.
+
+2. **Edge caching for early-stop didn't safely apply.** The
+   intuition was: stop a walk at a "fully-explored" partition
+   (one whose entire subtree has been processed) because its
+   stored value is already complete and so are its ancestors-via-
+   any-prior-walk. This is true *for ancestors that prior walks
+   actually traversed*, but a new walk via a different prefix has
+   its own prefix-specific ancestor chain (= the divergent part
+   of its path). Stopping at the fully-explored convergence
+   partition skips updating those prefix-specific ancestors.
+   So edge caching, as a walk-cost reducer, doesn't safely
+   short-circuit.
+
+A "skip walk if seed ≤ best_so_far" rule was sketched as a cheap
+optimization, but the soundness argument requires careful reasoning
+about ordering of walks vs case-3 evaluations, and we couldn't
+nail it down to confidence.
+
+### 11.3 Why we stopped pushing
+
+Beyond the specific soundness analyses, the meta-issue was that
+the DFS-with-walks-on-events architecture has subtle invariants
+about ordering — what's been walked vs what's pending vs what
+case-3 is currently evaluating against — that made reasoning
+brittle. During design discussion we flipped between "sound" and
+"unsound" conclusions multiple times, with construction errors in
+several attempted counter-examples. That's a sign the architecture
+isn't a good fit for confidence-by-reasoning; it would need a
+formal invariant proof and/or comprehensive testing to ship
+without lurking bugs.
+
+Phase 4b's pruning (score-bound at the policy + prefix-dominance
+in the tracker) is sound by clearer arguments and provides real
+benefit. Stopping there preserves the wins we're confident in and
+avoids shipping subtle correctness risks.
+
+### 11.4 Better-shaped alternatives, in case we revisit
+
+#### BFS-based dynamic programming (BFS-DP)
+
+Process partitions in size order (size 0, then size 1, ...). For
+each partition P, compute
+`best_prefix_at_P = min(score(P), max over predecessors Q of
+best_prefix_at_Q)`. Each partition processed exactly once. The
+optimum schedule's running min = `best_prefix_at_terminal`.
+
+This is the same problem shape as our DFS, but framed as a clean
+DP. It avoids DFS's "re-explore subtree on each strict-better
+prefix" redundancy. Total cost O(states × avg_predecessors),
+same as DFS-with-perfect-dominance and strictly less than DFS
+when dominance is imperfect. Soundness by construction.
+
+A backward BFS-DP from terminal would symmetrically compute
+`best_postfix_at_P` for every partition. Sound true-max-postfix
+values, ready for case 3 pruning, hint replay, or both, with no
+walk-ordering questions.
+
+The cost of switching to BFS-DP is that it's a parallel
+implementation, not an extension of the existing DFS. It needs:
+- An enumerator for valid partitions (downsets of the DAG)
+  level-by-level.
+- A from-scratch `score(P)` query over arbitrary partitions
+  (the existing `GCNRegisterTracker` is incremental, not
+  designed for arbitrary-state queries).
+- The DP loop and a schedule-recovery backtrace.
+
+Estimated effort: ~1.5 weeks for a working prototype.
+
+#### Bidirectional / meet-in-the-middle
+
+Forward search from start + backward search from terminal,
+meeting at midpoint partitions. Powerful for shortest-path
+problems where you only need *a* solution — exponential reduction
+from `b^d` to `2·b^(d/2)`. Less compelling for our problem
+because we're finding the *optimum*, which requires processing
+every reachable state regardless of search direction. The
+reduction collapses to a constant factor at best.
+
+Bidirectional in BFS-DP form is even less interesting: each
+direction processes about half the states; total work is the
+same as a single-direction sweep.
+
+In short: bidirectional doesn't add over BFS-DP for our problem.
+
+#### Hint replay only (no case-3 prune)
+
+If hint replay is desired (Phase 4g/4h's idea: follow a known
+good schedule's path to fast-forward through DFS), it can be
+done without case 3 and without bsf comparisons. Hints just
+need each partition's `next_node_hint` to point along some real
+completion's path. Populated via IsDone walks only, this is
+sound by construction (hint chain = real schedule). No
+under-bound issue because we're not making an over-bound claim;
+we're just storing pointers to real schedules.
+
+Cost of hint replay alone: postfix backward walks at IsDone (which
+are O(N) per completed schedule, much rarer than per-prune). No
+edge caching needed. No case 3 logic. Could be added on top of
+Phase 4b without disturbing the pruning machinery.
+
+### 11.5 Summary
+
+The postfix-tracking branch of this design is shelved. Phase 4b
+is the production state. If pressure-side pruning becomes desired
+beyond what Phase 4b achieves, the recommended path is backward
+BFS-DP (either as a pre-pass to feed case-3 prunes with sound
+bounds in the existing DFS, or as part of a wholesale switch to
+BFS-DP). The DFS-with-walks-on-events architecture as written in
+§6 of this document should be considered exploratory, not the
+direction to extend.
 
 ---
 
