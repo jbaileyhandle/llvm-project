@@ -18,42 +18,31 @@ namespace hierarchical_scheduler {
 PressureHistoryTracker::PressureHistoryTracker(
     const ScheduledSetTracker *scheduled_set_tracker,
     const GCNRegisterTracker *working_register_tracker,
-    const GCNRegisterTracker *best_register_tracker,
-    ScheduleMetric metric,
-    std::function<bool(const ScheduleNode *)> enqueue_for_replay)
+    ScheduleMetric metric)
     : scheduled_set_tracker_(scheduled_set_tracker),
       working_register_tracker_(working_register_tracker),
-      best_register_tracker_(best_register_tracker),
-      metric_(metric),
-      enqueue_for_replay_(std::move(enqueue_for_replay)) {
+      metric_(metric) {
   if (scheduled_set_tracker_ == nullptr) {
     report_fatal_error(
         "PressureHistoryTracker: scheduled_set_tracker must not be null");
   }
-  if (!enqueue_for_replay_) {
-    report_fatal_error(
-        "PressureHistoryTracker: enqueue_for_replay must be non-empty");
-  }
-  // working_register_tracker_ and best_register_tracker_ are
-  // permitted to be null — see header for the test-fixture
-  // contract.
+  // working_register_tracker_ is permitted to be null — see header
+  // for the test-fixture contract.
 }
 
 bool PressureHistoryTracker::IsDominatedElseRecord() {
-  if (working_register_tracker_ == nullptr ||
-      best_register_tracker_ == nullptr) {
+  if (working_register_tracker_ == nullptr) {
     report_fatal_error(
-        "PressureHistoryTracker::IsDominatedElseRecord(): bound register "
-        "trackers must be non-null for the no-arg overload; either bind "
-        "them at construction or call the explicit-scores overload");
+        "PressureHistoryTracker::IsDominatedElseRecord(): bound working "
+        "register tracker must be non-null for the no-arg overload; either "
+        "bind it at construction or call the explicit-score overload");
   }
   return IsDominatedElseRecord(
-      working_register_tracker_->GetMetricScore(metric_),
-      best_register_tracker_->GetMetricScore(metric_));
+      working_register_tracker_->GetMetricScore(metric_));
 }
 
 bool PressureHistoryTracker::IsDominatedElseRecord(
-    int current_prefix_score, int /*best_so_far_score*/) {
+    int current_prefix_score) {
   // Heterogeneous lookup via PartitionKeyView avoids copying the
   // bitset on the existing-entry path. DenseMap dispatches on
   // signature for the hash bucket, then disambiguates with the

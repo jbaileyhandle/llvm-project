@@ -166,9 +166,8 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
   //       for what the tracker checks and why pruning is safe.
   //
   // SIDE EFFECT: IsDominatedElseRecord can mutate the tracker
-  // (recording state for future comparison) and may invoke the
-  // tracker's enqueue_for_replay callback to push a fast-forward
-  // hint onto DfsSearch's replay queue. See PressureHistoryTracker.
+  // (recording state for future comparison). See
+  // PressureHistoryTracker.
   //
   // `length_history` parameter is unused here — present only
   // because DfsSearch invokes ShouldBoundSearch with a uniform

@@ -611,12 +611,10 @@ public:
   /// the late one waits one cycle, and D waits one more).
   static std::unique_ptr<ScheduleGraph> BuildHistoryPruneTestDAG();
 
-  /// Build a synthetic test DAG that exercises pressure history-
-  /// domination across all three cases the tracker eventually
-  /// supports — prefix dominance, total-bound (postfix) prune,
-  /// and fast-forward replay. Used with GCNRegisterTracker's
-  /// test mode (per-node VGPR deltas) so the test author picks
-  /// pressure dynamics independently of the DAG's topology.
+  /// Build a synthetic test DAG for exercising pressure history-
+  /// domination. Used with GCNRegisterTracker's test mode (per-
+  /// node VGPR deltas) so the test author picks pressure dynamics
+  /// independently of the DAG's topology.
   ///
   /// Structure (6 nodes, 6 edges):
   ///
@@ -635,16 +633,6 @@ public:
   ///     [A,C,B,D]) → richer prefix variety; one ordering can
   ///     have its prefix dominated by a later ordering's better
   ///     prefix.
-  ///   - From {A, B, C}, two distinct continuations ({A,B,C}+D...
-  ///     vs {A,B,C}+E...) give different postfix peaks → enables
-  ///     case 3 (total-bound) by letting one continuation record
-  ///     a poor postfix that bounds out a later prefix-better
-  ///     visit.
-  ///   - Postfix from {A, B, C, D} (or {A, B, C, E}) is a forced
-  ///     2-step chain (E,F or D,F respectively) → fast-forward
-  ///     replay's `next_node_hint` chain has multiple steps,
-  ///     making following the hint observable vs. picking from
-  ///     the ready list.
   ///
   /// All edges have latency 1 (length-side dynamics aren't the
   /// focus here).

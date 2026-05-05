@@ -1786,12 +1786,12 @@ void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
 // =============================================================================
 //
 // Standalone tests for PressureHistoryTracker's prefix-side logic.
-// The tracker's explicit-scores overload of IsDominatedElseRecord
-// is metric-agnostic — it just compares two ints — so these tests
-// pass literal ints for current_prefix_score and best_so_far_score
-// and don't need a real GCNRegisterTracker. The tracker is
-// constructed with nullptr register-tracker pointers and a no-op
-// enqueue lambda; the no-arg overload is not yet defined.
+// The tracker's explicit-score overload of IsDominatedElseRecord
+// is metric-agnostic — it just compares ints — so these tests pass
+// literal ints for current_prefix_score and don't need a real
+// GCNRegisterTracker. The tracker is constructed with nullptr
+// register-tracker pointer; the no-arg overload would fatal-error
+// in this configuration but isn't called here.
 
 struct PressureHistoryTrackerFixture {
   std::unique_ptr<ScheduleGraph> graph;
@@ -1824,9 +1824,7 @@ BuildPressureHistoryTrackerFixture(const GCNSubtarget &st) {
   fixture.pressure_history_tracker = std::make_unique<PressureHistoryTracker>(
       fixture.scheduled_set_tracker.get(),
       /*working_register_tracker=*/nullptr,
-      /*best_register_tracker=*/nullptr,
-      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore,
-      [](const ScheduleNode *) { return false; });
+      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore);
   return fixture;
 }
 
@@ -1860,7 +1858,7 @@ static void RunPressureHistoryFirstInsertAndSelfDominanceShakedown(
 
   bool first_call_inserted =
       !fixture.pressure_history_tracker->IsDominatedElseRecord(
-          /*current_prefix_score=*/100, /*best_so_far_score=*/0);
+          /*current_prefix_score=*/100);
   bool count_one_after_first =
       fixture.pressure_history_tracker->GetTotalEntries() == 1;
 
@@ -1868,7 +1866,7 @@ static void RunPressureHistoryFirstInsertAndSelfDominanceShakedown(
   // (equality counts).
   bool second_call_pruned =
       fixture.pressure_history_tracker->IsDominatedElseRecord(
-          /*current_prefix_score=*/100, /*best_so_far_score=*/0);
+          /*current_prefix_score=*/100);
   bool count_unchanged_after_second =
       fixture.pressure_history_tracker->GetTotalEntries() == 1;
   bool prune_count_one =
@@ -1897,7 +1895,7 @@ RunPressureHistoryStrictPriorDominatorShakedown(const GCNSubtarget &st) {
   // Query with strictly lower current_prefix_score. Prior 200 >=
   // current 100 → prune.
   bool pruned = fixture.pressure_history_tracker->IsDominatedElseRecord(
-      /*current_prefix_score=*/100, /*best_so_far_score=*/0);
+      /*current_prefix_score=*/100);
   const PressureHistoryTracker::Entry *after =
       fixture.pressure_history_tracker->GetEntryForTest(key);
   bool entry_unchanged = after != nullptr && after->best_prefix_score == 200;
@@ -1930,7 +1928,7 @@ static void RunPressureHistoryStrictCurrentBetterShakedown(
   // Query with strictly higher current. Prior 50 < current 200 → no
   // prune; entry updated to 200.
   bool not_pruned = !fixture.pressure_history_tracker->IsDominatedElseRecord(
-      /*current_prefix_score=*/200, /*best_so_far_score=*/0);
+      /*current_prefix_score=*/200);
   const PressureHistoryTracker::Entry *after =
       fixture.pressure_history_tracker->GetEntryForTest(key);
   bool entry_updated = after != nullptr && after->best_prefix_score == 200;
@@ -1957,13 +1955,13 @@ RunPressureHistoryDistinctPartitionsShakedown(const GCNSubtarget &st) {
   ScheduleNodeOnPressureFixture(fixture, fixture.a);
   bool a_inserted =
       !fixture.pressure_history_tracker->IsDominatedElseRecord(
-          /*current_prefix_score=*/100, /*best_so_far_score=*/0);
+          /*current_prefix_score=*/100);
 
   // Partition 2: {A, H} scheduled.
   ScheduleNodeOnPressureFixture(fixture, fixture.h);
   bool ah_inserted =
       !fixture.pressure_history_tracker->IsDominatedElseRecord(
-          /*current_prefix_score=*/200, /*best_so_far_score=*/0);
+          /*current_prefix_score=*/200);
 
   bool count_two =
       fixture.pressure_history_tracker->GetTotalEntries() == 2;

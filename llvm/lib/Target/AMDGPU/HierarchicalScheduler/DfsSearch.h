@@ -89,18 +89,14 @@ class DfsSearch {
             &working_schedule_constructor_.GetScheduledSetTracker(),
             &working_schedule_constructor_.GetLengthTracker()),
         // pressure_history_ binds to working_'s scheduled-set
-        // tracker for partition keys, and to working/best
-        // pressure trackers for the no-arg score reads. The
-        // metric matches Policy::kMetric so the tracker reads
-        // values consistent with what the search optimizes.
-        // Enqueue callback is a no-op until the replay queue
-        // is wired in.
+        // tracker for partition keys, and to working_'s pressure
+        // tracker for the no-arg score read. The metric matches
+        // Policy::kMetric so the tracker reads values consistent
+        // with what the search optimizes.
         pressure_history_(
             &working_schedule_constructor_.GetScheduledSetTracker(),
             &working_schedule_constructor_.GetPressureTracker(),
-            &best_schedule_constructor_.GetPressureTracker(),
-            Policy::kMetric,
-            [](const ScheduleNode *) -> bool { return false; }) {
+            Policy::kMetric) {
     // best_schedule_constructor_ is copy-constructed from the
     // graph's input schedule (built by BuildFromSUnits as Phase 4).
     // That gives us a complete valid schedule matching the region's
