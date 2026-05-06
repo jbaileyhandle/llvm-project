@@ -42,10 +42,16 @@
 // are handled by DenseMap's open-addressing probing, transparent to
 // this class.
 //
-// Memory cap: hard-internal `kMaxEntries`. Insertion past the cap
-// reports a fatal error rather than silently degrading. LRU
-// eviction was considered and deferred — see §8.3 of the design
-// doc for the rationale.
+// Memory cap: soft-internal `kMaxEntries`. Insertion past the cap
+// silently no-ops (no insert, no fatal error) and sets a flag that
+// callers can read via `MemoryCapWasHit()` for telemetry. The
+// dominance check against already-recorded entries is unaffected —
+// pruning still fires for any prefix that an existing entry
+// dominates; we just stop *recording* new prefixes once the cap is
+// reached. The per-region wall-clock timeout in DfsSearch (see
+// DfsSearch.h) is the real bound on runaway searches; the cap
+// exists only as a memory backstop. LRU eviction was considered
+// and deferred — see §8.3 of the design doc for the rationale.
 //
 //===----------------------------------------------------------------------===//
 
@@ -83,9 +89,16 @@ struct FrontierLb {
 class LengthHistoryTracker {
  public:
   /// Total-entry cap across all partitions. Insertion past this
-  /// limit reports a fatal error. See class-level comment for the
-  /// fatal-error-vs-eviction rationale.
-  static constexpr int kMaxEntries = 20'000;
+  /// limit silently no-ops (search continues, just without
+  /// recording the new prefix); the per-region wall-clock timeout
+  /// in DfsSearch is the real bound on runaway searches. Sized
+  /// generously so the cap is just a memory backstop. Per-entry
+  /// footprint is the PartitionKey's BitVector (~150 B for a
+  /// 600-node region, scaling with N) plus the per-Entry
+  /// end_cycle and inline-16 frontier_lbs SmallVector (~150 B).
+  /// At 10M entries that's ~3 GB worst case. See class-level
+  /// comment for the soft-cap-vs-eviction rationale.
+  static constexpr int kMaxEntries = 10'000'000;
 
   /// One Pareto-frontier element. The (signature, scheduled_set)
   /// is encoded by the bucket's PartitionKey, not duplicated here.
@@ -118,8 +131,13 @@ class LengthHistoryTracker {
   /// True iff the current prefix is dominated by some existing
   /// entry. If false, a new entry for the current prefix is
   /// inserted and any existing entries dominated by it are removed
-  /// (Pareto trim). Reports a fatal error if inserting would exceed
-  /// `kMaxEntries`.
+  /// (Pareto trim). If inserting would exceed `kMaxEntries`, the
+  /// insert is silently skipped and `memory_cap_hit_` is set
+  /// (queryable via `MemoryCapWasHit()`); the search continues
+  /// with whatever entries are already recorded. Returns false in
+  /// that path — without recording the current prefix we can't
+  /// claim it's dominated by anything in this bucket beyond what
+  /// the explicit dominance check above already determined.
   bool IsDominatedElseInsert();
 
   /// Total entries across all partitions. Useful for shakedowns
@@ -132,6 +150,15 @@ class LengthHistoryTracker {
   /// Useful for production region stats — reports how often
   /// history pruning fired during a search.
   int GetTotalPruneCount() const { return prune_count_; }
+
+  /// True iff at least one IsDominatedElseInsert call hit the
+  /// `kMaxEntries` soft cap and skipped recording its prefix.
+  /// Once set, stays set for the rest of the tracker's lifetime
+  /// (no recovery — once we've stopped recording, downstream
+  /// dominance results may be weaker than they would have been
+  /// otherwise). Useful for telemetry to flag searches whose
+  /// pruning effectiveness was clipped by the cap.
+  bool MemoryCapWasHit() const { return memory_cap_hit_; }
 
   /// Snapshot the bound scheduled-set tracker's current frontier as
   /// a node_topo_idx-sorted vector of FrontierLb. Public so tests
@@ -164,6 +191,11 @@ class LengthHistoryTracker {
   DenseMap<PartitionKey, SmallVector<Entry, 2>> table_;
   int total_entries_ = 0;
   int prune_count_ = 0;
+  /// Set true the first time IsDominatedElseInsert wants to insert
+  /// but `total_entries_` is at `kMaxEntries`. Sticky — never
+  /// cleared, even if subsequent Pareto trims drop `total_entries_`
+  /// below the cap again. See `MemoryCapWasHit()`.
+  bool memory_cap_hit_ = false;
 };
 
 } // namespace hierarchical_scheduler

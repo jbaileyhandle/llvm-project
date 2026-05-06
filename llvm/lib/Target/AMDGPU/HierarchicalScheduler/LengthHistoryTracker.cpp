@@ -93,10 +93,13 @@ bool LengthHistoryTracker::IsDominatedElseInsert() {
     // query into a fresh bucket. No dominator can exist (empty
     // bucket → no entries to compare against).
     if (total_entries_ + 1 > kMaxEntries) {
-      report_fatal_error(
-          "LengthHistoryTracker: insertion would exceed kMaxEntries (" +
-          Twine(kMaxEntries) + "); search produced too many partitions "
-          "for the current dominance pruning to control");
+      // Soft cap: stop recording, set the sticky flag, let the
+      // search continue. Returning false is correct — the empty-
+      // bucket arm has no existing entries to dominate the query,
+      // so "not dominated" is the truthful answer regardless of
+      // whether we recorded.
+      memory_cap_hit_ = true;
+      return false;
     }
     PartitionKey key = scheduled_set_tracker_->GetPartitionKey();
     table_[key].push_back(std::move(query));
@@ -134,10 +137,16 @@ bool LengthHistoryTracker::IsDominatedElseInsert() {
   total_entries_ -= static_cast<int>(dominated_indices.size());
 
   if (total_entries_ + 1 > kMaxEntries) {
-    report_fatal_error(
-        "LengthHistoryTracker: insertion would exceed kMaxEntries (" +
-        Twine(kMaxEntries) + "); search produced too many partitions "
-        "for the current dominance pruning to control");
+    // Soft cap: stop recording, set the sticky flag, let the
+    // search continue. We've already done the dominance check
+    // against the existing bucket above and confirmed no
+    // dominator exists, so "not dominated" remains the truthful
+    // answer. We're just dropping the chance to dominate future
+    // siblings — the bucket reflects fewer prefixes than it
+    // could, so downstream dominance results may be weaker than
+    // they would have been otherwise.
+    memory_cap_hit_ = true;
+    return false;
   }
 
   bucket.push_back(std::move(query));

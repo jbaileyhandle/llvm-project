@@ -54,6 +54,14 @@ bool PressureHistoryTracker::IsDominatedElseRecord(
     // First visit to this partition. Build the owning key and
     // insert a fresh entry. No prior entry, so no dominator
     // exists.
+    if (static_cast<int>(table_.size()) >= kMaxEntries) {
+      // Soft cap: stop recording, set the sticky flag, let the
+      // search continue. No prior entry exists for this
+      // partition, so "not dominated" is the truthful answer
+      // regardless of whether we recorded.
+      memory_cap_hit_ = true;
+      return false;
+    }
     PartitionKey key = scheduled_set_tracker_->GetPartitionKey();
     Entry fresh;
     fresh.best_prefix_score = current_prefix_score;

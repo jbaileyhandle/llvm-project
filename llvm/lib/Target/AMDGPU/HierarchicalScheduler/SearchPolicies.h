@@ -46,6 +46,17 @@ class SearchPolicyBase {
   // See AMDGPUHistoryDominationDesign.md §8.1.
   static constexpr bool kUseLengthHistoryPruning = false;
   static constexpr bool kUsePressureHistoryPruning = false;
+
+  // Per-region wall-clock budget for the search. DfsSearch checks
+  // elapsed time against this on every Recurse() entry and ends the
+  // search globally (returning the best schedule found so far) once
+  // the budget is exhausted. The seeded baseline (the input MF-order
+  // schedule) guarantees we always have at least the input to fall
+  // back on, so a timeout never produces a worse-than-input result.
+  // Concrete policies may override to give one pass more budget than
+  // another (e.g. a longer length pass once an occupancy ceiling has
+  // been pinned).
+  static constexpr int kTimeoutSecondsPerRegion = 20;
 };
 
 // Policy for DFS when the objective is to minimize schedule length for

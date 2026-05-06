@@ -16,6 +16,17 @@
 // partition. A new prefix that ties or loses on this score is
 // dominated by the prior visit and can be pruned.
 //
+// Memory cap: soft-internal `kMaxEntries`. Insertion past the cap
+// silently no-ops (no insert, no fatal error) and sets a flag
+// readable via `MemoryCapWasHit()` for telemetry. Existing
+// dominance checks are unaffected — pruning still fires for any
+// prefix that an already-recorded entry dominates; we just stop
+// *recording* new partitions once the cap is reached. The
+// per-region wall-clock timeout in DfsSearch (see DfsSearch.h) is
+// the real bound on runaway searches; the cap exists only as a
+// memory backstop. The table grows monotonically here, so once 
+// the cap is hit it stays hit for the rest of the tracker's lifetime.
+//
 // Metric-agnosticism. The tracker does not encode a specific
 // metric; its `IsDominatedElseRecord(int current_prefix_score)`
 // overload just compares ints. Convention: higher = better (we
@@ -46,6 +57,20 @@ namespace hierarchical_scheduler {
 
 class PressureHistoryTracker {
  public:
+  /// Total-entry cap across all partitions. Insertion past this
+  /// limit silently no-ops (search continues, just without
+  /// recording the new partition); the per-region wall-clock
+  /// timeout in DfsSearch is the real bound on runaway searches.
+  /// Sized generously so the cap is just a memory backstop. Per-
+  /// entry footprint is dominated by the PartitionKey's BitVector
+  /// (heap-allocated, sized by region node count) — call it ~150 B
+  /// for a 600-node region, scaling roughly linearly with N. At
+  /// 10M entries that's ~1.5 GB worst case. The pressure tracker
+  /// stores at most one entry per partition (no Pareto frontier),
+  /// so the same entry count covers more search states than the
+  /// length tracker's matching cap.
+  static constexpr int kMaxEntries = 10'000'000;
+
   /// One entry per partition. Public so tests can stage entries
   /// directly via InsertEntryForTest.
   struct Entry {
@@ -86,6 +111,9 @@ class PressureHistoryTracker {
   /// `current_prefix_score` from the caller):
   ///   - No prior entry at this partition: insert with
   ///     `best_prefix_score = current_prefix_score`; return false.
+  ///     If inserting would exceed `kMaxEntries`, the insert is
+  ///     silently skipped, `memory_cap_hit_` is set, and the
+  ///     return is still false.
   ///   - Prior entry's `best_prefix_score >= current_prefix_score`:
   ///     the prior visit is no worse on the only prefix-dependent
   ///     dimension. By the partition's prefix/postfix decoupling,
@@ -94,7 +122,7 @@ class PressureHistoryTracker {
   ///     `prune_count_`; return true.
   ///   - Prior entry exists and current is strictly better:
   ///     update `best_prefix_score = max(prior, current)`; return
-  ///     false.
+  ///     false. (No table growth, so no cap concern.)
   ///
   /// Metric-agnostic: this overload just compares ints (higher =
   /// better). The caller picks what those ints represent.
@@ -113,6 +141,14 @@ class PressureHistoryTracker {
   /// across the tracker's lifetime.
   int GetTotalPruneCount() const { return prune_count_; }
 
+  /// True iff at least one IsDominatedElseRecord call hit the
+  /// `kMaxEntries` soft cap and skipped recording its partition.
+  /// Once set, stays set — the table only grows here (no Pareto
+  /// trim path), so once we're at cap we stay at cap. Useful for
+  /// telemetry to flag searches whose pruning effectiveness was
+  /// clipped by the cap.
+  bool MemoryCapWasHit() const { return memory_cap_hit_; }
+
   /// Test-only: directly insert (or overwrite) an entry for
   /// `key`. Bypasses the production schedule path so tests can
   /// stage arbitrary starting states without driving real DAG
@@ -130,6 +166,11 @@ class PressureHistoryTracker {
   ScheduleMetric metric_;
   DenseMap<PartitionKey, Entry> table_;
   int prune_count_ = 0;
+  /// Set true the first time IsDominatedElseRecord wants to
+  /// insert but `table_.size()` is at `kMaxEntries`. Sticky —
+  /// the table only grows here (no Pareto trim), so once at cap
+  /// we stay at cap. See `MemoryCapWasHit()`.
+  bool memory_cap_hit_ = false;
 };
 
 } // namespace hierarchical_scheduler

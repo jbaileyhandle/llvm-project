@@ -18,6 +18,7 @@
 #include "ScheduleGraph.h"
 #include "SubgraphFormation.h"
 #include "llvm/ADT/SmallVector.h"
+#include <chrono>
 
 namespace llvm {
 class GCNSubtarget;
@@ -120,11 +121,23 @@ class DfsSearch {
     // DFS's perspective; we never iterate its ready list for order.
   }
 
-  // Runs DFS, returns a copy of the best schedule found.
+  // Runs DFS, returns a copy of the best schedule found. Starts the
+  // wall-clock budget timer here (not in the ctor) so subgraph
+  // formation cost — which runs during member initialization — does
+  // not count against Policy::kTimeoutSecondsPerRegion.
   ScheduleConstructor Run() {
+    search_start_time_ = std::chrono::steady_clock::now();
     Recurse();
     return best_schedule_constructor_;
   }
+
+  // True iff the most recent Run() exited because the per-region
+  // wall-clock budget (Policy::kTimeoutSecondsPerRegion) was
+  // exhausted, rather than because the search completed naturally
+  // (every branch explored or pruned, or Policy::ShouldEndSearch
+  // fired). Useful for telemetry that wants to distinguish a fully
+  // explored search from one that was cut short.
+  bool SearchEndedWithTimeout() const { return search_ended_with_timeout_; }
 
   // Number of Schedule/ScheduleByIndex calls made on the working
   // constructor during the most recent Run() — a direct measure of
@@ -204,7 +217,32 @@ class DfsSearch {
     return graph;
   }
 
+  // If the per-region wall-clock limit
+  // (Policy::kTimeoutSecondsPerRegion) has elapsed since Run()
+  // started, set search_ended_with_timeout_ (for telemetry) and
+  // should_end_search_ (for propagation through the recursion), and
+  // return true so the caller can unwind. Reuses should_end_search_
+  // for propagation: each recursive frame already checks it after
+  // every child returns and unwinds when set, so the search exits
+  // cleanly and Run() returns the seeded baseline (or anything
+  // better DFS managed to find before the wall hit).
+  // steady_clock::now() on Linux is vDSO-backed (~20ns), so calling
+  // on every Recurse() entry is cheap.
+  bool EndSearchIfTimedOut() {
+    auto elapsed = std::chrono::steady_clock::now() - search_start_time_;
+    if (elapsed < std::chrono::seconds(Policy::kTimeoutSecondsPerRegion)) {
+      return false;
+    }
+    search_ended_with_timeout_ = true;
+    should_end_search_ = true;
+    return true;
+  }
+
   void Recurse() {
+    if (EndSearchIfTimedOut()) {
+      return;
+    }
+
     if (working_schedule_constructor_.IsDone()) {
       if (working_schedule_constructor_.IsBetterThan(
               best_schedule_constructor_, Policy::kMetric)) {
@@ -254,10 +292,25 @@ class DfsSearch {
   // IsDone and beats it by Policy::kMetric.
   ScheduleConstructor best_schedule_constructor_;
 
-  // Set true by Recurse when Policy::ShouldEndSearch fires. Each
-  // recursive frame propagates the flag back up by checking it
-  // after each child Recurse() returns.
+  // Set true by Recurse when Policy::ShouldEndSearch fires, OR by
+  // EndSearchIfTimedOut when the per-region wall-clock limit is
+  // hit. Each recursive frame propagates the flag back up by
+  // checking it after each child Recurse() returns.
   bool should_end_search_ = false;
+
+  // Set true iff Run() exited because the per-region wall-clock
+  // limit (Policy::kTimeoutSecondsPerRegion) was exhausted, rather
+  // than because the search completed naturally. Pure telemetry —
+  // the search itself uses should_end_search_ for propagation; this
+  // flag only records the cause so callers can distinguish a fully
+  // explored search from one that was cut short.
+  bool search_ended_with_timeout_ = false;
+
+  // Wall-clock start time captured at the top of Run(). Set there
+  // (not in the ctor) so subgraph formation cost — which runs
+  // during member initialization — does not count against
+  // Policy::kTimeoutSecondsPerRegion.
+  std::chrono::steady_clock::time_point search_start_time_;
 
   // History-based-domination table for length pruning. Bound to
   // working_schedule_constructor_'s ScheduledSetTracker and

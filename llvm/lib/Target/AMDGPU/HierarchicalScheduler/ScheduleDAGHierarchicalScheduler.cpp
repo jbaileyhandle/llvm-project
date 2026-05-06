@@ -355,7 +355,14 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
       << search.GetLengthHistoryTracker().GetTotalPruneCount()
       << " | pressure_history_prunes="
       << search.GetPressureHistoryTracker().GetTotalPruneCount()
-      << " | order_changed=" << (order_changed ? "yes" : "no") << "\n";
+      << " | order_changed=" << (order_changed ? "yes" : "no")
+      << " | search_ended_with_timeout="
+      << (search.SearchEndedWithTimeout() ? "yes" : "no")
+      << " | length_history_cap_hit="
+      << (search.GetLengthHistoryTracker().MemoryCapWasHit() ? "yes" : "no")
+      << " | pressure_history_cap_hit="
+      << (search.GetPressureHistoryTracker().MemoryCapWasHit() ? "yes" : "no")
+      << "\n";
 }
 
 // Runs DFS with DfsMaximizeOccupancyPolicy on the region's graph and
