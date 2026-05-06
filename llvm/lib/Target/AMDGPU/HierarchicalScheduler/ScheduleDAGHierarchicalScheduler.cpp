@@ -350,18 +350,18 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
       << "    [Post] length:   dfs_length="
       << dfs_best.GetLengthTracker().GetCurrentCycle()
       << " | length_floor=" << graph.GetGraphLengthFloor() << "\n"
-      << "    [Post] common:   schedule_calls=" << search.GetScheduleCallCount()
+      << "    [Post] common:   schedule_calls=" << search.ScheduleCallCount().lifetime
       << " | length_history_prunes="
-      << search.GetLengthHistoryTracker().GetTotalPruneCount()
+      << search.GetLengthHistoryTracker().PruneCount().lifetime
       << " | pressure_history_prunes="
-      << search.GetPressureHistoryTracker().GetTotalPruneCount()
+      << search.GetPressureHistoryTracker().PruneCount().lifetime
       << " | order_changed=" << (order_changed ? "yes" : "no")
-      << " | search_ended_with_timeout="
-      << (search.SearchEndedWithTimeout() ? "yes" : "no")
+      << " | region_timed_out="
+      << (search.RegionTimedOut() ? "yes" : "no")
       << " | length_history_cap_hit="
-      << (search.GetLengthHistoryTracker().MemoryCapWasHit() ? "yes" : "no")
+      << (search.GetLengthHistoryTracker().MemoryCapHit().lifetime ? "yes" : "no")
       << " | pressure_history_cap_hit="
-      << (search.GetPressureHistoryTracker().MemoryCapWasHit() ? "yes" : "no")
+      << (search.GetPressureHistoryTracker().MemoryCapHit().lifetime ? "yes" : "no")
       << "\n";
 }
 

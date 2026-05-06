@@ -98,7 +98,7 @@ bool LengthHistoryTracker::IsDominatedElseInsert() {
       // bucket arm has no existing entries to dominate the query,
       // so "not dominated" is the truthful answer regardless of
       // whether we recorded.
-      memory_cap_hit_ = true;
+      memory_cap_hit_.Set();
       return false;
     }
     PartitionKey key = scheduled_set_tracker_->GetPartitionKey();
@@ -119,7 +119,7 @@ bool LengthHistoryTracker::IsDominatedElseInsert() {
   for (size_t i = 0; i < bucket.size(); ++i) {
     const Entry &existing = bucket[i];
     if (DoesDominate(existing, query)) {
-      ++prune_count_;
+      prune_count_.Increment();
       return true;
     }
     if (DoesDominate(query, existing)) {
@@ -145,13 +145,20 @@ bool LengthHistoryTracker::IsDominatedElseInsert() {
     // siblings — the bucket reflects fewer prefixes than it
     // could, so downstream dominance results may be weaker than
     // they would have been otherwise.
-    memory_cap_hit_ = true;
+    memory_cap_hit_.Set();
     return false;
   }
 
   bucket.push_back(std::move(query));
   ++total_entries_;
   return false;
+}
+
+void LengthHistoryTracker::Reset() {
+  table_.clear();
+  total_entries_ = 0;
+  prune_count_.ResetCurrentRun();
+  memory_cap_hit_.ResetCurrentRun();
 }
 
 void LengthHistoryTracker::InsertEntryForTest(

@@ -60,6 +60,7 @@
 
 #include "ScheduleLengthTracker.h"
 #include "ScheduledSetTracker.h"
+#include "SearchStats.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
@@ -140,25 +141,37 @@ class LengthHistoryTracker {
   /// the explicit dominance check above already determined.
   bool IsDominatedElseInsert();
 
+  /// Drop all recorded entries and clear the *_this_run counters
+  /// and flags. Lifetime counters (prune count, memory-cap-hit
+  /// flag) are intentionally preserved so they continue to
+  /// accumulate across Run() boundaries. Useful for outer loops
+  /// that re-use the tracker across multiple search iterations,
+  /// where each iteration wants a fresh dominance table but the
+  /// region-level totals should reflect all iterations together.
+  void Reset();
+
   /// Total entries across all partitions. Useful for shakedowns
   /// and stat dumps.
   int GetTotalEntries() const { return total_entries_; }
 
-  /// Total number of times IsDominatedElseInsert returned true
-  /// (i.e., a prior visit dominated the current prefix and the
-  /// caller can prune). Cumulative across the tracker's lifetime.
-  /// Useful for production region stats — reports how often
-  /// history pruning fired during a search.
-  int GetTotalPruneCount() const { return prune_count_; }
+  /// Read-only access to the prune counter. `.current_run` is the
+  /// number of times IsDominatedElseInsert returned true during
+  /// the current Run() (cleared by Reset). `.lifetime` is the
+  /// total since construction (never cleared by Reset).
+  const DualRunAndLifetimeCounter &PruneCount() const {
+    return prune_count_;
+  }
 
-  /// True iff at least one IsDominatedElseInsert call hit the
-  /// `kMaxEntries` soft cap and skipped recording its prefix.
-  /// Once set, stays set for the rest of the tracker's lifetime
-  /// (no recovery — once we've stopped recording, downstream
-  /// dominance results may be weaker than they would have been
-  /// otherwise). Useful for telemetry to flag searches whose
-  /// pruning effectiveness was clipped by the cap.
-  bool MemoryCapWasHit() const { return memory_cap_hit_; }
+  /// Read-only access to the memory-cap-hit flag. `.current_run`
+  /// is true iff IsDominatedElseInsert hit the `kMaxEntries` soft
+  /// cap during the current Run() (cleared by Reset).
+  /// `.lifetime` is true iff it ever hit during this tracker's
+  /// lifetime (never cleared; sticky once set). Useful for
+  /// telemetry flagging searches whose pruning effectiveness
+  /// was clipped by the cap.
+  const DualRunAndLifetimeFlag &MemoryCapHit() const {
+    return memory_cap_hit_;
+  }
 
   /// Snapshot the bound scheduled-set tracker's current frontier as
   /// a node_topo_idx-sorted vector of FrontierLb. Public so tests
@@ -190,12 +203,15 @@ class LengthHistoryTracker {
   const ScheduleLengthTracker *length_tracker_;
   DenseMap<PartitionKey, SmallVector<Entry, 2>> table_;
   int total_entries_ = 0;
-  int prune_count_ = 0;
-  /// Set true the first time IsDominatedElseInsert wants to insert
-  /// but `total_entries_` is at `kMaxEntries`. Sticky — never
-  /// cleared, even if subsequent Pareto trims drop `total_entries_`
-  /// below the cap again. See `MemoryCapWasHit()`.
-  bool memory_cap_hit_ = false;
+  /// Incremented at every prune event. .current_run is cleared
+  /// by Reset; .lifetime persists.
+  DualRunAndLifetimeCounter prune_count_;
+  /// Set true the first time IsDominatedElseInsert wants to
+  /// insert but `total_entries_` is at `kMaxEntries`. Sticky —
+  /// the .current_run flag is cleared by Reset; .lifetime stays
+  /// set once tripped, even if subsequent Pareto trims drop
+  /// `total_entries_` below the cap again. See `MemoryCapHit()`.
+  DualRunAndLifetimeFlag memory_cap_hit_;
 };
 
 } // namespace hierarchical_scheduler

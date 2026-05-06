@@ -11,12 +11,19 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
     LengthHistoryTracker &length_history,
-    PressureHistoryTracker & /*pressure_history*/) {
+    PressureHistoryTracker & /*pressure_history*/,
+    int target_length) {
   int best_length =
       best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
   int working_lb =
       schedule_constructor.GetLengthTracker().GetLengthLowerBound();
-  if (working_lb >= best_length) {
+  // Max acceptable length combines the caller-supplied target with
+  // the strict-improvement constraint. When target_length =
+  // INT_MAX (caller has no extra constraint to apply), this
+  // reduces to best_length - 1 and the bound matches the prior
+  // `working_lb >= best_length` check.
+  int max_acceptable = std::min(target_length, best_length - 1);
+  if (working_lb > max_acceptable) {
     return true;
   }
   if (!schedule_constructor.IsAtOrAboveFunctionOccupancyCeiling()) {
@@ -45,7 +52,8 @@ bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
     LengthHistoryTracker & /*length_history*/,
-    PressureHistoryTracker &pressure_history) {
+    PressureHistoryTracker &pressure_history,
+    int /*target_length*/) {
   // Score-bound: working's GetMetricScore(kMetric) is non-
   // increasing as more nodes are scheduled (peak pressure grows
   // monotonically, kMetric is max-direction so its score only

@@ -187,7 +187,7 @@ void ScheduleConstructor::ScheduleByIndex(int index) {
   }
   const ScheduleNode *node = ready_list[index];
 
-  ++schedule_call_count_;
+  schedule_call_count_.Increment();
 
   // Trackers self-skip for subgraph proxies (no register or cycle
   // effect — see each tracker's Schedule for the early-return).
@@ -292,6 +292,22 @@ void ScheduleConstructor::Unschedule() {
   scheduled_set_tracker_.Unschedule(node);
   length_tracker_.Unschedule(node);
   pressure_tracker_.Unschedule(node);
+}
+
+void ScheduleConstructor::UnscheduleAll() {
+  // Repeated Unschedule rolls back trackers and scope state through
+  // their normal undo path — same per-step bookkeeping the search
+  // would do during a normal backtrack — so a search-iteration
+  // teardown that ends in this state is indistinguishable from a
+  // search that backtracked all the way to root.
+  while (!schedule_order_.empty()) {
+    Unschedule();
+  }
+}
+
+void ScheduleConstructor::Reset() {
+  UnscheduleAll();
+  schedule_call_count_.ResetCurrentRun();
 }
 
 // ============================================================================

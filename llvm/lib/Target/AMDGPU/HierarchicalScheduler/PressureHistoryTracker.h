@@ -50,6 +50,7 @@
 #include "ScheduleGraph.h"
 #include "ScheduleMetric.h"
 #include "ScheduledSetTracker.h"
+#include "SearchStats.h"
 #include "llvm/ADT/DenseMap.h"
 
 namespace llvm {
@@ -134,20 +135,36 @@ class PressureHistoryTracker {
   /// Fatal-errors if the bound working register tracker is null.
   bool IsDominatedElseRecord();
 
+  /// Drop all recorded entries and clear the *.current_run
+  /// counters and flags. Lifetime values persist. Useful for
+  /// outer loops that re-use the tracker across multiple search
+  /// iterations (mirrors LengthHistoryTracker::Reset for API
+  /// symmetry; the occupancy pass currently runs single-Run so
+  /// doesn't exercise this, but provided so the trackers behave
+  /// consistently).
+  void Reset();
+
   /// Total entries across all partitions.
   int GetTotalEntries() const { return static_cast<int>(table_.size()); }
 
-  /// Total times IsDominatedElseRecord returned true. Cumulative
-  /// across the tracker's lifetime.
-  int GetTotalPruneCount() const { return prune_count_; }
+  /// Read-only access to the prune counter. `.current_run` is
+  /// the number of times IsDominatedElseRecord returned true
+  /// during the current Run() (cleared by Reset). `.lifetime`
+  /// is the total since construction (never cleared by Reset).
+  const DualRunAndLifetimeCounter &PruneCount() const {
+    return prune_count_;
+  }
 
-  /// True iff at least one IsDominatedElseRecord call hit the
-  /// `kMaxEntries` soft cap and skipped recording its partition.
-  /// Once set, stays set — the table only grows here (no Pareto
-  /// trim path), so once we're at cap we stay at cap. Useful for
-  /// telemetry to flag searches whose pruning effectiveness was
+  /// Read-only access to the memory-cap-hit flag. `.current_run`
+  /// is true iff IsDominatedElseRecord hit the `kMaxEntries`
+  /// soft cap during the current Run() (cleared by Reset).
+  /// `.lifetime` is true iff it ever hit during this tracker's
+  /// lifetime (never cleared; sticky once set). Useful for
+  /// telemetry flagging searches whose pruning effectiveness was
   /// clipped by the cap.
-  bool MemoryCapWasHit() const { return memory_cap_hit_; }
+  const DualRunAndLifetimeFlag &MemoryCapHit() const {
+    return memory_cap_hit_;
+  }
 
   /// Test-only: directly insert (or overwrite) an entry for
   /// `key`. Bypasses the production schedule path so tests can
@@ -165,12 +182,15 @@ class PressureHistoryTracker {
   const GCNRegisterTracker *working_register_tracker_;
   ScheduleMetric metric_;
   DenseMap<PartitionKey, Entry> table_;
-  int prune_count_ = 0;
+  /// Incremented at every prune event. .current_run is cleared
+  /// by Reset; .lifetime persists.
+  DualRunAndLifetimeCounter prune_count_;
   /// Set true the first time IsDominatedElseRecord wants to
   /// insert but `table_.size()` is at `kMaxEntries`. Sticky —
   /// the table only grows here (no Pareto trim), so once at cap
-  /// we stay at cap. See `MemoryCapWasHit()`.
-  bool memory_cap_hit_ = false;
+  /// we stay at cap; .lifetime never clears, .current_run
+  /// clears on Reset. See `MemoryCapHit()`.
+  DualRunAndLifetimeFlag memory_cap_hit_;
 };
 
 } // namespace hierarchical_scheduler

@@ -79,9 +79,13 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   }
 
   // Bound the current subtree if any of:
-  //   (a) the working schedule's length lower bound is at or above
-  //       best's current length — no completion can strictly beat
-  //       best; or
+  //   (a) the working schedule's length lower bound exceeds the
+  //       max acceptable length for this search — i.e., no
+  //       completion of working can yield a schedule we'd accept.
+  //       Max acceptable length = min(target_length,
+  //       best.length - 1): we accept a completion if it's both
+  //       at or below the iteration's target AND strictly better
+  //       than current best; or
   //   (b) the working schedule's register-only occupancy has dropped
   //       below the function ceiling — no completion can recover, and
   //       we must not degrade occupancy; or
@@ -94,8 +98,8 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   //   (a) LB is monotonically non-decreasing as nodes are scheduled
   //       (current_cycle + num_unscheduled never decreases, and the
   //       running max of scheduled_cycle + cp + 1 only grows), so
-  //       once LB >= best.length, every completion has length >= LB
-  //       >= best.length.
+  //       once LB exceeds max acceptable length, every completion's
+  //       length will too.
   //   (b) Peak register pressure is monotonically non-decreasing, so
   //       register-only occupancy is monotonically non-increasing.
   //       Once working drops below the function ceiling, no
@@ -111,11 +115,17 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   // because DfsSearch invokes ShouldBoundSearch with a uniform
   // signature across policies; this policy doesn't opt into
   // pressure-history pruning.
+  //
+  // `target_length` is the longest schedule the caller will
+  // accept this call. Set per-iteration by outer loops that
+  // walk a target value; INT_MAX means "no extra constraint,"
+  // and the bound (a) above reduces to working_lb >= best.length.
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
       LengthHistoryTracker &length_history,
-      PressureHistoryTracker &pressure_history);
+      PressureHistoryTracker &pressure_history,
+      int target_length);
 
   // End the search globally once best matches the graph-level length
   // floor (max(NumSchedulingUnits, cp_length + 1)) — no schedule can
@@ -180,15 +190,18 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
   // (recording state for future comparison). See
   // PressureHistoryTracker.
   //
-  // `length_history` parameter is unused here — present only
-  // because DfsSearch invokes ShouldBoundSearch with a uniform
-  // signature across policies; this policy doesn't opt into
-  // length-history pruning.
+  // `length_history` and `target_length` parameters are unused
+  // here — present only because DfsSearch invokes ShouldBoundSearch
+  // with a uniform signature across policies. This policy doesn't
+  // opt into length-history pruning, and occupancy maximization
+  // doesn't have a length-target concept (no analogous outer-loop
+  // construction on the pressure side).
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
       LengthHistoryTracker &length_history,
-      PressureHistoryTracker &pressure_history);
+      PressureHistoryTracker &pressure_history,
+      int target_length);
 
   // Called on completed schedules after the IsBetterThan/update step.
   // Return true to end the entire search and have DfsSearch::Run

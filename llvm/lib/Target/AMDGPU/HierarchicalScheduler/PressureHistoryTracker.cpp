@@ -59,7 +59,7 @@ bool PressureHistoryTracker::IsDominatedElseRecord(
       // search continue. No prior entry exists for this
       // partition, so "not dominated" is the truthful answer
       // regardless of whether we recorded.
-      memory_cap_hit_ = true;
+      memory_cap_hit_.Set();
       return false;
     }
     PartitionKey key = scheduled_set_tracker_->GetPartitionKey();
@@ -75,7 +75,7 @@ bool PressureHistoryTracker::IsDominatedElseRecord(
     // dimension. By the partition's prefix/postfix decoupling,
     // anything our subtree could reach is reachable at no worse
     // score from the prior prefix. Prune.
-    ++prune_count_;
+    prune_count_.Increment();
     return true;
   }
 
@@ -85,6 +85,15 @@ bool PressureHistoryTracker::IsDominatedElseRecord(
   prior.best_prefix_score =
       std::max(prior.best_prefix_score, current_prefix_score);
   return false;
+}
+
+void PressureHistoryTracker::Reset() {
+  // table_.size() IS the entry count for this tracker (one entry
+  // per partition), so clearing the map zeros GetTotalEntries()
+  // implicitly — no separate counter to reset.
+  table_.clear();
+  prune_count_.ResetCurrentRun();
+  memory_cap_hit_.ResetCurrentRun();
 }
 
 void PressureHistoryTracker::InsertEntryForTest(

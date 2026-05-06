@@ -1843,7 +1843,7 @@ static void RunPressureHistoryEmptyShakedown(const GCNSubtarget &st) {
   auto fixture = BuildPressureHistoryTrackerFixture(st);
   bool initially_empty =
       fixture.pressure_history_tracker->GetTotalEntries() == 0 &&
-      fixture.pressure_history_tracker->GetTotalPruneCount() == 0;
+      fixture.pressure_history_tracker->PruneCount().lifetime == 0;
   llvm::outs() << "    Empty-table behavior: "
                << (initially_empty ? "PASS\n" : "FAIL\n");
 }
@@ -1870,7 +1870,7 @@ static void RunPressureHistoryFirstInsertAndSelfDominanceShakedown(
   bool count_unchanged_after_second =
       fixture.pressure_history_tracker->GetTotalEntries() == 1;
   bool prune_count_one =
-      fixture.pressure_history_tracker->GetTotalPruneCount() == 1;
+      fixture.pressure_history_tracker->PruneCount().lifetime == 1;
 
   bool ok = first_call_inserted && count_one_after_first &&
             second_call_pruned && count_unchanged_after_second &&
@@ -1902,7 +1902,7 @@ RunPressureHistoryStrictPriorDominatorShakedown(const GCNSubtarget &st) {
   bool count_one =
       fixture.pressure_history_tracker->GetTotalEntries() == 1;
   bool prune_count_one =
-      fixture.pressure_history_tracker->GetTotalPruneCount() == 1;
+      fixture.pressure_history_tracker->PruneCount().lifetime == 1;
 
   bool ok =
       pruned && entry_unchanged && count_one && prune_count_one;
@@ -1935,7 +1935,7 @@ static void RunPressureHistoryStrictCurrentBetterShakedown(
   bool count_one =
       fixture.pressure_history_tracker->GetTotalEntries() == 1;
   bool prune_count_zero =
-      fixture.pressure_history_tracker->GetTotalPruneCount() == 0;
+      fixture.pressure_history_tracker->PruneCount().lifetime == 0;
 
   bool ok =
       not_pruned && entry_updated && count_one && prune_count_zero;
@@ -1966,7 +1966,7 @@ RunPressureHistoryDistinctPartitionsShakedown(const GCNSubtarget &st) {
   bool count_two =
       fixture.pressure_history_tracker->GetTotalEntries() == 2;
   bool prune_count_zero =
-      fixture.pressure_history_tracker->GetTotalPruneCount() == 0;
+      fixture.pressure_history_tracker->PruneCount().lifetime == 0;
 
   bool ok = a_inserted && ah_inserted && count_two && prune_count_zero;
   llvm::outs() << "    Distinct partitions get distinct entries: "
@@ -2041,7 +2041,8 @@ class TestLengthPolicyNoBoundsNoHistory : public DfsMinimizeLengthPolicy {
   static bool ShouldBoundSearch(const ScheduleConstructor &,
                                 const ScheduleConstructor &,
                                 LengthHistoryTracker &,
-                                PressureHistoryTracker &) {
+                                PressureHistoryTracker &,
+                                int /*target_length*/) {
     return false;
   }
 };
@@ -2052,7 +2053,8 @@ class TestLengthPolicyNoBoundsWithHistory : public DfsMinimizeLengthPolicy {
   static bool ShouldBoundSearch(const ScheduleConstructor &,
                                 const ScheduleConstructor &,
                                 LengthHistoryTracker &length_history,
-                                PressureHistoryTracker &) {
+                                PressureHistoryTracker &,
+                                int /*target_length*/) {
     return length_history.IsDominatedElseInsert();
   }
 };
@@ -2089,15 +2091,15 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   ScheduleConstructor no_hist_best = no_hist_search.Run();
   int no_hist_length =
       no_hist_best.GetLengthTracker().GetCurrentCycle();
-  int64_t no_hist_calls = no_hist_search.GetScheduleCallCount();
+  int64_t no_hist_calls = no_hist_search.ScheduleCallCount().lifetime;
 
   DfsSearch<TestLengthPolicyNoBoundsWithHistory> hist_search(
       *graph, st, mf, lis, /*form_subgraphs=*/false);
   ScheduleConstructor hist_best = hist_search.Run();
   int hist_length = hist_best.GetLengthTracker().GetCurrentCycle();
-  int64_t hist_calls = hist_search.GetScheduleCallCount();
+  int64_t hist_calls = hist_search.ScheduleCallCount().lifetime;
   int hist_prunes =
-      hist_search.GetLengthHistoryTracker().GetTotalPruneCount();
+      hist_search.GetLengthHistoryTracker().PruneCount().lifetime;
 
   llvm::outs() << "    no-history: length=" << no_hist_length
                << " schedule_calls=" << no_hist_calls << "\n";
@@ -2138,7 +2140,8 @@ class TestPressurePolicyNoBoundsNoHistory
   static bool ShouldBoundSearch(const ScheduleConstructor &,
                                 const ScheduleConstructor &,
                                 LengthHistoryTracker &,
-                                PressureHistoryTracker &) {
+                                PressureHistoryTracker &,
+                                int /*target_length*/) {
     return false;
   }
   static bool ShouldEndSearch(const ScheduleConstructor &,
@@ -2155,7 +2158,8 @@ class TestPressurePolicyNoBoundsWithHistory
       const ScheduleConstructor &,
       const ScheduleConstructor &,
       LengthHistoryTracker &,
-      PressureHistoryTracker &pressure_history) {
+      PressureHistoryTracker &pressure_history,
+      int /*target_length*/) {
     return pressure_history.IsDominatedElseRecord();
   }
   static bool ShouldEndSearch(const ScheduleConstructor &,
@@ -2226,7 +2230,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
       *graph, st, mf, lis, /*form_subgraphs=*/false);
   no_hist_search.EnableTestModeForTest(vgpr_deltas);
   ScheduleConstructor no_hist_best = no_hist_search.Run();
-  int64_t no_hist_calls = no_hist_search.GetScheduleCallCount();
+  int64_t no_hist_calls = no_hist_search.ScheduleCallCount().lifetime;
   int no_hist_score =
       no_hist_best.GetPressureTracker().GetMetricScore(kPolicyMetric);
 
@@ -2234,11 +2238,11 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
       *graph, st, mf, lis, /*form_subgraphs=*/false);
   hist_search.EnableTestModeForTest(vgpr_deltas);
   ScheduleConstructor hist_best = hist_search.Run();
-  int64_t hist_calls = hist_search.GetScheduleCallCount();
+  int64_t hist_calls = hist_search.ScheduleCallCount().lifetime;
   int hist_score =
       hist_best.GetPressureTracker().GetMetricScore(kPolicyMetric);
   int hist_prunes =
-      hist_search.GetPressureHistoryTracker().GetTotalPruneCount();
+      hist_search.GetPressureHistoryTracker().PruneCount().lifetime;
 
   llvm::outs() << "    no-history: best_score=" << no_hist_score
                << " schedule_calls=" << no_hist_calls << "\n";

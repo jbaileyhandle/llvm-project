@@ -58,6 +58,7 @@
 #include "ScheduleLengthTracker.h"
 #include "ScheduleMetric.h"
 #include "ScheduledSetTracker.h"
+#include "SearchStats.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include <vector>
@@ -118,6 +119,20 @@ public:
   /// schedule length, ready list, and removes the node from the
   /// schedule order.
   void Unschedule();
+
+  /// Prepare for a new search Run() — drive the constructor back
+  /// to its initial empty state and clear .current_run on per-run
+  /// counters (.lifetime values persist). Same end-state as a
+  /// freshly-constructed instance for everything except the
+  /// lifetime totals. Used by DfsSearch::ResetForReuse so a single
+  /// ScheduleConstructor can be re-used across multiple Run()
+  /// calls in an outer loop.
+  ///
+  /// The rewind to empty state goes through the established
+  /// Unschedule path so all bound trackers (length, pressure,
+  /// scheduled-set) get their per-step rollback notifications
+  /// rather than being side-channel-cleared.
+  void Reset();
 
   /// True when all nodes have been scheduled. Uses the scope-stack
   /// form so it stays correct once subgraph proxies are introduced
@@ -182,13 +197,17 @@ public:
     return static_cast<int>(schedule_order_.size());
   }
 
-  /// Cumulative count of Schedule / ScheduleByIndex calls on this
-  /// constructor since construction. Schedule funnels through
-  /// ScheduleByIndex, so this counts every actual scheduling
-  /// operation without double-counting. Unschedule does NOT
-  /// decrement (the count is effort spent, not depth). Useful for
-  /// assessing search effort in DFS-style traversals.
-  int64_t GetScheduleCallCount() const { return schedule_call_count_; }
+  /// Read-only access to the schedule-call counter.
+  /// `.current_run` is the count of Schedule / ScheduleByIndex
+  /// calls during the current Run() (cleared by Reset).
+  /// `.lifetime` is the cumulative total since construction
+  /// (never cleared). Schedule funnels through ScheduleByIndex,
+  /// so each scheduling operation is counted exactly once.
+  /// Unschedule does NOT decrement — the count is effort spent,
+  /// not depth.
+  const DualRunAndLifetimeCounter &ScheduleCallCount() const {
+    return schedule_call_count_;
+  }
 
   /// True if this schedule is strictly better than `other` under the
   /// given metric. Ties return false — callers that want "at least as
@@ -211,6 +230,13 @@ public:
   std::string Describe() const;
 
 private:
+  /// Drive the constructor back to its initial empty state by
+  /// repeatedly invoking Unschedule(). Internal helper used by
+  /// Reset(); not exposed publicly because callers should always
+  /// go through Reset() (which also clears per-run counters).
+  /// No-op if already empty.
+  void UnscheduleAll();
+
   const ScheduleGraph *graph_;
   GCNRegisterTracker pressure_tracker_;
   ScheduleLengthTracker length_tracker_;
@@ -245,9 +271,10 @@ private:
   /// Comparator defining ready-list sort order within each scope.
   ReadyComparator ready_comparator_;
 
-  /// Incremented by ScheduleByIndex. Tracks search effort; see
-  /// GetScheduleCallCount.
-  int64_t schedule_call_count_ = 0;
+  /// Incremented by ScheduleByIndex. .current_run is cleared by
+  /// Reset; .lifetime persists. Tracks search effort; see
+  /// ScheduleCallCount().
+  DualRunAndLifetimeCounter schedule_call_count_;
 
   /// Per-node count of strong predecessors not yet scheduled,
   /// indexed by ScheduleNode::GetTopoIndex(). Sized to graph.Size()
