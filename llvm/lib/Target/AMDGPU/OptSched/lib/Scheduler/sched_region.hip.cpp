@@ -940,6 +940,45 @@ FUNC_RESULT SchedRegion::Optimize_(Milliseconds startTime,
 
   Milliseconds solnTime = Utilities::GetProcessorTime() - startTime;
 
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Always-on print of per-pass enumeration node counts and rates,
+  // for apples-to-apples comparison with the HierarchicalScheduler's
+  // schedule_calls metric. solnTime is the elapsed wall span of the
+  // enumeration phase (computed immediately above) and accumulates
+  // across all target-length iterations within this pass.
+  //
+  // examined: every branch considered, including rejections for
+  //   legality, redundancy, and feasibility before any actual
+  //   schedule extension. Naturally lifetime — see
+  //   exmndNodeCnt_'s declaration.
+  //
+  // created: branches that survived all pre-checks and were
+  //   actually placed onto the partial schedule (StepFrwrd_'d).
+  //   Made cumulative by GetLifetimeCreatedNodeCnt() summing
+  //   per-iteration counts across this pass.
+  //
+  // The HierarchicalScheduler's schedule_call_count_ semantically
+  // sits between the two: it doesn't pre-check before Schedule, so
+  // each loop iteration counts as one Schedule, but the bound
+  // check happens in the child's Recurse and may immediately
+  // unwind. Rates (per second) give a workload-independent
+  // search-throughput measure.
+  {
+    uint64_t examined = enumrtr->GetLifetimeExaminedNodeCnt();
+    uint64_t created = enumrtr->GetLifetimeCreatedNodeCnt();
+    double seconds = solnTime / 1000.0;
+    double examined_rate = (seconds > 0.0) ? (examined / seconds) : 0.0;
+    double created_rate = (seconds > 0.0) ? (created / seconds) : 0.0;
+    Logger::Info(
+        "Enumeration node counts: examined=%llu created=%llu | "
+        "rates: examined/s=%.0f created/s=%.0f | elapsed_ms=%lld",
+        (unsigned long long)examined, (unsigned long long)created,
+        examined_rate, created_rate, solnTime);
+  }
+  //========================================================================================
+
 #ifdef IS_DEBUG_NODES
   Logger::Info("Examined %lld nodes.", enumrtr->GetNodeCnt());
 #endif

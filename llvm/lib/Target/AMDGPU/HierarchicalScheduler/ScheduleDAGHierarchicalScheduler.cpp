@@ -363,6 +363,22 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
       << " | pressure_history_cap_hit="
       << (search.GetPressureHistoryTracker().MemoryCapHit().lifetime ? "yes" : "no")
       << "\n";
+
+  // [Post] rates: per-region throughput so cross-scheduler
+  // comparisons aren't sensitive to total budget. When elapsed
+  // rounds to zero (trivially-small regions that complete in
+  // <1ms), the rate is undefined — emit a "-" placeholder so
+  // the elapsed measurement is still visible.
+  int64_t region_elapsed_ms = search.GetRegionElapsedMs();
+  int64_t schedule_calls = search.ScheduleCallCount().lifetime;
+  llvm::outs() << "    [Post] rates:    ";
+  if (region_elapsed_ms > 0) {
+    double calls_per_sec = schedule_calls / (region_elapsed_ms / 1000.0);
+    llvm::outs() << "schedule_calls/s=" << calls_per_sec;
+  } else {
+    llvm::outs() << "schedule_calls/s=-";
+  }
+  llvm::outs() << " | region_elapsed_ms=" << region_elapsed_ms << "\n";
 }
 
 // Runs DFS with DfsMaximizeOccupancyPolicy on the region's graph and
@@ -417,8 +433,97 @@ void ScheduleDAGHierarchicalScheduler::RunMinimizeLengthPass() {
   llvm::outs() << "RunMinimizeLengthPass: done\n";
 }
 
-// Per-region worker. Runs DFS with DfsMinimizeLengthPolicy and
-// applies the resulting schedule.
+// Per-iteration log entry, buffered during the outer loop so we
+// can choose to emit per-iteration lines only when the loop ran
+// more than one iteration.
+struct LengthPassIterationLog {
+  int target;
+  int result_length;
+  int64_t elapsed_ms;
+  int64_t schedule_calls;
+  int64_t length_history_prunes;
+  int64_t pressure_history_prunes;
+  bool length_history_cap_hit;
+  bool pressure_history_cap_hit;
+  bool region_timed_out_observed;
+};
+
+// Snapshot the search's current-run stats plus per-iteration
+// context into a log entry. Reads .current_run on every dual
+// counter / flag so the captured values reflect just the
+// iteration that just finished.
+template <typename PolicyT>
+static LengthPassIterationLog CaptureIterationLog(
+    int target, int result_length, const DfsSearch<PolicyT> &search) {
+  LengthPassIterationLog log;
+  log.target = target;
+  log.result_length = result_length;
+  log.elapsed_ms = search.GetCurrentRunElapsedMs();
+  log.schedule_calls = search.ScheduleCallCount().current_run;
+  log.length_history_prunes =
+      search.GetLengthHistoryTracker().PruneCount().current_run;
+  log.pressure_history_prunes =
+      search.GetPressureHistoryTracker().PruneCount().current_run;
+  log.length_history_cap_hit =
+      search.GetLengthHistoryTracker().MemoryCapHit().current_run;
+  log.pressure_history_cap_hit =
+      search.GetPressureHistoryTracker().MemoryCapHit().current_run;
+  log.region_timed_out_observed = search.RegionTimedOut();
+  return log;
+}
+
+// Print buffered per-iteration log entries when there were more
+// than one. Single-iteration runs get only the [Post] aggregate
+// (the per-iteration values would duplicate what [Post] shows).
+static void MaybePrintIterationLogs(
+    ArrayRef<LengthPassIterationLog> logs) {
+  if (logs.size() <= 1) {
+    return;
+  }
+  for (size_t i = 0; i < logs.size(); ++i) {
+    const auto &e = logs[i];
+    double calls_per_sec =
+        (e.elapsed_ms > 0)
+            ? (e.schedule_calls / (e.elapsed_ms / 1000.0))
+            : 0.0;
+    llvm::outs()
+        << "    [Iter " << i << "]   target=" << e.target
+        << " result_length=" << e.result_length
+        << " elapsed_ms=" << e.elapsed_ms
+        << " schedule_calls=" << e.schedule_calls
+        << " schedule_calls/s=" << calls_per_sec
+        << " length_prunes=" << e.length_history_prunes
+        << " pressure_prunes=" << e.pressure_history_prunes
+        << " length_cap_hit=" << (e.length_history_cap_hit ? "yes" : "no")
+        << " pressure_cap_hit="
+        << (e.pressure_history_cap_hit ? "yes" : "no")
+        << " region_timed_out="
+        << (e.region_timed_out_observed ? "yes" : "no")
+        << "\n";
+  }
+}
+
+// Print the [Post] outer line summarizing how the outer loop
+// terminated.
+static void PrintOuterLoopSummary(int iterations_run,
+                                  StringRef terminated_via,
+                                  int final_target) {
+  llvm::outs()
+      << "    [Post] outer:   iterations_run=" << iterations_run
+      << " | terminated_via=" << terminated_via;
+  if (terminated_via == "feasible") {
+    llvm::outs() << " | final_target=" << final_target;
+  }
+  llvm::outs() << "\n";
+}
+
+// Per-region worker. Runs DFS with DfsMinimizeLengthPolicy under
+// an outer for-loop that walks a target length from floor up to
+// input_length-1, calling search.Run() at each step. The first
+// iteration to find a complete schedule with length <= target
+// produces the optimum (since targets are tested in ascending
+// order). The loop also exits on region timeout, or naturally at
+// the end of the range without finding feasibility.
 void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
     RegionInfo &region) {
   const GCNSubtarget &st =
@@ -427,19 +532,62 @@ void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
   WithRegionGraph(region, [&](ScheduleGraph &graph) {
     const ScheduleConstructor &input_schedule_constructor =
         graph.GetInputScheduleConstructor();
+    const int floor = graph.GetGraphLengthFloor();
+    const int input_length =
+        input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
 
     DfsSearch<DfsMinimizeLengthPolicy> search(graph, st, MF, *LIS);
     PrintPreScheduleInfo(graph, input_schedule_constructor, st);
 
-    ScheduleConstructor dfs_best_schedule_constructor = search.Run();
+    // Default outcome before any iteration runs:
+    //   - "input_optimal" when the loop range is empty
+    //     (input_length already at the floor, search would have
+    //     no room to improve). The loop body below won't execute
+    //     in this case, leaving this default in place.
+    //   - "infeasible" otherwise — overridden when the loop
+    //     breaks on feasibility or timeout, and stays as
+    //     "infeasible" iff the loop walks the full target range
+    //     without success and without timing out.
+    StringRef terminated_via =
+        (input_length <= floor) ? "input_optimal" : "infeasible";
+    int final_target = -1;
+    int iterations_run = 0;
+    SmallVector<LengthPassIterationLog, 8> iter_logs;
 
-    bool changed = input_schedule_constructor.GetScheduleOrder() !=
-                   dfs_best_schedule_constructor.GetScheduleOrder();
+    ScheduleConstructor best_schedule_constructor =
+        input_schedule_constructor;
 
-    PrintPostScheduleInfo(graph, dfs_best_schedule_constructor, search, st,
+    for (int target = floor; target < input_length; ++target) {
+      search.ResetForReuse(target);
+      ScheduleConstructor result = search.Run();
+      ++iterations_run;
+
+      const int result_length = result.GetLengthTracker().GetCurrentCycle();
+      iter_logs.push_back(
+          CaptureIterationLog(target, result_length, search));
+
+      if (result_length <= target) {
+        best_schedule_constructor = result;
+        terminated_via = "feasible";
+        final_target = target;
+        break;
+      }
+      if (search.RegionTimedOut()) {
+        terminated_via = "timeout";
+        break;
+      }
+    }
+
+    bool changed =
+        input_schedule_constructor.GetScheduleOrder() !=
+        best_schedule_constructor.GetScheduleOrder();
+
+    MaybePrintIterationLogs(iter_logs);
+    PrintPostScheduleInfo(graph, best_schedule_constructor, search, st,
                           changed);
+    PrintOuterLoopSummary(iterations_run, terminated_via, final_target);
 
-    ApplyScheduleOrder(region, dfs_best_schedule_constructor);
+    ApplyScheduleOrder(region, best_schedule_constructor);
   });
 }
 

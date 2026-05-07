@@ -654,6 +654,15 @@ bool Enumerator::Initialize_(InstSchedule *sched, InstCount trgtLngth) {
 
   rlxdSchdulr_->SetupPrirtyLst();
 
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Accumulate createdNodeCnt_ from the just-finished iteration
+  // into lifetimeCreatedNodeCnt_ before resetting for the new
+  // iteration. See enumerator.h for the lifetime-vs-iteration
+  // semantics of these counters.
+  lifetimeCreatedNodeCnt_ += createdNodeCnt_;
+  //========================================================================================
   createdNodeCnt_ = 0;
   fxdInstCnt_ = 0;
   rdyLst_ = NULL;

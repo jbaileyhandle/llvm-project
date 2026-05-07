@@ -371,6 +371,18 @@ protected:
   uint64_t maxNodeCnt_;
   uint64_t createdNodeCnt_;
   uint64_t exmndNodeCnt_;
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Per-Enumerator (per-pass) cumulative count of placed nodes.
+  // Initialize_ resets createdNodeCnt_ on every target-length
+  // iteration; this companion field captures the pre-reset value
+  // each time so callers can read a true total across all
+  // iterations of this pass. Each pass allocates its own
+  // Enumerator, so this counter does not accumulate across
+  // passes.
+  uint64_t lifetimeCreatedNodeCnt_ = 0;
+  //========================================================================================
 
   InstCount minUnschduldTplgclOrdr_;
 
@@ -539,6 +551,30 @@ public:
 
   // Get the number of nodes that have been examined
   inline uint64_t GetNodeCnt();
+
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Same as GetNodeCnt() — exmndNodeCnt_ is naturally per-pass
+  // lifetime (reset only in the Enumerator ctor, which runs once
+  // per pass). Provided as an alias so the calling code can use
+  // a name that's symmetric with GetLifetimeCreatedNodeCnt() and
+  // makes the lifetime semantics explicit at the read site.
+  inline uint64_t GetLifetimeExaminedNodeCnt() { return GetNodeCnt(); }
+  //========================================================================================
+
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Get the per-pass cumulative number of nodes actually placed
+  // onto the partial schedule via StepFrwrd_, summed across all
+  // target-length iterations within this Enumerator's lifetime
+  // (= one pass — each pass allocates its own Enumerator).
+  // Strictly fewer than GetNodeCnt(), which counts every branch
+  // attempt including those rejected pre-placement for legality,
+  // redundancy, or feasibility.
+  inline uint64_t GetLifetimeCreatedNodeCnt();
+  //========================================================================================
 
   inline int GetSearchCnt();
 
@@ -991,6 +1027,19 @@ inline bool Enumerator::IsStateClear_() {
 /****************************************************************************/
 
 inline uint64_t Enumerator::GetNodeCnt() { return exmndNodeCnt_; }
+/****************************************************************************/
+
+//========================================================================================
+// jbaile
+//========================================================================================
+inline uint64_t Enumerator::GetLifetimeCreatedNodeCnt() {
+  // lifetimeCreatedNodeCnt_ holds the sum across all
+  // already-finished target-length iterations; createdNodeCnt_
+  // holds the in-flight iteration's running count. Their sum is
+  // the up-to-date per-pass cumulative.
+  return lifetimeCreatedNodeCnt_ + createdNodeCnt_;
+}
+//========================================================================================
 /****************************************************************************/
 
 inline int Enumerator::GetSearchCnt() { return iterNum_; }

@@ -25,6 +25,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SEARCHSTATS_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SEARCHSTATS_H
 
+#include <chrono>
 #include <cstdint>
 
 namespace llvm {
@@ -60,6 +61,41 @@ struct DualRunAndLifetimeFlag {
   }
 
   void ResetCurrentRun() { current_run = false; }
+};
+
+/// Stopwatch tracking start times at two scopes. Start() updates
+/// current_run_start unconditionally, and sets lifetime_start
+/// only the first time it's called (so subsequent Start() calls
+/// reset the per-run measurement without disturbing the
+/// lifetime origin). Both elapsed accessors compute against
+/// std::chrono::steady_clock::now() — read them right after
+/// the work you want to measure ends; reading later includes
+/// idle time. There is no Stop / no captured end value, by
+/// design: callers are expected to ask once at the relevant
+/// moment.
+struct DualRunAndLifetimeStopwatch {
+  std::chrono::steady_clock::time_point lifetime_start;
+  std::chrono::steady_clock::time_point current_run_start;
+
+  void Start() {
+    auto now = std::chrono::steady_clock::now();
+    if (lifetime_start.time_since_epoch().count() == 0) {
+      lifetime_start = now;
+    }
+    current_run_start = now;
+  }
+
+  int64_t CurrentRunElapsedMs() const {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - current_run_start)
+        .count();
+  }
+
+  int64_t LifetimeElapsedMs() const {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - lifetime_start)
+        .count();
+  }
 };
 
 } // namespace hierarchical_scheduler
