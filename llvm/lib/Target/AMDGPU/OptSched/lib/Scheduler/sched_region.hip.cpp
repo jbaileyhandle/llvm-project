@@ -692,6 +692,27 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
   InitialScheduleCost = bestCost_;
   InitialScheduleLength = bestSchedLngth_;
 
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Print isLstOptml and the list-schedule context that
+  // determined it, right before the enumerator gate. The schedule
+  // referenced is unambiguously lstSched (the list scheduler's
+  // output): heuristicScheduleLength = lstSched->GetCrntLngth()
+  // and hurstcCost_ = lstSched->GetCost(). isLstOptml is set
+  // (sched_region.hip.cpp:454) when hurstcCost_ == 0,
+  // maxIndependentInstructions == 1, or (in second pass)
+  // hurstcExecCost == 0; the misched.txt-driven
+  // RunRegardlessOfHeurisitcOutcome override above can force it
+  // back to false.
+  Logger::Info(
+      "Heuristic-optimality flag isLstOptml=%s. List schedule "
+      "(lstSched) length=%d cost=%d.",
+      isLstOptml ? "true" : "false",
+      static_cast<int>(heuristicScheduleLength),
+      static_cast<int>(hurstcCost_));
+  //========================================================================================
+
   // Step #4: Find the optimal schedule if the heuristc and ACO was not optimal
   if (BbSchedulerEnabled) {
     Milliseconds enumStart = Utilities::GetProcessorTime();
