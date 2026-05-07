@@ -363,6 +363,22 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
       << " | pressure_history_cap_hit="
       << (search.GetPressureHistoryTracker().MemoryCapHit().lifetime ? "yes" : "no")
       << "\n";
+
+  // [Post] rates: per-region throughput so cross-scheduler
+  // comparisons aren't sensitive to total budget. When elapsed
+  // rounds to zero (trivially-small regions that complete in
+  // <1ms), the rate is undefined — emit a "-" placeholder so
+  // the elapsed measurement is still visible.
+  int64_t region_elapsed_ms = search.GetRegionElapsedMs();
+  int64_t schedule_calls = search.ScheduleCallCount().lifetime;
+  llvm::outs() << "    [Post] rates:    ";
+  if (region_elapsed_ms > 0) {
+    double calls_per_sec = schedule_calls / (region_elapsed_ms / 1000.0);
+    llvm::outs() << "schedule_calls/s=" << calls_per_sec;
+  } else {
+    llvm::outs() << "schedule_calls/s=-";
+  }
+  llvm::outs() << " | region_elapsed_ms=" << region_elapsed_ms << "\n";
 }
 
 // Runs DFS with DfsMaximizeOccupancyPolicy on the region's graph and

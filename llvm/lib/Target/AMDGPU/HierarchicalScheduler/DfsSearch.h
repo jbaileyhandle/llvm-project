@@ -101,18 +101,14 @@ class DfsSearch {
         pressure_history_(
             &working_schedule_constructor_.GetScheduledSetTracker(),
             &working_schedule_constructor_.GetPressureTracker(),
-            Policy::kMetric),
-        // Region-scope timing: start time captured at construction
-        // so per-region telemetry can report elapsed time across
-        // all Run() calls. Deadline is a fixed offset from the
-        // start; EndSearchIfTimedOut compares against this and is
-        // the only time-based enforcement. Both unaffected by
-        // ResetForReuse, so they span every iteration of any outer
-        // loop driving this DfsSearch.
-        region_start_time_(std::chrono::steady_clock::now()),
-        region_deadline_(region_start_time_ +
-                         std::chrono::seconds(
-                             Policy::kTimeoutSecondsPerRegion)) {
+            Policy::kMetric) {
+    // Stamp the stopwatch's lifetime_start at construction. (This
+    // first Start() also seeds current_run_start, which Run()
+    // overwrites on every entry.) timing_.lifetime_start is
+    // unaffected by ResetForReuse, so it spans every Run() of
+    // any outer loop driving this DfsSearch — and so does the
+    // timeout check, which derives elapsed against it.
+    timing_.Start();
     // best_schedule_constructor_ is copy-constructed from the
     // graph's input schedule (built by BuildFromSUnits as Phase 4).
     // That gives us a complete valid schedule matching the region's
@@ -136,13 +132,29 @@ class DfsSearch {
     // DFS's perspective; we never iterate its ready list for order.
   }
 
-  // Runs DFS, returns a copy of the best schedule found. Captures
-  // run_start_time_ so telemetry can compute elapsed time for
-  // this Run().
+  // Runs DFS, returns a copy of the best schedule found. Calls
+  // timing_.Start() at entry, which resets current_run_start so
+  // per-Run telemetry (GetCurrentRunElapsedMs) measures from this
+  // point. timing_.lifetime_start was set at construction and is
+  // not touched here.
   ScheduleConstructor Run() {
-    run_start_time_ = std::chrono::steady_clock::now();
+    timing_.Start();
     Recurse();
     return best_schedule_constructor_;
+  }
+
+  // Wall-clock elapsed (milliseconds) for the most recent Run().
+  // Read right after Run() returns; calling later includes idle
+  // time after the run ended (this stopwatch has no captured
+  // end — see DualRunAndLifetimeStopwatch).
+  int64_t GetCurrentRunElapsedMs() const {
+    return timing_.CurrentRunElapsedMs();
+  }
+
+  // Wall-clock elapsed (milliseconds) since this DfsSearch was
+  // constructed. Live; reflects "now" each time it's called.
+  int64_t GetRegionElapsedMs() const {
+    return timing_.LifetimeElapsedMs();
   }
 
   // Reset state so this DfsSearch can be Run() again — drives
@@ -259,17 +271,19 @@ class DfsSearch {
     return graph;
   }
 
-  // If the region deadline has been reached, set region_timed_out_
-  // (for telemetry) and should_end_search_ (for propagation through
-  // the recursion), and return true so the caller can unwind.
-  // Reuses should_end_search_ for propagation: each recursive frame
+  // If the region elapsed time has reached the policy's per-region
+  // budget, set region_timed_out_ (for telemetry) and
+  // should_end_search_ (for propagation through the recursion),
+  // and return true so the caller can unwind. Reuses
+  // should_end_search_ for propagation: each recursive frame
   // already checks it after every child returns and unwinds when
   // set, so the search exits cleanly and Run() returns the seeded
   // baseline (or anything better DFS managed to find before the
   // wall hit). steady_clock::now() on Linux is vDSO-backed (~20ns),
   // so calling on every Recurse() entry is cheap.
   bool EndSearchIfTimedOut() {
-    if (std::chrono::steady_clock::now() < region_deadline_) {
+    if (timing_.LifetimeElapsedMs() <
+        int64_t{Policy::kTimeoutSecondsPerRegion} * 1000) {
       return false;
     }
     region_timed_out_ = true;
@@ -345,22 +359,13 @@ class DfsSearch {
   // lifetime, matching the deadline that controls it.
   bool region_timed_out_ = false;
 
-  // Region-scope. Wall-clock instant when this DfsSearch was
-  // constructed — i.e., when work on this region began.
-  // Initialized once in the ctor; not modified afterward.
-  std::chrono::steady_clock::time_point region_start_time_;
-
-  // Region-scope. Wall-clock instant past which the search must
-  // terminate. Initialized once in the ctor as
-  // region_start_time_ + Policy::kTimeoutSecondsPerRegion.
-  // EndSearchIfTimedOut compares against this. Not reset by
-  // ResetForReuse, so all Run() calls within this DfsSearch's
-  // lifetime share the same cap.
-  std::chrono::steady_clock::time_point region_deadline_;
-
-  // Run-scope. Wall-clock instant captured at the top of the
-  // current Run() invocation. Reset on every Run() entry.
-  std::chrono::steady_clock::time_point run_start_time_;
+  // Stopwatch with both region-scope (lifetime_start, set in ctor
+  // and untouched by ResetForReuse) and run-scope
+  // (current_run_start, refreshed at the top of every Run())
+  // origins. Read via GetCurrentRunElapsedMs and
+  // GetRegionElapsedMs. EndSearchIfTimedOut also reads its
+  // lifetime elapsed for the timeout check.
+  DualRunAndLifetimeStopwatch timing_;
 
   // The longest schedule the search will accept on this Run().
   // Passed through to Policy::ShouldBoundSearch each visit; the
