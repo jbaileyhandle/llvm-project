@@ -84,9 +84,10 @@ void CheckDominatorTree(ScheduleGraph &graph) {
 // must have size graph.Size()+1 (one entry per scheduling step,
 // starting from the empty state). `expected_cp_length` and
 // `expected_graph_length_floor` cross-check the graph-level scalars
-// computed during ComputeCriticalPathFromExit.
+// computed during ComputeCriticalPathFromExit (now invoked via the
+// combined ComputeCriticalPaths wrapper).
 //
-// Requires graph.ComputeCriticalPathFromExit() and
+// Requires graph.ComputeCriticalPaths() and
 // graph.ComputeTopologicalOrder() to have run already.
 void CheckOneLengthLowerBoundRun(ScheduleGraph &graph,
                                  const GCNSubtarget &st,
@@ -154,7 +155,7 @@ void CheckOneLengthLowerBoundRun(ScheduleGraph &graph,
 // emplaced in order A, C, D, E, F, G, H. PASS/FAIL based on exact
 // match at every node.
 void CheckCriticalPath(ScheduleGraph &graph) {
-  graph.ComputeCriticalPathFromExit();
+  graph.ComputeCriticalPaths();
   struct ExpectedCp {
     const char *name;
     int expected;
@@ -178,6 +179,81 @@ void CheckCriticalPath(ScheduleGraph &graph) {
   llvm::outs() << (mismatches == 0 ? "  PASS\n" : "  FAIL\n");
 }
 
+// Verifies critical-path-from-entry against hand-computed values for
+// BuildTestDAG. Node iteration order: A, C, D, E, F, G, H.
+//
+// Edge latencies (from BuildTestDAG header):
+//   A->H=1  A->D=3  A->C=2
+//   C->D=1  C->E=4
+//   D->F=2  E->F=1
+//   H->G=5  F->G=2
+//
+// Forward recurrence (base case A=0):
+//   A = 0                                            (entry)
+//   C = max(A->C=2 + A=0) = 2
+//   D = max(A->D=3 + A=0, C->D=1 + C=2) = max(3,3) = 3
+//   E = max(C->E=4 + C=2) = 6
+//   F = max(D->F=2 + D=3, E->F=1 + E=6) = max(5,7) = 7
+//   H = max(A->H=1 + A=0) = 1
+//   G = max(H->G=5 + H=1, F->G=2 + F=7) = max(6,9) = 9
+//
+// Also asserts the directional sanity:
+// cp_from_entry[exit] == cp_from_exit[entry] == CriticalPathLength.
+// Both quantities measure the longest latency-weighted path
+// through the whole DAG, so they must agree.
+void CheckCriticalPathFromEntry(ScheduleGraph &graph) {
+  graph.ComputeCriticalPathFromEntry();
+  struct ExpectedCp {
+    const char *name;
+    int expected;
+  };
+  const ExpectedCp expected_cps[] = {
+      {"A", 0}, {"C", 2}, {"D", 3}, {"E", 6},
+      {"F", 7}, {"G", 9}, {"H", 1},
+  };
+  int mismatches = 0;
+  llvm::outs() << "  Critical path from entry:";
+  for (int i = 0, n = graph.Size(); i < n; ++i) {
+    const ScheduleNode &node = graph.Nodes()[i];
+    int got = graph.GetCriticalPathFromEntry(&node);
+    int want = expected_cps[i].expected;
+    llvm::outs() << " " << expected_cps[i].name << "=" << got;
+    if (got != want) {
+      llvm::outs() << "(expected " << want << ")";
+      ++mismatches;
+    }
+  }
+  llvm::outs() << (mismatches == 0 ? "  PASS\n" : "  FAIL\n");
+
+  // Directional sanity: cp_from_entry at the exit node equals
+  // cp_from_exit at the entry node equals CriticalPathLength.
+  // Topo order in BuildTestDAG places A at index 0 (entry, single
+  // root) and G at the last topologically-visited index (single
+  // leaf — the only node with no successors). We look them up by
+  // searching the node list rather than hard-coding an index, so
+  // the check is robust to topo-iteration changes.
+  const ScheduleNode *entry = nullptr;
+  const ScheduleNode *exit = nullptr;
+  for (const ScheduleNode &node : graph.Nodes()) {
+    if (node.NumPredecessors() == 0) {
+      entry = &node;
+    }
+    if (node.NumSuccessors() == 0) {
+      exit = &node;
+    }
+  }
+  int from_entry_at_exit = graph.GetCriticalPathFromEntry(exit);
+  int from_exit_at_entry = graph.GetCriticalPathFromExit(entry);
+  int cp_length = graph.GetCriticalPathLength();
+  llvm::outs() << "  CP directional equality: cp_from_entry[exit]="
+               << from_entry_at_exit
+               << " cp_from_exit[entry]=" << from_exit_at_entry
+               << " CriticalPathLength=" << cp_length << "  ";
+  bool eq_ok = (from_entry_at_exit == from_exit_at_entry) &&
+               (from_entry_at_exit == cp_length);
+  llvm::outs() << (eq_ok ? "PASS\n" : "FAIL\n");
+}
+
 // Exercises graph algorithms on a synthetic test DAG with known structure.
 // Delegates each algorithm to a helper in this anonymous namespace.
 void RunTestDAGShakedown() {
@@ -193,6 +269,7 @@ void RunTestDAGShakedown() {
   CheckTransitiveReduction(*test_graph);
   CheckDominatorTree(*test_graph);
   CheckCriticalPath(*test_graph);
+  CheckCriticalPathFromEntry(*test_graph);
 
   // Cycle detection verified: BuildTestDAGWithCycle() +
   // ValidateAndComputeTopologicalOrder() fires report_fatal_error
@@ -1173,7 +1250,7 @@ void RunSubgraphContiguityShakedown(const MachineFunction &mf,
   // ── Unclustered run ────────────────────────────────────────────
   auto unclustered = ScheduleGraph::BuildContiguityTestDAG();
   unclustered->ValidateAndComputeTopologicalOrder();
-  unclustered->ComputeCriticalPathFromExit();
+  unclustered->ComputeCriticalPaths();
   ScheduleConstructor sc_unclustered = greedy_schedule(*unclustered);
   int unclustered_length = sc_unclustered.GetLengthTracker().GetCurrentCycle();
 
@@ -1254,7 +1331,7 @@ void RunScheduledSetTrackerShakedown(const GCNSubtarget &st) {
   {
     auto graph = ScheduleGraph::BuildTestDAG();
     graph->ValidateAndComputeTopologicalOrder();
-    graph->ComputeCriticalPathFromExit();
+    graph->ComputeCriticalPaths();
     ScheduleLengthTracker length_tracker(*graph, st);
     ScheduledSetTracker scheduled_set_tracker(graph.get(), &length_tracker);
     bool ok = scheduled_set_tracker.GetPrefixSignature() == 0 &&
@@ -1276,7 +1353,7 @@ void RunScheduledSetTrackerShakedown(const GCNSubtarget &st) {
   {
     auto graph = ScheduleGraph::BuildTestDAG();
     graph->ValidateAndComputeTopologicalOrder();
-    graph->ComputeCriticalPathFromExit();
+    graph->ComputeCriticalPaths();
     ArrayRef<ScheduleNode *> topo = graph->GetTopoOrder();
     ScheduleNode *a = topo[0];
     ScheduleNode *h = topo[1];
@@ -1314,7 +1391,7 @@ void RunScheduledSetTrackerShakedown(const GCNSubtarget &st) {
   {
     auto graph = ScheduleGraph::BuildTestDAG();
     graph->ValidateAndComputeTopologicalOrder();
-    graph->ComputeCriticalPathFromExit();
+    graph->ComputeCriticalPaths();
     ScheduleLengthTracker length_tracker(*graph, st);
     ScheduledSetTracker scheduled_set_tracker(graph.get(), &length_tracker);
     ArrayRef<ScheduleNode *> topo = graph->GetTopoOrder();
@@ -1341,7 +1418,7 @@ void RunScheduledSetTrackerShakedown(const GCNSubtarget &st) {
     auto build = [&]() {
       auto g = ScheduleGraph::BuildTestDAG();
       g->ValidateAndComputeTopologicalOrder();
-      g->ComputeCriticalPathFromExit();
+      g->ComputeCriticalPaths();
       return g;
     };
     auto graph1 = build();
@@ -1385,7 +1462,7 @@ void RunScheduledSetTrackerShakedown(const GCNSubtarget &st) {
     ScheduleNode *h = &graph->Nodes()[6];
     graph->AddEdge(a, h, ScheduleEdge::kData, /*latency=*/4);
     graph->ValidateAndComputeTopologicalOrder();
-    graph->ComputeCriticalPathFromExit();
+    graph->ComputeCriticalPaths();
     ScheduleLengthTracker length_tracker(*graph, st);
     ScheduledSetTracker scheduled_set_tracker(graph.get(), &length_tracker);
 
@@ -1493,7 +1570,7 @@ BuildLengthHistoryTrackerFixture(const GCNSubtarget &st) {
   LengthHistoryTrackerFixture fixture;
   fixture.graph = ScheduleGraph::BuildTestDAG();
   fixture.graph->ValidateAndComputeTopologicalOrder();
-  fixture.graph->ComputeCriticalPathFromExit();
+  fixture.graph->ComputeCriticalPaths();
   ArrayRef<ScheduleNode *> topo = fixture.graph->GetTopoOrder();
   fixture.a = topo[0];
   fixture.h = topo[1];
@@ -1811,7 +1888,7 @@ BuildPressureHistoryTrackerFixture(const GCNSubtarget &st) {
   PressureHistoryTrackerFixture fixture;
   fixture.graph = ScheduleGraph::BuildTestDAG();
   fixture.graph->ValidateAndComputeTopologicalOrder();
-  fixture.graph->ComputeCriticalPathFromExit();
+  fixture.graph->ComputeCriticalPaths();
   ArrayRef<ScheduleNode *> topo = fixture.graph->GetTopoOrder();
   fixture.a = topo[0];
   fixture.h = topo[1];
@@ -2083,7 +2160,7 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
 
   auto graph = ScheduleGraph::BuildHistoryPruneTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
-  graph->ComputeCriticalPathFromExit();
+  graph->ComputeCriticalPaths();
   graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf, lis);
 
   DfsSearch<TestLengthPolicyNoBoundsNoHistory> no_hist_search(
@@ -2221,7 +2298,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
 
   auto graph = ScheduleGraph::BuildPressureHistoryPruneTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
-  graph->ComputeCriticalPathFromExit();
+  graph->ComputeCriticalPaths();
   graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf, lis);
 
   std::vector<int> vgpr_deltas = {+1, +1, +1, -1, -1, -1};
@@ -2277,7 +2354,7 @@ void RunLengthLowerBoundShakedown(const GCNSubtarget &st) {
   {
     auto graph = ScheduleGraph::BuildTestDAG();
     graph->ValidateAndComputeTopologicalOrder();
-    graph->ComputeCriticalPathFromExit();
+    graph->ComputeCriticalPaths();
     const int expected_lb[] = {7, 10, 10, 10, 10, 10, 10, 10};
     CheckOneLengthLowerBoundRun(*graph, st, expected_lb,
                                 /*expected_cp_length=*/9,
@@ -2295,7 +2372,7 @@ void RunLengthLowerBoundShakedown(const GCNSubtarget &st) {
   {
     auto graph = ScheduleGraph::BuildLengthLowerBoundTestDAG();
     graph->ValidateAndComputeTopologicalOrder();
-    graph->ComputeCriticalPathFromExit();
+    graph->ComputeCriticalPaths();
     const int expected_lb[] = {6, 10, 10, 10, 11, 12, 12};
     CheckOneLengthLowerBoundRun(*graph, st, expected_lb,
                                 /*expected_cp_length=*/9,

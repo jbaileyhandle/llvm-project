@@ -389,7 +389,7 @@ void ScheduleGraph::InsertSubgraphProxies(
   // Topo recompute also re-runs cycle detection, our re-entrancy
   // catch for the just-inserted subgraphs.
   ValidateAndComputeTopologicalOrder();
-  ComputeCriticalPathFromExit();
+  ComputeCriticalPaths();
 }
 
 void ScheduleGraph::PrintSubgraphInfos(raw_ostream &os) const {
@@ -489,9 +489,7 @@ void ScheduleGraph::ComputeTopologicalOrder(bool include_weak_edges) {
 void ScheduleGraph::InvalidateDerivedData() {
   topo_order_.clear();
   topo_order_include_weak_edges_.reset();
-  critical_path_from_exit_by_topo_index_.clear();
-  critical_path_length_.reset();
-  graph_length_floor_.reset();
+  ClearCriticalPaths();
   reduced_graph_.reset();
   reachability_by_topo_index_.clear();
   dom_tree_.reset();
@@ -545,6 +543,46 @@ void ScheduleGraph::ComputeCriticalPathFromExit() {
   int cp_at_source = critical_path_from_exit_by_topo_index_[0];
   critical_path_length_ = cp_at_source;
   graph_length_floor_ = std::max(NumSchedulingUnits(), cp_at_source + 1);
+}
+
+void ScheduleGraph::ComputeCriticalPathFromEntry() {
+  // Cache-aware: skip if cp is already current. Cleared by any
+  // graph mutation via InvalidateDerivedData.
+  if (HasCriticalPathFromEntry()) {
+    return;
+  }
+  if (!IsTopoSorted()) {
+    std::string msg = "ComputeCriticalPathFromEntry called on " + ToString() +
+                      " before ComputeTopologicalOrder";
+    report_fatal_error(llvm::StringRef(msg));
+  }
+
+  // One slot per node, indexed by topo_index. Default-initialized to 0
+  // so the entry node's base case is implicit.
+  critical_path_from_entry_by_topo_index_.assign(Size(), 0);
+
+  // Walk in forward topological order: predecessors are visited before
+  // successors, so cp_from_entry[pred] is ready when we compute
+  // cp_from_entry[node].
+  for (ScheduleNode *node : topo_order_) {
+    int max_cp = 0;
+    for (const ScheduleEdge &edge : node->Predecessors()) {
+      if (!edge.IsLatencyEdge()) {
+        continue;
+      }
+      ScheduleNode *predecessor = edge.node_;
+      // Per-edge cycle delta: max of the edge's modeled latency
+      // and the predecessor's IssueWidth=1 issue-slot consumption.
+      // Mirrors the weight rule in ComputeCriticalPathFromExit.
+      int weight = std::max(edge.Latency(), predecessor->IssueSlotsConsumed());
+      int cp = weight +
+               critical_path_from_entry_by_topo_index_[predecessor->GetTopoIndex()];
+      if (cp > max_cp) {
+        max_cp = cp;
+      }
+    }
+    critical_path_from_entry_by_topo_index_[node->GetTopoIndex()] = max_cp;
+  }
 }
 
 void ScheduleGraph::ComputeTransitiveReductionAndReachability() {
@@ -661,13 +699,15 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
   graph->CreateLeafNodesFromSUnits(sunits, sunit_to_node);
   graph->AddEdgesBetweenLeafNodes(sunit_to_node);
   graph->CreateEntryAndExitNodes(lis, mri, region_begin_idx, region_end_idx);
-  // Compute topo and cp_from_exit before Phase 4 so the
-  // ScheduleLengthTracker inside input_schedule_constructor_ satisfies
-  // its precondition (cp must be available at tracker construction).
+  // Compute topo and both critical-path directions before Phase 4 so
+  // the ScheduleLengthTracker inside input_schedule_constructor_
+  // satisfies its precondition (cp_from_exit must be available at
+  // tracker construction) and so window-based length feasibility (a
+  // future tracker addition reading cp_from_entry) is also ready.
   // ValidateAndComputeTopologicalOrder also enforces single-source /
   // single-sink (entry / exit must each be unique by construction).
   graph->ValidateAndComputeTopologicalOrder();
-  graph->ComputeCriticalPathFromExit();
+  graph->ComputeCriticalPaths();
   graph->PopulateInputScheduleConstructor(st, mf, lis, region);
 
   return graph;

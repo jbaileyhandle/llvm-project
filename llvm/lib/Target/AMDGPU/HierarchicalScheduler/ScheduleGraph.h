@@ -938,6 +938,82 @@ public:
   /// HasCriticalPathFromExit().
   int GetCriticalPathLength() const { return *critical_path_length_; }
 
+  /// Compute the longest latency-weighted path from the entry node
+  /// to each node, considering only latency-carrying edges. Symmetric
+  /// counterpart to ComputeCriticalPathFromExit.
+  ///
+  /// Used as the static initial value of each instruction's earliest
+  /// placement cycle in target-feasibility iteration: an instruction
+  /// cannot be placed before this cycle no matter how its
+  /// predecessors are scheduled, because the longest latency-weighted
+  /// path leading to it is this long.
+  ///
+  /// Recurrence (base case: entry has cp_from_entry = 0):
+  ///   cp_from_entry[n] = max over latency-edge predecessors p of
+  ///                         (edge.latency + cp_from_entry[p])
+  /// using the same per-edge weight rule as ComputeCriticalPathFromExit
+  /// (max of the edge's modeled latency and the predecessor's
+  /// IssueSlotsConsumed).
+  ///
+  /// Implemented as a single forward-topological pass — O(V + E).
+  /// Requires ComputeTopologicalOrder to have been called first
+  /// (fires report_fatal_error otherwise).
+  ///
+  /// Storage: std::vector<int> indexed by ScheduleNode::GetTopoIndex().
+  /// Sized to Size() (one slot per node, no waste).
+  void ComputeCriticalPathFromEntry();
+
+  /// Whether ComputeCriticalPathFromEntry() has been called and not
+  /// been invalidated since.
+  bool HasCriticalPathFromEntry() const {
+    return !critical_path_from_entry_by_topo_index_.empty();
+  }
+
+  /// Longest latency-weighted path from the entry node, keyed by
+  /// topo index. Bare lookup — caller is responsible for ensuring CP
+  /// has been computed.
+  int GetCriticalPathFromEntryByTopoIndex(int topo_idx) const {
+    return critical_path_from_entry_by_topo_index_[topo_idx];
+  }
+
+  /// Convenience: same as above but extracts the topo index from
+  /// the node.
+  int GetCriticalPathFromEntry(const ScheduleNode *node) const {
+    return GetCriticalPathFromEntryByTopoIndex(node->GetTopoIndex());
+  }
+
+  /// Compute both critical-path directions in one call. Each
+  /// direction is independently cache-aware, so calling this when
+  /// one direction is already cached just computes the other. This
+  /// is the preferred entry point for production callers that
+  /// finalize a graph for downstream consumers (which include
+  /// window-based length feasibility, the LB tracker, and
+  /// subgraph-formation passes); the per-direction methods remain
+  /// available primarily for shakedowns and tests that exercise
+  /// one direction in isolation.
+  void ComputeCriticalPaths() {
+    ComputeCriticalPathFromExit();
+    ComputeCriticalPathFromEntry();
+  }
+
+  /// Whether both critical-path directions have been computed and
+  /// not invalidated since.
+  bool HasCriticalPaths() const {
+    return HasCriticalPathFromExit() && HasCriticalPathFromEntry();
+  }
+
+  /// Clear both critical-path tables and the scalar caches derived
+  /// from cp_from_exit (CriticalPathLength, GraphLengthFloor). Used
+  /// by InvalidateDerivedData; callable directly if a caller wants
+  /// to force a recompute without invalidating the rest of the
+  /// derived data.
+  void ClearCriticalPaths() {
+    critical_path_from_exit_by_topo_index_.clear();
+    critical_path_from_entry_by_topo_index_.clear();
+    critical_path_length_.reset();
+    graph_length_floor_.reset();
+  }
+
   /// Lower bound on schedule length implied by graph structure alone:
   ///   max(NumSchedulingUnits, GetCriticalPathLength() + 1)
   /// NumSchedulingUnits covers the IssueWidth=1 floor (one cycle per
@@ -1094,6 +1170,11 @@ private:
   /// ScheduleNode::GetTopoIndex(). Empty == "not computed or
   /// invalidated since." Sized to Size() (one slot per node).
   std::vector<int> critical_path_from_exit_by_topo_index_;
+
+  /// Populated by ComputeCriticalPathFromEntry. Indexed by
+  /// ScheduleNode::GetTopoIndex(). Empty == "not computed or
+  /// invalidated since." Sized to Size() (one slot per node).
+  std::vector<int> critical_path_from_entry_by_topo_index_;
 
   /// Cached max over critical_path_from_exit_by_topo_index_. Populated
   /// at the end of ComputeCriticalPathFromExit; reset in

@@ -449,11 +449,11 @@ void FormSubgraphs(ScheduleGraph &graph,
   // the re-derive below short-circuits).
   graph.InsertSubgraphProxies(std::move(infos));
 
-  // 6. Re-derive topo + critical-path so downstream consumers see
+  // 6. Re-derive topo + critical-paths so downstream consumers see
   // the post-mutation graph (proxies + artificial edges). Both
   // calls early-return if no mutation happened above.
   graph.ValidateAndComputeTopologicalOrder();
-  graph.ComputeCriticalPathFromExit();
+  graph.ComputeCriticalPaths();
 }
 
 } // namespace hierarchical_scheduler
