@@ -220,6 +220,163 @@ void CheckSetMaxAcceptableScheduleLength(ScheduleGraph &graph, const GCNSubtarge
   llvm::outs() << (mismatches == 0 ? "  PASS\n" : "  FAIL\n");
 }
 
+// Verifies the MaxScheduleCycleHeap inside ScheduleLengthTracker.
+//
+// BuildTestDAG cp_from_exit values (per CheckCriticalPath):
+//   A=9, C=7, D=4, E=3, F=2, G=0, H=5
+// Topo order assigned by Kahn's (per RunTestDAGShakedown's print):
+//   A=0, H=1, C=2, D=3, E=4, F=5, G=6
+// max_cycle = 12 - 1 - cp_from_exit:
+//   A=2, H=6, C=4, D=7, E=8, F=9, G=11
+//
+// Sorted ascending by (max_cycle, topo_idx):
+//   A(2,0), C(4,2), H(6,1), D(7,3), E(8,4), F(9,5), G(11,6)
+//
+// Tests:
+//   1) Pre-Set: heap empty, predicate false.
+//   2) After SetMax(12): heap fully populated, top=A(2),
+//      predicate false (current_cycle=0).
+//   3) Forward drain: Schedule each node in topo order, peeking
+//      after each step to verify the heap's top advances to the
+//      next-smallest unscheduled entry.
+//   4) Reverse drain: Unschedule in stack order, peeking at each
+//      step to verify the heap restores entries correctly. After
+//      the full reverse, heap matches step (2)'s state.
+//   5) Predicate behavior: with the post-(4) state, tighten
+//      SetMax(2) so A.max_cycle becomes -8 (negative). With
+//      current_cycle still 0, predicate fires (0 > -8).
+void CheckMaxScheduleCycleHeap(ScheduleGraph &graph,
+                               const GCNSubtarget &st) {
+  ScheduleLengthTracker tracker(graph, st);
+  const auto &heap = tracker.GetMaxScheduleCycleHeapForTest();
+
+  // 1) Pre-Set: heap empty, predicate false.
+  bool pre_ok = heap.Size() == 0 && !heap.Peek().has_value() &&
+                !tracker.IsCurrentCycleBeyondEarliestMaxScheduleCycle();
+  llvm::outs() << "  Heap pre-Set: size=" << heap.Size()
+               << " peek="
+               << (heap.Peek().has_value() ? "present" : "nullopt")
+               << " predicate="
+               << (tracker.IsCurrentCycleBeyondEarliestMaxScheduleCycle()
+                       ? "true"
+                       : "false")
+               << "  " << (pre_ok ? "PASS\n" : "FAIL\n");
+
+  // 2) SetMax(12): heap populated, top=A(2,0), predicate false.
+  tracker.SetMaxAcceptableScheduleLength(12);
+  auto top_after_set = heap.Peek();
+  bool set_ok = heap.Size() == 7 && top_after_set.has_value() &&
+                top_after_set->max_cycle == 2 &&
+                top_after_set->topo_idx == 0 &&
+                !tracker.IsCurrentCycleBeyondEarliestMaxScheduleCycle();
+  llvm::outs() << "  Heap after SetMax(12): size=" << heap.Size()
+               << " top.max_cycle="
+               << (top_after_set.has_value() ? top_after_set->max_cycle : -1)
+               << " top.topo_idx="
+               << (top_after_set.has_value() ? top_after_set->topo_idx : -1)
+               << " predicate="
+               << (tracker.IsCurrentCycleBeyondEarliestMaxScheduleCycle()
+                       ? "true"
+                       : "false")
+               << "  " << (set_ok ? "PASS\n" : "FAIL\n");
+
+  // Resolve nodes by topo index for the drain steps.
+  const ScheduleNode *nodes_by_topo[7] = {nullptr};
+  for (const ScheduleNode &n : graph.Nodes()) {
+    if (!n.IsSchedulingUnit()) {
+      continue;
+    }
+    nodes_by_topo[n.GetTopoIndex()] = &n;
+  }
+
+  // 3) Forward drain.
+  struct ForwardStep {
+    int schedule_topo;
+    std::optional<MaxScheduleCycleHeap::Entry> expected_top;
+    const char *label;
+  };
+  const ForwardStep forward[] = {
+      {0, MaxScheduleCycleHeap::Entry{4, 2}, "Schedule A -> top=C(4,2)"},
+      {1, MaxScheduleCycleHeap::Entry{4, 2}, "Schedule H -> top=C(4,2)"},
+      {2, MaxScheduleCycleHeap::Entry{7, 3}, "Schedule C -> top=D(7,3)"},
+      {3, MaxScheduleCycleHeap::Entry{8, 4}, "Schedule D -> top=E(8,4)"},
+      {4, MaxScheduleCycleHeap::Entry{9, 5}, "Schedule E -> top=F(9,5)"},
+      {5, MaxScheduleCycleHeap::Entry{11, 6}, "Schedule F -> top=G(11,6)"},
+      {6, std::nullopt, "Schedule G -> empty"},
+  };
+  int forward_fails = 0;
+  llvm::outs() << "  Heap forward drain:\n";
+  for (const ForwardStep &step : forward) {
+    tracker.Schedule(nodes_by_topo[step.schedule_topo]);
+    auto got = heap.Peek();
+    bool ok = got.has_value() == step.expected_top.has_value() &&
+              (!got.has_value() ||
+               (got->max_cycle == step.expected_top->max_cycle &&
+                got->topo_idx == step.expected_top->topo_idx));
+    llvm::outs() << "    " << step.label << ": got "
+                 << (got.has_value()
+                         ? "(max=" + std::to_string(got->max_cycle) +
+                               ",topo=" + std::to_string(got->topo_idx) + ")"
+                         : "nullopt")
+                 << "  " << (ok ? "PASS\n" : "FAIL\n");
+    if (!ok) {
+      ++forward_fails;
+    }
+  }
+
+  // 4) Reverse drain.
+  struct ReverseStep {
+    int unschedule_topo;
+    MaxScheduleCycleHeap::Entry expected_top;
+    const char *label;
+  };
+  const ReverseStep reverse[] = {
+      {6, {11, 6}, "Unschedule G -> top=G(11,6)"},
+      {5, {9, 5}, "Unschedule F -> top=F(9,5)"},
+      {4, {8, 4}, "Unschedule E -> top=E(8,4)"},
+      {3, {7, 3}, "Unschedule D -> top=D(7,3)"},
+      {2, {4, 2}, "Unschedule C -> top=C(4,2)"},
+      {1, {4, 2}, "Unschedule H -> top=C(4,2)"},
+      {0, {2, 0}, "Unschedule A -> top=A(2,0)"},
+  };
+  int reverse_fails = 0;
+  llvm::outs() << "  Heap reverse drain:\n";
+  for (const ReverseStep &step : reverse) {
+    tracker.Unschedule(nodes_by_topo[step.unschedule_topo]);
+    auto got = heap.Peek();
+    bool ok = got.has_value() &&
+              got->max_cycle == step.expected_top.max_cycle &&
+              got->topo_idx == step.expected_top.topo_idx;
+    llvm::outs() << "    " << step.label << ": got "
+                 << (got.has_value()
+                         ? "(max=" + std::to_string(got->max_cycle) +
+                               ",topo=" + std::to_string(got->topo_idx) + ")"
+                         : "nullopt")
+                 << "  " << (ok ? "PASS\n" : "FAIL\n");
+    if (!ok) {
+      ++reverse_fails;
+    }
+  }
+
+  // 5) Predicate behavior under tightened L. SetMax(2): rebuild
+  // with max_cycle = 2 - 1 - cp_from_exit, all negative for any
+  // cp_from_exit >= 2 (everything except G). Smallest entry's
+  // max_cycle is A's = -8. current_cycle is still 0, so 0 > -8
+  // and the predicate fires.
+  tracker.SetMaxAcceptableScheduleLength(2);
+  bool predicate_tight =
+      tracker.IsCurrentCycleBeyondEarliestMaxScheduleCycle();
+  llvm::outs() << "  Heap predicate after SetMax(2) (current_cycle=0, "
+                  "smallest max_cycle=-8): "
+               << (predicate_tight ? "true" : "false") << " (expected true)  "
+               << (predicate_tight ? "PASS\n" : "FAIL\n");
+
+  llvm::outs() << "  Heap drain summary: forward_fails=" << forward_fails
+               << " reverse_fails=" << reverse_fails << "  "
+               << ((forward_fails == 0 && reverse_fails == 0) ? "PASS\n"
+                                                              : "FAIL\n");
+}
+
 // Verifies critical-path-from-entry against hand-computed values for
 // BuildTestDAG. Node iteration order: A, C, D, E, F, G, H.
 //
@@ -312,6 +469,7 @@ void RunTestDAGShakedown(const GCNSubtarget &st) {
   CheckCriticalPath(*test_graph);
   CheckCriticalPathFromEntry(*test_graph);
   CheckSetMaxAcceptableScheduleLength(*test_graph, st);
+  CheckMaxScheduleCycleHeap(*test_graph, st);
 
   // Cycle detection verified: BuildTestDAGWithCycle() +
   // ValidateAndComputeTopologicalOrder() fires report_fatal_error

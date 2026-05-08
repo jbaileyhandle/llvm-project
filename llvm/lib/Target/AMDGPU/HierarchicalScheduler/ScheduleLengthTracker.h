@@ -52,6 +52,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULELENGTHTRACKER_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULELENGTHTRACKER_H
 
+#include "MaxScheduleCycleHeap.h"
 #include "ScheduleGraph.h"
 #include "llvm/ADT/DenseMap.h"
 #include <optional>
@@ -65,6 +66,12 @@ class GCNSubtarget;
 namespace hierarchical_scheduler {
 
 class ScheduleLengthTracker {
+  // The heap reads max_schedule_cycle_by_topo_index_,
+  // scheduled_cycle_by_topo_index_, current_cycle_, and graph_
+  // through this friend declaration so its API can stay narrow
+  // (Insert/Remove by topo_idx with no array passing).
+  friend class MaxScheduleCycleHeap;
+
 public:
   /// Construct from a graph and subtarget. On first construction for
   /// a given graph (identified by its unique ID), validates that:
@@ -182,6 +189,33 @@ public:
     return GetMaxScheduleCycleByTopoIndex(node->GetTopoIndex());
   }
 
+  /// Test-only mutable access to the underlying heap. Used by
+  /// shakedowns that need to call Peek/Size to verify Insert/
+  /// Remove/Rebuild produced the expected ordering. Production
+  /// code uses IsCurrentCycleBeyondEarliestMaxScheduleCycle().
+  const MaxScheduleCycleHeap &GetMaxScheduleCycleHeapForTest() const {
+    return unscheduled_max_cycle_heap_;
+  }
+
+  /// True iff the search has advanced past the earliest max
+  /// schedule cycle among unscheduled instructions — i.e., some
+  /// unscheduled node's deadline has already been passed and no
+  /// completion of this prefix can honor it without exceeding
+  /// the configured max acceptable schedule length. The length
+  /// policy's per-step prune check reads this.
+  ///
+  /// Returns false (no pruning) when no max acceptable schedule
+  /// length has been set or no unscheduled instructions remain.
+  ///
+  /// Delegates to unscheduled_max_cycle_heap_, which maintains
+  /// the unscheduled-by-max-schedule-cycle set across
+  /// Schedule / Unschedule / SetMaxAcceptableScheduleLength so
+  /// this query is O(1) (heap's begin()) at call time.
+  bool IsCurrentCycleBeyondEarliestMaxScheduleCycle() const {
+    return unscheduled_max_cycle_heap_
+        .IsCurrentCycleBeyondEarliestMaxCycle();
+  }
+
   /// Human-readable summary.
   std::string Describe() const;
 
@@ -232,6 +266,16 @@ private:
   /// value before SetMaxAcceptableScheduleLength has been called;
   /// callers must guard reads with HasMaxAcceptableScheduleLength.
   std::optional<int> max_acceptable_schedule_length_;
+
+  /// Min-heap of currently-unscheduled instructions keyed by
+  /// max_schedule_cycle. Maintained across Schedule/Unschedule
+  /// (entries removed/re-inserted) and SetMaxAcceptableScheduleLength
+  /// (heap rebuilt because cycle values changed). Reads its
+  /// inputs from this tracker via friend access. Construction
+  /// passes *this; the heap's constructor only stores the
+  /// pointer, so this is safe even though the tracker is still
+  /// being initialized at that point.
+  MaxScheduleCycleHeap unscheduled_max_cycle_heap_;
 
   /// Validates the graph and subtarget assumptions. Called once per
   /// graph (results cached internally by graph ID).

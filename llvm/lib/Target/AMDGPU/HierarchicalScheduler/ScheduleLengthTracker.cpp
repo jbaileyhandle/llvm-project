@@ -72,7 +72,8 @@ void ScheduleLengthTracker::ValidateGraph(const ScheduleGraph &graph,
 ScheduleLengthTracker::ScheduleLengthTracker(const ScheduleGraph &graph,
                                              const GCNSubtarget &st)
     : graph_(&graph),
-      scheduled_cycle_by_topo_index_(graph.Size(), /*sentinel=*/-1) {
+      scheduled_cycle_by_topo_index_(graph.Size(), /*sentinel=*/-1),
+      unscheduled_max_cycle_heap_(*this) {
   ValidateGraph(graph, st);
   if (!graph.HasCriticalPathFromExit()) {
     report_fatal_error(
@@ -98,12 +99,12 @@ void ScheduleLengthTracker::Schedule(const ScheduleNode *node) {
   PushUndoStep(node);
   AdvanceSchedule(node, ready_cycle);
   UpdateLengthLowerBoundMax(node, ready_cycle);
+  unscheduled_max_cycle_heap_.Remove(node);
 }
 
 void ScheduleLengthTracker::Unschedule(const ScheduleNode *node) {
   // Symmetric with Schedule: proxies were no-ops, so undo is also
-  // a no-op. The `node` parameter is here purely for this filter
-  // — undo data lives self-contained in undo_stack_.back().
+  // a no-op.
   if (!node->IsSchedulingUnit()) {
     return;
   }
@@ -116,10 +117,23 @@ void ScheduleLengthTracker::Unschedule(const ScheduleNode *node) {
   ScheduleStep step = undo_stack_.back();
   undo_stack_.pop_back();
 
-  scheduled_cycle_by_topo_index_[step.node->GetTopoIndex()] = -1;
+  // The undo stack records which node was just scheduled; the
+  // caller-supplied node should match. A mismatch indicates the
+  // tracker's mutators are being driven out of order — undoing
+  // the wrong instruction would silently corrupt state.
+  if (step.node != node) {
+    report_fatal_error(
+        "ScheduleLengthTracker::Unschedule called with node " +
+        Twine(node->GetId()) +
+        " but the most recent Schedule was for node " +
+        Twine(step.node->GetId()));
+  }
+
+  scheduled_cycle_by_topo_index_[node->GetTopoIndex()] = -1;
   current_cycle_ = step.prev_cycle;
   total_bubbles_ = step.prev_bubbles;
   max_scheduled_plus_cp_ = step.prev_max_scheduled_plus_cp;
+  unscheduled_max_cycle_heap_.Insert(node);
 }
 
 int ScheduleLengthTracker::ComputeReadyCycle(
@@ -233,6 +247,11 @@ void ScheduleLengthTracker::SetMaxAcceptableScheduleLength(int max_acceptable_sc
     max_schedule_cycle_by_topo_index_[topo_idx] =
         max_acceptable_schedule_length - 1 - cp_from_exit;
   }
+
+  // The cycle values just changed, so any prior heap entries are
+  // keyed at stale max_cycle values. Rebuild from scratch from
+  // the new array.
+  unscheduled_max_cycle_heap_.Rebuild();
 }
 
 // ============================================================================

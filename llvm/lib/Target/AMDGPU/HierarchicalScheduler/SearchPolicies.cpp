@@ -19,14 +19,24 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
   // coarse-grained complement to the per-node deadline check
   // implied by the tracker's GetMaxScheduleCycle table.
   const auto &length_tracker = schedule_constructor.GetLengthTracker();
+
   int max_acceptable = length_tracker.GetMaxAcceptableScheduleLength();
   int working_lb = length_tracker.GetLengthLowerBound();
   if (working_lb > max_acceptable) {
     return true;
   }
+  // Per-instruction max-schedule-cycle prune: tighter than the
+  // aggregate LB above when the smallest unscheduled
+  // max_schedule_cycle has been overrun, even though the LB
+  // itself hasn't yet exceeded max_acceptable.
+  if (length_tracker.IsCurrentCycleBeyondEarliestMaxScheduleCycle()) {
+    return true;
+  }
+
   if (!schedule_constructor.RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
     return true;
   }
+
   if constexpr (kUseLengthHistoryPruning) {
     // Mutating: records the current prefix in length_history when
     // it is NOT dominated. See LengthHistoryTracker class comment.
