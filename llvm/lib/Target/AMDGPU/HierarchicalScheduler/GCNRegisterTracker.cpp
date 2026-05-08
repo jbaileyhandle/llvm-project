@@ -479,9 +479,9 @@ unsigned GCNRegisterTracker::GetMaxNumSGPRsForOcc(const GCNSubtarget &st,
 // fractional bonus for how far below the current bracket's upper
 // edge the register count sits. See GCNRegisterTracker.h for the
 // formula. Uncapped by design: the early-exit check
-// (IsAtOrAboveFunctionOccupancyCeiling) makes the top-bracket plateau unreachable
-// during search, so a cap would only add branches without changing
-// any decision.
+// (RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget) makes
+// the top-bracket plateau unreachable during search, so a cap
+// would only add branches without changing any decision.
 namespace {
 
 // Continuous occupancy score for a single register class. The two

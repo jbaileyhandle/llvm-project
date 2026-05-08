@@ -141,6 +141,20 @@ public:
     return scopes_.size() == 1 && scopes_[0].ready.empty();
   }
 
+  /// Total cycles used by the schedule. Only meaningful when
+  /// IsDone() — reports fatal error on a partial schedule, since
+  /// "the schedule's length" isn't defined until the schedule is
+  /// complete. For running cycle counts during construction, read
+  /// GetLengthTracker().GetCurrentCycle() directly.
+  int GetScheduleLength() const {
+    if (!IsDone()) {
+      report_fatal_error(
+          "ScheduleConstructor::GetScheduleLength called on "
+          "incomplete schedule");
+    }
+    return length_tracker_.GetCurrentCycle();
+  }
+
   /// The current scope's ready list — nodes whose strong predecessors
   /// are all scheduled AND that are visible in the currently-active
   /// scope. Maintained in sorted order under the constructor-supplied
@@ -185,6 +199,16 @@ public:
   const ScheduleLengthTracker &GetLengthTracker() const {
     return length_tracker_;
   }
+
+  /// Set the maximum schedule length the search will accept for
+  /// the next stretch of work on this constructor and populate the
+  /// length tracker's per-node max-schedule-cycle table accordingly.
+  /// Idempotent: subsequent calls overwrite. Production callers
+  /// pass min(iteration_target, best.length - 1).
+  void SetMaxAcceptableScheduleLength(int max_acceptable_schedule_length) {
+    length_tracker_.SetMaxAcceptableScheduleLength(max_acceptable_schedule_length);
+  }
+
   const ScheduledSetTracker &GetScheduledSetTracker() const {
     return scheduled_set_tracker_;
   }
@@ -224,7 +248,7 @@ public:
   /// (LDS, launch bounds) are binding below the register max — in
   /// that case extra register headroom doesn't translate to extra
   /// effective occupancy. A search can exit early either way.
-  bool IsAtOrAboveFunctionOccupancyCeiling() const;
+  bool RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() const;
 
   /// Human-readable summary of current state.
   std::string Describe() const;

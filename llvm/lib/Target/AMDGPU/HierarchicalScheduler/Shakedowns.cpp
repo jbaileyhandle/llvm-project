@@ -179,6 +179,47 @@ void CheckCriticalPath(ScheduleGraph &graph) {
   llvm::outs() << (mismatches == 0 ? "  PASS\n" : "  FAIL\n");
 }
 
+// Verifies ScheduleLengthTracker::SetMaxAcceptableScheduleLength's formula on
+// BuildTestDAG. cp_from_exit values from CheckCriticalPath:
+//   A=9, C=7, D=4, E=3, F=2, G=0, H=5.
+// For target_length L, max_schedule_cycle[i] = L - 1 - cp_from_exit[i].
+// Picking L = 12 to keep all expected values non-negative.
+void CheckSetMaxAcceptableScheduleLength(ScheduleGraph &graph, const GCNSubtarget &st) {
+  ScheduleLengthTracker tracker(graph, st);
+  constexpr int kTargetLength = 12;
+  tracker.SetMaxAcceptableScheduleLength(kTargetLength);
+
+  if (!tracker.HasMaxAcceptableScheduleLength()) {
+    llvm::outs() << "  SetMaxAcceptableScheduleLength formula: HasMaxAcceptableScheduleLength "
+                    "returned false after SetMaxAcceptableScheduleLength  FAIL\n";
+    return;
+  }
+
+  struct ExpectedMax {
+    const char *name;
+    int expected;
+  };
+  // L - 1 - cp_from_exit  (L=12)
+  const ExpectedMax expected_max[] = {
+      {"A", 2}, {"C", 4}, {"D", 7}, {"E", 8},
+      {"F", 9}, {"G", 11}, {"H", 6},
+  };
+  int mismatches = 0;
+  llvm::outs() << "  SetMaxAcceptableScheduleLength formula (L=" << kTargetLength
+               << "):";
+  for (int i = 0, n = graph.Size(); i < n; ++i) {
+    const ScheduleNode &node = graph.Nodes()[i];
+    int got = tracker.GetMaxScheduleCycle(&node);
+    int want = expected_max[i].expected;
+    llvm::outs() << " " << expected_max[i].name << "=" << got;
+    if (got != want) {
+      llvm::outs() << "(expected " << want << ")";
+      ++mismatches;
+    }
+  }
+  llvm::outs() << (mismatches == 0 ? "  PASS\n" : "  FAIL\n");
+}
+
 // Verifies critical-path-from-entry against hand-computed values for
 // BuildTestDAG. Node iteration order: A, C, D, E, F, G, H.
 //
@@ -256,7 +297,7 @@ void CheckCriticalPathFromEntry(ScheduleGraph &graph) {
 
 // Exercises graph algorithms on a synthetic test DAG with known structure.
 // Delegates each algorithm to a helper in this anonymous namespace.
-void RunTestDAGShakedown() {
+void RunTestDAGShakedown(const GCNSubtarget &st) {
   auto test_graph = ScheduleGraph::BuildTestDAG();
   test_graph->ValidateAndComputeTopologicalOrder();
 
@@ -270,6 +311,7 @@ void RunTestDAGShakedown() {
   CheckDominatorTree(*test_graph);
   CheckCriticalPath(*test_graph);
   CheckCriticalPathFromEntry(*test_graph);
+  CheckSetMaxAcceptableScheduleLength(*test_graph, st);
 
   // Cycle detection verified: BuildTestDAGWithCycle() +
   // ValidateAndComputeTopologicalOrder() fires report_fatal_error
@@ -2118,8 +2160,7 @@ class TestLengthPolicyNoBoundsNoHistory : public DfsMinimizeLengthPolicy {
   static bool ShouldBoundSearch(const ScheduleConstructor &,
                                 const ScheduleConstructor &,
                                 LengthHistoryTracker &,
-                                PressureHistoryTracker &,
-                                int /*target_length*/) {
+                                PressureHistoryTracker &) {
     return false;
   }
 };
@@ -2130,8 +2171,7 @@ class TestLengthPolicyNoBoundsWithHistory : public DfsMinimizeLengthPolicy {
   static bool ShouldBoundSearch(const ScheduleConstructor &,
                                 const ScheduleConstructor &,
                                 LengthHistoryTracker &length_history,
-                                PressureHistoryTracker &,
-                                int /*target_length*/) {
+                                PressureHistoryTracker &) {
     return length_history.IsDominatedElseInsert();
   }
 };
@@ -2217,8 +2257,7 @@ class TestPressurePolicyNoBoundsNoHistory
   static bool ShouldBoundSearch(const ScheduleConstructor &,
                                 const ScheduleConstructor &,
                                 LengthHistoryTracker &,
-                                PressureHistoryTracker &,
-                                int /*target_length*/) {
+                                PressureHistoryTracker &) {
     return false;
   }
   static bool ShouldEndSearch(const ScheduleConstructor &,
@@ -2235,8 +2274,7 @@ class TestPressurePolicyNoBoundsWithHistory
       const ScheduleConstructor &,
       const ScheduleConstructor &,
       LengthHistoryTracker &,
-      PressureHistoryTracker &pressure_history,
-      int /*target_length*/) {
+      PressureHistoryTracker &pressure_history) {
     return pressure_history.IsDominatedElseRecord();
   }
   static bool ShouldEndSearch(const ScheduleConstructor &,
@@ -2906,7 +2944,7 @@ void RunScheduleMetricShakedown(ScheduleGraph &graph,
       sc_full.GetLengthTracker().GetCurrentCycle(),
       /*higher_is_better=*/false);
 
-  // --- Part 4: IsAtOrAboveFunctionOccupancyCeiling observability ---
+  // --- Part 4: RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget observability ---
   //
   // Print the pieces so we can see them line up. No pass/fail since
   // whether the region is at the ceiling depends on actual pressure.
@@ -2914,12 +2952,12 @@ void RunScheduleMetricShakedown(ScheduleGraph &graph,
                << sc_empty.GetPressureTracker().GetRegisterOnlyOccupancy()
                << " fn_limit="
                << sc_empty.GetPressureTracker().GetConfiguredMachineFunctionOccupancyLimit()
-               << " at_ceiling=" << sc_empty.IsAtOrAboveFunctionOccupancyCeiling() << "\n";
+               << " at_ceiling=" << sc_empty.RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() << "\n";
   llvm::outs() << "    full ceiling check:    reg_occ="
                << sc_full.GetPressureTracker().GetRegisterOnlyOccupancy()
                << " fn_limit="
                << sc_full.GetPressureTracker().GetConfiguredMachineFunctionOccupancyLimit()
-               << " at_ceiling=" << sc_full.IsAtOrAboveFunctionOccupancyCeiling() << "\n";
+               << " at_ceiling=" << sc_full.RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() << "\n";
 }
 
 // Sweep every entry of the precomputed continuous-occupancy-score
@@ -3036,7 +3074,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
   RunContinuousScoreTableSweepShakedown(st);
-  RunTestDAGShakedown();
+  RunTestDAGShakedown(st);
   RunInsertSubgraphProxiesShakedown();
   RunSubgraphContiguityShakedown(MF, *LIS);
   RunLengthLowerBoundShakedown(st);

@@ -9,24 +9,22 @@ using namespace llvm::hierarchical_scheduler;
 
 bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
-    const ScheduleConstructor &best_schedule_constructor,
+    const ScheduleConstructor & /*best_schedule_constructor*/,
     LengthHistoryTracker &length_history,
-    PressureHistoryTracker & /*pressure_history*/,
-    int target_length) {
-  int best_length =
-      best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
-  int working_lb =
-      schedule_constructor.GetLengthTracker().GetLengthLowerBound();
-  // Max acceptable length combines the caller-supplied target with
-  // the strict-improvement constraint. When target_length =
-  // INT_MAX (caller has no extra constraint to apply), this
-  // reduces to best_length - 1 and the bound matches the prior
-  // `working_lb >= best_length` check.
-  int max_acceptable = std::min(target_length, best_length - 1);
+    PressureHistoryTracker & /*pressure_history*/) {
+  // Max acceptable schedule length is read straight from working's
+  // length tracker, which DfsSearch keeps in sync with
+  // min(requested_target_length, best.length - 1) at every event
+  // that changes either input. The aggregate-LB check below is the
+  // coarse-grained complement to the per-node deadline check
+  // implied by the tracker's GetMaxScheduleCycle table.
+  const auto &length_tracker = schedule_constructor.GetLengthTracker();
+  int max_acceptable = length_tracker.GetMaxAcceptableScheduleLength();
+  int working_lb = length_tracker.GetLengthLowerBound();
   if (working_lb > max_acceptable) {
     return true;
   }
-  if (!schedule_constructor.IsAtOrAboveFunctionOccupancyCeiling()) {
+  if (!schedule_constructor.RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
     return true;
   }
   if constexpr (kUseLengthHistoryPruning) {
@@ -52,8 +50,7 @@ bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
     LengthHistoryTracker & /*length_history*/,
-    PressureHistoryTracker &pressure_history,
-    int /*target_length*/) {
+    PressureHistoryTracker &pressure_history) {
   // Score-bound: working's GetMetricScore(kMetric) is non-
   // increasing as more nodes are scheduled (peak pressure grows
   // monotonically, kMetric is max-direction so its score only
@@ -79,5 +76,5 @@ bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
 bool DfsMaximizeOccupancyPolicy::ShouldEndSearch(
     const ScheduleConstructor & /*schedule_constructor*/,
     const ScheduleConstructor &best_schedule_constructor) {
-  return best_schedule_constructor.IsAtOrAboveFunctionOccupancyCeiling();
+  return best_schedule_constructor.RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget();
 }

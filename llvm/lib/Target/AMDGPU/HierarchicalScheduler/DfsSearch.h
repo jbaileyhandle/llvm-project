@@ -37,8 +37,7 @@ namespace hierarchical_scheduler {
 //       const ScheduleConstructor &schedule_constructor,
 //       const ScheduleConstructor &best_schedule_constructor,
 //       LengthHistoryTracker &length_history,
-//       PressureHistoryTracker &pressure_history,
-//       int target_length);
+//       PressureHistoryTracker &pressure_history);
 //   static bool ShouldEndSearch(
 //       const ScheduleConstructor &schedule_constructor,
 //       const ScheduleConstructor &best_schedule_constructor);
@@ -109,6 +108,10 @@ class DfsSearch {
     // any outer loop driving this DfsSearch — and so does the
     // timeout check, which derives elapsed against it.
     timing_.Start();
+    // Populate working's max-schedule-cycle table from the
+    // current effective bound (best holds the input schedule
+    // here, so the seed reflects the input-derived bound).
+    RecomputeWorkingMaxScheduleCycles();
     // best_schedule_constructor_ is copy-constructed from the
     // graph's input schedule (built by BuildFromSUnits as Phase 4).
     // That gives us a complete valid schedule matching the region's
@@ -172,14 +175,15 @@ class DfsSearch {
   //
   // Designed for outer loops that walk a target value over
   // multiple Run() calls (see ScheduleRegionForMinimumLength).
-  void ResetForReuse(int target_length) {
+  void ResetForReuse(int requested_target_length) {
     working_schedule_constructor_.Reset();
     length_history_.Reset();
     pressure_history_.Reset();
     best_schedule_constructor_ =
         working_schedule_constructor_.GetGraph().GetInputScheduleConstructor();
     should_end_search_ = false;
-    target_length_ = target_length;
+    requested_target_length_ = requested_target_length;
+    RecomputeWorkingMaxScheduleCycles();
   }
 
   // True iff the region-level deadline (set in the ctor as
@@ -271,6 +275,20 @@ class DfsSearch {
     return graph;
   }
 
+  // Re-derive working's per-node max-schedule-cycle table from
+  // the current iteration target and best-schedule length. The
+  // effective bound is min(requested_target_length_, best_length - 1):
+  // smaller of the explicit iteration target the outer driver
+  // set and the strict-improvement bound implied by the best
+  // schedule found so far. Called whenever either input changes
+  // — at construction, at each ResetForReuse, and after every
+  // best-improvement event in Recurse.
+  void RecomputeWorkingMaxScheduleCycles() {
+    int best_length = best_schedule_constructor_.GetScheduleLength();
+    working_schedule_constructor_.SetMaxAcceptableScheduleLength(
+        std::min(requested_target_length_, best_length - 1));
+  }
+
   // If the region elapsed time has reached the policy's per-region
   // budget, set region_timed_out_ (for telemetry) and
   // should_end_search_ (for propagation through the recursion),
@@ -300,6 +318,10 @@ class DfsSearch {
       if (working_schedule_constructor_.IsBetterThan(
               best_schedule_constructor_, Policy::kMetric)) {
         best_schedule_constructor_ = working_schedule_constructor_;
+        // best.length may have shrunk; re-derive working's
+        // max-schedule-cycle table so the new (tighter) bound
+        // takes effect on subsequent steps.
+        RecomputeWorkingMaxScheduleCycles();
       }
       if (Policy::ShouldEndSearch(working_schedule_constructor_,
                                   best_schedule_constructor_)) {
@@ -317,8 +339,7 @@ class DfsSearch {
     if (Policy::ShouldBoundSearch(working_schedule_constructor_,
                                   best_schedule_constructor_,
                                   length_history_,
-                                  pressure_history_,
-                                  target_length_)) {
+                                  pressure_history_)) {
       return;
     }
 
@@ -374,7 +395,7 @@ class DfsSearch {
   // constraint," reducing the bound to the existing best-length
   // check. Outer loops that walk a target value rewrite this
   // before each Run().
-  int target_length_ = std::numeric_limits<int>::max();
+  int requested_target_length_ = std::numeric_limits<int>::max();
 
   // History-based-domination table for length pruning. Bound to
   // working_schedule_constructor_'s ScheduledSetTracker and

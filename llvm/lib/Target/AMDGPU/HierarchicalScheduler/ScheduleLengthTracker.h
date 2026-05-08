@@ -54,6 +54,7 @@
 
 #include "ScheduleGraph.h"
 #include "llvm/ADT/DenseMap.h"
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -117,6 +118,70 @@ public:
   /// O(1).
   int GetLengthLowerBound() const;
 
+  /// Set the maximum schedule length the search will accept, and
+  /// populate each node's max schedule cycle:
+  ///   max_schedule_cycle[i] = max_acceptable_schedule_length - 1
+  ///                                - cp_from_exit[i]
+  ///
+  /// Derivation: a schedule whose last instruction is at cycle
+  /// L-1 has length exactly L (cycles 0..L-1 are used). Node i
+  /// with cp_from_exit[i] forces a chain ending at cycle
+  /// node_cycle + cp_from_exit[i], which must be <= L-1, so
+  /// node_cycle <= L - 1 - cp_from_exit[i]. Taking L =
+  /// max_acceptable_schedule_length yields the formula above.
+  ///
+  /// A node placed past its max schedule cycle pushes the chain
+  /// past cycle L-1, growing the schedule beyond
+  /// max_acceptable_schedule_length — i.e., infeasible at this target.
+  /// Subsequent infrastructure consumes
+  /// max_schedule_cycle_by_topo_index_ for a per-step pruning
+  /// check that rejects such subtrees.
+  ///
+  /// max_acceptable_schedule_length is the same quantity the policy's
+  /// ShouldBoundSearch derives for its LB-vs-best comparison:
+  ///   min(iteration_target, best.length - 1)
+  /// so callers should pass that value. DfsSearch maintains it,
+  /// calling this setter at three points: at construction (with
+  /// the input-derived seed), in ResetForReuse (with the new
+  /// iteration's target), and on every best-improvement (when
+  /// best.length - 1 drops below the previous setting).
+  ///
+  /// Idempotent: calling with the same value re-populates the
+  /// vector to the same contents. Subsequent calls overwrite.
+  ///
+  /// Precondition: cp_from_exit must be computed on the graph
+  /// (validated at tracker construction).
+  void SetMaxAcceptableScheduleLength(int max_acceptable_schedule_length);
+
+  /// True iff SetMaxAcceptableScheduleLength has been called.
+  /// Both the stored max_acceptable_schedule_length_ and the
+  /// derived per-node max_schedule_cycle_by_topo_index_ become
+  /// readable when this returns true.
+  bool HasMaxAcceptableScheduleLength() const {
+    return max_acceptable_schedule_length_.has_value();
+  }
+
+  /// The max acceptable schedule length last passed to
+  /// SetMaxAcceptableScheduleLength. Caller must ensure
+  /// HasMaxAcceptableScheduleLength() — bare optional dereference,
+  /// no guard.
+  int GetMaxAcceptableScheduleLength() const {
+    return *max_acceptable_schedule_length_;
+  }
+
+  /// Maximum schedule cycle (latest acceptable placement cycle)
+  /// for a node, indexed by topo_index. Caller must ensure
+  /// HasMaxAcceptableScheduleLength() — bare lookup, no guard.
+  int GetMaxScheduleCycleByTopoIndex(int topo_idx) const {
+    return max_schedule_cycle_by_topo_index_[topo_idx];
+  }
+
+  /// Convenience: same as above, but extracts the topo index from
+  /// the node.
+  int GetMaxScheduleCycle(const ScheduleNode *node) const {
+    return GetMaxScheduleCycleByTopoIndex(node->GetTopoIndex());
+  }
+
   /// Human-readable summary.
   std::string Describe() const;
 
@@ -146,6 +211,27 @@ private:
   };
 
   std::vector<ScheduleStep> undo_stack_;
+
+  /// Per-node max schedule cycle (latest acceptable placement
+  /// cycle), indexed by topo_index. Empty when SetMaxAcceptableScheduleLength
+  /// has not been called. Populated and overwritten in place by
+  /// SetMaxAcceptableScheduleLength as the effective target tightens (across
+  /// outer-loop iterations and best-improvement events).
+  ///
+  /// Static for the duration between two SetMaxAcceptableScheduleLength calls:
+  /// not touched by Schedule / Unschedule. The dependency on
+  /// cp_from_exit (graph-static) and the caller-supplied
+  /// max_acceptable_schedule_length (search-state) are both captured in
+  /// SetMaxAcceptableScheduleLength's recompute.
+  std::vector<int> max_schedule_cycle_by_topo_index_;
+
+  /// The maximum schedule length the search will accept, as last
+  /// passed to SetMaxAcceptableScheduleLength. Read by the length
+  /// policy's aggregate lower-bound prune check (compares the
+  /// tracker's GetLengthLowerBound against this value). Has no
+  /// value before SetMaxAcceptableScheduleLength has been called;
+  /// callers must guard reads with HasMaxAcceptableScheduleLength.
+  std::optional<int> max_acceptable_schedule_length_;
 
   /// Validates the graph and subtarget assumptions. Called once per
   /// graph (results cached internally by graph ID).

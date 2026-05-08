@@ -204,6 +204,37 @@ int ScheduleLengthTracker::GetScheduledCycle(
   return cycle;
 }
 
+void ScheduleLengthTracker::SetMaxAcceptableScheduleLength(int max_acceptable_schedule_length) {
+  // A schedule of max_acceptable_schedule_length cycles uses cycles
+  // 0..max_acceptable_schedule_length-1. For node i with cp_from_exit[i],
+  // the latency-weighted chain from i to the exit takes
+  // cp_from_exit[i] cycles, so if i is placed at cycle c, the
+  // chain ends at cycle c + cp_from_exit[i]. That last cycle
+  // must fit in the schedule:
+  //   c + cp_from_exit[i] <= max_acceptable_schedule_length - 1
+  // Solving for c:
+  //   c <= max_acceptable_schedule_length - 1 - cp_from_exit[i]
+  // which is the max schedule cycle stored below.
+  if (!graph_->HasCriticalPathFromExit()) {
+    report_fatal_error(
+        "ScheduleLengthTracker::SetMaxAcceptableScheduleLength called when graph "
+        "cp_from_exit has been invalidated");
+  }
+
+  // Update overall max length
+  max_acceptable_schedule_length_ = max_acceptable_schedule_length;
+
+  // Update max_schedule_cycle per node
+  const int n = graph_->Size();
+  max_schedule_cycle_by_topo_index_.resize(n);
+  for (int topo_idx = 0; topo_idx < n; ++topo_idx) {
+    int cp_from_exit =
+        graph_->GetCriticalPathFromExitByTopoIndex(topo_idx);
+    max_schedule_cycle_by_topo_index_[topo_idx] =
+        max_acceptable_schedule_length - 1 - cp_from_exit;
+  }
+}
+
 // ============================================================================
 // Diagnostics
 // ============================================================================

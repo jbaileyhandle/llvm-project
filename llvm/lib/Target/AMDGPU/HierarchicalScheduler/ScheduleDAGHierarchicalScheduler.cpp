@@ -284,7 +284,7 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
 
     // Tighten MFI's occupancy limit immediately so the next region's
     // search sees the real running kernel ceiling (via
-    // ScheduleConstructor::IsAtOrAboveFunctionOccupancyCeiling and
+    // ScheduleConstructor::RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget and
     // any other code that consults MFI->getOccupancy()).
     // limitOccupancy only lowers; kernel_occupancy_so_far is
     // monotonically non-increasing, so this is always a no-op or
