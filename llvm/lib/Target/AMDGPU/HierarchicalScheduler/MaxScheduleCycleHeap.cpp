@@ -4,6 +4,8 @@
 
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
@@ -22,8 +24,19 @@ void MaxScheduleCycleHeap::Insert(int topo_idx) {
   if (!tracker_->HasMaxAcceptableScheduleLength()) {
     return;
   }
-  entries_.insert(
+  // Insert must produce a fresh entry. A duplicate means
+  // Schedule/Unschedule are out of sync — Insert has been called
+  // without a matching prior Remove for this topo_idx — and any
+  // downstream prune decision would be reading a stale heap.
+  // Loud failure here pinpoints the violation rather than letting
+  // it produce wrong-but-quiet results later.
+  auto result = entries_.insert(
       {tracker_->max_schedule_cycle_by_topo_index_[topo_idx], topo_idx});
+  if (!result.second) {
+    report_fatal_error(
+        "MaxScheduleCycleHeap::Insert: entry already present for topo_idx=" +
+        Twine(topo_idx));
+  }
 }
 
 void MaxScheduleCycleHeap::Insert(const ScheduleNode *node) {
@@ -38,8 +51,19 @@ void MaxScheduleCycleHeap::Remove(int topo_idx) {
   if (!tracker_->HasMaxAcceptableScheduleLength()) {
     return;
   }
-  entries_.erase(
+  // Remove must find an entry to erase. A miss means
+  // Schedule/Unschedule are out of sync — Remove has been called
+  // without a matching prior Insert (or with a stale max_cycle
+  // key from before SetMaxAcceptableScheduleLength rebuilt the
+  // heap). Loud failure here pinpoints the violation rather than
+  // letting it produce wrong-but-quiet results later.
+  size_t erased = entries_.erase(
       {tracker_->max_schedule_cycle_by_topo_index_[topo_idx], topo_idx});
+  if (erased == 0) {
+    report_fatal_error(
+        "MaxScheduleCycleHeap::Remove: no entry to remove for topo_idx=" +
+        Twine(topo_idx));
+  }
 }
 
 void MaxScheduleCycleHeap::Remove(const ScheduleNode *node) {
