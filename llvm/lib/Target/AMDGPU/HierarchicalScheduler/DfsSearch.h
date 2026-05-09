@@ -223,6 +223,25 @@ class DfsSearch {
     return length_history_;
   }
 
+  // Diagnostic counters — total count of complete schedules
+  // visited (every time Recurse hit working.IsDone()) and total
+  // count of best updates (every time IsBetterThan returned true).
+  // Useful for understanding search behavior:
+  //   complete_schedules_count == 1 → search found one path,
+  //     never backtracked to a different completion.
+  //   complete_schedules_count >> 1, best_updates_count == 1 →
+  //     search found many completions but only the first beat
+  //     the seeded baseline (alternatives didn't improve on
+  //     IsBetterThan's metric).
+  //   best_updates_count > 1 → tiebreak / strictly-better updates
+  //     fired more than once during search.
+  // Lifetime values; never reset (no per-Run distinction yet —
+  // add if needed).
+  int CompleteSchedulesCount() const {
+    return complete_schedules_count_;
+  }
+  int BestUpdatesCount() const { return best_updates_count_; }
+
   // Read-only access to the pressure history tracker. Useful for
   // shakedowns and per-region stat reporting.
   const PressureHistoryTracker &GetPressureHistoryTracker() const {
@@ -336,8 +355,10 @@ class DfsSearch {
     }
 
     if (working_schedule_constructor_.IsDone()) {
+      ++complete_schedules_count_;
       if (working_schedule_constructor_.IsBetterThan(
               best_schedule_constructor_, Policy::kMetric)) {
+        ++best_updates_count_;
         best_schedule_constructor_ = working_schedule_constructor_;
         // best.length may have shrunk; re-derive working's
         // max-schedule-cycle table so the new (tighter) bound
@@ -390,6 +411,10 @@ class DfsSearch {
   // schedule; replaced whenever working_schedule_constructor_ is
   // IsDone and beats it by Policy::kMetric.
   ScheduleConstructor best_schedule_constructor_;
+
+  // Diagnostic counters — see accessors above.
+  int complete_schedules_count_ = 0;
+  int best_updates_count_ = 0;
 
   // Set true by Recurse when Policy::ShouldEndSearch fires, OR by
   // EndSearchIfTimedOut when the region deadline has been reached.

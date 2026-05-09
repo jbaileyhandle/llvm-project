@@ -356,6 +356,8 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
       << search.GetLengthHistoryTracker().PruneCount().lifetime
       << " | pressure_history_prunes="
       << search.GetPressureHistoryTracker().PruneCount().lifetime
+      << " | complete_schedules=" << search.CompleteSchedulesCount()
+      << " | best_updates=" << search.BestUpdatesCount()
       << " | order_changed=" << (order_changed ? "yes" : "no")
       << " | region_timed_out="
       << (search.RegionTimedOut() ? "yes" : "no")
