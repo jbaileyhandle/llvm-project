@@ -536,6 +536,25 @@ static void PrintOuterLoopSummary(int iterations_run,
 // plain search.
 constexpr bool kUseTargetFeasibilityIteration = true;
 
+// Compile-time selector for the length-minimization policy used by
+// both phases. When true, both phases use
+// DfsMinimizeLengthRefineOccupancyPolicy: after finding a length-
+// optimal schedule, the search continues exploring same-length
+// completions to refine continuous register-occupancy score
+// (giving RA more headroom and reducing spill risk). When false,
+// DfsMinimizeLengthPolicy is used — pure length min, stops on
+// first length-optimal schedule.
+//
+// Picked once and threaded through both helpers as a template
+// argument. Switching to runtime-configurable (e.g., a misched.txt
+// entry branching between the two template instantiations at the
+// orchestrator) is a follow-up.
+constexpr bool kRefineOccupancyInLengthMin = false;
+using LengthMinPolicy = std::conditional_t<
+    kRefineOccupancyInLengthMin,
+    DfsMinimizeLengthRefineOccupancyPolicy,
+    DfsMinimizeLengthPolicy>;
+
 // Phase 1 helper: target-feasibility iteration. Walks target
 // length from the static graph floor up to input_length-1 on a
 // dedicated DfsSearch with its own per-region budget. The first
@@ -547,6 +566,7 @@ constexpr bool kUseTargetFeasibilityIteration = true;
 // captured (input on no feasibility found).
 //
 // No-op when the loop range is empty (input_length <= floor).
+template <typename Policy>
 static void RunIterativeLengthMinPhase(
     ScheduleGraph &graph, const GCNSubtarget &st,
     const MachineFunction &mf, const LiveIntervals &lis,
@@ -560,8 +580,8 @@ static void RunIterativeLengthMinPhase(
   // ran formation once for the whole region before either phase
   // started. Re-running here would treat the existing subgraph
   // proxies as nested-subgraph candidates and fatal.
-  DfsSearch<DfsMinimizeLengthPolicy> iter_search(graph, st, mf, lis,
-                                                 /*form_subgraphs=*/false);
+  DfsSearch<Policy> iter_search(graph, st, mf, lis,
+                                /*form_subgraphs=*/false);
 
   // Default outcome before any iteration runs:
   //   - "input_optimal" when the loop range is empty (input_length
@@ -622,6 +642,7 @@ static void RunIterativeLengthMinPhase(
 // is off, this is the only search that runs. Updates outer best
 // only on strict improvement so iteration's optimum isn't
 // overwritten by an equivalent plain result.
+template <typename Policy>
 static void RunPlainLengthMinPhase(
     ScheduleGraph &graph, const GCNSubtarget &st,
     const MachineFunction &mf, const LiveIntervals &lis,
@@ -629,14 +650,14 @@ static void RunPlainLengthMinPhase(
     ScheduleConstructor &best_schedule_constructor) {
   // form_subgraphs=false: see RunIterativeLengthMinPhase comment.
   // Formation is a once-per-region mutation done by the orchestrator.
-  DfsSearch<DfsMinimizeLengthPolicy> plain_search(graph, st, mf, lis,
-                                                  /*form_subgraphs=*/false);
+  DfsSearch<Policy> plain_search(graph, st, mf, lis,
+                                 /*form_subgraphs=*/false);
   int plain_target =
       best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
   plain_search.ResetForReuse(plain_target);
   ScheduleConstructor plain_result = plain_search.Run();
   if (plain_result.IsBetterThan(best_schedule_constructor,
-                                 DfsMinimizeLengthPolicy::kMetric)) {
+                                 Policy::kMetric)) {
     best_schedule_constructor = plain_result;
   }
 
@@ -668,7 +689,7 @@ void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
     // call's side effect. Running formation twice on the same graph
     // would fatal in CheckNoNestedMembers (the existing proxies
     // would be treated as members of a new subgraph).
-    FormSubgraphs(graph, DfsMinimizeLengthPolicy::MakeFormationPolicy());
+    FormSubgraphs(graph, LengthMinPolicy::MakeFormationPolicy());
 
     PrintPreScheduleInfo(graph, input_schedule_constructor, st);
 
@@ -676,14 +697,14 @@ void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
         input_schedule_constructor;
 
     if constexpr (kUseTargetFeasibilityIteration) {
-      RunIterativeLengthMinPhase(graph, st, MF, *LIS,
-                                  input_schedule_constructor,
-                                  best_schedule_constructor);
+      RunIterativeLengthMinPhase<LengthMinPolicy>(
+          graph, st, MF, *LIS, input_schedule_constructor,
+          best_schedule_constructor);
     }
 
-    RunPlainLengthMinPhase(graph, st, MF, *LIS,
-                            input_schedule_constructor,
-                            best_schedule_constructor);
+    RunPlainLengthMinPhase<LengthMinPolicy>(
+        graph, st, MF, *LIS, input_schedule_constructor,
+        best_schedule_constructor);
 
     ApplyScheduleOrder(region, best_schedule_constructor);
   });
