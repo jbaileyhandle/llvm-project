@@ -189,6 +189,21 @@ public:
     return GetMaxScheduleCycleByTopoIndex(node->GetTopoIndex());
   }
 
+  /// Minimum schedule cycle (earliest possible placement cycle
+  /// given the current partial schedule) for a node, indexed by
+  /// topo_index. Initialized at construction to cp_from_entry
+  /// (the static floor on an empty schedule); maintained
+  /// incrementally as Schedule / Unschedule are called — see
+  /// the data member's class-level comment below for the
+  /// propagation rule.
+  int GetMinScheduleCycleByTopoIndex(int topo_idx) const {
+    return min_schedule_cycle_by_topo_index_[topo_idx];
+  }
+
+  int GetMinScheduleCycle(const ScheduleNode *node) const {
+    return GetMinScheduleCycleByTopoIndex(node->GetTopoIndex());
+  }
+
   /// Test-only mutable access to the underlying heap. Used by
   /// shakedowns that need to call Peek/Size to verify Insert/
   /// Remove/Rebuild produced the expected ordering. Production
@@ -216,6 +231,25 @@ public:
         .IsCurrentCycleBeyondEarliestMaxCycle();
   }
 
+  /// True iff the most recent Schedule's forward propagation pushed
+  /// some unscheduled node's min_schedule_cycle above its
+  /// max_schedule_cycle — i.e., that node can no longer be placed
+  /// in time, so no completion of this prefix can honor the
+  /// configured max acceptable schedule length. Tighter complement
+  /// to IsCurrentCycleBeyondEarliestMaxScheduleCycle: the heap-
+  /// based check fires only after current_cycle has advanced past
+  /// a deadline; this fires immediately as soon as propagation
+  /// reveals that some node's earliest exceeds its latest, even
+  /// before current_cycle catches up. The length policy's per-
+  /// step prune check reads both.
+  ///
+  /// Returns false when no max acceptable schedule length has
+  /// been set, or when no Schedule has fired yet, or when the
+  /// most recent Schedule's propagation found no violation.
+  bool IsAnyMinScheduleCycleBeyondMaxScheduleCycle() const {
+    return min_exceeds_max_after_last_schedule_;
+  }
+
   /// Human-readable summary.
   std::string Describe() const;
 
@@ -236,12 +270,33 @@ private:
   /// currently-scheduled nodes, kept as a running max.
   int max_scheduled_plus_cp_ = 0;
 
+  /// One entry in a Schedule's propagation undo trail: the topo
+  /// index of an unscheduled node whose min_schedule_cycle was
+  /// raised, and the value to restore to on Unschedule.
+  struct PriorMinScheduleCycle {
+    int topo_idx;
+    int prior_min_schedule_cycle;
+  };
+
   /// Undo record for one Schedule() call.
   struct ScheduleStep {
     const ScheduleNode *node;
     int prev_cycle;
     int prev_bubbles;
     int prev_max_scheduled_plus_cp;
+    /// True iff min_exceeds_max_after_last_schedule_ was true
+    /// before this Schedule. Restored on Unschedule so the bool
+    /// always reflects the result of whatever Schedule is now
+    /// most recent. Strictly speaking the search flow doesn't
+    /// read the bool between an Unschedule and the next Schedule
+    /// (which would reset it anyway), but undoing is cheap and
+    /// makes the bool's semantics robust to future readers.
+    bool prev_min_exceeds_max_after_last_schedule;
+    /// One entry per unscheduled node whose min_schedule_cycle
+    /// this Schedule's propagation raised. On Unschedule, each
+    /// entry is restored. Empty when propagation found no nodes
+    /// to update.
+    std::vector<PriorMinScheduleCycle> prev_min_schedule_cycle_entries;
   };
 
   std::vector<ScheduleStep> undo_stack_;
@@ -258,6 +313,34 @@ private:
   /// max_acceptable_schedule_length (search-state) are both captured in
   /// SetMaxAcceptableScheduleLength's recompute.
   std::vector<int> max_schedule_cycle_by_topo_index_;
+
+  /// Per-node min schedule cycle (earliest possible placement
+  /// cycle given the current partial schedule), indexed by
+  /// topo_index. Initialized at construction to cp_from_entry —
+  /// the static floor that holds on an empty schedule. Maintained
+  /// incrementally by Schedule / Unschedule:
+  ///
+  ///   On Schedule(N): forward transitive propagation through the
+  ///   unscheduled forward cone of N. For each unscheduled
+  ///   successor S reachable from N, recompute
+  ///     new = max over predecessors P of S of
+  ///             (effective_cycle_P
+  ///                + max(edge.Latency(), P.IssueSlotsConsumed()))
+  ///   where effective_cycle_P is scheduled_cycle[P] when P is
+  ///   scheduled and min_schedule_cycle[P] otherwise. If new is
+  ///   greater than the stored value, write it and continue
+  ///   propagation through S's successors. Each prior value is
+  ///   recorded into the matching ScheduleStep so Unschedule can
+  ///   restore.
+  ///
+  ///   On Unschedule(N): walk the step's prev_min_schedule_cycle_by_topo_index
+  ///   list and restore each entry to its prior value.
+  ///
+  /// Mirrors max_schedule_cycle_by_topo_index_: together they
+  /// bracket each unscheduled node's feasible placement window.
+  /// A node with min > max is infeasible at the current max
+  /// acceptable schedule length.
+  std::vector<int> min_schedule_cycle_by_topo_index_;
 
   /// The maximum schedule length the search will accept, as last
   /// passed to SetMaxAcceptableScheduleLength. Read by the length
@@ -276,6 +359,15 @@ private:
   /// pointer, so this is safe even though the tracker is still
   /// being initialized at that point.
   MaxScheduleCycleHeap unscheduled_max_cycle_heap_;
+
+  /// Set inline during Schedule's forward propagation when some
+  /// unscheduled node's raised min_schedule_cycle exceeds its
+  /// max_schedule_cycle. Reset to false at the start of every
+  /// Schedule and restored from the popped step's
+  /// prev_min_exceeds_max_after_last_schedule on Unschedule.
+  /// Read by the policy via
+  /// IsAnyMinScheduleCycleBeyondMaxScheduleCycle.
+  bool min_exceeds_max_after_last_schedule_ = false;
 
   /// Validates the graph and subtarget assumptions. Called once per
   /// graph (results cached internally by graph ID).
@@ -298,6 +390,36 @@ private:
   /// Bump the running max for GetLengthLowerBound's second term
   /// using `node`'s just-computed ready_cycle and cp_from_exit.
   void UpdateLengthLowerBoundMax(const ScheduleNode *node, int ready_cycle);
+
+  /// Forward transitive propagation of min_schedule_cycle from a
+  /// just-scheduled node. Drives a topo-ordered worklist of S's
+  /// unscheduled forward cone, recomputing each node's min and
+  /// raising the stored value where needed. Updates are recorded
+  /// onto the back-of-stack ScheduleStep so Unschedule can
+  /// restore. Sets min_exceeds_max_after_last_schedule_ if any
+  /// raised value exceeds the corresponding max_schedule_cycle.
+  void PropagateMinScheduleCycleForward(
+      const ScheduleNode *just_scheduled);
+
+  /// Recompute one unscheduled node's min_schedule_cycle from
+  /// current state:
+  ///   max over S's latency predecessors P of
+  ///     (effective_cycle_P
+  ///        + max(edge.Latency(), P.IssueSlotsConsumed()))
+  /// where effective_cycle_P is scheduled_cycle[P] when P is
+  /// scheduled and min_schedule_cycle[P] otherwise. Returns 0
+  /// for nodes with no latency predecessors (entry nodes).
+  int ComputeMinScheduleCycleForward(const ScheduleNode *S) const;
+
+  /// Raise min_schedule_cycle[topo_idx] to `candidate_min` if
+  /// strictly higher than the stored value. On a real raise:
+  /// records the prior value into `step`, flips
+  /// min_exceeds_max_after_last_schedule_ when the new value
+  /// exceeds max_schedule_cycle[topo_idx] (and a max acceptable
+  /// schedule length is set), and returns true. Returns false
+  /// if no raise was needed.
+  bool TryRaiseMinScheduleCycle(int topo_idx, int candidate_min,
+                                ScheduleStep &step);
 };
 
 } // namespace hierarchical_scheduler

@@ -8,9 +8,13 @@
 
 #include "ScheduleLengthTracker.h"
 #include "GCNSubtarget.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/MC/MCSchedule.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <algorithm>
+#include <queue>
+#include <vector>
 
 using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
@@ -81,6 +85,23 @@ ScheduleLengthTracker::ScheduleLengthTracker(const ScheduleGraph &graph,
         "ComputeCriticalPathFromExit to have been called before "
         "construction (see class-level precondition).");
   }
+  if (!graph.HasCriticalPathFromEntry()) {
+    report_fatal_error(
+        "ScheduleLengthTracker requires ScheduleGraph::"
+        "ComputeCriticalPathFromEntry to have been called before "
+        "construction — min_schedule_cycle_by_topo_index_ is "
+        "initialized to cp_from_entry as the static floor.");
+  }
+  // Initialize min_schedule_cycle to the static floor: with no
+  // nodes scheduled, each node's earliest cycle is its
+  // cp_from_entry. Schedule/Unschedule will mutate / restore from
+  // here.
+  const int n = graph.Size();
+  min_schedule_cycle_by_topo_index_.resize(n);
+  for (int topo_idx = 0; topo_idx < n; ++topo_idx) {
+    min_schedule_cycle_by_topo_index_[topo_idx] =
+        graph.GetCriticalPathFromEntryByTopoIndex(topo_idx);
+  }
 }
 
 // ============================================================================
@@ -100,6 +121,13 @@ void ScheduleLengthTracker::Schedule(const ScheduleNode *node) {
   AdvanceSchedule(node, ready_cycle);
   UpdateLengthLowerBoundMax(node, ready_cycle);
   unscheduled_max_cycle_heap_.Remove(node);
+
+  // Reset before propagation: the bool reflects only this
+  // Schedule's propagation result. PushUndoStep already saved
+  // the prior value into the back-of-stack ScheduleStep so
+  // Unschedule can restore.
+  min_exceeds_max_after_last_schedule_ = false;
+  PropagateMinScheduleCycleForward(node);
 }
 
 void ScheduleLengthTracker::Unschedule(const ScheduleNode *node) {
@@ -114,8 +142,10 @@ void ScheduleLengthTracker::Unschedule(const ScheduleNode *node) {
                        "Schedule");
   }
 
-  ScheduleStep step = undo_stack_.back();
-  undo_stack_.pop_back();
+  // Read the back-of-stack step in place — copying it would also
+  // copy its prev_min_schedule_cycle_entries vector, which can be
+  // large after a deep propagation. Pop only after restoration.
+  const ScheduleStep &step = undo_stack_.back();
 
   // The undo stack records which node was just scheduled; the
   // caller-supplied node should match. A mismatch indicates the
@@ -134,6 +164,19 @@ void ScheduleLengthTracker::Unschedule(const ScheduleNode *node) {
   total_bubbles_ = step.prev_bubbles;
   max_scheduled_plus_cp_ = step.prev_max_scheduled_plus_cp;
   unscheduled_max_cycle_heap_.Insert(node);
+
+  // Restore min_schedule_cycle for every node propagation raised.
+  // Order doesn't matter: each entry is an independent (topo_idx,
+  // value) pair.
+  for (const PriorMinScheduleCycle &entry :
+       step.prev_min_schedule_cycle_entries) {
+    min_schedule_cycle_by_topo_index_[entry.topo_idx] =
+        entry.prior_min_schedule_cycle;
+  }
+  min_exceeds_max_after_last_schedule_ =
+      step.prev_min_exceeds_max_after_last_schedule;
+
+  undo_stack_.pop_back();
 }
 
 int ScheduleLengthTracker::ComputeReadyCycle(
@@ -173,8 +216,14 @@ int ScheduleLengthTracker::ComputeReadyCycle(
 }
 
 void ScheduleLengthTracker::PushUndoStep(const ScheduleNode *node) {
-  undo_stack_.push_back({node, current_cycle_, total_bubbles_,
-                         max_scheduled_plus_cp_});
+  undo_stack_.emplace_back();
+  ScheduleStep &step = undo_stack_.back();
+  step.node = node;
+  step.prev_cycle = current_cycle_;
+  step.prev_bubbles = total_bubbles_;
+  step.prev_max_scheduled_plus_cp = max_scheduled_plus_cp_;
+  step.prev_min_exceeds_max_after_last_schedule =
+      min_exceeds_max_after_last_schedule_;
 }
 
 void ScheduleLengthTracker::AdvanceSchedule(const ScheduleNode *node,
@@ -183,6 +232,95 @@ void ScheduleLengthTracker::AdvanceSchedule(const ScheduleNode *node,
   total_bubbles_ += bubbles;
   scheduled_cycle_by_topo_index_[node->GetTopoIndex()] = ready_cycle;
   current_cycle_ = ready_cycle + 1;
+}
+
+int ScheduleLengthTracker::ComputeMinScheduleCycleForward(
+    const ScheduleNode *S) const {
+  int new_min = 0;
+  for (const ScheduleEdge &edge : S->Predecessors()) {
+    if (!edge.IsLatencyEdge()) {
+      continue;
+    }
+    const ScheduleNode *predecessor = edge.node_;
+    int effective_cycle =
+        IsScheduled(predecessor)
+            ? scheduled_cycle_by_topo_index_[predecessor->GetTopoIndex()]
+            : min_schedule_cycle_by_topo_index_[predecessor->GetTopoIndex()];
+    int weight =
+        std::max(edge.Latency(), predecessor->IssueSlotsConsumed());
+    new_min = std::max(new_min, effective_cycle + weight);
+  }
+  return new_min;
+}
+
+bool ScheduleLengthTracker::TryRaiseMinScheduleCycle(
+    int topo_idx, int candidate_min, ScheduleStep &step) {
+  int prior = min_schedule_cycle_by_topo_index_[topo_idx];
+  if (candidate_min <= prior) {
+    return false;
+  }
+  step.prev_min_schedule_cycle_entries.push_back({topo_idx, prior});
+  min_schedule_cycle_by_topo_index_[topo_idx] = candidate_min;
+  if (HasMaxAcceptableScheduleLength() &&
+      candidate_min > max_schedule_cycle_by_topo_index_[topo_idx]) {
+    min_exceeds_max_after_last_schedule_ = true;
+  }
+  return true;
+}
+
+void ScheduleLengthTracker::PropagateMinScheduleCycleForward(
+    const ScheduleNode *just_scheduled) {
+  // Min-heap by topo_index: pops the smallest topo_idx first.
+  // Topo order means S's predecessors are all settled (scheduled
+  // or already popped) when S is recomputed, so a single pop
+  // yields S's final value.
+  struct ByTopoGreater {
+    bool operator()(const ScheduleNode *a, const ScheduleNode *b) const {
+      return a->GetTopoIndex() > b->GetTopoIndex();
+    }
+  };
+  std::priority_queue<const ScheduleNode *,
+                      std::vector<const ScheduleNode *>,
+                      ByTopoGreater> queue;
+  // "Has been enqueued at any point during this propagation."
+  // Topo-ordered processing guarantees a popped node never needs
+  // re-enqueueing — no later-popped (higher-topo) node can affect
+  // it — so the bitmap is set on enqueue and never reset.
+  BitVector ever_enqueued(graph_->Size());
+
+  auto enqueue_successors = [&](const ScheduleNode *node) {
+    for (const ScheduleEdge &edge : node->Successors()) {
+      if (!edge.IsLatencyEdge()) {
+        continue;
+      }
+      const ScheduleNode *successor = edge.node_;
+      // Redundant given IsLatencyEdge (latency edges only connect
+      // scheduling units), but kept for self-documentation.
+      if (!successor->IsSchedulingUnit()) {
+        continue;
+      }
+      int successor_topo_idx = successor->GetTopoIndex();
+      if (ever_enqueued[successor_topo_idx]) {
+        continue;
+      }
+      ever_enqueued.set(successor_topo_idx);
+      queue.push(successor);
+    }
+  };
+
+  enqueue_successors(just_scheduled);
+
+  ScheduleStep &step = undo_stack_.back();
+  while (!queue.empty()) {
+    const ScheduleNode *S = queue.top();
+    queue.pop();
+
+    int candidate_min = ComputeMinScheduleCycleForward(S);
+    if (TryRaiseMinScheduleCycle(S->GetTopoIndex(), candidate_min,
+                                  step)) {
+      enqueue_successors(S);
+    }
+  }
 }
 
 void ScheduleLengthTracker::UpdateLengthLowerBoundMax(

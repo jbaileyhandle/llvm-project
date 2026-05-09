@@ -452,6 +452,197 @@ void CheckCriticalPathFromEntry(ScheduleGraph &graph) {
   llvm::outs() << (eq_ok ? "PASS\n" : "FAIL\n");
 }
 
+// Verifies min_schedule_cycle initialization, forward propagation,
+// and undo on the BuildTestDAG. cp_from_entry values (per
+// CheckCriticalPathFromEntry):
+//   A=0, C=2, D=3, E=6, F=7, G=9, H=1
+// cp_from_exit values (per CheckCriticalPath):
+//   A=9, C=7, D=4, E=3, F=2, G=0, H=5
+// Topo order: A=0, H=1, C=2, D=3, E=4, F=5, G=6.
+//
+// Tests:
+//   1) Initial state: min == cp_from_entry for every node.
+//   2) Bubble-inducing schedule. Order A, C, E, H — H lands at
+//      cycle 7 (current_cycle has advanced past H's data-ready
+//      cycle of 1 because of E's bubble). H's effective cycle
+//      jumps from min[H]=1 to scheduled_cycle=7, so G's
+//      contribution from H rises from 1+5=6 to 7+5=12, raising
+//      min[G] from 9 to 12. The first three Schedules land at
+//      their cp_from_entry values, so propagation finds no
+//      raises in those steps.
+//   3) Reverse drain: Unschedule in stack order, verify min[G]
+//      restores at each step and the full empty state matches
+//      the post-construction values.
+//   4) Deadline detection: with max_acceptable=10, max[G] = 10 -
+//      1 - cp_from_exit[G] = 9. Repeating the bubble schedule
+//      raises min[G] to 12 > 9, so
+//      IsAnyMinScheduleCycleBeyondMaxScheduleCycle fires after
+//      Schedule(H). Unschedule(H) restores it to false.
+void CheckMinScheduleCycle(ScheduleGraph &graph,
+                           const GCNSubtarget &st) {
+  ScheduleLengthTracker tracker(graph, st);
+
+  // Resolve nodes by topo index. Every node in BuildTestDAG is a
+  // scheduling unit (no proxies), so the IsSchedulingUnit guard
+  // is for symmetry with the heap shakedown only.
+  const ScheduleNode *nodes_by_topo[7] = {nullptr};
+  for (const ScheduleNode &n : graph.Nodes()) {
+    if (!n.IsSchedulingUnit()) {
+      continue;
+    }
+    nodes_by_topo[n.GetTopoIndex()] = &n;
+  }
+
+  struct LabeledMin {
+    const char *name;
+    int topo_idx;
+    int expected_min;
+  };
+  // Indexed by name for legibility; topo_idx for lookup.
+  const LabeledMin initial[] = {
+      {"A", 0, 0}, {"H", 1, 1}, {"C", 2, 2}, {"D", 3, 3},
+      {"E", 4, 6}, {"F", 5, 7}, {"G", 6, 9},
+  };
+
+  // 1) Initial state.
+  int initial_fails = 0;
+  llvm::outs() << "  Initial min_schedule_cycle == cp_from_entry:";
+  for (const LabeledMin &e : initial) {
+    int got = tracker.GetMinScheduleCycleByTopoIndex(e.topo_idx);
+    llvm::outs() << " " << e.name << "=" << got;
+    if (got != e.expected_min) {
+      llvm::outs() << "(expected " << e.expected_min << ")";
+      ++initial_fails;
+    }
+  }
+  llvm::outs() << (initial_fails == 0 ? "  PASS\n" : "  FAIL\n");
+
+  // 2) Bubble-inducing schedule: A, C, E, H. Hand-traced expected
+  // min[G] after each Schedule.
+  struct ForwardStep {
+    int schedule_topo;
+    int expected_min_g;
+    const char *label;
+  };
+  const ForwardStep forward[] = {
+      {0, 9, "Schedule A -> min[G]=9 (no propagation)"},
+      {2, 9, "Schedule C -> min[G]=9 (no propagation)"},
+      {4, 9, "Schedule E -> min[G]=9 (no propagation)"},
+      {1, 12, "Schedule H -> min[G]=12 (H@7 raises G via H->G=5)"},
+  };
+  int bubble_fails = 0;
+  llvm::outs() << "  Bubble-inducing schedule (A,C,E,H):\n";
+  for (const ForwardStep &step : forward) {
+    tracker.Schedule(nodes_by_topo[step.schedule_topo]);
+    int got = tracker.GetMinScheduleCycleByTopoIndex(/*G=*/6);
+    bool ok = (got == step.expected_min_g);
+    llvm::outs() << "    " << step.label << ": min[G]=" << got
+                 << "  " << (ok ? "PASS\n" : "FAIL\n");
+    if (!ok) {
+      ++bubble_fails;
+    }
+  }
+
+  // 3) Reverse drain. Unschedule in LIFO order; verify min[G]
+  // restores along the way and final state matches initial.
+  struct ReverseStep {
+    int unschedule_topo;
+    int expected_min_g;
+    const char *label;
+  };
+  const ReverseStep reverse[] = {
+      {1, 9, "Unschedule H -> min[G]=9 (restored)"},
+      {4, 9, "Unschedule E -> min[G]=9"},
+      {2, 9, "Unschedule C -> min[G]=9"},
+      {0, 9, "Unschedule A -> min[G]=9"},
+  };
+  int undo_fails = 0;
+  llvm::outs() << "  Reverse drain restores min:\n";
+  for (const ReverseStep &step : reverse) {
+    tracker.Unschedule(nodes_by_topo[step.unschedule_topo]);
+    int got = tracker.GetMinScheduleCycleByTopoIndex(/*G=*/6);
+    bool ok = (got == step.expected_min_g);
+    llvm::outs() << "    " << step.label << ": min[G]=" << got
+                 << "  " << (ok ? "PASS\n" : "FAIL\n");
+    if (!ok) {
+      ++undo_fails;
+    }
+  }
+  // Full restoration: after the full undo, every node's min
+  // should match cp_from_entry again.
+  int restore_fails = 0;
+  for (const LabeledMin &e : initial) {
+    int got = tracker.GetMinScheduleCycleByTopoIndex(e.topo_idx);
+    if (got != e.expected_min) {
+      ++restore_fails;
+    }
+  }
+  llvm::outs() << "    Full undo: min == cp_from_entry  "
+               << (restore_fails == 0 ? "PASS\n" : "FAIL\n");
+
+  // 4) Deadline detection. After SetMax(10), max[G] = 9; the
+  // bubble schedule raises min[G] to 12 > 9, firing the bool.
+  // Unschedule(H) restores it from the saved prior.
+  struct DeadlineStep {
+    enum Kind { kSchedule, kUnschedule } kind;
+    int topo_idx;
+    bool expected_bool;
+    const char *label;
+  };
+  const DeadlineStep deadline[] = {
+      {DeadlineStep::kSchedule, 0, false,
+       "Schedule A -> bool=false"},
+      {DeadlineStep::kSchedule, 2, false,
+       "Schedule C -> bool=false"},
+      {DeadlineStep::kSchedule, 4, false,
+       "Schedule E -> bool=false"},
+      {DeadlineStep::kSchedule, 1, true,
+       "Schedule H -> bool=true (min[G]=12 > max[G]=9)"},
+      {DeadlineStep::kUnschedule, 1, false,
+       "Unschedule H -> bool=false (restored)"},
+  };
+  int deadline_fails = 0;
+  llvm::outs() << "  Deadline detection (max_acceptable=10):\n";
+  tracker.SetMaxAcceptableScheduleLength(10);
+  if (tracker.IsAnyMinScheduleCycleBeyondMaxScheduleCycle()) {
+    llvm::outs() << "    SetMax(10) on empty: bool=true  FAIL\n";
+    ++deadline_fails;
+  } else {
+    llvm::outs() << "    SetMax(10) on empty: bool=false  PASS\n";
+  }
+  for (const DeadlineStep &step : deadline) {
+    if (step.kind == DeadlineStep::kSchedule) {
+      tracker.Schedule(nodes_by_topo[step.topo_idx]);
+    } else {
+      tracker.Unschedule(nodes_by_topo[step.topo_idx]);
+    }
+    bool got = tracker.IsAnyMinScheduleCycleBeyondMaxScheduleCycle();
+    bool ok = (got == step.expected_bool);
+    llvm::outs() << "    " << step.label << ": bool="
+                 << (got ? "true" : "false") << "  "
+                 << (ok ? "PASS\n" : "FAIL\n");
+    if (!ok) {
+      ++deadline_fails;
+    }
+  }
+  // Drain back so the tracker is in a clean state if any caller
+  // reuses it (defensive — current callers don't, but the heap
+  // shakedown ends with an empty stack and we mirror that).
+  tracker.Unschedule(nodes_by_topo[4]);
+  tracker.Unschedule(nodes_by_topo[2]);
+  tracker.Unschedule(nodes_by_topo[0]);
+
+  llvm::outs() << "  Min schedule cycle summary: initial_fails="
+               << initial_fails << " bubble_fails=" << bubble_fails
+               << " undo_fails=" << undo_fails
+               << " restore_fails=" << restore_fails
+               << " deadline_fails=" << deadline_fails << "  "
+               << ((initial_fails + bubble_fails + undo_fails +
+                    restore_fails + deadline_fails) == 0
+                       ? "PASS\n"
+                       : "FAIL\n");
+}
+
 // Exercises graph algorithms on a synthetic test DAG with known structure.
 // Delegates each algorithm to a helper in this anonymous namespace.
 void RunTestDAGShakedown(const GCNSubtarget &st) {
@@ -470,6 +661,7 @@ void RunTestDAGShakedown(const GCNSubtarget &st) {
   CheckCriticalPathFromEntry(*test_graph);
   CheckSetMaxAcceptableScheduleLength(*test_graph, st);
   CheckMaxScheduleCycleHeap(*test_graph, st);
+  CheckMinScheduleCycle(*test_graph, st);
 
   // Cycle detection verified: BuildTestDAGWithCycle() +
   // ValidateAndComputeTopologicalOrder() fires report_fatal_error
