@@ -35,6 +35,27 @@ class SearchPolicyBase {
   // Default: no formation. Override in a derived policy to opt in.
   static SubgraphFormationPolicy MakeFormationPolicy() { return {}; }
 
+  // Per-Recurse iteration shape and order. DfsSearch calls this
+  // once at each Recurse() entry and iterates the resulting vector
+  // via ScheduleConstructor::Schedule(node) — so a policy can:
+  //   - filter the ready list down to a subset (omitted nodes are
+  //     not scheduled in this Recurse iteration);
+  //   - impose any priority order, including ones that depend on
+  //     dynamic per-search state (min/max schedule cycles, register
+  //     pressure, etc.).
+  //
+  // Default: copy the ready list as-is. The underlying list is
+  // maintained in topo_index ascending order by ScheduleConstructor,
+  // so a no-op default reproduces the previous static-order
+  // behavior. Concrete policies override for filtering or dynamic
+  // priority.
+  static void FilterAndSortReadyList(
+      const ScheduleConstructor &working,
+      SmallVectorImpl<const ScheduleNode *> &out) {
+    ArrayRef<const ScheduleNode *> ready = working.GetReadyList();
+    out.assign(ready.begin(), ready.end());
+  }
+
   // History-based-domination pruning opt-in flags. Default false;
   // concrete policies override to true to enable the corresponding
   // history table in DfsSearch. The `if constexpr` gate in
@@ -68,15 +89,35 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   static constexpr ScheduleMetric kMetric =
       ScheduleMetric::kMinimizeScheduleLength;
 
-  // Strict total order used to sort ScheduleConstructor's ready list.
-  // First cut: topo_index ascending (deterministic, unique per node).
-  // Planned enhancement: slack-based ordering (ALAP - ASAP, low-slack
-  // critical-path nodes first, tiebreak by topo_index). Finding a
-  // shorter schedule sooner means best.length drops earlier in the
-  // search, so the length-LB bound prunes more subtrees.
-  static bool ReadyCompare(const ScheduleNode *a, const ScheduleNode *b) {
-    return a->GetTopoIndex() < b->GetTopoIndex();
-  }
+  // Override SearchPolicyBase: two-level filter+sort, modelled on
+  // OptSched's cycle-by-cycle window-then-priority pattern.
+  //
+  //   Level 1 — no-bubble candidates: ready nodes whose effective
+  //   min_schedule_cycle <= current_cycle. These can be scheduled
+  //   at current_cycle with zero bubble. Sort ascending by
+  //   effective max_schedule_cycle (most deadline-pressured first),
+  //   tiebreak by topo_index.
+  //
+  //   Level 2 — bubble fallback: only if level 1 is empty (no ready
+  //   node can issue at current_cycle without stalling). Take all
+  //   ready nodes; sort ascending by effective min_schedule_cycle
+  //   (smallest forced bubble first), then by effective
+  //   max_schedule_cycle ascending (most deadline-pressured among
+  //   same-min), then topo_index.
+  //
+  // Effective min/max for a scheduling-unit node is its own value
+  // from the length tracker. For a subgraph proxy, it's the min
+  // (smallest) of the corresponding values across the proxy's
+  // subgraph members — so the proxy is treated as a composite of
+  // its members.
+  //
+  // Falls back to topo-only when no max acceptable schedule length
+  // is set (max_schedule_cycle would be undefined). DfsSearch
+  // always sets one for this policy, so the fallback only matters
+  // for the corner case of a search with no target seed.
+  static void FilterAndSortReadyList(
+      const ScheduleConstructor &working,
+      SmallVectorImpl<const ScheduleNode *> &out);
 
   // Bound the current subtree if any of:
   //   (a) the working schedule's length lower bound exceeds the
@@ -163,12 +204,9 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
   static constexpr ScheduleMetric kMetric =
       ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
 
-  // Strict total order used to sort ScheduleConstructor's ready list.
-  // Topo_index ascending — deterministic, unique per node. No
-  // heuristic for occupancy yet; 
-  static bool ReadyCompare(const ScheduleNode *a, const ScheduleNode *b) {
-    return a->GetTopoIndex() < b->GetTopoIndex();
-  }
+  // No FilterAndSortReadyList override — uses the base default
+  // (snapshot the underlying list in topo_index order). No
+  // pressure-side iteration heuristic yet.
 
   // Return true if no completion of the current partial schedule
   // can improve on best_schedule_constructor. Bounds:

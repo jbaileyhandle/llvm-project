@@ -31,8 +31,9 @@ namespace hierarchical_scheduler {
 // Policy contract (the static methods below — Policy classes don't
 // inherit, they just have these by name):
 //   static constexpr ScheduleMetric kMetric;
-//   static bool ReadyCompare(const ScheduleNode *a,
-//                            const ScheduleNode *b);
+//   static void FilterAndSortReadyList(
+//       const ScheduleConstructor &working,
+//       SmallVectorImpl<const ScheduleNode *> &out);
 //   static bool ShouldBoundSearch(
 //       const ScheduleConstructor &schedule_constructor,
 //       const ScheduleConstructor &best_schedule_constructor,
@@ -43,16 +44,16 @@ namespace hierarchical_scheduler {
 //       const ScheduleConstructor &best_schedule_constructor);
 //   static SubgraphFormationPolicy MakeFormationPolicy();
 //
-// MakeFormationPolicy is provided with a default-empty implementation
-// by SearchPolicyBase (see SearchPolicies.h); concrete policies that
-// want subgraph formation override it. An empty SubgraphFormationPolicy
-// makes the formation step a one-call no-op (FormSubgraphs early-
-// returns on empty pipeline).
+// MakeFormationPolicy and FilterAndSortReadyList are provided with
+// defaults by SearchPolicyBase (see SearchPolicies.h); concrete
+// policies override as needed.
 //
-// ReadyCompare must be a strict total order; it drives the sort order
-// of ScheduleConstructor's ready list. DfsSearch iterates the ready
-// list by index, relying on the round-trip stability guarantee
-// documented on ScheduleConstructor.
+// FilterAndSortReadyList produces a per-Recurse snapshot in the
+// policy's iteration order. DfsSearch iterates that snapshot via
+// ScheduleConstructor::Schedule(node) — the underlying ready list is
+// maintained in topo_index ascending order by ScheduleConstructor for
+// O(log K) insert/lookup, but the iteration order is whatever the
+// policy says.
 //
 // ShouldBoundSearch is a LOCAL prune: returning true abandons the
 // current subtree but lets the search continue elsewhere. Called on
@@ -83,7 +84,7 @@ class DfsSearch {
       // a valid (unconstrained) baseline for the search to beat.
       : working_schedule_constructor_(
             MaybeFormSubgraphs(graph, form_subgraphs),
-            st, mf, lis, &Policy::ReadyCompare),
+            st, mf, lis),
         best_schedule_constructor_(graph.GetInputScheduleConstructor()),
         // length_history_ binds to working_'s trackers. Constructed
         // unconditionally; queried only when Policy::
@@ -343,14 +344,17 @@ class DfsSearch {
       return;
     }
 
-    // Iterate the live ready list by index. Schedule+Unschedule is a
-    // round-trip: after Unschedule the ready list has identical
-    // contents AND index layout (strict-total-order comparator + sort
-    // maintenance), so ++i points to the next sibling.
-    int ready_size =
-        static_cast<int>(working_schedule_constructor_.GetReadyList().size());
-    for (int i = 0; i < ready_size; ++i) {
-      working_schedule_constructor_.ScheduleByIndex(i);
+    // Iterate the policy's per-Recurse snapshot in priority order.
+    // The snapshot is computed once at this Recurse entry — inner
+    // Recurses produce their own snapshots, so they can't perturb
+    // ours. Schedule(node) does an O(log K) lookup into the
+    // underlying topo-sorted ready list to find the snapshot's
+    // chosen node.
+    SmallVector<const ScheduleNode *, 16> ordered_ready;
+    Policy::FilterAndSortReadyList(working_schedule_constructor_,
+                                    ordered_ready);
+    for (const ScheduleNode *node : ordered_ready) {
+      working_schedule_constructor_.Schedule(node);
       Recurse();
       working_schedule_constructor_.Unschedule();
       if (should_end_search_) {

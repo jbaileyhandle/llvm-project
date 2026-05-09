@@ -73,35 +73,16 @@ namespace hierarchical_scheduler {
 
 class ScheduleConstructor {
 public:
-  /// Comparator for ready-list ordering. Must be a strict total
-  /// order — no two distinct nodes may compare equal. The default
-  /// (topo_index ascending) satisfies this because topo_index is
-  /// unique per node. Policies with multi-criterion ordering must
-  /// still bottom out in a uniquely-identifying tiebreaker.
-  ///
-  /// Strict total order is required for index-based iteration to be
-  /// stable across Schedule/Unschedule round-trips — ties would let
-  /// a re-inserted element land at a different index.
-  ///
-  using ReadyComparator = bool (*)(const ScheduleNode *,
-                                   const ScheduleNode *);
-
-  /// Default ready-list comparator: topo_index ascending. Stateless,
-  /// strict total order.
-  static bool DefaultReadyComparator(const ScheduleNode *a,
-                                     const ScheduleNode *b) {
-    return a->GetTopoIndex() < b->GetTopoIndex();
-  }
-
   /// Construct from a graph and target info. The graph must outlive
   /// this object. Reports fatal error if the graph contains group
-  /// nodes (not yet supported at this level). `ready_cmp` defines the
-  /// ready-list order; default is topo_index ascending.
+  /// nodes (not yet supported at this level). The ready list is held
+  /// in arbitrary insertion order; per-Recurse iteration priority is
+  /// the search policy's responsibility (see Policy::
+  /// FilterAndSortReadyList in SearchPolicies.h).
   ScheduleConstructor(const ScheduleGraph &graph,
                       const GCNSubtarget &st,
                       const MachineFunction &mf,
-                      const LiveIntervals &lis,
-                      ReadyComparator ready_cmp = DefaultReadyComparator);
+                      const LiveIntervals &lis);
 
   /// Schedule a node. The node must be in the ready list.
   /// Updates register pressure, schedule length, ready list, and
@@ -278,10 +259,14 @@ private:
     /// The subgraph proxy whose members this scope is scheduling, or
     /// nullptr for the base scope.
     const ScheduleNode *subgraph_proxy;
-    /// Nodes visible in this scope that are currently schedulable,
-    /// maintained in sorted order under ready_comparator_. Inline
-    /// capacity sized to cover typical ready-list sizes without
-    /// heap spill.
+    /// Nodes visible in this scope that are currently schedulable.
+    /// Maintained in topo_index ascending order so insert/lookup
+    /// are O(log K). The maintenance order is fixed (not policy-
+    /// tunable); per-Recurse iteration priority is the search
+    /// policy's responsibility (see Policy::FilterAndSortReadyList
+    /// in SearchPolicies.h, which produces a per-Recurse snapshot
+    /// in policy-defined order). Inline capacity sized to cover
+    /// typical ready-list sizes without heap spill.
     SmallVector<const ScheduleNode *, 64> ready;
   };
 
@@ -291,9 +276,6 @@ private:
   /// base scope. Phase 2+ pushes additional scopes when subgraph
   /// proxies are scheduled (one scope per active subgraph).
   std::vector<SubgraphScheduleScope> scopes_;
-
-  /// Comparator defining ready-list sort order within each scope.
-  ReadyComparator ready_comparator_;
 
   /// Incremented by ScheduleByIndex. .current_run is cleared by
   /// Reset; .lifetime persists. Tracks search effort; see
@@ -346,13 +328,13 @@ private:
   FindScopeOnStack(const ScheduleNode *target_proxy);
 
   /// Return the index of `node` in `ready_list`, or -1 if absent.
-  /// Binary search under ready_comparator_ (O(log K)).
+  /// Binary search by topo_index (O(log K)).
   int GetReadyListIndexOf(
       const SmallVectorImpl<const ScheduleNode *> &ready_list,
       const ScheduleNode *node) const;
 
-  /// Insert `node` into `ready_list` at its sorted position under
-  /// ready_comparator_. Precondition: node is not already present.
+  /// Insert `node` into `ready_list` at its sorted position by
+  /// topo_index ascending. Precondition: node is not already present.
   void ReadyListInsert(SmallVectorImpl<const ScheduleNode *> &ready_list,
                        const ScheduleNode *node);
 

@@ -22,16 +22,14 @@ using namespace llvm::hierarchical_scheduler;
 ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
                                          const GCNSubtarget &st,
                                          const MachineFunction &mf,
-                                         const LiveIntervals &lis,
-                                         ReadyComparator ready_cmp)
+                                         const LiveIntervals &lis)
     : graph_(&graph),
       pressure_tracker_(graph, mf, lis),
       length_tracker_(graph, st),
       // scheduled_set_tracker_ depends on length_tracker_ for cycle
       // lookups; declared after it in the class so member init order
       // is correct.
-      scheduled_set_tracker_(&graph, &length_tracker_),
-      ready_comparator_(ready_cmp) {
+      scheduled_set_tracker_(&graph, &length_tracker_) {
   InitReadyList();
 }
 
@@ -52,7 +50,10 @@ ScheduleConstructor::FindScopeOnStack(const ScheduleNode *target_proxy) {
 }
 
 // ============================================================================
-// Ready list maintenance (sorted SmallVector under ready_comparator_)
+// Ready list maintenance (sorted SmallVector by topo_index ascending —
+// the natural strict-total-order. Per-Recurse iteration priority is
+// the search policy's responsibility; see Policy::FilterAndSortReadyList
+// in SearchPolicies.h.)
 //
 // Helpers take the target ready_list as a parameter so callers can
 // route a release into any scope's ready list. Phase 0 always uses
@@ -60,11 +61,20 @@ ScheduleConstructor::FindScopeOnStack(const ScheduleNode *target_proxy) {
 // signatures are already shaped for the scope-stack world.
 // ============================================================================
 
+namespace {
+// Strict total order used to maintain the ready list. Fixed (not
+// policy-tunable) — guarantees O(log N) insert/lookup via lower_bound
+// and round-trip preservation of list layout across Schedule/Unschedule.
+bool ReadyByTopoIndex(const ScheduleNode *a, const ScheduleNode *b) {
+  return a->GetTopoIndex() < b->GetTopoIndex();
+}
+} // namespace
+
 int ScheduleConstructor::GetReadyListIndexOf(
     const SmallVectorImpl<const ScheduleNode *> &ready_list,
     const ScheduleNode *node) const {
   auto it = std::lower_bound(ready_list.begin(), ready_list.end(), node,
-                             ready_comparator_);
+                             ReadyByTopoIndex);
   if (it == ready_list.end() || *it != node) {
     return -1;
   }
@@ -75,10 +85,10 @@ void ScheduleConstructor::ReadyListInsert(
     SmallVectorImpl<const ScheduleNode *> &ready_list,
     const ScheduleNode *node) {
   auto it = std::lower_bound(ready_list.begin(), ready_list.end(), node,
-                             ready_comparator_);
-  // Duplicate check: since ready_comparator_ is a strict total order,
-  // node can only already be present at the position lower_bound
-  // returned. Cheap — reuses the same traversal.
+                             ReadyByTopoIndex);
+  // Duplicate check: topo_index is strictly unique per node, so node
+  // can only already be present at the position lower_bound returned.
+  // Cheap — reuses the same traversal.
   if (it != ready_list.end() && *it == node) {
     report_fatal_error("ScheduleConstructor: ReadyListInsert on node " +
                        Twine(node->GetId()) +
