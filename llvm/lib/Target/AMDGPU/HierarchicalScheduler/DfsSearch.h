@@ -89,10 +89,17 @@ class DfsSearch {
         // length_history_ binds to working_'s trackers. Constructed
         // unconditionally; queried only when Policy::
         // kUseLengthHistoryPruning is true (the `if constexpr` in
-        // Recurse dead-strips the consult/insert otherwise).
+        // Recurse dead-strips the consult/insert otherwise). The
+        // pressure-score dimension on history dominance is gated
+        // by Policy::kRefineOccupancyAtSameLength: when true, the
+        // tracker also requires prior's continuous occupancy
+        // score >= current's for dominance (length-then-occupancy
+        // refinement); when false, length dimensions only.
         length_history_(
             &working_schedule_constructor_.GetScheduledSetTracker(),
-            &working_schedule_constructor_.GetLengthTracker()),
+            &working_schedule_constructor_.GetLengthTracker(),
+            &working_schedule_constructor_.GetPressureTracker(),
+            Policy::kRefineOccupancyAtSameLength),
         // pressure_history_ binds to working_'s scheduled-set
         // tracker for partition keys, and to working_'s pressure
         // tracker for the no-arg score read. The metric matches
@@ -278,16 +285,29 @@ class DfsSearch {
 
   // Re-derive working's per-node max-schedule-cycle table from
   // the current iteration target and best-schedule length. The
-  // effective bound is min(requested_target_length_, best_length - 1):
-  // smaller of the explicit iteration target the outer driver
-  // set and the strict-improvement bound implied by the best
-  // schedule found so far. Called whenever either input changes
-  // — at construction, at each ResetForReuse, and after every
-  // best-improvement event in Recurse.
+  // effective bound is min(requested_target_length_,
+  // best_length - improvement_offset): smaller of the explicit
+  // iteration target the outer driver set and the
+  // strict-improvement (or same-length-allowed) bound implied by
+  // the best schedule found so far. Called whenever either input
+  // changes — at construction, at each ResetForReuse, and after
+  // every best-improvement event in Recurse.
+  //
+  // The improvement_offset is policy-controlled via
+  // kRefineOccupancyAtSameLength:
+  //   false (default): offset = 1 → bound = best.length - 1, so
+  //     same-length completions are pruned and only strictly
+  //     shorter completions are produced.
+  //   true (refine mode): offset = 0 → bound = best.length, so
+  //     same-length completions are produced and IsBetterThan can
+  //     pick the one with the higher continuous occupancy score.
   void RecomputeWorkingMaxScheduleCycles() {
     int best_length = best_schedule_constructor_.GetScheduleLength();
+    constexpr int kImprovementOffset =
+        Policy::kRefineOccupancyAtSameLength ? 0 : 1;
     working_schedule_constructor_.SetMaxAcceptableScheduleLength(
-        std::min(requested_target_length_, best_length - 1));
+        std::min(requested_target_length_,
+                 best_length - kImprovementOffset));
   }
 
   // If the region elapsed time has reached the policy's per-region

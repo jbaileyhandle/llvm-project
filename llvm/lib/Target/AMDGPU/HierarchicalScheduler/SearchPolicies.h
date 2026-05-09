@@ -56,6 +56,18 @@ class SearchPolicyBase {
     out.assign(ready.begin(), ready.end());
   }
 
+  // Length-min refine-occupancy opt-in. When true, the search
+  // continues exploring same-length completions to refine
+  // continuous register-occupancy score. DfsSearch reads this to
+  // decide whether the per-Recurse max_acceptable bound should
+  // be best.length - 1 (default; reject same-length completions)
+  // or best.length (refine mode; accept same-length completions
+  // so IsBetterThan can pick the one with higher occupancy
+  // score). Default false; only the refine-occupancy length-min
+  // policy overrides to true. Other policies don't engage with
+  // this flag.
+  static constexpr bool kRefineOccupancyAtSameLength = false;
+
   // History-based-domination pruning opt-in flags. Default false;
   // concrete policies override to true to enable the corresponding
   // history table in DfsSearch. The `if constexpr` gate in
@@ -190,6 +202,34 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   // the current prefix on every dimension, the subtree is pruned.
   // See AMDGPUHistoryDominationDesign.md §5.
   static constexpr bool kUseLengthHistoryPruning = true;
+};
+
+// Length-min variant that, after finding a length-optimal schedule,
+// continues exploring same-length completions to refine continuous
+// register-occupancy score. Inherits everything from
+// DfsMinimizeLengthPolicy except:
+//   - kRefineOccupancyAtSameLength flipped to true (DfsSearch uses
+//     this to relax the max_acceptable bound from best.length - 1
+//     to best.length, allowing same-length completions to be
+//     produced).
+//   - ShouldEndSearch overridden to also require occupancy strictly
+//     above the function target — when occupancy already exceeds
+//     target, further pressure refinement won't unlock anything,
+//     so we end at length floor as in the no-refine path; when
+//     occupancy equals target, we keep searching to maximize
+//     continuous score within the bracket.
+//
+// Subclassing gives us a distinct type that DfsSearch can
+// instantiate alongside DfsMinimizeLengthPolicy in the same
+// binary — the orchestrator picks which to use.
+class DfsMinimizeLengthRefineOccupancyPolicy
+    : public DfsMinimizeLengthPolicy {
+ public:
+  static constexpr bool kRefineOccupancyAtSameLength = true;
+
+  static bool ShouldEndSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor);
 };
 
 // Policy for DFS when the objective is to maximize register-only

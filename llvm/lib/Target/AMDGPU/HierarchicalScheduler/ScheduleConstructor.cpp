@@ -335,9 +335,22 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
     return pressure_tracker_.GetContinuousOccupancyScore() >
            other.pressure_tracker_.GetContinuousOccupancyScore();
 
-  case ScheduleMetric::kMinimizeScheduleLength:
-    return length_tracker_.GetCurrentCycle() <
-           other.length_tracker_.GetCurrentCycle();
+  case ScheduleMetric::kMinimizeScheduleLength: {
+    int my_length = length_tracker_.GetCurrentCycle();
+    int other_length = other.length_tracker_.GetCurrentCycle();
+    if (my_length != other_length) {
+      return my_length < other_length;
+    }
+    // Same length — tiebreak by continuous register occupancy
+    // score (higher = better). The bound check
+    // (RecomputeWorkingMaxScheduleCycles) only allows same-length
+    // completions to be produced when the search policy opts in
+    // via kRefineOccupancyAtSameLength, so under the default
+    // length-only policy this branch is effectively dead code
+    // and does not change behavior.
+    return pressure_tracker_.GetContinuousOccupancyScore() >
+           other.pressure_tracker_.GetContinuousOccupancyScore();
+  }
 
   case ScheduleMetric::kMinimizeRegisterOccupancy:
     return pressure_tracker_.GetRegisterOnlyOccupancy() <
@@ -352,6 +365,11 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
 
 bool ScheduleConstructor::RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() const {
   return pressure_tracker_.GetRegisterOnlyOccupancy() >=
+         pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
+}
+
+bool ScheduleConstructor::RegisterOnlyOccupancyExceedsFunctionOccupancyTarget() const {
+  return pressure_tracker_.GetRegisterOnlyOccupancy() >
          pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
 }
 

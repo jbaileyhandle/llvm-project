@@ -58,6 +58,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_LENGTHHISTORYTRACKER_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_LENGTHHISTORYTRACKER_H
 
+#include "GCNRegisterTracker.h"
 #include "ScheduleLengthTracker.h"
 #include "ScheduledSetTracker.h"
 #include "SearchStats.h"
@@ -113,16 +114,35 @@ class LengthHistoryTracker {
     /// indices) but possibly different LBs, so element-wise
     /// comparison is a parallel walk.
     SmallVector<FrontierLb, 16> frontier_lbs;
+    /// Continuous register-occupancy score at the time this entry
+    /// was inserted. Always populated. Whether it participates in
+    /// dominance is gated by `include_pressure_dim_` on the
+    /// owning tracker — set true for the length-min-refine-
+    /// occupancy policy, false otherwise. When the gate is off,
+    /// this field is dead weight (~4 bytes/entry).
+    int continuous_occupancy_score;
   };
 
-  /// Construct over `scheduled_set_tracker` and `length_tracker`.
-  /// Both pointers must be non-null and outlive this tracker.
+  /// Construct over `scheduled_set_tracker`, `length_tracker`, and
+  /// `pressure_tracker`. All pointers must be non-null and outlive
+  /// this tracker.
+  ///
+  /// `include_pressure_dim` controls whether the partial schedule's
+  /// continuous occupancy score (at insertion time) participates in
+  /// dominance. False (default) reproduces the length-only behavior;
+  /// true adds a reversed-direction dimension (higher score is
+  /// better) so prior dominates only if its score >= current's.
+  /// Used by DfsMinimizeLengthRefineOccupancyPolicy. The score
+  /// field is always populated on Entry regardless — the gate is
+  /// only on whether the field is consulted.
   ///
   /// The bitset-size >= 2 invariant required by PartitionKey's
   /// DenseMapInfo sentinels is enforced by ScheduledSetTracker's
   /// own constructor; we don't recheck it here.
   LengthHistoryTracker(const ScheduledSetTracker *scheduled_set_tracker,
-                       const ScheduleLengthTracker *length_tracker);
+                       const ScheduleLengthTracker *length_tracker,
+                       const GCNRegisterTracker *pressure_tracker,
+                       bool include_pressure_dim);
 
   /// True iff the bound trackers' current prefix is dominated by
   /// some existing entry in this partition's bucket. Pure read; no
@@ -193,14 +213,21 @@ class LengthHistoryTracker {
   ArrayRef<Entry> GetBucketForTest(const PartitionKey &key) const;
 
  private:
-  /// Returns true iff `a` dominates `b` on every Pareto dimension
-  /// (end_cycle and each frontier LB). Both Entries must be from
-  /// the same partition: their frontier_lbs vectors have equal
-  /// length and parallel node_topo_idx ordering.
-  static bool DoesDominate(const Entry &a, const Entry &b);
+  /// Returns true iff `a` dominates `b` on every Pareto dimension.
+  /// Length dimensions (end_cycle and each frontier LB) use
+  /// smaller-is-better. When `include_pressure_dim` is true, also
+  /// requires a's continuous_occupancy_score >= b's
+  /// (higher-is-better — a reversed-direction dimension). Both
+  /// Entries must be from the same partition: their frontier_lbs
+  /// vectors have equal length and parallel node_topo_idx ordering.
+  bool DoesDominate(const Entry &a, const Entry &b) const;
 
   const ScheduledSetTracker *scheduled_set_tracker_;
   const ScheduleLengthTracker *length_tracker_;
+  const GCNRegisterTracker *pressure_tracker_;
+  /// Gate for the pressure-score dimension on dominance. See
+  /// constructor comment.
+  bool include_pressure_dim_;
   DenseMap<PartitionKey, SmallVector<Entry, 2>> table_;
   int total_entries_ = 0;
   /// Incremented at every prune event. .current_run is cleared

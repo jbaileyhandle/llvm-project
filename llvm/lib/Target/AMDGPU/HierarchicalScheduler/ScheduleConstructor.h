@@ -231,6 +231,14 @@ public:
   /// effective occupancy. A search can exit early either way.
   bool RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() const;
 
+  /// Strict-above counterpart: true only if peak register-only
+  /// occupancy is *strictly greater* than the function ceiling.
+  /// Used by the length-min refine-occupancy policy's
+  /// ShouldEndSearch — when we've already exceeded the function
+  /// target, there's no value in continuing to refine pressure
+  /// within the same length.
+  bool RegisterOnlyOccupancyExceedsFunctionOccupancyTarget() const;
+
   /// Human-readable summary of current state.
   std::string Describe() const;
 

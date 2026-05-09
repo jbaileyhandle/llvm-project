@@ -1958,7 +1958,8 @@ struct LengthHistoryTrackerFixture {
 };
 
 static LengthHistoryTrackerFixture
-BuildLengthHistoryTrackerFixture(const GCNSubtarget &st) {
+BuildLengthHistoryTrackerFixture(const GCNSubtarget &st,
+                                 bool include_pressure_dim = false) {
   LengthHistoryTrackerFixture fixture;
   fixture.graph = ScheduleGraph::BuildTestDAG();
   fixture.graph->ValidateAndComputeTopologicalOrder();
@@ -1972,8 +1973,14 @@ BuildLengthHistoryTrackerFixture(const GCNSubtarget &st) {
       std::make_unique<ScheduleLengthTracker>(*fixture.graph, st);
   fixture.scheduled_set_tracker = std::make_unique<ScheduledSetTracker>(
       fixture.graph.get(), fixture.length_tracker.get());
+  // Tests pass nullptr for pressure_tracker. With
+  // include_pressure_dim=true, IsDominated still works — the
+  // query's continuous_occupancy_score is read as 0 (null
+  // tracker), and tests stage prior entries' scores explicitly via
+  // InsertEntryForTest.
   fixture.length_history_tracker = std::make_unique<LengthHistoryTracker>(
-      fixture.scheduled_set_tracker.get(), fixture.length_tracker.get());
+      fixture.scheduled_set_tracker.get(), fixture.length_tracker.get(),
+      /*pressure_tracker=*/nullptr, include_pressure_dim);
   return fixture;
 }
 
@@ -2238,6 +2245,88 @@ static void RunLengthHistoryHashCollisionShakedown(const GCNSubtarget &st) {
                << (ok ? "PASS\n" : "FAIL\n");
 }
 
+// Pressure-score dimension on dominance. With
+// include_pressure_dim=true, dominance also requires
+// prior.continuous_occupancy_score >= query.continuous_occupancy_score
+// (reversed direction — higher is better). With null
+// pressure_tracker the query's score is read as 0; tests stage
+// prior scores explicitly via InsertEntryForTest.
+//
+// Cases on a state where length dims would otherwise dominate:
+//   prior.score = 5 (>= query.score = 0) → dominates → IsDominated true.
+//   prior.score = -1 (< query.score = 0) → score check blocks → false.
+//
+// Also confirms the score dim is gated:
+//   include_pressure_dim=false: prior.score = -1 still dominates
+//     (length dims alone suffice).
+static void RunLengthHistoryPressureDimShakedown(const GCNSubtarget &st) {
+  // After ScheduleNodeOnFixture(a), query (current state) has
+  // end_cycle=1 and frontier {H=1, C=2, D=3}.
+  // The "length-equal" prior below uses end_cycle=1 with the same
+  // frontier_lbs — it ties query on every length dim.
+  auto make_length_equal_prior = [](const LengthHistoryTrackerFixture &f,
+                                    int score) {
+    LengthHistoryTracker::Entry prior;
+    prior.end_cycle = 1;
+    prior.frontier_lbs = {
+        {f.h->GetTopoIndex(), 1},
+        {f.c->GetTopoIndex(), 2},
+        {f.d->GetTopoIndex(), 3},
+    };
+    prior.continuous_occupancy_score = score;
+    return prior;
+  };
+
+  // Case 1: include_pressure_dim=true, prior.score=5 (better than
+  // query.score=0). Length dims tie; score dominates → IsDominated true.
+  {
+    auto fixture =
+        BuildLengthHistoryTrackerFixture(st, /*include_pressure_dim=*/true);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    fixture.length_history_tracker->InsertEntryForTest(
+        key, make_length_equal_prior(fixture, /*score=*/5));
+    bool dominated = fixture.length_history_tracker->IsDominated();
+    llvm::outs() << "    pressure_dim=true, prior.score=5 (better): "
+                    "dominated="
+                 << (dominated ? "true" : "false")
+                 << "  " << (dominated ? "PASS\n" : "FAIL\n");
+  }
+
+  // Case 2: include_pressure_dim=true, prior.score=-1 (worse than
+  // query.score=0). Length dims tie; score check blocks dominance.
+  {
+    auto fixture =
+        BuildLengthHistoryTrackerFixture(st, /*include_pressure_dim=*/true);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    fixture.length_history_tracker->InsertEntryForTest(
+        key, make_length_equal_prior(fixture, /*score=*/-1));
+    bool not_dominated = !fixture.length_history_tracker->IsDominated();
+    llvm::outs() << "    pressure_dim=true, prior.score=-1 (worse): "
+                    "not_dominated="
+                 << (not_dominated ? "true" : "false")
+                 << "  " << (not_dominated ? "PASS\n" : "FAIL\n");
+  }
+
+  // Case 3: include_pressure_dim=false, prior.score=-1 (worse).
+  // Score field is ignored; length dims alone determine dominance.
+  // Length dims tie → prior dominates regardless of score.
+  {
+    auto fixture =
+        BuildLengthHistoryTrackerFixture(st, /*include_pressure_dim=*/false);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    fixture.length_history_tracker->InsertEntryForTest(
+        key, make_length_equal_prior(fixture, /*score=*/-1));
+    bool dominated = fixture.length_history_tracker->IsDominated();
+    llvm::outs() << "    pressure_dim=false, prior.score=-1 (ignored): "
+                    "dominated="
+                 << (dominated ? "true" : "false")
+                 << "  " << (dominated ? "PASS\n" : "FAIL\n");
+  }
+}
+
 void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
   llvm::outs() << "  RunLengthHistoryTrackerShakedown:\n";
   RunLengthHistoryEmptyShakedown(st);
@@ -2248,6 +2337,7 @@ void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
   RunLengthHistoryIncomparableShakedown(st);
   RunLengthHistoryDistinctPartitionsShakedown(st);
   RunLengthHistoryHashCollisionShakedown(st);
+  RunLengthHistoryPressureDimShakedown(st);
 }
 
 // =============================================================================

@@ -13,9 +13,13 @@ namespace hierarchical_scheduler {
 
 LengthHistoryTracker::LengthHistoryTracker(
     const ScheduledSetTracker *scheduled_set_tracker,
-    const ScheduleLengthTracker *length_tracker)
+    const ScheduleLengthTracker *length_tracker,
+    const GCNRegisterTracker *pressure_tracker,
+    bool include_pressure_dim)
     : scheduled_set_tracker_(scheduled_set_tracker),
-      length_tracker_(length_tracker) {
+      length_tracker_(length_tracker),
+      pressure_tracker_(pressure_tracker),
+      include_pressure_dim_(include_pressure_dim) {
   if (scheduled_set_tracker_ == nullptr) {
     report_fatal_error(
         "LengthHistoryTracker: scheduled_set_tracker must not be null");
@@ -24,6 +28,16 @@ LengthHistoryTracker::LengthHistoryTracker(
     report_fatal_error(
         "LengthHistoryTracker: length_tracker must not be null");
   }
+  // pressure_tracker_ may be null. When non-null and
+  // include_pressure_dim_ is true, IsDominated/IsDominatedElseInsert
+  // populate Entry's continuous_occupancy_score from the tracker
+  // and dominance consults it. When null, the score field is
+  // populated with 0 — useful for tests that use
+  // InsertEntryForTest to set scores explicitly without driving
+  // the production query path. Production callers that opt into
+  // include_pressure_dim are expected to supply a real tracker;
+  // there's no runtime check for that misconfiguration since the
+  // sole production caller (DfsSearch) wires it consistently.
   // Bitset-size >= 2 invariant is enforced by ScheduledSetTracker's
   // ctor — no recheck here.
 }
@@ -47,7 +61,8 @@ LengthHistoryTracker::GetFrontierLbsSnapshot() const {
   return result;
 }
 
-bool LengthHistoryTracker::DoesDominate(const Entry &a, const Entry &b) {
+bool LengthHistoryTracker::DoesDominate(const Entry &a,
+                                        const Entry &b) const {
   if (a.end_cycle > b.end_cycle) {
     return false;
   }
@@ -57,6 +72,18 @@ bool LengthHistoryTracker::DoesDominate(const Entry &a, const Entry &b) {
   // node_topo_idx and compare only the LBs.
   for (size_t i = 0; i < a.frontier_lbs.size(); ++i) {
     if (a.frontier_lbs[i].lower_bound > b.frontier_lbs[i].lower_bound) {
+      return false;
+    }
+  }
+  // Pressure-score dimension. Reversed direction: higher score is
+  // better, so a dominates iff a.score >= b.score. Pressure is
+  // monotonically non-decreasing during search, so the recorded
+  // score is an upper bound on any completion's score — making
+  // this dominance sound when paired with the length dimensions
+  // above. Gated on include_pressure_dim_ (false in the default
+  // length-only policy).
+  if (include_pressure_dim_) {
+    if (a.continuous_occupancy_score < b.continuous_occupancy_score) {
       return false;
     }
   }
@@ -70,7 +97,14 @@ bool LengthHistoryTracker::IsDominated() const {
   if (it == table_.end()) {
     return false;
   }
-  Entry query{length_tracker_->GetCurrentCycle(), GetFrontierLbsSnapshot()};
+  // pressure_tracker_ may be null when include_pressure_dim_ is
+  // false (tests don't always have one). The score field is dead
+  // weight in that case — store 0 so the field is initialized.
+  int score = pressure_tracker_ != nullptr
+                  ? pressure_tracker_->GetContinuousOccupancyScore()
+                  : 0;
+  Entry query{length_tracker_->GetCurrentCycle(),
+              GetFrontierLbsSnapshot(), score};
   for (const Entry &existing : it->second) {
     if (DoesDominate(existing, query)) {
       return true;
@@ -81,7 +115,12 @@ bool LengthHistoryTracker::IsDominated() const {
 
 bool LengthHistoryTracker::IsDominatedElseInsert() {
   PartitionKeyView view = scheduled_set_tracker_->GetPartitionKeyView();
-  Entry query{length_tracker_->GetCurrentCycle(), GetFrontierLbsSnapshot()};
+  // See IsDominated above for the nullable-pressure-tracker rationale.
+  int score = pressure_tracker_ != nullptr
+                  ? pressure_tracker_->GetContinuousOccupancyScore()
+                  : 0;
+  Entry query{length_tracker_->GetCurrentCycle(),
+              GetFrontierLbsSnapshot(), score};
 
   // Lookup via view — no bitset copy in the existing-bucket path.
   // We construct an owning PartitionKey only when we have to insert

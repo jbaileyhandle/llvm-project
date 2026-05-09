@@ -212,6 +212,25 @@ bool DfsMinimizeLengthPolicy::ShouldEndSearch(
   return best_length <= floor;
 }
 
+bool DfsMinimizeLengthRefineOccupancyPolicy::ShouldEndSearch(
+    const ScheduleConstructor & /*schedule_constructor*/,
+    const ScheduleConstructor &best_schedule_constructor) {
+  int best_length =
+      best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
+  int floor = best_schedule_constructor.GetGraph().GetGraphLengthFloor();
+  if (best_length > floor) {
+    return false;
+  }
+  // At length floor. End only if integer occupancy strictly
+  // exceeds the function target — within-bracket continuous-
+  // score refinement can't unlock anything more once we're
+  // already above the target. When occupancy equals the target,
+  // continue searching same-length completions for higher
+  // continuous score (more headroom within the bracket).
+  return best_schedule_constructor
+      .RegisterOnlyOccupancyExceedsFunctionOccupancyTarget();
+}
+
 bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
