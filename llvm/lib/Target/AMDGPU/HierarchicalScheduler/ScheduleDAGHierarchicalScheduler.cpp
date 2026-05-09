@@ -14,6 +14,7 @@
 #include "MaliciousScheduler.h"
 #include "ScheduleConstructor.h"
 #include "SearchPolicies.h"
+#include "SubgraphFormation.h"
 #include "GCNSubtarget.h"
 #include "SIMachineFunctionInfo.h"
 #include "ScheduleGraph.h"
@@ -555,7 +556,12 @@ static void RunIterativeLengthMinPhase(
   const int input_length =
       input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
 
-  DfsSearch<DfsMinimizeLengthPolicy> iter_search(graph, st, mf, lis);
+  // form_subgraphs=false: the orchestrator (ScheduleRegionForMinimumLength)
+  // ran formation once for the whole region before either phase
+  // started. Re-running here would treat the existing subgraph
+  // proxies as nested-subgraph candidates and fatal.
+  DfsSearch<DfsMinimizeLengthPolicy> iter_search(graph, st, mf, lis,
+                                                 /*form_subgraphs=*/false);
 
   // Default outcome before any iteration runs:
   //   - "input_optimal" when the loop range is empty (input_length
@@ -621,7 +627,10 @@ static void RunPlainLengthMinPhase(
     const MachineFunction &mf, const LiveIntervals &lis,
     const ScheduleConstructor &input_schedule_constructor,
     ScheduleConstructor &best_schedule_constructor) {
-  DfsSearch<DfsMinimizeLengthPolicy> plain_search(graph, st, mf, lis);
+  // form_subgraphs=false: see RunIterativeLengthMinPhase comment.
+  // Formation is a once-per-region mutation done by the orchestrator.
+  DfsSearch<DfsMinimizeLengthPolicy> plain_search(graph, st, mf, lis,
+                                                  /*form_subgraphs=*/false);
   int plain_target =
       best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
   plain_search.ResetForReuse(plain_target);
@@ -652,6 +661,14 @@ void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
   WithRegionGraph(region, [&](ScheduleGraph &graph) {
     const ScheduleConstructor &input_schedule_constructor =
         graph.GetInputScheduleConstructor();
+
+    // Formation is a once-per-region mutation: it materializes
+    // subgraph proxies into the graph. Both phases below construct
+    // their DfsSearches with form_subgraphs=false and rely on this
+    // call's side effect. Running formation twice on the same graph
+    // would fatal in CheckNoNestedMembers (the existing proxies
+    // would be treated as members of a new subgraph).
+    FormSubgraphs(graph, DfsMinimizeLengthPolicy::MakeFormationPolicy());
 
     PrintPreScheduleInfo(graph, input_schedule_constructor, st);
 
