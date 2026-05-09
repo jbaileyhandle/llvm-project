@@ -25,11 +25,29 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
   if (working_lb > max_acceptable) {
     return true;
   }
+
   // Per-instruction max-schedule-cycle prune: tighter than the
   // aggregate LB above when the smallest unscheduled
   // max_schedule_cycle has been overrun, even though the LB
   // itself hasn't yet exceeded max_acceptable.
   if (length_tracker.IsCurrentCycleBeyondEarliestMaxScheduleCycle()) {
+    return true;
+  }
+
+  // Min-vs-max prune: complementary to the check above. Each
+  // catches cases the other can miss.
+  //   Heap check (above) fires when current_cycle has crept
+  //     past some unscheduled node's max — the node has been
+  //     stranded by general advancement, not by a specific
+  //     predecessor's contribution.
+  //   This check fires when the most recent Schedule's forward
+  //     propagation just pushed some node's min over its max
+  //     via a long-latency path, even though current_cycle
+  //     hasn't yet caught up.
+  // Either way, the named node can no longer be placed in time,
+  // so no completion of the working schedule can honor the
+  // configured max acceptable schedule length.
+  if (length_tracker.IsAnyMinScheduleCycleBeyondMaxScheduleCycle()) {
     return true;
   }
 
