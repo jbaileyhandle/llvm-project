@@ -533,22 +533,117 @@ static void PrintOuterLoopSummary(int iterations_run,
 // length 700). Flipping this on requires the deadline-based prune
 // inside the inner search and a budget-exhausted fallback to
 // plain search.
-constexpr bool kUseTargetFeasibilityIteration = false;
+constexpr bool kUseTargetFeasibilityIteration = true;
 
-// Per-region worker. Runs DFS with DfsMinimizeLengthPolicy.
+// Phase 1 helper: target-feasibility iteration. Walks target
+// length from the static graph floor up to input_length-1 on a
+// dedicated DfsSearch with its own per-region budget. The first
+// iteration to find a complete schedule with length <= target
+// updates `best_schedule_constructor` and exits the loop (targets
+// tested in ascending order, so the first feasibility is the
+// optimum). Loop also exits on region timeout or natural
+// exhaustion of the target range, leaving best at whatever was
+// captured (input on no feasibility found).
 //
-// In the default plain-search mode, calls search.Run() once and
-// applies the resulting schedule. Output is no worse than the
-// region's current MF order (DfsSearch seeds best with the input).
+// No-op when the loop range is empty (input_length <= floor).
+static void RunIterativeLengthMinPhase(
+    ScheduleGraph &graph, const GCNSubtarget &st,
+    const MachineFunction &mf, const LiveIntervals &lis,
+    const ScheduleConstructor &input_schedule_constructor,
+    ScheduleConstructor &best_schedule_constructor) {
+  const int floor = graph.GetGraphLengthFloor();
+  const int input_length =
+      input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
+
+  DfsSearch<DfsMinimizeLengthPolicy> iter_search(graph, st, mf, lis);
+
+  // Default outcome before any iteration runs:
+  //   - "input_optimal" when the loop range is empty (input_length
+  //     already at the floor, search would have no room to improve).
+  //   - "infeasible" otherwise — overridden when the loop breaks
+  //     on feasibility or timeout, and stays as "infeasible" iff
+  //     the loop walks the full target range without success and
+  //     without timing out.
+  StringRef terminated_via =
+      (input_length <= floor) ? "input_optimal" : "infeasible";
+  int final_target = -1;
+  int iterations_run = 0;
+  SmallVector<LengthPassIterationLog, 8> iter_logs;
+
+  for (int target = floor; target < input_length; ++target) {
+    iter_search.ResetForReuse(target);
+    ScheduleConstructor result = iter_search.Run();
+    ++iterations_run;
+
+    const int result_length =
+        result.GetLengthTracker().GetCurrentCycle();
+    iter_logs.push_back(
+        CaptureIterationLog(target, result_length, iter_search));
+
+    if (result_length <= target) {
+      best_schedule_constructor = result;
+      terminated_via = "feasible";
+      final_target = target;
+      break;
+    }
+    if (iter_search.RegionTimedOut()) {
+      terminated_via = "timeout";
+      break;
+    }
+  }
+
+  bool iter_changed =
+      input_schedule_constructor.GetScheduleOrder() !=
+      best_schedule_constructor.GetScheduleOrder();
+
+  MaybePrintIterationLogs(iter_logs);
+  PrintPostScheduleInfo(graph, best_schedule_constructor, iter_search, st,
+                        iter_changed);
+  PrintOuterLoopSummary(iterations_run, terminated_via, final_target);
+}
+
+// Phase 2 helper: plain min-search on a fresh DfsSearch with its
+// own per-region budget. The target ceiling is the tighter of
+// input_length and any improvement iteration just produced —
+// i.e., the current outer best's length. Plain's policy bound
+// then comes out at min(ceiling, plain_seed_best.length - 1),
+// giving aggressive pruning right out of the gate when iteration
+// improved.
 //
-// In target-feasibility iteration mode (gated by
-// kUseTargetFeasibilityIteration), drives an outer for-loop that
-// walks a target length from floor up to input_length-1, calling
-// search.Run() at each step. The first iteration to find a
-// complete schedule with length <= target produces the optimum
-// (targets are tested in ascending order). The loop exits on
-// feasibility, region timeout, or naturally at the end of the
-// range.
+// When iteration timed out (or walked the full range without
+// finding feasibility), this gives plain an untouched per-region
+// budget — the no-regression-vs-plain fallback. When iteration
+// is off, this is the only search that runs. Updates outer best
+// only on strict improvement so iteration's optimum isn't
+// overwritten by an equivalent plain result.
+static void RunPlainLengthMinPhase(
+    ScheduleGraph &graph, const GCNSubtarget &st,
+    const MachineFunction &mf, const LiveIntervals &lis,
+    const ScheduleConstructor &input_schedule_constructor,
+    ScheduleConstructor &best_schedule_constructor) {
+  DfsSearch<DfsMinimizeLengthPolicy> plain_search(graph, st, mf, lis);
+  int plain_target =
+      best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
+  plain_search.ResetForReuse(plain_target);
+  ScheduleConstructor plain_result = plain_search.Run();
+  if (plain_result.IsBetterThan(best_schedule_constructor,
+                                 DfsMinimizeLengthPolicy::kMetric)) {
+    best_schedule_constructor = plain_result;
+  }
+
+  bool changed =
+      input_schedule_constructor.GetScheduleOrder() !=
+      best_schedule_constructor.GetScheduleOrder();
+  PrintPostScheduleInfo(graph, best_schedule_constructor, plain_search, st,
+                        changed);
+}
+
+// Per-region worker. Runs DFS with DfsMinimizeLengthPolicy in two
+// phases — gated target-feasibility iteration (Phase 1), then
+// always-on plain min-search (Phase 2). Output is no worse than
+// the region's current MF order (each phase's DfsSearch seeds
+// best with the input) and no worse than plain alone (Phase 2
+// always runs with a fresh per-region budget).
 void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
     RegionInfo &region) {
   const GCNSubtarget &st =
@@ -557,82 +652,23 @@ void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
   WithRegionGraph(region, [&](ScheduleGraph &graph) {
     const ScheduleConstructor &input_schedule_constructor =
         graph.GetInputScheduleConstructor();
-    const int floor = graph.GetGraphLengthFloor();
-    const int input_length =
-        input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
 
-    DfsSearch<DfsMinimizeLengthPolicy> search(graph, st, MF, *LIS);
     PrintPreScheduleInfo(graph, input_schedule_constructor, st);
 
     ScheduleConstructor best_schedule_constructor =
         input_schedule_constructor;
 
     if constexpr (kUseTargetFeasibilityIteration) {
-      // Default outcome before any iteration runs:
-      //   - "input_optimal" when the loop range is empty
-      //     (input_length already at the floor, search would have
-      //     no room to improve). The loop body below won't execute
-      //     in this case, leaving this default in place.
-      //   - "infeasible" otherwise — overridden when the loop
-      //     breaks on feasibility or timeout, and stays as
-      //     "infeasible" iff the loop walks the full target range
-      //     without success and without timing out.
-      StringRef terminated_via =
-          (input_length <= floor) ? "input_optimal" : "infeasible";
-      int final_target = -1;
-      int iterations_run = 0;
-      SmallVector<LengthPassIterationLog, 8> iter_logs;
-
-      for (int target = floor; target < input_length; ++target) {
-        search.ResetForReuse(target);
-        ScheduleConstructor result = search.Run();
-        ++iterations_run;
-
-        const int result_length =
-            result.GetLengthTracker().GetCurrentCycle();
-        iter_logs.push_back(
-            CaptureIterationLog(target, result_length, search));
-
-        if (result_length <= target) {
-          best_schedule_constructor = result;
-          terminated_via = "feasible";
-          final_target = target;
-          break;
-        }
-        if (search.RegionTimedOut()) {
-          terminated_via = "timeout";
-          break;
-        }
-      }
-
-      bool changed =
-          input_schedule_constructor.GetScheduleOrder() !=
-          best_schedule_constructor.GetScheduleOrder();
-
-      MaybePrintIterationLogs(iter_logs);
-      PrintPostScheduleInfo(graph, best_schedule_constructor, search, st,
-                            changed);
-      PrintOuterLoopSummary(iterations_run, terminated_via, final_target);
-
-      ApplyScheduleOrder(region, best_schedule_constructor);
-    } else {
-      // Plain min-search: single Run() with the policy's INT_MAX
-      // target. floor and input_length are unused on this branch
-      // (they only feed the loop body above).
-      (void)floor;
-      (void)input_length;
-
-      best_schedule_constructor = search.Run();
-
-      bool changed =
-          input_schedule_constructor.GetScheduleOrder() !=
-          best_schedule_constructor.GetScheduleOrder();
-
-      PrintPostScheduleInfo(graph, best_schedule_constructor, search, st,
-                            changed);
-
-      ApplyScheduleOrder(region, best_schedule_constructor);
+      RunIterativeLengthMinPhase(graph, st, MF, *LIS,
+                                  input_schedule_constructor,
+                                  best_schedule_constructor);
     }
+
+    RunPlainLengthMinPhase(graph, st, MF, *LIS,
+                            input_schedule_constructor,
+                            best_schedule_constructor);
+
+    ApplyScheduleOrder(region, best_schedule_constructor);
   });
 }
 
