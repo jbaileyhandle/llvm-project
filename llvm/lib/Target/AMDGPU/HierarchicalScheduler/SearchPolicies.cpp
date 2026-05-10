@@ -58,6 +58,30 @@ int EffectiveMaxScheduleCycle(
   return result;
 }
 
+// Effective node-input-order for ranking — corresponds to LLVM's
+// SUnit::NodeNum, which is the order LLVM's pre-RA scheduler emits
+// instructions in. That order is register-pressure-aware (LLVM's
+// pre-RA scheduler considers RP), so using it as a tiebreaker
+// after deadline pressure inherits LLVM's RP-awareness implicitly
+// — same trick OptSched uses with its NID heuristic.
+//
+// Scheduling-unit node: its own SUnit::NodeNum. Subgraph proxy:
+// min over members' effective node-nums (matches the other
+// Effective* helpers — proxy is treated as the most "input-order
+// urgent" of its members). Returns 0 for proxies with no members.
+int EffectiveNodeNum(const ScheduleNode *node) {
+  if (node->IsSchedulingUnit()) {
+    const SUnit *su = node->GetSUnit();
+    return su != nullptr ? static_cast<int>(su->NodeNum) : 0;
+  }
+  SubgraphInfo *info = node->GetSubgraphInfo();
+  int result = INT_MAX;
+  for (ScheduleNode *member : info->members) {
+    result = std::min(result, EffectiveNodeNum(member));
+  }
+  return (result == INT_MAX) ? 0 : result;
+}
+
 } // namespace
 
 void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
@@ -104,7 +128,9 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
   int current_cycle = length_tracker.GetCurrentCycle();
 
   // Level 1: no-bubble candidates (effective min <= current_cycle),
-  // sorted by effective max ascending then topo ascending.
+  // sorted by effective max ascending (most deadline-pressured
+  // first), then NID ascending (LLVM input order — pressure-aware
+  // tiebreak from LLVM's pre-RA scheduler), then topo ascending.
   for (const ScheduleNode *node : ready) {
     if (EffectiveMinScheduleCycle(node, length_tracker) <= current_cycle) {
       out.push_back(node);
@@ -119,6 +145,11 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
           if (a_max != b_max) {
             return a_max < b_max;
           }
+          int a_nid = EffectiveNodeNum(a);
+          int b_nid = EffectiveNodeNum(b);
+          if (a_nid != b_nid) {
+            return a_nid < b_nid;
+          }
           return a->GetTopoIndex() < b->GetTopoIndex();
         });
     return;
@@ -126,7 +157,8 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
 
   // Level 2: all candidates would bubble. Sort by effective min
   // ascending (smallest forced bubble), then effective max
-  // ascending (deadline pressure within same-min), then topo.
+  // ascending (deadline pressure within same-min), then NID
+  // ascending, then topo.
   out.assign(ready.begin(), ready.end());
   std::sort(
       out.begin(), out.end(),
@@ -140,6 +172,11 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
         int b_max = EffectiveMaxScheduleCycle(b, length_tracker);
         if (a_max != b_max) {
           return a_max < b_max;
+        }
+        int a_nid = EffectiveNodeNum(a);
+        int b_nid = EffectiveNodeNum(b);
+        if (a_nid != b_nid) {
+          return a_nid < b_nid;
         }
         return a->GetTopoIndex() < b->GetTopoIndex();
       });
