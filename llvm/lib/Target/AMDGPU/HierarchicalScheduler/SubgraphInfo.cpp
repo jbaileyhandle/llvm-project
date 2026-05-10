@@ -51,11 +51,17 @@ SubgraphInfo::SubgraphInfo(ArrayRef<ScheduleNode *> members_in,
   SmallPtrSet<ScheduleNode *, 16> ext_successors_seen;
 
   for (ScheduleNode *m : members) {
+    bool has_in_subgraph_pred = false;
     for (const ScheduleEdge &edge : m->Predecessors()) {
-      if (!member_set.contains(edge.node_) &&
-          ext_predecessors_seen.insert(edge.node_).second) {
+      if (member_set.contains(edge.node_)) {
+        // In-subgraph predecessor: this member is not initial.
+        has_in_subgraph_pred = true;
+      } else if (ext_predecessors_seen.insert(edge.node_).second) {
         ext_predecessors.push_back(edge.node_);
       }
+    }
+    if (!has_in_subgraph_pred) {
+      initial_members.push_back(m);
     }
     for (const ScheduleEdge &edge : m->Successors()) {
       if (!member_set.contains(edge.node_) &&

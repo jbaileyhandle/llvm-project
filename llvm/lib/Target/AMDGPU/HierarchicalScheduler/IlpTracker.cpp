@@ -9,10 +9,12 @@
 #include "IlpTracker.h"
 #include "GCNRegisterTracker.h"
 #include "SIInstrInfo.h"
+#include "SubgraphInfo.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/ScheduleDAG.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
+#include <climits>
 
 using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
@@ -238,9 +240,35 @@ int IlpTracker::GetIlpScore() const {
 // ============================================================================
 
 int IlpTracker::CloseCostForNode(const ScheduleNode *node) const {
+  // Subgraph start proxy: scheduling the proxy commits to scheduling
+  // its members next (subgraph members are contiguous). Score the
+  // proxy as the cheapest-available opening move in the subgraph —
+  // min over initial_members of CloseCostForNode(member). Optimistic:
+  // assumes the search will pick the best first move once inside.
+  // Returns 0 for an empty initial-member list (degenerate; shouldn't
+  // happen for a well-formed subgraph but defensive).
+  //
+  // Recursive on members so a member that is itself a start proxy
+  // (nested subgraphs, currently unsupported but future-proofed) is
+  // handled the same way. End proxies don't reach this path because
+  // FilterAndSortReadyList short-circuits on them (sole-entry
+  // invariant); if one ever did, the !IsRealInstruction branch
+  // returns 0 conservatively.
+  if (node->IsSubgraphStartProxy()) {
+    SubgraphInfo *info = node->GetSubgraphInfo();
+    int min_cost = INT_MAX;
+    for (const ScheduleNode *member : info->initial_members) {
+      min_cost = std::min(min_cost, CloseCostForNode(member));
+    }
+    return (min_cost == INT_MAX) ? 0 : min_cost;
+  }
   if (!IsRealInstruction(node)) {
+    // End proxies, entry/exit sentinels: no real-instruction
+    // semantics — no ILP cost for ranking purposes.
     return 0;
   }
+
+  // Real instruction 
   const GCNRegisterTracker::NodeRegInfo &info =
       pressure_tracker_->GetNodeRegInfo(node);
   int cost = 0;

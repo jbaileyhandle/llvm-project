@@ -56,6 +56,22 @@ struct SubgraphInfo {
   /// Same shape as ext_predecessors.
   SmallVector<ScheduleNode *, 16> ext_successors;
 
+  /// Members with no in-subgraph predecessors — i.e., members that
+  /// would become ready immediately upon scheduling the start proxy
+  /// (since their only predecessors are external, all of which are
+  /// scheduled by the time the proxy is ready). These are the
+  /// candidates for the FIRST move within this subgraph once it's
+  /// entered.
+  ///
+  /// Used by IlpTracker::CloseCostForNode to score a start proxy as
+  /// "min over initial_members of CloseCostForNode(member)" — the
+  /// cheapest opening move if the subgraph is entered now.
+  ///
+  /// Computed by the constructor in the same pass that builds
+  /// ext_predecessors / ext_successors. Order is stable (matches
+  /// first-seen order in `members`).
+  SmallVector<ScheduleNode *, 8> initial_members;
+
   /// The START proxy node that represents the entry into this
   /// subgraph in the outer scheduling graph. Pushes a scope on the
   /// scope stack when scheduled. Null until InsertSubgraphProxies

@@ -238,18 +238,27 @@ class IlpTracker {
                : it->second.desirable_spacing;
   }
 
-  /// Cost of scheduling `node` NOW from an ILP perspective — the
-  /// saturated freshness penalty summed over open producers `node`
-  /// would close as their first consumer. Higher = more / heavier
-  /// / fresher producer windows would be cut short by scheduling
-  /// now. Returns 0 for nodes with no MachineInstr-backed uses
-  /// (proxies, entry/exit sentinels).
+  /// Cost of scheduling `node` NOW from an ILP perspective.
   ///
-  /// Per-close cost = max(0, desirable_spacing_R - spacing_R).
-  /// Symmetric with the close-side scoring formula
-  /// (contribution = min(spacing_R, desirable_spacing_R)) — both
-  /// live in this class so the saturation policy has one source
-  /// of truth.
+  /// Real MachineInstr-backed instruction: saturated freshness
+  /// penalty summed over open producers `node` would close as their
+  /// first consumer. Per-close cost =
+  /// max(0, desirable_spacing_R - spacing_R). Symmetric with the
+  /// close-side scoring formula (contribution = min(spacing_R,
+  /// desirable_spacing_R)) — both live in this class so the
+  /// saturation policy has one source of truth.
+  ///
+  /// Subgraph start proxy: scheduling the proxy commits to
+  /// scheduling its members next (subgraph members are contiguous),
+  /// so the proxy's cost is the cheapest opening move available —
+  /// min over SubgraphInfo::initial_members of
+  /// CloseCostForNode(member). Optimistic; assumes the search will
+  /// take the best first move once inside.
+  ///
+  /// End proxies, entry/exit sentinels: 0 (no real-instruction
+  /// semantics). End proxies don't normally reach this — the length
+  /// policy short-circuits on them (sole-entry invariant) — but
+  /// returning 0 keeps the contract simple if one ever does.
   int CloseCostForNode(const ScheduleNode *node) const;
 
   /// Human-readable summary.
