@@ -82,6 +82,20 @@ int EffectiveNodeNum(const ScheduleNode *node) {
   return (result == INT_MAX) ? 0 : result;
 }
 
+// Effective net (defs - kills) for ranking. Scheduling-unit node:
+// pressure_tracker's GetNetDefMinusLastUse. Subgraph proxy:
+// neutral (0) for now — proper subgraph aggregate (defs going out
+// minus uses freed) is non-trivial and deferred. On regions
+// without subgraphs (formation finds 0), this doesn't matter.
+int EffectiveNetDefMinusLastUse(
+    const ScheduleNode *node,
+    const GCNRegisterTracker &pressure_tracker) {
+  if (node->IsSchedulingUnit()) {
+    return pressure_tracker.GetNetDefMinusLastUse(node);
+  }
+  return 0;
+}
+
 } // namespace
 
 void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
@@ -137,13 +151,28 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
     }
   }
   if (!out.empty()) {
+    const GCNRegisterTracker &pressure_tracker =
+        working.GetPressureTracker();
     std::sort(
         out.begin(), out.end(),
-        [&length_tracker](const ScheduleNode *a, const ScheduleNode *b) {
+        [&length_tracker, &pressure_tracker](const ScheduleNode *a,
+                                              const ScheduleNode *b) {
           int a_max = EffectiveMaxScheduleCycle(a, length_tracker);
           int b_max = EffectiveMaxScheduleCycle(b, length_tracker);
           if (a_max != b_max) {
             return a_max < b_max;
+          }
+          // Pressure-aware secondary: among same-deadline candidates,
+          // pick the one whose schedule-now would relieve more
+          // pressure (more negative net = more relief). NID below
+          // is unique per SUnit so this is the load-bearing
+          // tiebreak; NID is then a deterministic backup.
+          int a_net =
+              EffectiveNetDefMinusLastUse(a, pressure_tracker);
+          int b_net =
+              EffectiveNetDefMinusLastUse(b, pressure_tracker);
+          if (a_net != b_net) {
+            return a_net < b_net;
           }
           int a_nid = EffectiveNodeNum(a);
           int b_nid = EffectiveNodeNum(b);
@@ -157,12 +186,16 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
 
   // Level 2: all candidates would bubble. Sort by effective min
   // ascending (smallest forced bubble), then effective max
-  // ascending (deadline pressure within same-min), then NID
-  // ascending, then topo.
+  // ascending (deadline pressure within same-min), then net
+  // def-kill ascending (pressure relief among same-deadline),
+  // then NID, then topo.
+  const GCNRegisterTracker &pressure_tracker =
+      working.GetPressureTracker();
   out.assign(ready.begin(), ready.end());
   std::sort(
       out.begin(), out.end(),
-      [&length_tracker](const ScheduleNode *a, const ScheduleNode *b) {
+      [&length_tracker, &pressure_tracker](const ScheduleNode *a,
+                                            const ScheduleNode *b) {
         int a_min = EffectiveMinScheduleCycle(a, length_tracker);
         int b_min = EffectiveMinScheduleCycle(b, length_tracker);
         if (a_min != b_min) {
@@ -172,6 +205,11 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
         int b_max = EffectiveMaxScheduleCycle(b, length_tracker);
         if (a_max != b_max) {
           return a_max < b_max;
+        }
+        int a_net = EffectiveNetDefMinusLastUse(a, pressure_tracker);
+        int b_net = EffectiveNetDefMinusLastUse(b, pressure_tracker);
+        if (a_net != b_net) {
+          return a_net < b_net;
         }
         int a_nid = EffectiveNodeNum(a);
         int b_nid = EffectiveNodeNum(b);
@@ -266,6 +304,60 @@ bool DfsMinimizeLengthRefineOccupancyPolicy::ShouldEndSearch(
   // continuous score (more headroom within the bracket).
   return best_schedule_constructor
       .RegisterOnlyOccupancyExceedsFunctionOccupancyTarget();
+}
+
+void DfsMaximizeOccupancyPolicy::FilterAndSortReadyList(
+    const ScheduleConstructor &working,
+    SmallVectorImpl<const ScheduleNode *> &out) {
+  out.clear();
+  ArrayRef<const ScheduleNode *> ready = working.GetReadyList();
+  const GCNRegisterTracker &pressure_tracker =
+      working.GetPressureTracker();
+
+  // Filter: if any "pure reader" (real instruction with def_count
+  // == 0) is in the ready list, keep ONLY pure readers — they
+  // consume registers without producing new live ranges, so
+  // picking them now strictly relieves pressure (or holds steady).
+  // Subgraph proxies don't qualify (they're scope markers, not
+  // real instructions); when a pure reader exists they're
+  // deferred.
+  bool any_pure_reader = false;
+  for (const ScheduleNode *node : ready) {
+    if (node->IsSchedulingUnit() &&
+        pressure_tracker.GetDefCount(node) == 0) {
+      any_pure_reader = true;
+      break;
+    }
+  }
+  if (any_pure_reader) {
+    for (const ScheduleNode *node : ready) {
+      if (node->IsSchedulingUnit() &&
+          pressure_tracker.GetDefCount(node) == 0) {
+        out.push_back(node);
+      }
+    }
+  } else {
+    out.assign(ready.begin(), ready.end());
+  }
+
+  // Sort: net (defs - kills) ascending — most pressure-relieving
+  // first; pure readers naturally have net <= 0. NID tiebreak,
+  // then topo. Proxies sort with net=0 (neutral; see helper).
+  std::sort(
+      out.begin(), out.end(),
+      [&pressure_tracker](const ScheduleNode *a, const ScheduleNode *b) {
+        int a_net = EffectiveNetDefMinusLastUse(a, pressure_tracker);
+        int b_net = EffectiveNetDefMinusLastUse(b, pressure_tracker);
+        if (a_net != b_net) {
+          return a_net < b_net;
+        }
+        int a_nid = EffectiveNodeNum(a);
+        int b_nid = EffectiveNodeNum(b);
+        if (a_nid != b_nid) {
+          return a_nid < b_nid;
+        }
+        return a->GetTopoIndex() < b->GetTopoIndex();
+      });
 }
 
 bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(

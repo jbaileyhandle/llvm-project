@@ -244,9 +244,26 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
   static constexpr ScheduleMetric kMetric =
       ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
 
-  // No FilterAndSortReadyList override — uses the base default
-  // (snapshot the underlying list in topo_index order). No
-  // pressure-side iteration heuristic yet.
+  // Override SearchPolicyBase: pressure-aware filter + sort.
+  //
+  //   Filter: if any "pure reader" (def_count == 0) is in the ready
+  //   list, keep ONLY pure readers — they consume registers
+  //   without producing new live ranges, so picking them now
+  //   strictly relieves pressure (or holds steady). Defer all
+  //   def-producing instructions to a later step.
+  //
+  //   Sort:
+  //     - Primary: net_def_minus_kill ascending (most pressure-
+  //       relief first; pure readers naturally have net <= 0).
+  //     - NID ascending (LLVM input order — implicitly pressure-
+  //       aware via LLVM's pre-RA scheduler).
+  //     - topo_index ascending (deterministic final tiebreak).
+  //
+  // Subgraph proxies (no register effect on their own) treat their
+  // members as the composite — see Effective* helpers in the .cpp.
+  static void FilterAndSortReadyList(
+      const ScheduleConstructor &working,
+      SmallVectorImpl<const ScheduleNode *> &out);
 
   // Return true if no completion of the current partial schedule
   // can improve on best_schedule_constructor. Bounds:

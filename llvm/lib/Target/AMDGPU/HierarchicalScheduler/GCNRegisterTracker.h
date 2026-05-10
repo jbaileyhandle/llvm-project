@@ -207,6 +207,38 @@ public:
                                              unsigned num_vgpr,
                                              unsigned num_sgpr);
 
+  /// Number of register defs the node would introduce (newly live
+  /// registers). Read from the pre-extracted, deduplicated,
+  /// dead-def-filtered NodeRegInfo.defs — dead defs are excluded
+  /// because they don't add live-range pressure across the schedule.
+  /// Returns 0 for proxies and nodes without defs. Used by ranking
+  /// heuristics.
+  int GetDefCount(const ScheduleNode *node) const;
+
+  /// Number of node's uses that would be a "last use" (kill) if
+  /// the node were scheduled now — uses where remaining_uses_[reg]
+  /// == 1 (this node is the only remaining consumer). Dynamic:
+  /// depends on which other nodes are still unscheduled. Used by
+  /// ranking heuristics.
+  ///
+  /// Sub-register precision: lane masks are not considered. A use
+  /// is a kill iff this node is the last unscheduled instruction
+  /// reading the register at all, regardless of lane. Conservative
+  /// — undercounts kills when other unscheduled instructions touch
+  /// disjoint lanes of the same vreg (each is a per-lane kill,
+  /// but our coarse check requires register-level sole-remaining
+  /// status). Sufficient for ranking; not used for pressure
+  /// accounting.
+  int CountLastUses(const ScheduleNode *node) const;
+
+  /// Net register-pressure delta if the node were scheduled now:
+  /// GetDefCount(node) - CountLastUses(node). Negative = scheduling
+  /// the node decreases pressure (frees more than it creates).
+  /// Positive = increases. Zero = wash. Convenience wrapper around
+  /// the two helpers above so policy ranking lambdas can read one
+  /// number.
+  int GetNetDefMinusLastUse(const ScheduleNode *node) const;
+
   /// Test-only: switch this tracker to a delta-based synthetic
   /// pressure path. `per_node_vgpr_deltas` is indexed by node
   /// topo index; each Schedule(node) does

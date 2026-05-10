@@ -680,6 +680,36 @@ GCNRegisterTracker::DescribeRegOps(const ScheduleNode *node) const {
   return result;
 }
 
+int GCNRegisterTracker::GetDefCount(const ScheduleNode *node) const {
+  if (!node->IsSchedulingUnit()) {
+    return 0;
+  }
+  const NodeRegInfo &info =
+      node_reg_info_by_topo_index_[node->GetTopoIndex()];
+  return static_cast<int>(info.defs.size());
+}
+
+int GCNRegisterTracker::CountLastUses(const ScheduleNode *node) const {
+  if (!node->IsSchedulingUnit()) {
+    return 0;
+  }
+  const NodeRegInfo &info =
+      node_reg_info_by_topo_index_[node->GetTopoIndex()];
+  int kills = 0;
+  for (const RegMask &use : info.uses) {
+    auto it = remaining_uses_.find(use.reg);
+    if (it != remaining_uses_.end() && it->second == 1) {
+      ++kills;
+    }
+  }
+  return kills;
+}
+
+int GCNRegisterTracker::GetNetDefMinusLastUse(
+    const ScheduleNode *node) const {
+  return GetDefCount(node) - CountLastUses(node);
+}
+
 std::string GCNRegisterTracker::DescribePressure() const {
   std::string result;
   result += "cur: SGPR=" + std::to_string(cur_pressure_.getSGPRNum()) +
