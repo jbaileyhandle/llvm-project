@@ -1,6 +1,7 @@
 //===- SearchPolicies.cpp - Per-pass search policies ---------------------===//
 
 #include "SearchPolicies.h"
+#include "IlpTracker.h"
 #include "ScheduleGraph.h"
 #include "SubgraphInfo.h"
 #include <algorithm>

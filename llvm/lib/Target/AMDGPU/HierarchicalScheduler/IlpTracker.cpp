@@ -12,32 +12,39 @@
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/ScheduleDAG.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <algorithm>
 
 using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
 
 namespace {
 
-// Op-type weight for ILP. Higher = scheduling extra issue work
-// during this op's latency window matters more. Numbers are
-// ballpark, not derived from a precise latency table — the AMDGPU
-// timing model is too coarse to justify finer granularity.
+// Per-op desirable spacing — the saturation cap on each producer's
+// contribution. Numbers are ballpark approximations of how many
+// real instructions of cover an op of each class typically benefits
+// from before further hiding stops mattering. The AMDGPU latency
+// model is too crude to justify finer granularity.
 //
-// VMEM / FLAT (memory loads): hundreds of cycles latency.
-// DS (LDS): tens of cycles latency.
-// Default (VALU / SALU): single-digit, often 1.
+// VMEM / FLAT (memory loads): hundreds of cycles latency — significant
+//   cover meaningful, capped at 32 to bound the table-driven score.
+// SMEM (scalar memory load): ~tens of cycles via the scalar cache.
+// DS (LDS): ~tens of cycles, faster than global.
+// Default (VALU / SALU): single-digit cycles, minimal cover needed.
 //
 // Easy to tune as a unit later. The relative ordering is what
-// drives the ranking heuristic; absolute magnitudes set the trade
-// vs other scoring axes (length, occupancy).
-int IlpWeightForOp(const MachineInstr *mi) {
+// drives ranking decisions; absolute magnitudes set the trade
+// against other scoring axes (length, occupancy).
+int IlpDesirableSpacingForOp(const MachineInstr *mi) {
   if (SIInstrInfo::isVMEM(*mi) || SIInstrInfo::isFLAT(*mi)) {
-    return 8;
+    return 32;
+  }
+  if (SIInstrInfo::isSMRD(*mi)) {
+    return 16;
   }
   if (SIInstrInfo::isDS(*mi)) {
-    return 4;
+    return 8;
   }
-  return 1;
+  return 2;
 }
 
 // True iff `node` is a real, MachineInstr-backed scheduling unit
@@ -61,16 +68,16 @@ bool IsRealInstruction(const ScheduleNode *node) {
 IlpTracker::IlpTracker(const ScheduleGraph &graph,
                        const GCNRegisterTracker &pressure_tracker)
     : pressure_tracker_(&pressure_tracker),
-      weight_by_topo_index_(graph.Size(), 0) {
-  // Precompute per-node op-type weight. Only real MachineInstr-backed
-  // nodes get a non-zero weight; everything else stays at 0 (the
-  // initialized value).
+      desirable_spacing_by_topo_index_(graph.Size(), 0) {
+  // Precompute per-node desirable_spacing. Only real MachineInstr-
+  // backed nodes get a non-zero value; everything else stays at 0
+  // (the initialized value).
   for (const ScheduleNode &node : graph.Nodes()) {
     if (!IsRealInstruction(&node)) {
       continue;
     }
-    weight_by_topo_index_[node.GetTopoIndex()] =
-        IlpWeightForOp(node.GetSUnit()->getInstr());
+    desirable_spacing_by_topo_index_[node.GetTopoIndex()] =
+        IlpDesirableSpacingForOp(node.GetSUnit()->getInstr());
   }
 }
 
@@ -137,10 +144,9 @@ void IlpTracker::CloseOneProducer(unsigned reg, int contribution,
   }
   const OpenProducer &producer = it->second;
   closed_ilp_score_ += contribution;
-  undo.closed.push_back(
-      {reg, producer.inst_count, producer.weight, contribution});
-  sum_open_weights_ -= producer.weight;
-  sum_open_weighted_indices_ -= producer.weight * producer.inst_count;
+  undo.closed.push_back({reg, producer.inst_count,
+                         producer.desirable_spacing, contribution});
+  sum_open_inst_indices_ -= producer.inst_count;
   open_producer_by_reg_.erase(it);
 }
 
@@ -154,8 +160,8 @@ void IlpTracker::ProcessUsesAsCloses(const ScheduleNode *node,
       continue;
     }
     const OpenProducer &producer = it->second;
-    int contribution = producer.weight *
-        (instructions_issued_count_ - producer.inst_count - 1);
+    int spacing = instructions_issued_count_ - producer.inst_count - 1;
+    int contribution = std::min(spacing, producer.desirable_spacing);
     CloseOneProducer(use.reg, contribution, undo);
   }
 }
@@ -163,7 +169,8 @@ void IlpTracker::ProcessUsesAsCloses(const ScheduleNode *node,
 void IlpTracker::OpenDefs(const ScheduleNode *node, UndoRecord &undo) {
   const GCNRegisterTracker::NodeRegInfo &info =
       pressure_tracker_->GetNodeRegInfo(node);
-  const int weight = weight_by_topo_index_[node->GetTopoIndex()];
+  const int desirable_spacing =
+      desirable_spacing_by_topo_index_[node->GetTopoIndex()];
   for (const GCNRegisterTracker::RegMask &def : info.defs) {
     // Re-def with no intervening read: prior value is dead, nothing
     // stalled on it, no ILP credit. Read-modify-write was already
@@ -174,10 +181,10 @@ void IlpTracker::OpenDefs(const ScheduleNode *node, UndoRecord &undo) {
       CloseOneProducer(def.reg, /*contribution=*/0, undo);
     }
     open_producer_by_reg_.try_emplace(
-        def.reg, OpenProducer{instructions_issued_count_, weight});
+        def.reg,
+        OpenProducer{instructions_issued_count_, desirable_spacing});
     undo.opened.push_back(def.reg);
-    sum_open_weights_ += weight;
-    sum_open_weighted_indices_ += weight * instructions_issued_count_;
+    sum_open_inst_indices_ += instructions_issued_count_;
   }
 }
 
@@ -189,8 +196,7 @@ void IlpTracker::EraseOpens(const UndoRecord &undo) {
           "IlpTracker::EraseOpens: opened-record reg " + Twine(reg) +
           " not present in open map. Mutators driven out of order?");
     }
-    sum_open_weights_ -= it->second.weight;
-    sum_open_weighted_indices_ -= it->second.weight * it->second.inst_count;
+    sum_open_inst_indices_ -= it->second.inst_count;
     open_producer_by_reg_.erase(it);
   }
 }
@@ -198,7 +204,8 @@ void IlpTracker::EraseOpens(const UndoRecord &undo) {
 void IlpTracker::ReinsertCloses(const UndoRecord &undo) {
   for (const UndoRecord::ClosedEntry &c : undo.closed) {
     auto [it, inserted] = open_producer_by_reg_.try_emplace(
-        c.reg, OpenProducer{c.prior_inst_count, c.prior_weight});
+        c.reg,
+        OpenProducer{c.prior_inst_count, c.prior_desirable_spacing});
     if (!inserted) {
       report_fatal_error(
           "IlpTracker::ReinsertCloses: re-inserting closed reg " +
@@ -206,8 +213,7 @@ void IlpTracker::ReinsertCloses(const UndoRecord &undo) {
           " but it is already present in the open map. Round-trip "
           "invariant violated.");
     }
-    sum_open_weights_ += c.prior_weight;
-    sum_open_weighted_indices_ += c.prior_weight * c.prior_inst_count;
+    sum_open_inst_indices_ += c.prior_inst_count;
     closed_ilp_score_ -= c.contribution;
   }
 }
@@ -217,12 +223,38 @@ void IlpTracker::ReinsertCloses(const UndoRecord &undo) {
 // ============================================================================
 
 int IlpTracker::GetIlpScore() const {
-  // closed + Σ_{R ∈ open}  w_R * (c - i_R - 1)
-  //       = closed + (c - 1) * sum_w - sum_(w*i)
+  // pending = Σ_{R in open} (c - i_R - 1)  [unsaturated]
+  //         = open_count * (c - 1) - sum_open_inst_indices_
   // O(1).
+  const int open_count =
+      static_cast<int>(open_producer_by_reg_.size());
   return closed_ilp_score_ +
-         (instructions_issued_count_ - 1) * sum_open_weights_ -
-         sum_open_weighted_indices_;
+         open_count * (instructions_issued_count_ - 1) -
+         sum_open_inst_indices_;
+}
+
+// ============================================================================
+// Heuristic helper
+// ============================================================================
+
+int IlpTracker::CloseCostForNode(const ScheduleNode *node) const {
+  if (!IsRealInstruction(node)) {
+    return 0;
+  }
+  const GCNRegisterTracker::NodeRegInfo &info =
+      pressure_tracker_->GetNodeRegInfo(node);
+  int cost = 0;
+  for (const GCNRegisterTracker::RegMask &use : info.uses) {
+    int desirable_spacing = GetDesirableSpacingForOpenProducer(use.reg);
+    if (desirable_spacing == 0) {
+      // Not an open producer — closing is a no-op, no ILP cost.
+      continue;
+    }
+    int spacing = GetSpacingForOpenProducer(use.reg);
+    int freshness_remaining = std::max(0, desirable_spacing - spacing);
+    cost += freshness_remaining;
+  }
+  return cost;
 }
 
 // ============================================================================
@@ -235,6 +267,5 @@ std::string IlpTracker::Describe() const {
   out += " closed=" + std::to_string(closed_ilp_score_);
   out += " issued=" + std::to_string(instructions_issued_count_);
   out += " open_vregs=" + std::to_string(GetOpenProducerVregCount());
-  out += " sum_w=" + std::to_string(sum_open_weights_);
   return out;
 }

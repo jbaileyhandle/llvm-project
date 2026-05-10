@@ -3210,32 +3210,36 @@ void RunIlpTrackerShakedown(ScheduleGraph &graph,
   llvm::outs() << "  Initial empty state: "
                << (initial_ok ? "PASS\n" : "FAIL\n");
 
-  // --- Op-type weight buckets (informational) ---
-  // Walk all nodes, count how many got each weight value. Only real
-  // MachineInstr-backed nodes get a non-zero weight; everything
-  // else (proxies, sentinels) reads 0.
+  // --- Op-type desirable_spacing buckets (informational) ---
+  // Walk all nodes, count how many got each saturation-cap value.
+  // Only real MachineInstr-backed nodes get a non-zero value;
+  // everything else (proxies, sentinels) reads 0.
   int real_count = 0;
-  int weight_8_count = 0;
-  int weight_4_count = 0;
-  int weight_1_count = 0;
+  int vmem_flat_count = 0;
+  int smem_count = 0;
+  int ds_count = 0;
+  int default_count = 0;
   for (const ScheduleNode &node : graph.Nodes()) {
-    int w = tracker.GetWeight(&node);
-    if (w == 0) {
+    int ds_val = tracker.GetDesirableSpacing(&node);
+    if (ds_val == 0) {
       continue;
     }
     ++real_count;
-    if (w == 8) {
-      ++weight_8_count;
-    } else if (w == 4) {
-      ++weight_4_count;
+    if (ds_val == 32) {
+      ++vmem_flat_count;
+    } else if (ds_val == 16) {
+      ++smem_count;
+    } else if (ds_val == 8) {
+      ++ds_count;
     } else {
-      ++weight_1_count;
+      ++default_count;
     }
   }
-  llvm::outs() << "  Op-type weights: real=" << real_count
-               << " vmem/flat(w=8)=" << weight_8_count
-               << " ds(w=4)=" << weight_4_count
-               << " default(w=1)=" << weight_1_count << "\n";
+  llvm::outs() << "  Op-type desirable_spacing buckets: real=" << real_count
+               << " vmem/flat(32)=" << vmem_flat_count
+               << " smem(16)=" << smem_count
+               << " ds(8)=" << ds_count
+               << " default(2)=" << default_count << "\n";
 
   // --- Forward pass: schedule in topo order ---
   // ilp_score_after[i] / closed_score_after[i] = GetIlpScore() /
