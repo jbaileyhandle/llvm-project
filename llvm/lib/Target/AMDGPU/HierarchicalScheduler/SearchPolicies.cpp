@@ -97,6 +97,28 @@ int EffectiveNetDefMinusLastUse(
   return 0;
 }
 
+// Slack threshold (in cycles) that splits ready candidates into
+// "urgent" (must be picked soon to meet the deadline) and "relaxed"
+// (plenty of room — let ILP guide the choice). Picked to be a few
+// times the typical short-op latency on AMDGPU; fine-tuning is
+// benchmark-driven. Must be > 0 so urgency is defined.
+//
+// Distinct from IlpTracker::desirable_spacing — slack is in CYCLES
+// (deadline-derived); desirable_spacing is in INSTRUCTIONS (issue-
+// count-derived). Different units, different roles.
+constexpr int kIlpRelaxedSlackThreshold = 8;
+
+// True iff `node`'s deadline-slack puts it in the urgent bucket.
+// Urgent = max_schedule_cycle - current_cycle < threshold; the
+// candidate must be picked soon to meet the configured maximum
+// schedule length. Relaxed candidates have headroom and let the
+// ILP heuristic guide the sort.
+bool IsUrgent(const ScheduleNode *node, int current_cycle,
+              const ScheduleLengthTracker &length_tracker) {
+  return EffectiveMaxScheduleCycle(node, length_tracker) - current_cycle <
+         kIlpRelaxedSlackThreshold;
+}
+
 } // namespace
 
 void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
@@ -141,67 +163,20 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
   }
 
   int current_cycle = length_tracker.GetCurrentCycle();
-
-  // Level 1: no-bubble candidates (effective min <= current_cycle),
-  // sorted by effective max ascending (most deadline-pressured
-  // first), then NID ascending (LLVM input order — pressure-aware
-  // tiebreak from LLVM's pre-RA scheduler), then topo ascending.
-  for (const ScheduleNode *node : ready) {
-    if (EffectiveMinScheduleCycle(node, length_tracker) <= current_cycle) {
-      out.push_back(node);
-    }
-  }
-  if (!out.empty()) {
-    const GCNRegisterTracker &pressure_tracker =
-        working.GetPressureTracker();
-    std::sort(
-        out.begin(), out.end(),
-        [&length_tracker, &pressure_tracker](const ScheduleNode *a,
-                                              const ScheduleNode *b) {
-          int a_max = EffectiveMaxScheduleCycle(a, length_tracker);
-          int b_max = EffectiveMaxScheduleCycle(b, length_tracker);
-          if (a_max != b_max) {
-            return a_max < b_max;
-          }
-          // Pressure-aware secondary: among same-deadline candidates,
-          // pick the one whose schedule-now would relieve more
-          // pressure (more negative net = more relief). NID below
-          // is unique per SUnit so this is the load-bearing
-          // tiebreak; NID is then a deterministic backup.
-          int a_net =
-              EffectiveNetDefMinusLastUse(a, pressure_tracker);
-          int b_net =
-              EffectiveNetDefMinusLastUse(b, pressure_tracker);
-          if (a_net != b_net) {
-            return a_net < b_net;
-          }
-          int a_nid = EffectiveNodeNum(a);
-          int b_nid = EffectiveNodeNum(b);
-          if (a_nid != b_nid) {
-            return a_nid < b_nid;
-          }
-          return a->GetTopoIndex() < b->GetTopoIndex();
-        });
-    return;
-  }
-
-  // Level 2: all candidates would bubble. Sort by effective min
-  // ascending (smallest forced bubble), then effective max
-  // ascending (deadline pressure within same-min), then net
-  // def-kill ascending (pressure relief among same-deadline),
-  // then NID, then topo.
   const GCNRegisterTracker &pressure_tracker =
       working.GetPressureTracker();
-  out.assign(ready.begin(), ready.end());
-  std::sort(
-      out.begin(), out.end(),
+  const IlpTracker &ilp_tracker = working.GetIlpTracker();
+
+  // Existing-criteria sort tail used in BOTH urgent (level 1 / 2)
+  // and relaxed (after the ILP-cost prefix). Order:
+  //   max ↑, net_def_kill ↑, NID ↑, topo ↑.
+  // max is the deadline-pressure key. net_def_kill is pressure-
+  // relief secondary. NID (LLVM input order, pressure-aware via
+  // the pre-RA scheduler) is the load-bearing tiebreak — unique
+  // per SUnit. topo is the deterministic final fallback.
+  auto compare_max_net_nid_topo_less =
       [&length_tracker, &pressure_tracker](const ScheduleNode *a,
                                             const ScheduleNode *b) {
-        int a_min = EffectiveMinScheduleCycle(a, length_tracker);
-        int b_min = EffectiveMinScheduleCycle(b, length_tracker);
-        if (a_min != b_min) {
-          return a_min < b_min;
-        }
         int a_max = EffectiveMaxScheduleCycle(a, length_tracker);
         int b_max = EffectiveMaxScheduleCycle(b, length_tracker);
         if (a_max != b_max) {
@@ -218,7 +193,83 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
           return a_nid < b_nid;
         }
         return a->GetTopoIndex() < b->GetTopoIndex();
+      };
+
+  // Relaxed-tier comparator: ILP-close-cost ↑ first, then the
+  // shared tail. Among same-cost candidates falls through to the
+  // existing deadline-driven sort. Cost = sum over the node's
+  // uses of max(0, desirable_spacing_R - spacing_R) for any open
+  // producer R the use would close — fresh closes of heavy
+  // producers cost most.
+  auto compare_relaxed_less = [&compare_max_net_nid_topo_less,
+                                &ilp_tracker](
+                                   const ScheduleNode *a,
+                                   const ScheduleNode *b) {
+    int a_cost = ilp_tracker.CloseCostForNode(a);
+    int b_cost = ilp_tracker.CloseCostForNode(b);
+    if (a_cost != b_cost) {
+      return a_cost < b_cost;
+    }
+    return compare_max_net_nid_topo_less(a, b);
+  };
+
+  // Level 1: no-bubble candidates (effective min <= current_cycle).
+  // Tier-by-slack split: urgent (max - current < threshold) keep
+  // the existing deadline-first sort; relaxed get the ILP-aware
+  // sort. Urgent candidates always come before relaxed in the
+  // returned list so deadline correctness wins when forced.
+  for (const ScheduleNode *node : ready) {
+    if (EffectiveMinScheduleCycle(node, length_tracker) <= current_cycle) {
+      out.push_back(node);
+    }
+  }
+  if (!out.empty()) {
+    auto first_relaxed = std::stable_partition(
+        out.begin(), out.end(),
+        [current_cycle, &length_tracker](const ScheduleNode *n) {
+          return IsUrgent(n, current_cycle, length_tracker);
+        });
+    std::sort(out.begin(), first_relaxed,
+              compare_max_net_nid_topo_less);
+    std::sort(first_relaxed, out.end(), compare_relaxed_less);
+    return;
+  }
+
+  // Level 2: all candidates would bubble. Sort by effective min
+  // ascending FIRST (smallest forced bubble — bubble minimization
+  // is more important than ILP), then within same-min apply the
+  // same urgent / relaxed split as level 1. We compose this by
+  // sorting by min, then by tier+sort-tail within each min group.
+  // Concretely: stable_sort by min, then for each min-group apply
+  // the same partition+sort.
+  out.assign(ready.begin(), ready.end());
+  std::stable_sort(
+      out.begin(), out.end(),
+      [&length_tracker](const ScheduleNode *a, const ScheduleNode *b) {
+        return EffectiveMinScheduleCycle(a, length_tracker) <
+               EffectiveMinScheduleCycle(b, length_tracker);
       });
+  // Walk min-groups, re-sort each by tier within the group.
+  auto group_begin = out.begin();
+  while (group_begin != out.end()) {
+    int group_min =
+        EffectiveMinScheduleCycle(*group_begin, length_tracker);
+    auto group_end = group_begin;
+    while (group_end != out.end() &&
+           EffectiveMinScheduleCycle(*group_end, length_tracker) ==
+               group_min) {
+      ++group_end;
+    }
+    auto first_relaxed = std::stable_partition(
+        group_begin, group_end,
+        [current_cycle, &length_tracker](const ScheduleNode *n) {
+          return IsUrgent(n, current_cycle, length_tracker);
+        });
+    std::sort(group_begin, first_relaxed,
+              compare_max_net_nid_topo_less);
+    std::sort(first_relaxed, group_end, compare_relaxed_less);
+    group_begin = group_end;
+  }
 }
 
 bool DfsMinimizeLengthPolicy::ShouldBoundSearch(

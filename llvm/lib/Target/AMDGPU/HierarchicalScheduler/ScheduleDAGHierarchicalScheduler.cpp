@@ -321,7 +321,9 @@ static void PrintPreScheduleInfo(const ScheduleGraph &graph,
       << "\n"
       << "    [Pre]  length:   input_length="
       << input.GetLengthTracker().GetCurrentCycle()
-      << " | length_floor=" << graph.GetGraphLengthFloor() << "\n";
+      << " | length_floor=" << graph.GetGraphLengthFloor() << "\n"
+      << "    [Pre]  ilp:      input_ilp="
+      << input.GetIlpTracker().GetIlpScore() << "\n";
   graph.PrintSubgraphInfos(llvm::outs());
 }
 
@@ -351,6 +353,10 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
       << "    [Post] length:   dfs_length="
       << dfs_best.GetLengthTracker().GetCurrentCycle()
       << " | length_floor=" << graph.GetGraphLengthFloor() << "\n"
+      << "    [Post] ilp:      dfs_ilp="
+      << dfs_best.GetIlpTracker().GetIlpScore()
+      << " | dfs_ilp_closed="
+      << dfs_best.GetIlpTracker().GetClosedIlpScore() << "\n"
       << "    [Post] common:   schedule_calls=" << search.ScheduleCallCount().lifetime
       << " | length_history_prunes="
       << search.GetLengthHistoryTracker().PruneCount().lifetime
