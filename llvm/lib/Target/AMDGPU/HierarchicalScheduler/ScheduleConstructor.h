@@ -54,6 +54,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULECONSTRUCTOR_H
 
 #include "GCNRegisterTracker.h"
+#include "IlpTracker.h"
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
 #include "ScheduleMetric.h"
@@ -180,6 +181,7 @@ public:
   const ScheduleLengthTracker &GetLengthTracker() const {
     return length_tracker_;
   }
+  const IlpTracker &GetIlpTracker() const { return ilp_tracker_; }
 
   /// Set the maximum schedule length the search will accept for
   /// the next stretch of work on this constructor and populate the
@@ -253,6 +255,7 @@ private:
   const ScheduleGraph *graph_;
   GCNRegisterTracker pressure_tracker_;
   ScheduleLengthTracker length_tracker_;
+  IlpTracker ilp_tracker_;
   ScheduledSetTracker scheduled_set_tracker_;
 
   /// Nodes scheduled so far, in order.

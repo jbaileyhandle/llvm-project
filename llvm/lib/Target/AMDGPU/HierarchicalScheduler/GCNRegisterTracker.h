@@ -239,6 +239,18 @@ public:
   /// number.
   int GetNetDefMinusLastUse(const ScheduleNode *node) const;
 
+  /// Read-only access to the pre-extracted def/use record for `node`.
+  /// Computed once at construction (deduplicated, dead-def-filtered).
+  /// Subgraph proxies have empty defs and empty uses — callers that
+  /// care about real-instruction-only behavior should branch on
+  /// node->IsSchedulingUnit(). Used by the IlpTracker to identify
+  /// the def-vreg set (producers to open) and the use-vreg set
+  /// (potential first-consumers to close) without re-walking the
+  /// MachineInstr operands.
+  const NodeRegInfo &GetNodeRegInfo(const ScheduleNode *node) const {
+    return node_reg_info_by_topo_index_[node->GetTopoIndex()];
+  }
+
   /// Test-only: switch this tracker to a delta-based synthetic
   /// pressure path. `per_node_vgpr_deltas` is indexed by node
   /// topo index; each Schedule(node) does

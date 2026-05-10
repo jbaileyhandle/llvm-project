@@ -17,6 +17,7 @@
 #include "DominatorTree.h"
 #include "GCNRegisterTracker.h"
 #include "GCNSubtarget.h"
+#include "IlpTracker.h"
 #include "LengthHistoryTracker.h"
 #include "PressureHistoryTracker.h"
 #include "RegisterTracker.h"
@@ -3177,6 +3178,158 @@ void RunScheduleLengthTrackerShakedown(ScheduleGraph &graph,
   }
 }
 
+// Tests IlpTracker: drives Schedule/Unschedule across all graph
+// nodes in topo order, exercising the producer-to-first-consumer
+// scoring (open/close, weight propagation, count bump). Verifies:
+//   - Initial empty state.
+//   - Op-type weight buckets are populated for real instructions
+//     (informational stat — no PASS/FAIL).
+//   - Forward GetIlpScore is monotone non-decreasing.
+//   - At full schedule, the open-producer map is empty (the exit
+//     sentinel must have closed all live-out producers).
+//   - Reverse Unschedule restores GetIlpScore to each forward-step
+//     snapshot exactly.
+//   - Round-trip returns to initial empty state.
+//
+// Drives the IlpTracker directly (no ScheduleConstructor) — the
+// pressure tracker's NodeRegInfo is the only IlpTracker dependency
+// that needs to be live, and topo order is a valid schedule order
+// that satisfies all dependencies (defs before uses, members
+// before exit sentinel).
+void RunIlpTrackerShakedown(ScheduleGraph &graph,
+                            const MachineFunction &mf,
+                            const LiveIntervals &lis) {
+  GCNRegisterTracker pressure_tracker(graph, mf, lis);
+  IlpTracker tracker(graph, pressure_tracker);
+
+  // --- Initial empty state ---
+  bool initial_ok = tracker.GetIlpScore() == 0 &&
+                    tracker.GetClosedIlpScore() == 0 &&
+                    tracker.GetInstructionsIssuedCount() == 0 &&
+                    tracker.GetOpenProducerVregCount() == 0;
+  llvm::outs() << "  Initial empty state: "
+               << (initial_ok ? "PASS\n" : "FAIL\n");
+
+  // --- Op-type weight buckets (informational) ---
+  // Walk all nodes, count how many got each weight value. Only real
+  // MachineInstr-backed nodes get a non-zero weight; everything
+  // else (proxies, sentinels) reads 0.
+  int real_count = 0;
+  int weight_8_count = 0;
+  int weight_4_count = 0;
+  int weight_1_count = 0;
+  for (const ScheduleNode &node : graph.Nodes()) {
+    int w = tracker.GetWeight(&node);
+    if (w == 0) {
+      continue;
+    }
+    ++real_count;
+    if (w == 8) {
+      ++weight_8_count;
+    } else if (w == 4) {
+      ++weight_4_count;
+    } else {
+      ++weight_1_count;
+    }
+  }
+  llvm::outs() << "  Op-type weights: real=" << real_count
+               << " vmem/flat(w=8)=" << weight_8_count
+               << " ds(w=4)=" << weight_4_count
+               << " default(w=1)=" << weight_1_count << "\n";
+
+  // --- Forward pass: schedule in topo order ---
+  // ilp_score_after[i] / closed_score_after[i] = GetIlpScore() /
+  // GetClosedIlpScore() after i nodes have been scheduled. Index 0
+  // = empty state; index N = fully scheduled.
+  std::vector<int> ilp_score_after;
+  std::vector<int> closed_score_after;
+  ilp_score_after.push_back(tracker.GetIlpScore());
+  closed_score_after.push_back(tracker.GetClosedIlpScore());
+
+  llvm::outs() << "  ILP trace (topo order):\n";
+  for (ScheduleNode *node : graph.GetTopoOrder()) {
+    tracker.Schedule(node);
+    ilp_score_after.push_back(tracker.GetIlpScore());
+    closed_score_after.push_back(tracker.GetClosedIlpScore());
+    llvm::outs() << "    " << node->ToString() << "  ->  "
+                 << tracker.Describe() << "\n";
+  }
+
+  // --- Forward invariants ---
+  // (a) GetClosedIlpScore is monotone non-decreasing — every close
+  // (real or re-def-implicit) only ever ADDS to closed_ilp_score_,
+  // so this is a strict invariant. The combined GetIlpScore can
+  // dip at a re-def event, so we don't check that here.
+  int closed_monotonicity_violations = 0;
+  for (int i = 1; i < static_cast<int>(closed_score_after.size()); ++i) {
+    if (closed_score_after[i] < closed_score_after[i - 1]) {
+      llvm::outs() << "  Closed-score monotonicity violated at step "
+                   << i << ": " << closed_score_after[i - 1] << " -> "
+                   << closed_score_after[i] << "\n";
+      ++closed_monotonicity_violations;
+    }
+  }
+  llvm::outs() << "  Closed-score monotonicity:"
+               << (closed_monotonicity_violations == 0 ? "  PASS\n"
+                                                       : "  FAIL\n");
+
+  // (b) After full schedule, open-producer count must be 0 — the
+  // exit sentinel processes its uses (live-outs) and closes them.
+  // A nonzero count indicates either a live-out reg never reached
+  // the exit sentinel's NodeRegInfo.uses (graph-construction bug)
+  // or the close-side guard rejected sentinels (regression in
+  // IlpTracker::Schedule).
+  bool completion_ok = tracker.GetOpenProducerVregCount() == 0;
+  llvm::outs() << "  Open producers settled at completion: "
+               << (completion_ok ? "PASS\n" : "FAIL\n")
+               << "    (" << tracker.GetOpenProducerVregCount()
+               << " left open)\n";
+
+  // (c) At completion, GetIlpScore == GetClosedIlpScore (open map
+  // is empty, so the pending portion is zero).
+  bool completion_scores_match =
+      tracker.GetIlpScore() == tracker.GetClosedIlpScore();
+  llvm::outs() << "  Completion: GetIlpScore == GetClosedIlpScore: "
+               << (completion_scores_match ? "PASS\n" : "FAIL\n");
+
+  // --- Reverse pass: unschedule everything ---
+  // After unscheduling node i (in reverse topo order), the tracker
+  // state should equal the state just before that node was
+  // scheduled forward — both GetIlpScore and GetClosedIlpScore
+  // should equal their forward snapshots at index i.
+  llvm::outs() << "  ILP trace (unschedule):\n";
+  int reverse_violations = 0;
+  for (int i = static_cast<int>(graph.GetTopoOrder().size()) - 1;
+       i >= 0; --i) {
+    tracker.Unschedule(graph.GetTopoOrder()[i]);
+    int ilp_score = tracker.GetIlpScore();
+    int closed_score = tracker.GetClosedIlpScore();
+    int expected_ilp = ilp_score_after[i];
+    int expected_closed = closed_score_after[i];
+    llvm::outs() << "    undo  " << tracker.Describe()
+                 << "  ilp=" << ilp_score << " (expected "
+                 << expected_ilp << ")  closed=" << closed_score
+                 << " (expected " << expected_closed << ")\n";
+    if (ilp_score != expected_ilp || closed_score != expected_closed) {
+      ++reverse_violations;
+    }
+  }
+  llvm::outs() << "  Unschedule restoration:"
+               << (reverse_violations == 0 ? "  PASS\n" : "  FAIL\n");
+
+  // --- Round-trip ---
+  bool roundtrip_ok = tracker.GetIlpScore() == 0 &&
+                      tracker.GetClosedIlpScore() == 0 &&
+                      tracker.GetInstructionsIssuedCount() == 0 &&
+                      tracker.GetOpenProducerVregCount() == 0;
+  llvm::outs() << "  Round-trip result: " << tracker.Describe()
+               << (roundtrip_ok ? "  PASS" : "  FAIL") << "\n";
+  if (!roundtrip_ok) {
+    report_fatal_error("IlpTracker round-trip test failed: state did "
+                       "not return to zero after full unschedule");
+  }
+}
+
 // Tests ScheduleConstructor: constructs a full schedule by always picking
 // the first node from the ready list, then unschedules everything and
 // verifies round-trip.
@@ -3477,6 +3630,7 @@ void RunRegionShakedowns(ScheduleGraph &graph,
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(mf.getSubtarget());
   RunScheduleLengthTrackerShakedown(graph, st);
+  RunIlpTrackerShakedown(graph, mf, lis);
   RunScheduleConstructorShakedown(graph, mf, lis);
   RunScheduleMetricShakedown(graph, mf, lis);
 
