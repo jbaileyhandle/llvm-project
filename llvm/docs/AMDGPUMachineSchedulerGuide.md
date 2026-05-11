@@ -5423,3 +5423,35 @@ cache-line loads per edge), denser contiguous iteration.
 Rough estimate: ~10-20 cycles per Schedule saved for typical
 pred/succ counts. Modest. Probably only worth it if the edge
 iteration shows up in a profile alongside R.1.
+
+### R.4 Dynamic urgent-vs-relaxed cutoff in length-policy ranking
+
+`DfsMinimizeLengthPolicy::FilterAndSortReadyList` partitions ready
+candidates into "urgent" (slack < `kIlpRelaxedSlackThreshold`,
+currently 8) and "relaxed" tiers; urgent candidates use the
+deadline-first sort, relaxed get the ILP-aware sort. The cutoff
+is a static compile-time constant.
+
+Static is wrong in principle:
+- If the ready list has many tight-deadline candidates AND
+  issue-capacity-per-cycle is low (IssueWidth=1 always for us),
+  even a candidate with "slack=10" may effectively be urgent —
+  there are 10 cycles to go but 15 candidates that all want to
+  fire in that window. The deadline pressure is shared.
+- Conversely, if the ready list is small and other dim factors
+  put most candidates near floor anyway, the threshold could be
+  smaller and let ILP guide more decisions.
+
+Right shape is something like: count candidates with slack < X
+for a sweep over X, find the threshold where the count exceeds
+remaining issue capacity. Use that as the dynamic cutoff. Or
+something simpler that captures the same intuition (slack
+distribution + remaining capacity).
+
+Per-Recurse cost: small, since it operates on the same ready
+list we're already iterating in `BuildSortKey`.
+
+Defer until benchmarks identify cases where a single static
+value is clearly miscalibrated. The current 8 happens to work
+on stencil high_rp; cases where it's wrong likely surface on
+longer-latency or wider-issue regions.

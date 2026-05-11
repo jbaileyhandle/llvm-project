@@ -106,6 +106,15 @@ int EffectiveNetDefMinusLastUse(
 // Distinct from IlpTracker::desirable_spacing — slack is in CYCLES
 // (deadline-derived); desirable_spacing is in INSTRUCTIONS (issue-
 // count-derived). Different units, different roles.
+//
+// TODO: this should be DYNAMIC, not static. A candidate with
+// slack=10 is effectively urgent when the ready list also has
+// 15 other slack<=10 candidates competing for the same window —
+// the deadline pressure is shared across all of them, and at
+// IssueWidth=1 only one fires per cycle. The right cutoff
+// depends on the slack distribution and the remaining issue
+// capacity in the deadline window, not a single global number.
+// See Appendix R.4 in AMDGPUMachineSchedulerGuide.md.
 constexpr int kIlpRelaxedSlackThreshold = 8;
 
 // All the per-node fields used to rank ready-list candidates in
