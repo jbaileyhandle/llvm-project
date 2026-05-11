@@ -584,40 +584,40 @@ static void PrintIterativePhaseSummary(StringRef indent, int iterations_run,
 // plain search.
 constexpr bool kUseTargetFeasibilityIteration = true;
 
-// Compile-time selector for the length-minimization policy used by
-// both phases. When true, both phases use
-// DfsMinimizeLengthRefineOccupancyPolicy: after finding a length-
-// optimal schedule, the search continues exploring same-length
-// completions to refine continuous register-occupancy score
-// (giving RA more headroom and reducing spill risk). When false,
-// DfsMinimizeLengthPolicy is used — pure length min, stops on
-// first length-optimal schedule.
-//
-// Picked once and threaded through both helpers as a template
-// argument. Switching to runtime-configurable (e.g., a misched.txt
-// entry branching between the two template instantiations at the
-// orchestrator) is a follow-up.
-// Compile-time selector for which length-min policy to use. Three
-// options:
+// Runtime selector for which length-min policy to use, resolved from
+// misched.txt at the start of each region in ScheduleRegionForMinimumLength.
+// Three choices:
 //   kNone:            pure length-min, no refinement (base policy).
-//   kRefineOccupancy: after length floor, continue exploring
-//                     same-length completions to refine occupancy.
-//   kRefineIlp:       after length floor, continue exploring
-//                     same-length completions to refine ILP.
-// Pick one; the corresponding policy class becomes LengthMinPolicy
-// and is threaded through both length-min helpers via templates.
-// Runtime selection (e.g., via misched.txt) is a follow-up.
+//                     Default when no option is set.
+//   kRefineOccupancy: after length floor, continue exploring same-
+//                     length completions to refine occupancy.
+//                     Enabled by SchedulerOption::LengthMinRefineOccupancy.
+//   kRefineIlp:       after length floor, continue exploring same-
+//                     length completions to refine ILP.
+//                     Enabled by SchedulerOption::LengthMinRefineIlp.
+// The two options are mutually exclusive at runtime — if both are set,
+// the resolver fatals.
 enum class LengthMinPolicyChoice { kNone, kRefineOccupancy, kRefineIlp };
-constexpr LengthMinPolicyChoice kLengthMinPolicyChoice =
-    LengthMinPolicyChoice::kRefineIlp;
 
-using LengthMinPolicy = std::conditional_t<
-    kLengthMinPolicyChoice == LengthMinPolicyChoice::kRefineIlp,
-    DfsMinimizeLengthRefineIlpPolicy,
-    std::conditional_t<
-        kLengthMinPolicyChoice == LengthMinPolicyChoice::kRefineOccupancy,
-        DfsMinimizeLengthRefineOccupancyPolicy,
-        DfsMinimizeLengthPolicy>>;
+static LengthMinPolicyChoice ResolveLengthMinPolicyChoice() {
+  const auto &cfg = MachineInstrSchedulerConfig::GetConfig();
+  bool ilp = cfg.HasSchedulingOption(
+      MachineInstrSchedulerConfig::SchedulerOption::LengthMinRefineIlp);
+  bool occ = cfg.HasSchedulingOption(
+      MachineInstrSchedulerConfig::SchedulerOption::LengthMinRefineOccupancy);
+  if (ilp && occ) {
+    report_fatal_error(
+        "HierarchicalScheduler: LengthMinRefineIlp and "
+        "LengthMinRefineOccupancy are mutually exclusive");
+  }
+  if (ilp) {
+    return LengthMinPolicyChoice::kRefineIlp;
+  }
+  if (occ) {
+    return LengthMinPolicyChoice::kRefineOccupancy;
+  }
+  return LengthMinPolicyChoice::kNone;
+}
 
 // Phase 1 helper: target-feasibility iteration. Walks target
 // length from the static graph floor up to input_length-1 on a
@@ -750,13 +750,51 @@ static void RunPlainLengthMinPhase(
   }
 }
 
-// Per-region worker. Runs DFS with DfsMinimizeLengthPolicy in two
-// phases — gated target-feasibility iteration, then always-on plain
-// min-search. Output is no worse than the region's current MF order
-// (each phase's DfsSearch seeds best with the input) and no worse
-// than plain alone (the plain phase always runs with a fresh
-// per-region budget). Returns per-region stats for the driver to
-// aggregate into the PASS RESULT line.
+// Per-region per-policy worker. Templated on the length-min policy
+// so we can instantiate one copy per LengthMinPolicyChoice and
+// dispatch at runtime from ScheduleRegionForMinimumLength. Runs DFS
+// in two phases — gated target-feasibility iteration, then always-on
+// plain min-search — and writes the chosen schedule into
+// `best_schedule_constructor`. `any_timed_out` aggregates the
+// per-region timeout from either phase.
+template <typename Policy>
+static void RunMinimizeLengthForRegionWithPolicy(
+    ScheduleGraph &graph, const GCNSubtarget &st,
+    const MachineFunction &mf, const LiveIntervals &lis,
+    const ScheduleConstructor &input_schedule_constructor,
+    ScheduleConstructor &best_schedule_constructor,
+    bool &any_timed_out) {
+  // Formation is a once-per-region mutation: it materializes
+  // subgraph proxies into the graph. Both phases below construct
+  // their DfsSearches with form_subgraphs=false and rely on this
+  // call's side effect. Running formation twice on the same graph
+  // would fatal in CheckNoNestedMembers (the existing proxies
+  // would be treated as members of a new subgraph).
+  FormSubgraphs(graph, Policy::MakeFormationPolicy());
+
+  // input: block shared by both phases — printed once per region
+  // at indent level 2 (\t\t), directly under the region heading.
+  PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
+
+  if constexpr (kUseTargetFeasibilityIteration) {
+    RunIterativeLengthMinPhase<Policy>(
+        graph, st, mf, lis, input_schedule_constructor,
+        best_schedule_constructor, any_timed_out);
+  }
+
+  RunPlainLengthMinPhase<Policy>(
+      graph, st, mf, lis, input_schedule_constructor,
+      best_schedule_constructor, any_timed_out);
+}
+
+// Per-region worker. Resolves the length-min policy from misched.txt
+// at the top of each region and dispatches to the corresponding
+// template instantiation of RunMinimizeLengthForRegionWithPolicy.
+// Output is no worse than the region's current MF order (each phase's
+// DfsSearch seeds best with the input) and no worse than plain alone
+// (the plain phase always runs with a fresh per-region budget).
+// Returns per-region stats for the driver to aggregate into the
+// PASS RESULT line.
 ScheduleDAGHierarchicalScheduler::LengthRegionStats
 ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
     RegionInfo &region) {
@@ -768,32 +806,29 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
   WithRegionGraph(region, [&](ScheduleGraph &graph) {
     const ScheduleConstructor &input_schedule_constructor =
         graph.GetInputScheduleConstructor();
-
-    // Formation is a once-per-region mutation: it materializes
-    // subgraph proxies into the graph. Both phases below construct
-    // their DfsSearches with form_subgraphs=false and rely on this
-    // call's side effect. Running formation twice on the same graph
-    // would fatal in CheckNoNestedMembers (the existing proxies
-    // would be treated as members of a new subgraph).
-    FormSubgraphs(graph, LengthMinPolicy::MakeFormationPolicy());
-
-    // input: block shared by both phases — printed once per region
-    // at indent level 2 (\t\t), directly under the region heading.
-    PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
-
     ScheduleConstructor best_schedule_constructor =
         input_schedule_constructor;
     bool any_timed_out = false;
 
-    if constexpr (kUseTargetFeasibilityIteration) {
-      RunIterativeLengthMinPhase<LengthMinPolicy>(
+    switch (ResolveLengthMinPolicyChoice()) {
+    case LengthMinPolicyChoice::kNone:
+      RunMinimizeLengthForRegionWithPolicy<DfsMinimizeLengthPolicy>(
           graph, st, MF, *LIS, input_schedule_constructor,
           best_schedule_constructor, any_timed_out);
+      break;
+    case LengthMinPolicyChoice::kRefineIlp:
+      RunMinimizeLengthForRegionWithPolicy<
+          DfsMinimizeLengthRefineIlpPolicy>(
+          graph, st, MF, *LIS, input_schedule_constructor,
+          best_schedule_constructor, any_timed_out);
+      break;
+    case LengthMinPolicyChoice::kRefineOccupancy:
+      RunMinimizeLengthForRegionWithPolicy<
+          DfsMinimizeLengthRefineOccupancyPolicy>(
+          graph, st, MF, *LIS, input_schedule_constructor,
+          best_schedule_constructor, any_timed_out);
+      break;
     }
-
-    RunPlainLengthMinPhase<LengthMinPolicy>(
-        graph, st, MF, *LIS, input_schedule_constructor,
-        best_schedule_constructor, any_timed_out);
 
     ApplyScheduleOrder(region, best_schedule_constructor);
 

@@ -34,6 +34,11 @@ class MachineInstrSchedulerConfig {
             // HierarchicalScheduler-specific
             MaliciousScheduler,
             RunShakedowns,
+            // Length-min policy selectors for HierarchicalScheduler.
+            // When neither is set, length-min runs with the plain
+            // DfsMinimizeLengthPolicy (kNone).
+            LengthMinRefineIlp,
+            LengthMinRefineOccupancy,
             // Sentinel
             InvalidOption
         };
@@ -153,7 +158,9 @@ class MachineInstrSchedulerConfig {
             {SchedulerOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"},
             {SchedulerOption::UseContinuousOccupancyScore, "UseContinuousOccupancyScore"},
             {SchedulerOption::MaliciousScheduler, "MaliciousScheduler"},
-            {SchedulerOption::RunShakedowns, "RunShakedowns"}
+            {SchedulerOption::RunShakedowns, "RunShakedowns"},
+            {SchedulerOption::LengthMinRefineIlp, "LengthMinRefineIlp"},
+            {SchedulerOption::LengthMinRefineOccupancy, "LengthMinRefineOccupancy"}
         };
 
 
