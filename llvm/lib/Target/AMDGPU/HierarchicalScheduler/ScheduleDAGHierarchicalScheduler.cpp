@@ -555,11 +555,27 @@ constexpr bool kUseTargetFeasibilityIteration = true;
 // argument. Switching to runtime-configurable (e.g., a misched.txt
 // entry branching between the two template instantiations at the
 // orchestrator) is a follow-up.
-constexpr bool kRefineOccupancyInLengthMin = false;
+// Compile-time selector for which length-min policy to use. Three
+// options:
+//   kNone:            pure length-min, no refinement (base policy).
+//   kRefineOccupancy: after length floor, continue exploring
+//                     same-length completions to refine occupancy.
+//   kRefineIlp:       after length floor, continue exploring
+//                     same-length completions to refine ILP.
+// Pick one; the corresponding policy class becomes LengthMinPolicy
+// and is threaded through both length-min helpers via templates.
+// Runtime selection (e.g., via misched.txt) is a follow-up.
+enum class LengthMinPolicyChoice { kNone, kRefineOccupancy, kRefineIlp };
+constexpr LengthMinPolicyChoice kLengthMinPolicyChoice =
+    LengthMinPolicyChoice::kRefineIlp;
+
 using LengthMinPolicy = std::conditional_t<
-    kRefineOccupancyInLengthMin,
-    DfsMinimizeLengthRefineOccupancyPolicy,
-    DfsMinimizeLengthPolicy>;
+    kLengthMinPolicyChoice == LengthMinPolicyChoice::kRefineIlp,
+    DfsMinimizeLengthRefineIlpPolicy,
+    std::conditional_t<
+        kLengthMinPolicyChoice == LengthMinPolicyChoice::kRefineOccupancy,
+        DfsMinimizeLengthRefineOccupancyPolicy,
+        DfsMinimizeLengthPolicy>>;
 
 // Phase 1 helper: target-feasibility iteration. Walks target
 // length from the static graph floor up to input_length-1 on a

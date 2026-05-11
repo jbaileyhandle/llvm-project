@@ -108,15 +108,81 @@ int EffectiveNetDefMinusLastUse(
 // count-derived). Different units, different roles.
 constexpr int kIlpRelaxedSlackThreshold = 8;
 
-// True iff `node`'s deadline-slack puts it in the urgent bucket.
-// Urgent = max_schedule_cycle - current_cycle < threshold; the
-// candidate must be picked soon to meet the configured maximum
-// schedule length. Relaxed candidates have headroom and let the
-// ILP heuristic guide the sort.
-bool IsUrgent(const ScheduleNode *node, int current_cycle,
-              const ScheduleLengthTracker &length_tracker) {
-  return EffectiveMaxScheduleCycle(node, length_tracker) - current_cycle <
-         kIlpRelaxedSlackThreshold;
+// All the per-node fields used to rank ready-list candidates in
+// DfsMinimizeLengthPolicy::FilterAndSortReadyList. Built once per
+// candidate via BuildSortKey; the four comparators below
+// (UrgentLess, RelaxedLess, NoBubbleLess, ForcedBubbleLess) are
+// pure permutations of these fields via std::tie — no further work.
+//
+// Field summary:
+//   min_cycle, max_cycle  : earliest / latest cycle the node can
+//     legally be scheduled at, given the current partial schedule.
+//   ilp_cost              : ILP credit this node would forfeit by
+//     scheduling now — sum over its uses of max(0,
+//     desirable_spacing_R - spacing_R) for each open producer R
+//     it would close as first consumer. Higher = closer to a
+//     just-opened / heavy producer being cut short. See
+//     IlpTracker::CloseCostForNode.
+//   net_def_kill          : defs - first-use-kills, pressure proxy.
+//   nid                   : LLVM input order (SUnit::NodeNum).
+//   topo                  : final deterministic tiebreak.
+//   is_urgent             : derived; true iff slack
+//     max_cycle - current_cycle < kIlpRelaxedSlackThreshold.
+struct SortKey {
+  int min_cycle;
+  int max_cycle;
+  int ilp_cost;
+  int net_def_kill;
+  int nid;
+  int topo;
+  bool is_urgent;
+};
+
+SortKey BuildSortKey(const ScheduleNode *node, int current_cycle,
+                     const ScheduleLengthTracker &length_tracker,
+                     const GCNRegisterTracker &pressure_tracker,
+                     const IlpTracker &ilp_tracker) {
+  SortKey key;
+  key.min_cycle = EffectiveMinScheduleCycle(node, length_tracker);
+  key.max_cycle = EffectiveMaxScheduleCycle(node, length_tracker);
+  key.ilp_cost = ilp_tracker.CloseCostForNode(node);
+  key.net_def_kill = EffectiveNetDefMinusLastUse(node, pressure_tracker);
+  key.nid = EffectiveNodeNum(node);
+  key.topo = node->GetTopoIndex();
+  key.is_urgent = key.max_cycle - current_cycle < kIlpRelaxedSlackThreshold;
+  return key;
+}
+
+bool UrgentLess(const SortKey &a, const SortKey &b) {
+  return std::tie(a.max_cycle, a.ilp_cost, a.net_def_kill, a.nid, a.topo) <
+         std::tie(b.max_cycle, b.ilp_cost, b.net_def_kill, b.nid, b.topo);
+}
+
+bool RelaxedLess(const SortKey &a, const SortKey &b) {
+  return std::tie(a.ilp_cost, a.max_cycle, a.net_def_kill, a.nid, a.topo) <
+         std::tie(b.ilp_cost, b.max_cycle, b.net_def_kill, b.nid, b.topo);
+}
+
+// NoBubble: candidates that can fire at current_cycle (their
+// min_cycle <= current_cycle). Urgent first, then relaxed; within
+// tier, tier-specific less. Used when there's at least one
+// candidate that won't force a stall.
+bool NoBubbleLess(const SortKey &a, const SortKey &b) {
+  if (a.is_urgent != b.is_urgent) {
+    return a.is_urgent;
+  }
+  return a.is_urgent ? UrgentLess(a, b) : RelaxedLess(a, b);
+}
+
+// ForcedBubble: every candidate's min_cycle > current_cycle, so
+// some stall is unavoidable. Min ascending outermost (smallest
+// forced bubble), then within same-min the NoBubble ordering
+// applies. Used as the fallback when no no-bubble candidate exists.
+bool ForcedBubbleLess(const SortKey &a, const SortKey &b) {
+  if (a.min_cycle != b.min_cycle) {
+    return a.min_cycle < b.min_cycle;
+  }
+  return NoBubbleLess(a, b);
 }
 
 } // namespace
@@ -129,14 +195,17 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
       working.GetLengthTracker();
   ArrayRef<const ScheduleNode *> ready = working.GetReadyList();
 
-  auto by_topo = [](const ScheduleNode *a, const ScheduleNode *b) {
-    return a->GetTopoIndex() < b->GetTopoIndex();
-  };
-
+  // Precondition: the search must have configured the bound by the
+  // time we're ranking — both the urgency tier and the per-node
+  // SortKey rely on MaxScheduleCycle being readable. DfsSearch
+  // wires this in its constructor (RecomputeWorkingMaxScheduleCycles)
+  // before any Recurse fires, so this guard catches caller-order
+  // bugs rather than expected states.
   if (!length_tracker.HasMaxAcceptableScheduleLength()) {
-    out.assign(ready.begin(), ready.end());
-    std::sort(out.begin(), out.end(), by_topo);
-    return;
+    report_fatal_error(
+        "DfsMinimizeLengthPolicy::FilterAndSortReadyList called "
+        "before SetMaxAcceptableScheduleLength — bound not "
+        "configured; sort would have no urgency basis");
   }
 
   // End-proxy short-circuit. An end proxy enters the ready list
@@ -167,108 +236,46 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
       working.GetPressureTracker();
   const IlpTracker &ilp_tracker = working.GetIlpTracker();
 
-  // Existing-criteria sort tail used in BOTH urgent (level 1 / 2)
-  // and relaxed (after the ILP-cost prefix). Order:
-  //   max ↑, net_def_kill ↑, NID ↑, topo ↑.
-  // max is the deadline-pressure key. net_def_kill is pressure-
-  // relief secondary. NID (LLVM input order, pressure-aware via
-  // the pre-RA scheduler) is the load-bearing tiebreak — unique
-  // per SUnit. topo is the deterministic final fallback.
-  auto compare_max_net_nid_topo_less =
-      [&length_tracker, &pressure_tracker](const ScheduleNode *a,
-                                            const ScheduleNode *b) {
-        int a_max = EffectiveMaxScheduleCycle(a, length_tracker);
-        int b_max = EffectiveMaxScheduleCycle(b, length_tracker);
-        if (a_max != b_max) {
-          return a_max < b_max;
-        }
-        int a_net = EffectiveNetDefMinusLastUse(a, pressure_tracker);
-        int b_net = EffectiveNetDefMinusLastUse(b, pressure_tracker);
-        if (a_net != b_net) {
-          return a_net < b_net;
-        }
-        int a_nid = EffectiveNodeNum(a);
-        int b_nid = EffectiveNodeNum(b);
-        if (a_nid != b_nid) {
-          return a_nid < b_nid;
-        }
-        return a->GetTopoIndex() < b->GetTopoIndex();
-      };
-
-  // Relaxed-tier comparator: ILP-close-cost ↑ first, then the
-  // shared tail. Among same-cost candidates falls through to the
-  // existing deadline-driven sort. Cost = sum over the node's
-  // uses of max(0, desirable_spacing_R - spacing_R) for any open
-  // producer R the use would close — fresh closes of heavy
-  // producers cost most.
-  auto compare_relaxed_less = [&compare_max_net_nid_topo_less,
-                                &ilp_tracker](
-                                   const ScheduleNode *a,
-                                   const ScheduleNode *b) {
-    int a_cost = ilp_tracker.CloseCostForNode(a);
-    int b_cost = ilp_tracker.CloseCostForNode(b);
-    if (a_cost != b_cost) {
-      return a_cost < b_cost;
-    }
-    return compare_max_net_nid_topo_less(a, b);
-  };
-
-  // Level 1: no-bubble candidates (effective min <= current_cycle).
-  // Tier-by-slack split: urgent (max - current < threshold) keep
-  // the existing deadline-first sort; relaxed get the ILP-aware
-  // sort. Urgent candidates always come before relaxed in the
-  // returned list so deadline correctness wins when forced.
+  // Build a sort key for every ready candidate once. The
+  // SortKey-aware comparators below (NoBubbleLess /
+  // ForcedBubbleLess) are pure permutations of these fields —
+  // no per-comparison Effective*-helper calls.
+  SmallVector<std::pair<const ScheduleNode *, SortKey>, 64> keyed;
+  keyed.reserve(ready.size());
   for (const ScheduleNode *node : ready) {
-    if (EffectiveMinScheduleCycle(node, length_tracker) <= current_cycle) {
-      out.push_back(node);
-    }
+    keyed.push_back({node, BuildSortKey(node, current_cycle, length_tracker,
+                                        pressure_tracker, ilp_tracker)});
   }
-  if (!out.empty()) {
-    auto first_relaxed = std::stable_partition(
-        out.begin(), out.end(),
-        [current_cycle, &length_tracker](const ScheduleNode *n) {
-          return IsUrgent(n, current_cycle, length_tracker);
-        });
-    std::sort(out.begin(), first_relaxed,
-              compare_max_net_nid_topo_less);
-    std::sort(first_relaxed, out.end(), compare_relaxed_less);
+
+  // Partition: no-bubble candidates (min_cycle <= current_cycle)
+  // first, forced-bubble candidates after. If any no-bubble
+  // candidate exists, only that group goes into `out` (sorted by
+  // NoBubbleLess) — we never offer a forced-bubble candidate when
+  // a no-bubble one is available. Otherwise the full list goes
+  // in, sorted by ForcedBubbleLess (which puts min-asc outermost).
+  auto first_forced = std::partition(
+      keyed.begin(), keyed.end(),
+      [current_cycle](const auto &entry) {
+        return entry.second.min_cycle <= current_cycle;
+      });
+
+  if (first_forced != keyed.begin()) {
+    std::sort(keyed.begin(), first_forced,
+              [](const auto &a, const auto &b) {
+                return NoBubbleLess(a.second, b.second);
+              });
+    for (auto it = keyed.begin(); it != first_forced; ++it) {
+      out.push_back(it->first);
+    }
     return;
   }
 
-  // Level 2: all candidates would bubble. Sort by effective min
-  // ascending FIRST (smallest forced bubble — bubble minimization
-  // is more important than ILP), then within same-min apply the
-  // same urgent / relaxed split as level 1. We compose this by
-  // sorting by min, then by tier+sort-tail within each min group.
-  // Concretely: stable_sort by min, then for each min-group apply
-  // the same partition+sort.
-  out.assign(ready.begin(), ready.end());
-  std::stable_sort(
-      out.begin(), out.end(),
-      [&length_tracker](const ScheduleNode *a, const ScheduleNode *b) {
-        return EffectiveMinScheduleCycle(a, length_tracker) <
-               EffectiveMinScheduleCycle(b, length_tracker);
-      });
-  // Walk min-groups, re-sort each by tier within the group.
-  auto group_begin = out.begin();
-  while (group_begin != out.end()) {
-    int group_min =
-        EffectiveMinScheduleCycle(*group_begin, length_tracker);
-    auto group_end = group_begin;
-    while (group_end != out.end() &&
-           EffectiveMinScheduleCycle(*group_end, length_tracker) ==
-               group_min) {
-      ++group_end;
-    }
-    auto first_relaxed = std::stable_partition(
-        group_begin, group_end,
-        [current_cycle, &length_tracker](const ScheduleNode *n) {
-          return IsUrgent(n, current_cycle, length_tracker);
-        });
-    std::sort(group_begin, first_relaxed,
-              compare_max_net_nid_topo_less);
-    std::sort(first_relaxed, group_end, compare_relaxed_less);
-    group_begin = group_end;
+  std::sort(keyed.begin(), keyed.end(),
+            [](const auto &a, const auto &b) {
+              return ForcedBubbleLess(a.second, b.second);
+            });
+  for (const auto &entry : keyed) {
+    out.push_back(entry.first);
   }
 }
 
