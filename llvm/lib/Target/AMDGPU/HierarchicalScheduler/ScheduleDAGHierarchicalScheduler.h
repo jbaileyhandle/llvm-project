@@ -116,11 +116,23 @@ public:
   // bound prevents the length search from degrading occupancy.
   void RunMinimizeLengthPass();
 
+  // Aggregate stats returned by ScheduleRegionForMinimumLength. Used
+  // by the driver to print a PASS RESULT line at the end of the
+  // length pass (regions improved, regions hit floor, regions timed
+  // out).
+  struct LengthRegionStats {
+    int input_length = 0;
+    int output_length = 0;
+    int floor = 0;
+    bool timed_out = false;
+  };
+
   // Per-region worker for RunMinimizeLengthPass. Runs DFS with
   // DfsMinimizeLengthPolicy and applies the resulting schedule.
   // DfsSearch seeds best with the input schedule, so the output is
-  // guaranteed no worse than the current MF order.
-  void ScheduleRegionForMinimumLength(RegionInfo &region);
+  // guaranteed no worse than the current MF order. Returns
+  // per-region stats for the outer loop to aggregate.
+  LengthRegionStats ScheduleRegionForMinimumLength(RegionInfo &region);
 
   // Initialize per-function state. Called at the start of
   // RunHierarchicalScheduler / RunMaliciousScheduler. Stores mfi_

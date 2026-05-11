@@ -869,7 +869,9 @@ public:
   /// one indented line per subgraph (in `GetSubgraphInfos()` order
   /// — largest first) with that subgraph's member count and debug
   /// name.
-  void PrintSubgraphInfos(raw_ostream &os) const;
+  // `indent` is the column prefix for the `subgraphs:` header line.
+  // Member lines below it get two extra spaces.
+  void PrintSubgraphInfos(raw_ostream &os, StringRef indent = "") const;
 
   /// Umbrella entry point: verify single-source / single-sink (under
   /// both the strong-edge and all-edge interpretations, for safety)

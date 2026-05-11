@@ -69,12 +69,13 @@ void ScheduleDAGHierarchicalScheduler::schedule() {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
   const GCNRegPressure &rp = region.GetOriginalPeakPressure();
-  llvm::outs() << "HierarchicalScheduler: recorded region "
-               << regions_.size() << " (" << region.GetNumInstrs()
-               << " instrs, orig_reg_occ="
+  llvm::outs() << "HierarchicalScheduler: recorded region["
+               << (regions_.size() - 1) << "]: instrs="
+               << region.GetNumInstrs()
+               << " orig_reg_occ="
                << region.GetOriginalRegisterOnlyOccupancy()
                << " vgpr=" << rp.getVGPRNum(st.hasGFX90AInsts())
-               << " sgpr=" << rp.getSGPRNum() << ")\n";
+               << " sgpr=" << rp.getSGPRNum() << "\n";
 }
 
 // Sort `regions_` ascending by the integer occupancy implied by each
@@ -92,8 +93,8 @@ void ScheduleDAGHierarchicalScheduler::SortRegionsByOriginalRegisterOnlyOccupanc
 // Sorts recorded regions, then dispatches to the configured
 // scheduling algorithm.
 void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
-  llvm::outs() << "HierarchicalScheduler: finalizeSchedule called with "
-               << regions_.size() << " regions\n";
+  llvm::outs() << "HierarchicalScheduler: finalizeSchedule ("
+               << regions_.size() << " regions)\n";
 
   SortRegionsByOriginalRegisterOnlyOccupancyAscending();
 
@@ -101,8 +102,8 @@ void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
   llvm::outs() << "HierarchicalScheduler: region order after sort:\n";
   for (size_t i = 0; i < regions_.size(); ++i) {
     const RegionInfo &r = regions_[i];
-    llvm::outs() << "  [" << i << "] " << r.GetNumInstrs()
-                 << " instrs, orig_reg_occ="
+    llvm::outs() << "\tregion[" << i << "]: instrs=" << r.GetNumInstrs()
+                 << " orig_reg_occ="
                  << r.GetOriginalRegisterOnlyOccupancy() << "\n";
   }
 
@@ -239,8 +240,8 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
   int kernel_occupancy_so_far = configured_limit;
 
   // TODO: Remove this temporary print once the pass is wired up.
-  llvm::outs() << "RunMaximizeOccupancyPass: starting with "
-               << "configured_limit=" << configured_limit << "\n";
+  llvm::outs() << "\n=== Pass: MaximizeOccupancy === (configured_limit="
+               << configured_limit << ")\n";
 
   for (size_t i = 0; i < regions_.size(); ++i) {
     RegionInfo &region = regions_[i];
@@ -256,31 +257,35 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     //
     // On the first iteration, kernel_occupancy_so_far ==
     // configured_limit, so this also catches the case where region 0's
-    // occupancy is already maxed out by the ceiling set by other factors 
+    // occupancy is already maxed out by the ceiling set by other factors
     // (e.g. arch max / LDS / launch bounds).
     if (original_register_only_occupancy >= kernel_occupancy_so_far) {
       int num_skipped = static_cast<int>(regions_.size() - i);
       int total = static_cast<int>(regions_.size());
       int percent_skipped = (num_skipped * 100) / total;
-      llvm::outs() << "  [" << i << "] stop: orig_reg_only="
+      llvm::outs() << "\tregion[" << i << "]: SKIPPED (orig_reg_only="
                    << original_register_only_occupancy
                    << " >= kernel_so_far=" << kernel_occupancy_so_far
-                   << " (skipping " << num_skipped << "/" << total
-                   << " regions, " << percent_skipped << "%)\n";
+                   << "; " << num_skipped << "/" << total
+                   << " remaining, " << percent_skipped << "%)\n";
       break;
     }
 
-    // Determine highest occupancy achievable for region
+    // Region heading printed before the per-region work so input:/output:
+    // blocks below nest under it visually.
+    llvm::outs() << "\n\tregion[" << i << "]: instrs="
+                 << region.GetNumInstrs()
+                 << " orig_reg_occ=" << original_register_only_occupancy
+                 << "\n";
+
+    // Determine highest occupancy achievable for region.
     int best_region_occupancy = ScheduleRegionForMaximumOccupancy(region);
 
-    // Update kernel_occupancy_so_far
+    // Update kernel_occupancy_so_far.
     int kernel_occupancy_after_region =
         std::min(kernel_occupancy_so_far, best_region_occupancy);
-    llvm::outs() << "  [" << i << "] orig_reg_only="
-                 << original_register_only_occupancy
-                 << " -> best_region_occupancy=" << best_region_occupancy
-                 << "  kernel_occupancy_so_far: " << kernel_occupancy_so_far << " -> "
-                 << kernel_occupancy_after_region << "\n";
+    llvm::outs() << "\t\tkernel_occupancy: " << kernel_occupancy_so_far
+                 << " -> " << kernel_occupancy_after_region << "\n";
     kernel_occupancy_so_far = kernel_occupancy_after_region;
 
     // Tighten MFI's occupancy limit immediately so the next region's
@@ -293,99 +298,111 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     mfi_->limitOccupancy(static_cast<unsigned>(kernel_occupancy_so_far));
   }
 
-  llvm::outs() << "RunMaximizeOccupancyPass: final kernel_occupancy="
+  llvm::outs() << "\n\tPASS RESULT: kernel_occupancy="
                << kernel_occupancy_so_far
                << " (MFI->Occupancy now " << mfi_->getOccupancy() << ")\n";
 }
 
 // Pre-search per-region telemetry: shape of the region the DFS is
-// about to schedule. Pressure / length / formation are all printed
-// so that the same line-set is useful regardless of which driver is
-// running. Subgraph formation already ran inside DfsSearch's ctor by
-// the time this fires.
+// about to schedule. Emits an `input:` block with grouped sub-keys
+// (pressure / length / ilp / graph / subgraphs). `header_indent` is
+// the column of the `input:` header line; sub-keys are nested one
+// tab deeper, and subgraph items one tab deeper again.
 static void PrintPreScheduleInfo(const ScheduleGraph &graph,
                                  const ScheduleConstructor &input,
-                                 const GCNSubtarget &st) {
+                                 const GCNSubtarget &st,
+                                 StringRef header_indent) {
   const GCNRegPressure &input_peak =
       input.GetPressureTracker().GetPeakPressure();
+  const std::string key_indent = (header_indent + "\t").str();
   llvm::outs()
-      << "    [Pre]  nodes=" << graph.NumSchedulingUnits()
-      << " cp=" << graph.GetCriticalPathLength() << "\n"
-      << "    [Pre]  pressure: input_peak: vgpr="
+      << header_indent << "input:\n"
+      << key_indent << "pressure: vgpr="
       << input_peak.getVGPRNum(st.hasGFX90AInsts())
       << " sgpr=" << input_peak.getSGPRNum()
-      << " | orig_reg_only_occ="
+      << " reg_only_occ="
       << input.GetPressureTracker().GetRegisterOnlyOccupancy()
-      << " | orig_all_factors_occ="
+      << " all_factors_occ="
       << input.GetPressureTracker().GetAllFactorsRegionOnlyOccupancy()
       << "\n"
-      << "    [Pre]  length:   input_length="
+      << key_indent << "length:   cycles="
       << input.GetLengthTracker().GetCurrentCycle()
-      << " | length_floor=" << graph.GetGraphLengthFloor() << "\n"
-      << "    [Pre]  ilp:      input_ilp="
-      << input.GetIlpTracker().GetIlpScore() << "\n";
-  graph.PrintSubgraphInfos(llvm::outs());
+      << " floor=" << graph.GetGraphLengthFloor() << "\n"
+      << key_indent << "ilp:      score="
+      << input.GetIlpTracker().GetIlpScore() << "\n"
+      << key_indent << "graph:    nodes=" << graph.NumSchedulingUnits()
+      << " critical_path=" << graph.GetCriticalPathLength() << "\n";
+  graph.PrintSubgraphInfos(llvm::outs(), key_indent);
 }
 
 // Post-search per-region telemetry: shape of the schedule DFS
-// produced. Both pressure and length results are emitted (with a
-// `pressure:` / `length:` / `common:` demarcation) regardless of
-// which driver invoked the search — the metrics are always
-// available on the resulting ScheduleConstructor / DfsSearch
-// trackers, and showing both makes cross-pass comparisons easy.
+// produced. Emits an `output:` block with grouped sub-keys
+// (pressure / length / ilp / search / rates). `header_indent` is
+// the column of the `output:` header line; sub-keys are nested one
+// tab deeper.
 template <typename PolicyT>
 static void PrintPostScheduleInfo(const ScheduleGraph &graph,
                                   const ScheduleConstructor &dfs_best,
                                   const DfsSearch<PolicyT> &search,
                                   const GCNSubtarget &st,
-                                  bool order_changed) {
+                                  bool order_changed,
+                                  StringRef header_indent) {
   const GCNRegPressure &dfs_peak =
       dfs_best.GetPressureTracker().GetPeakPressure();
+  const std::string key_indent = (header_indent + "\t").str();
   llvm::outs()
-      << "    [Post] pressure: dfs_peak: vgpr="
+      << header_indent << "output:\n"
+      << key_indent << "pressure: vgpr="
       << dfs_peak.getVGPRNum(st.hasGFX90AInsts())
       << " sgpr=" << dfs_peak.getSGPRNum()
-      << " | dfs_reg_only_occ="
+      << " reg_only_occ="
       << dfs_best.GetPressureTracker().GetRegisterOnlyOccupancy()
-      << " | dfs_all_factors_occ="
+      << " all_factors_occ="
       << dfs_best.GetPressureTracker().GetAllFactorsRegionOnlyOccupancy()
       << "\n"
-      << "    [Post] length:   dfs_length="
+      << key_indent << "length:   cycles="
       << dfs_best.GetLengthTracker().GetCurrentCycle()
-      << " | length_floor=" << graph.GetGraphLengthFloor() << "\n"
-      << "    [Post] ilp:      dfs_ilp="
+      << " floor=" << graph.GetGraphLengthFloor() << "\n"
+      << key_indent << "ilp:      score="
       << dfs_best.GetIlpTracker().GetIlpScore() << "\n"
-      << "    [Post] common:   schedule_calls=" << search.ScheduleCallCount().lifetime
-      << " | length_history_prunes="
+      // `search:` carries 8 metrics — too wide for one line. Split into
+      // counters (line 1) and boolean flags (line 2). The continuation
+      // uses 10 spaces of within-line padding so values stack visually
+      // under `calls=` — these spaces are alignment, not indentation
+      // (the indent tabs come from key_indent).
+      << key_indent << "search:   calls=" << search.ScheduleCallCount().lifetime
+      << " length_prunes="
       << search.GetLengthHistoryTracker().PruneCount().lifetime
-      << " | pressure_history_prunes="
+      << " pressure_prunes="
       << search.GetPressureHistoryTracker().PruneCount().lifetime
-      << " | complete_schedules=" << search.CompleteSchedulesCount()
-      << " | best_updates=" << search.BestUpdatesCount()
-      << " | order_changed=" << (order_changed ? "yes" : "no")
-      << " | region_timed_out="
+      << " complete_schedules=" << search.CompleteSchedulesCount()
+      << " best_updates=" << search.BestUpdatesCount()
+      << "\n"
+      << key_indent << "          timed_out="
       << (search.RegionTimedOut() ? "yes" : "no")
-      << " | length_history_cap_hit="
+      << " length_cap_hit="
       << (search.GetLengthHistoryTracker().MemoryCapHit().lifetime ? "yes" : "no")
-      << " | pressure_history_cap_hit="
+      << " pressure_cap_hit="
       << (search.GetPressureHistoryTracker().MemoryCapHit().lifetime ? "yes" : "no")
       << "\n";
 
-  // [Post] rates: per-region throughput so cross-scheduler
-  // comparisons aren't sensitive to total budget. When elapsed
-  // rounds to zero (trivially-small regions that complete in
-  // <1ms), the rate is undefined — emit a "-" placeholder so
-  // the elapsed measurement is still visible.
+  // rates: per-region throughput so cross-scheduler comparisons
+  // aren't sensitive to total budget. When elapsed rounds to zero
+  // (trivially-small regions that complete in <1ms), the rate is
+  // undefined — emit a "-" placeholder so the elapsed measurement
+  // is still visible.
   int64_t region_elapsed_ms = search.GetRegionElapsedMs();
   int64_t schedule_calls = search.ScheduleCallCount().lifetime;
-  llvm::outs() << "    [Post] rates:    ";
+  llvm::outs() << key_indent << "rates:    ";
   if (region_elapsed_ms > 0) {
     double calls_per_sec = schedule_calls / (region_elapsed_ms / 1000.0);
-    llvm::outs() << "schedule_calls/s=" << calls_per_sec;
+    llvm::outs() << "calls/s=" << calls_per_sec;
   } else {
-    llvm::outs() << "schedule_calls/s=-";
+    llvm::outs() << "calls/s=-";
   }
-  llvm::outs() << " | region_elapsed_ms=" << region_elapsed_ms << "\n";
+  llvm::outs() << " elapsed_ms=" << region_elapsed_ms
+               << " order_changed=" << (order_changed ? "yes" : "no")
+               << "\n";
 }
 
 // Runs DFS with DfsMaximizeOccupancyPolicy on the region's graph and
@@ -406,7 +423,9 @@ int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
         graph.GetInputScheduleConstructor();
 
     DfsSearch<DfsMaximizeOccupancyPolicy> search(graph, st, MF, *LIS);
-    PrintPreScheduleInfo(graph, input_schedule_constructor, st);
+    // Occupancy pass has no phases: input:/output: live directly under
+    // region[N] at indent level 2 (\t\t).
+    PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
 
     ScheduleConstructor dfs_best_schedule_constructor = search.Run();
 
@@ -415,7 +434,7 @@ int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
             dfs_best_schedule_constructor.GetScheduleOrder();
 
     PrintPostScheduleInfo(graph, dfs_best_schedule_constructor, search, st,
-                          changed);
+                          changed, "\t\t");
 
     ApplyScheduleOrder(region, dfs_best_schedule_constructor);
 
@@ -428,16 +447,39 @@ int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
 
 // Outer loop of the length-minimization pass. See header.
 void ScheduleDAGHierarchicalScheduler::RunMinimizeLengthPass() {
-  // TODO: Remove this temporary print once the pass is wired up.
-  llvm::outs() << "RunMinimizeLengthPass: starting with "
-               << regions_.size() << " regions\n";
+  llvm::outs() << "\n=== Pass: MinimizeLength === (" << regions_.size()
+               << " regions)\n";
+
+  int regions_improved = 0;
+  int regions_at_floor = 0;
+  int regions_timed_out = 0;
+  int regions_unchanged = 0;
 
   for (size_t i = 0; i < regions_.size(); ++i) {
-    llvm::outs() << "  [" << i << "] ";
-    ScheduleRegionForMinimumLength(regions_[i]);
+    // Region heading printed before the per-region work so input:/
+    // phase blocks below nest under it visually.
+    llvm::outs() << "\n\tregion[" << i
+                 << "]: instrs=" << regions_[i].GetNumInstrs() << "\n";
+    LengthRegionStats stats = ScheduleRegionForMinimumLength(regions_[i]);
+
+    if (stats.output_length < stats.input_length) {
+      ++regions_improved;
+    } else {
+      ++regions_unchanged;
+    }
+    if (stats.output_length == stats.floor) {
+      ++regions_at_floor;
+    }
+    if (stats.timed_out) {
+      ++regions_timed_out;
+    }
   }
 
-  llvm::outs() << "RunMinimizeLengthPass: done\n";
+  llvm::outs() << "\n\tPASS RESULT: regions=" << regions_.size()
+               << " improved=" << regions_improved
+               << " unchanged=" << regions_unchanged
+               << " at_floor=" << regions_at_floor
+               << " timed_out=" << regions_timed_out << "\n";
 }
 
 // Per-iteration log entry, buffered during the outer loop so we
@@ -480,10 +522,11 @@ static LengthPassIterationLog CaptureIterationLog(
 }
 
 // Print buffered per-iteration log entries when there were more
-// than one. Single-iteration runs get only the [Post] aggregate
-// (the per-iteration values would duplicate what [Post] shows).
+// than one. Single-iteration runs are skipped — the per-iteration
+// values would duplicate what the subsequent `output:` block shows.
+// `indent` is the column for the `iter[N]:` lines themselves.
 static void MaybePrintIterationLogs(
-    ArrayRef<LengthPassIterationLog> logs) {
+    ArrayRef<LengthPassIterationLog> logs, StringRef indent) {
   if (logs.size() <= 1) {
     return;
   }
@@ -494,32 +537,31 @@ static void MaybePrintIterationLogs(
             ? (e.schedule_calls / (e.elapsed_ms / 1000.0))
             : 0.0;
     llvm::outs()
-        << "    [Iter " << i << "]   target=" << e.target
-        << " result_length=" << e.result_length
+        << indent << "iter[" << i << "]: target=" << e.target
+        << " result=" << e.result_length
+        << " calls=" << e.schedule_calls
+        << " calls/s=" << calls_per_sec
         << " elapsed_ms=" << e.elapsed_ms
-        << " schedule_calls=" << e.schedule_calls
-        << " schedule_calls/s=" << calls_per_sec
         << " length_prunes=" << e.length_history_prunes
         << " pressure_prunes=" << e.pressure_history_prunes
         << " length_cap_hit=" << (e.length_history_cap_hit ? "yes" : "no")
         << " pressure_cap_hit="
         << (e.pressure_history_cap_hit ? "yes" : "no")
-        << " region_timed_out="
+        << " timed_out="
         << (e.region_timed_out_observed ? "yes" : "no")
         << "\n";
   }
 }
 
-// Print the [Post] outer line summarizing how the outer loop
-// terminated.
-static void PrintOuterLoopSummary(int iterations_run,
-                                  StringRef terminated_via,
-                                  int final_target) {
-  llvm::outs()
-      << "    [Post] outer:   iterations_run=" << iterations_run
-      << " | terminated_via=" << terminated_via;
+// Print the `summary:` line for the iterative phase, summarizing how
+// the outer loop terminated. `indent` is the column for the line.
+static void PrintIterativePhaseSummary(StringRef indent, int iterations_run,
+                                       StringRef terminated_via,
+                                       int final_target) {
+  llvm::outs() << indent << "summary:  iterations=" << iterations_run
+               << " terminated_via=" << terminated_via;
   if (terminated_via == "feasible") {
-    llvm::outs() << " | final_target=" << final_target;
+    llvm::outs() << " final_target=" << final_target;
   }
   llvm::outs() << "\n";
 }
@@ -593,7 +635,8 @@ static void RunIterativeLengthMinPhase(
     ScheduleGraph &graph, const GCNSubtarget &st,
     const MachineFunction &mf, const LiveIntervals &lis,
     const ScheduleConstructor &input_schedule_constructor,
-    ScheduleConstructor &best_schedule_constructor) {
+    ScheduleConstructor &best_schedule_constructor,
+    bool &any_timed_out) {
   const int floor = graph.GetGraphLengthFloor();
   const int input_length =
       input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
@@ -617,6 +660,10 @@ static void RunIterativeLengthMinPhase(
   int final_target = -1;
   int iterations_run = 0;
   SmallVector<LengthPassIterationLog, 8> iter_logs;
+
+  // Phase header at level 2 (\t\t). Iter / output: / summary: lines
+  // below are level 3 (one tab deeper).
+  llvm::outs() << "\t\ttarget_iteration:\n";
 
   for (int target = floor; target < input_length; ++target) {
     iter_search.ResetForReuse(target);
@@ -644,10 +691,15 @@ static void RunIterativeLengthMinPhase(
       input_schedule_constructor.GetScheduleOrder() !=
       best_schedule_constructor.GetScheduleOrder();
 
-  MaybePrintIterationLogs(iter_logs);
+  MaybePrintIterationLogs(iter_logs, "\t\t\t");
   PrintPostScheduleInfo(graph, best_schedule_constructor, iter_search, st,
-                        iter_changed);
-  PrintOuterLoopSummary(iterations_run, terminated_via, final_target);
+                        iter_changed, "\t\t\t");
+  PrintIterativePhaseSummary("\t\t\t", iterations_run, terminated_via,
+                             final_target);
+
+  if (iter_search.RegionTimedOut()) {
+    any_timed_out = true;
+  }
 }
 
 // Phase 2 helper: plain min-search on a fresh DfsSearch with its
@@ -669,7 +721,8 @@ static void RunPlainLengthMinPhase(
     ScheduleGraph &graph, const GCNSubtarget &st,
     const MachineFunction &mf, const LiveIntervals &lis,
     const ScheduleConstructor &input_schedule_constructor,
-    ScheduleConstructor &best_schedule_constructor) {
+    ScheduleConstructor &best_schedule_constructor,
+    bool &any_timed_out) {
   // form_subgraphs=false: see RunIterativeLengthMinPhase comment.
   // Formation is a once-per-region mutation done by the orchestrator.
   DfsSearch<Policy> plain_search(graph, st, mf, lis,
@@ -686,20 +739,31 @@ static void RunPlainLengthMinPhase(
   bool changed =
       input_schedule_constructor.GetScheduleOrder() !=
       best_schedule_constructor.GetScheduleOrder();
+
+  // Phase header at level 2 (\t\t). The output: block below is level 3.
+  llvm::outs() << "\t\tplain_search:\n";
   PrintPostScheduleInfo(graph, best_schedule_constructor, plain_search, st,
-                        changed);
+                        changed, "\t\t\t");
+
+  if (plain_search.RegionTimedOut()) {
+    any_timed_out = true;
+  }
 }
 
 // Per-region worker. Runs DFS with DfsMinimizeLengthPolicy in two
-// phases — gated target-feasibility iteration (Phase 1), then
-// always-on plain min-search (Phase 2). Output is no worse than
-// the region's current MF order (each phase's DfsSearch seeds
-// best with the input) and no worse than plain alone (Phase 2
-// always runs with a fresh per-region budget).
-void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
+// phases — gated target-feasibility iteration, then always-on plain
+// min-search. Output is no worse than the region's current MF order
+// (each phase's DfsSearch seeds best with the input) and no worse
+// than plain alone (the plain phase always runs with a fresh
+// per-region budget). Returns per-region stats for the driver to
+// aggregate into the PASS RESULT line.
+ScheduleDAGHierarchicalScheduler::LengthRegionStats
+ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
     RegionInfo &region) {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
+
+  LengthRegionStats stats;
 
   WithRegionGraph(region, [&](ScheduleGraph &graph) {
     const ScheduleConstructor &input_schedule_constructor =
@@ -713,32 +777,44 @@ void ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
     // would be treated as members of a new subgraph).
     FormSubgraphs(graph, LengthMinPolicy::MakeFormationPolicy());
 
-    PrintPreScheduleInfo(graph, input_schedule_constructor, st);
+    // input: block shared by both phases — printed once per region
+    // at indent level 2 (\t\t), directly under the region heading.
+    PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
 
     ScheduleConstructor best_schedule_constructor =
         input_schedule_constructor;
+    bool any_timed_out = false;
 
     if constexpr (kUseTargetFeasibilityIteration) {
       RunIterativeLengthMinPhase<LengthMinPolicy>(
           graph, st, MF, *LIS, input_schedule_constructor,
-          best_schedule_constructor);
+          best_schedule_constructor, any_timed_out);
     }
 
     RunPlainLengthMinPhase<LengthMinPolicy>(
         graph, st, MF, *LIS, input_schedule_constructor,
-        best_schedule_constructor);
+        best_schedule_constructor, any_timed_out);
 
     ApplyScheduleOrder(region, best_schedule_constructor);
+
+    stats.input_length =
+        input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
+    stats.output_length =
+        best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
+    stats.floor = graph.GetGraphLengthFloor();
+    stats.timed_out = any_timed_out;
   });
+
+  return stats;
 }
 
 // Main hierarchical scheduling path.
 void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   InitFunction();
 
-  llvm::outs() << "RunHierarchicalScheduler: processing " << regions_.size()
-               << " regions, target occupancy " << mfi_->getOccupancy()
-               << "\n";
+  llvm::outs() << "\n=== HierarchicalScheduler === (regions="
+               << regions_.size() << " target_occupancy="
+               << mfi_->getOccupancy() << ")\n";
 
   // Shakedowns are validation harnesses: noisy and slow. Off by default;
   // opt in via the `RunShakedowns` option in misched.txt.

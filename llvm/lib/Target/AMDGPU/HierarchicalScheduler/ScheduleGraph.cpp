@@ -392,17 +392,18 @@ void ScheduleGraph::InsertSubgraphProxies(
   ComputeCriticalPaths();
 }
 
-void ScheduleGraph::PrintSubgraphInfos(raw_ostream &os) const {
+void ScheduleGraph::PrintSubgraphInfos(raw_ostream &os,
+                                       StringRef indent) const {
   int total_members_covered = 0;
   for (const SubgraphInfo *info : subgraph_infos_) {
     total_members_covered += static_cast<int>(info->members.size());
   }
-  os << "    [Formation] subgraphs=" << subgraph_infos_.size()
+  os << indent << "subgraphs: count=" << subgraph_infos_.size()
      << " covered=" << total_members_covered
      << "/" << NumSchedulingUnits() << "\n";
   for (size_t i = 0; i < subgraph_infos_.size(); ++i) {
     const SubgraphInfo *info = subgraph_infos_[i];
-    os << "      [" << i << "] members=" << info->members.size()
+    os << indent << "\t[" << i << "] members=" << info->members.size()
        << " name=" << info->debug_name << "\n";
   }
 }
