@@ -33,6 +33,7 @@ class MachineInstrSchedulerConfig {
             UseContinuousOccupancyScore,
             // HierarchicalScheduler-specific
             MaliciousScheduler,
+            RunShakedowns,
             // Sentinel
             InvalidOption
         };
@@ -151,7 +152,8 @@ class MachineInstrSchedulerConfig {
             {SchedulerOption::RunOnAllFunctions, "RunOnAllFunctions"},
             {SchedulerOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"},
             {SchedulerOption::UseContinuousOccupancyScore, "UseContinuousOccupancyScore"},
-            {SchedulerOption::MaliciousScheduler, "MaliciousScheduler"}
+            {SchedulerOption::MaliciousScheduler, "MaliciousScheduler"},
+            {SchedulerOption::RunShakedowns, "RunShakedowns"}
         };
 
 

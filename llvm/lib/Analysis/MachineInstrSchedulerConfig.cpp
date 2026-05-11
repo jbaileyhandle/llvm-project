@@ -144,6 +144,7 @@ MachineInstrSchedulerConfig::SchedulerOption MachineInstrSchedulerConfig::GetSch
         .Case("RunRegardlessOfHeurisitcOutcome", SchedulerOption::RunRegardlessOfHeurisitcOutcome)
         .Case("UseContinuousOccupancyScore", SchedulerOption::UseContinuousOccupancyScore)
         .Case("MaliciousScheduler", SchedulerOption::MaliciousScheduler)
+        .Case("RunShakedowns", SchedulerOption::RunShakedowns)
         .Default(SchedulerOption::InvalidOption);
 
     if (option == SchedulerOption::InvalidOption) {
@@ -164,6 +165,7 @@ bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption opti
         return (scheduler == Scheduler::AcoOptSched || scheduler == Scheduler::BnbOptSched);
     // HierarchicalScheduler-specific
     case SchedulerOption::MaliciousScheduler:
+    case SchedulerOption::RunShakedowns:
         return (scheduler == Scheduler::HierarchicalScheduler);
     default:
         return false;

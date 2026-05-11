@@ -740,10 +740,15 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
                << " regions, target occupancy " << mfi_->getOccupancy()
                << "\n";
 
+  // Shakedowns are validation harnesses: noisy and slow. Off by default;
+  // opt in via the `RunShakedowns` option in misched.txt.
+  if (MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
+          MachineInstrSchedulerConfig::SchedulerOption::RunShakedowns)) {
+    RunAllShakedowns();
+  }
+
   RunMaximizeOccupancyPass();
   RunMinimizeLengthPass();
-
-  RunAllShakedowns();
 }
 
 // Set up ScheduleDAGMILive state for the given region. Calls startBlock and
