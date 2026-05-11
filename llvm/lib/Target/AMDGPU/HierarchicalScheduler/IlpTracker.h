@@ -83,39 +83,47 @@
 //
 // Two scores, distinct properties:
 //
-//   GetClosedIlpScore() == closed_ilp_score_
+//   GetIlpScore() == closed_ilp_score_
 //     Sum of saturated contributions from producers whose first
 //     consumer (real instruction OR exit sentinel) has already
-//     been scheduled. Re-def implicit closes contribute 0; real
-//     closes contribute min(spacing, desirable_spacing(op)).
+//     been scheduled — i.e., LOCKED IN. Re-def implicit closes
+//     contribute 0; real closes contribute min(spacing,
+//     desirable_spacing(op)).
 //     - Strictly monotone non-decreasing during forward search.
 //       Closes (real or re-def) only ever ADD; nothing ever
 //       subtracts.
 //     - True lower bound on the eventual final ILP score (which
-//       is GetClosedIlpScore at completion). The partial closed
+//       is GetIlpScore at completion). The partial locked-in
 //       score is a prefix sum of real future closes; the eventual
 //       can only equal or exceed.
+//     - This is the headline / authoritative ILP score. Use it
+//       for IsBetterThan, telemetry, dominance dim, etc.
 //
-//   GetIlpScore()  ≈  closed_ilp_score_  +  pending
-//                  =  closed_ilp_score_
-//                     +  open_count * (c - 1)
-//                     -  sum_open_inst_indices_
-//     where c = instructions_issued_count_. Combines the closed
-//     portion with the unsaturated would-close-now value of every
-//     still-open producer.
-//     - At completion: equals GetClosedIlpScore (open map is
-//       empty), so it is the actual final ILP score.
+//   GetProvisionalIlpScore()  ≈  closed_ilp_score_  +  pending
+//                              =  closed_ilp_score_
+//                                 +  open_count * (c - 1)
+//                                 -  sum_open_inst_indices_
+//     where c = instructions_issued_count_. Combines the locked-in
+//     portion with the would-close-now value of every still-open
+//     producer — the score we'd report if every open producer
+//     were force-closed at the current snapshot. "Provisional"
+//     because it's subject to change: open producers can grow
+//     their contributions, or be re-def-killed entirely.
+//     - At completion: equals GetIlpScore (open map is empty),
+//       so it is the actual final ILP score.
 //     - During partial schedule: the pending portion is UNSATURATED
 //       — it uses raw spacing rather than min(spacing,
 //       desirable_spacing). For mature open producers (those
 //       already at or past their desirable_spacing) it overestimates
 //       by up to (spacing - desirable_spacing) per producer. We
 //       accept this approximation to keep the formula O(1) without
-//       maintaining per-tier (fresh-vs-mature) sums; the closed
-//       portion captures the saturation correctly at close time.
+//       maintaining per-tier (fresh-vs-mature) sums.
 //     - Also NOT strictly monotone — re-def events drop pending by
 //       (c - i - 1) without adding anything to closed, so the
-//       partial score can dip.
+//       provisional score can dip.
+//     - Useful only for partial-schedule diagnostics ("if I
+//       stopped now, what would I get?"). Don't use for any
+//       authoritative comparison.
 //
 // Use-site implications:
 //   - Heuristic ranking: use IlpTracker::CloseCostForNode (defined
@@ -124,13 +132,13 @@
 //     latency-hiding credit if scheduled now," not the schedule-
 //     wide score.
 //   - Comparing COMPLETED schedules (IsBetterThan, ShouldEndSearch
-//     completion watermark): either getter works — they coincide
-//     at completion. Use GetIlpScore for the headline number.
+//     completion watermark): GetIlpScore — locked in, exact at
+//     completion.
 //   - Length-history dominance with ILP as a required-better
-//     Pareto axis: still safe with GetIlpScore — adding ANY
-//     required dim only makes dominance harder, never easier,
-//     regardless of strict-bound properties. If you specifically
-//     want a true lower bound, GetClosedIlpScore is the option.
+//     Pareto axis: GetIlpScore (true lower bound, strictly
+//     monotone, sound axis).
+//   - Diagnostics on partial schedules ("provisional snapshot"):
+//     GetProvisionalIlpScore.
 //
 //===----------------------------------------------------------------------===//
 
@@ -173,18 +181,22 @@ class IlpTracker {
   /// Proxy: no-op (mirrors Schedule).
   void Unschedule(const ScheduleNode *node);
 
-  /// Headline ILP score. closed_ilp_score_ + unsaturated pending
-  /// contributions from still-open producers. Equals the actual
-  /// final ILP score once IsDone (open map is empty after the
-  /// exit sentinel has closed all live-outs). O(1).
-  int GetIlpScore() const;
+  /// Headline / authoritative ILP score: sum of saturated
+  /// contributions from producers whose first consumer has
+  /// already been scheduled (LOCKED IN). Strictly monotone non-
+  /// decreasing during forward search; true lower bound on the
+  /// eventual final ILP score; exact final score at completion.
+  /// Use this for IsBetterThan, telemetry, dominance dim, etc.
+  int GetIlpScore() const { return closed_ilp_score_; }
 
-  /// The closed portion of the score in isolation — sum of
-  /// saturated contributions from producers whose first consumer
-  /// has already been scheduled. True lower bound on the eventual
-  /// final score. Useful for diagnostics and for any consumer that
-  /// needs strict-bound semantics.
-  int GetClosedIlpScore() const { return closed_ilp_score_; }
+  /// Provisional score for diagnostics: locked-in + the would-
+  /// close-now contribution of every still-open producer
+  /// (unsaturated pending). Equals GetIlpScore at completion.
+  /// During partial schedule, can dip at re-def events and
+  /// overestimate for mature open producers. NOT a strict bound;
+  /// use only for "if I stopped here, what would I get?" snapshots.
+  /// O(1).
+  int GetProvisionalIlpScore() const;
 
   /// Number of real instructions issued so far. Excludes proxies
   /// AND entry/exit sentinels — only MachineInstr-backed nodes
@@ -237,6 +249,29 @@ class IlpTracker {
                ? 0
                : it->second.desirable_spacing;
   }
+
+  /// Per-open-producer record exposed for history-dominance
+  /// snapshotting. `inst_count` is the value of
+  /// instructions_issued_count_ when the producer's def was
+  /// scheduled — the issue index in the real-instruction sequence
+  /// (NOT cycle; bubbles don't move it). Smaller inst_count =
+  /// scheduled earlier in the prefix = more real instructions
+  /// already issued after this producer = more future ILP cover
+  /// potential.
+  struct OpenProducerInstCount {
+    unsigned reg;
+    int inst_count;
+  };
+
+  /// Snapshot of currently open producers as (reg, inst_count)
+  /// pairs sorted by reg ascending. Used by LengthHistoryTracker
+  /// to record per-open-producer issue positions in each entry,
+  /// so dominance can do a parallel walk parallel to frontier_lbs.
+  /// Same-partition entries have the same vreg set in the same
+  /// reg-sorted order, so element-wise comparison is well-defined.
+  /// O(|open| log |open|) — sort dominates.
+  SmallVector<OpenProducerInstCount, 16>
+  GetOpenProducerInstCountsSnapshot() const;
 
   /// Cost of scheduling `node` NOW from an ILP perspective.
   ///
@@ -323,9 +358,9 @@ class IlpTracker {
   DenseMap<unsigned, OpenProducer> open_producer_by_reg_;
 
   /// Σ i_R over R in the open map — the only state needed for
-  /// the (unsaturated) pending portion of GetIlpScore:
+  /// the (unsaturated) pending portion of GetProvisionalIlpScore:
   ///   pending = open_count * (c - 1) - sum_open_inst_indices_.
-  /// Maintained on insert/erase so GetIlpScore is O(1).
+  /// Maintained on insert/erase so GetProvisionalIlpScore is O(1).
   int sum_open_inst_indices_ = 0;
 
   /// One record per Schedule call on a scheduling-unit node (real

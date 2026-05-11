@@ -355,6 +355,30 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
            other.pressure_tracker_.GetContinuousOccupancyScore();
   }
 
+  case ScheduleMetric::kMinimizeScheduleLengthRefineIlp: {
+    int my_length = length_tracker_.GetCurrentCycle();
+    int other_length = other.length_tracker_.GetCurrentCycle();
+    if (my_length != other_length) {
+      return my_length < other_length;
+    }
+    // Same length — tiebreak by locked-in ILP score (higher =
+    // better). Tertiary tiebreak on continuous occupancy score
+    // (higher = better) — among same-length-same-ILP, take the
+    // one with more pressure headroom. Same-length-same-ILP-same-
+    // occupancy returns false (treated as tied; best stays the
+    // existing entry). Same-length completions only get produced
+    // when the search policy opts into the bound relaxation via
+    // kRefineIlpAtSameLength, so under any other policy these
+    // tiebreak paths are effectively dead code.
+    int my_ilp = ilp_tracker_.GetIlpScore();
+    int other_ilp = other.ilp_tracker_.GetIlpScore();
+    if (my_ilp != other_ilp) {
+      return my_ilp > other_ilp;
+    }
+    return pressure_tracker_.GetContinuousOccupancyScore() >
+           other.pressure_tracker_.GetContinuousOccupancyScore();
+  }
+
   case ScheduleMetric::kMinimizeRegisterOccupancy:
     return pressure_tracker_.GetRegisterOnlyOccupancy() <
            other.pressure_tracker_.GetRegisterOnlyOccupancy();

@@ -34,6 +34,16 @@ enum class ScheduleMetric {
   /// Current schedule length in cycles.
   kMinimizeScheduleLength,
 
+  /// Length-min with ILP score as the same-length tiebreaker.
+  /// Length asc primary; among same-length, higher locked-in
+  /// IlpTracker::GetIlpScore wins; among same-length-same-ILP,
+  /// higher continuous register occupancy wins (tertiary tiebreak
+  /// for stability / pressure-headroom preference). Used by
+  /// DfsMinimizeLengthRefineIlpPolicy — that policy opts into the
+  /// bound relaxation that produces same-length completions for
+  /// IsBetterThan to choose among.
+  kMinimizeScheduleLengthRefineIlp,
+
   /// Inverted register occupancy: lower GetRegisterOnlyOccupancy is
   /// "better." TEST-ONLY — used to drive a search toward worse
   /// register occupancy so we can verify search infrastructure

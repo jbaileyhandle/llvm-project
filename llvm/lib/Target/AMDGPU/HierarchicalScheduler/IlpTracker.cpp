@@ -224,7 +224,7 @@ void IlpTracker::ReinsertCloses(const UndoRecord &undo) {
 // Score query
 // ============================================================================
 
-int IlpTracker::GetIlpScore() const {
+int IlpTracker::GetProvisionalIlpScore() const {
   // pending = Σ_{R in open} (c - i_R - 1)  [unsaturated]
   //         = open_count * (c - 1) - sum_open_inst_indices_
   // O(1).
@@ -233,6 +233,30 @@ int IlpTracker::GetIlpScore() const {
   return closed_ilp_score_ +
          open_count * (instructions_issued_count_ - 1) -
          sum_open_inst_indices_;
+}
+
+// ============================================================================
+// Open-producer snapshot
+// ============================================================================
+
+SmallVector<IlpTracker::OpenProducerInstCount, 16>
+IlpTracker::GetOpenProducerInstCountsSnapshot() const {
+  SmallVector<OpenProducerInstCount, 16> result;
+  result.reserve(open_producer_by_reg_.size());
+  for (const auto &reg_to_producer : open_producer_by_reg_) {
+    result.push_back(
+        {reg_to_producer.first, reg_to_producer.second.inst_count});
+  }
+  // Sort by reg ascending for stable parallel-walk comparison
+  // across two snapshots from the same partition. Same-partition
+  // open sets are identical, so the sorted-by-reg order aligns
+  // entries one-to-one between any two snapshots.
+  std::sort(result.begin(), result.end(),
+            [](const OpenProducerInstCount &a,
+               const OpenProducerInstCount &b) {
+              return a.reg < b.reg;
+            });
+  return result;
 }
 
 // ============================================================================
@@ -292,7 +316,7 @@ int IlpTracker::CloseCostForNode(const ScheduleNode *node) const {
 std::string IlpTracker::Describe() const {
   std::string out;
   out += "ilp: score=" + std::to_string(GetIlpScore());
-  out += " closed=" + std::to_string(closed_ilp_score_);
+  out += " provisional=" + std::to_string(GetProvisionalIlpScore());
   out += " issued=" + std::to_string(instructions_issued_count_);
   out += " open_vregs=" + std::to_string(GetOpenProducerVregCount());
   return out;

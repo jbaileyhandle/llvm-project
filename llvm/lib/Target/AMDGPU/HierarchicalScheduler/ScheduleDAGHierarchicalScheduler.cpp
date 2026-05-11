@@ -354,9 +354,7 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
       << dfs_best.GetLengthTracker().GetCurrentCycle()
       << " | length_floor=" << graph.GetGraphLengthFloor() << "\n"
       << "    [Post] ilp:      dfs_ilp="
-      << dfs_best.GetIlpTracker().GetIlpScore()
-      << " | dfs_ilp_closed="
-      << dfs_best.GetIlpTracker().GetClosedIlpScore() << "\n"
+      << dfs_best.GetIlpTracker().GetIlpScore() << "\n"
       << "    [Post] common:   schedule_calls=" << search.ScheduleCallCount().lifetime
       << " | length_history_prunes="
       << search.GetLengthHistoryTracker().PruneCount().lifetime

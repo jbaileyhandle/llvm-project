@@ -89,17 +89,18 @@ class DfsSearch {
         // length_history_ binds to working_'s trackers. Constructed
         // unconditionally; queried only when Policy::
         // kUseLengthHistoryPruning is true (the `if constexpr` in
-        // Recurse dead-strips the consult/insert otherwise). The
-        // pressure-score dimension on history dominance is gated
-        // by Policy::kRefineOccupancyAtSameLength: when true, the
-        // tracker also requires prior's continuous occupancy
-        // score >= current's for dominance (length-then-occupancy
-        // refinement); when false, length dimensions only.
+        // Recurse dead-strips the consult/insert otherwise).
+        // Pressure-score dim is gated by Policy::
+        // kRefineOccupancyAtSameLength; ILP dim is gated by
+        // Policy::kRefineIlpAtSameLength. When neither gate is
+        // set, dominance reduces to length-only.
         length_history_(
             &working_schedule_constructor_.GetScheduledSetTracker(),
             &working_schedule_constructor_.GetLengthTracker(),
             &working_schedule_constructor_.GetPressureTracker(),
-            Policy::kRefineOccupancyAtSameLength),
+            &working_schedule_constructor_.GetIlpTracker(),
+            Policy::kRefineOccupancyAtSameLength,
+            Policy::kRefineIlpAtSameLength),
         // pressure_history_ binds to working_'s scheduled-set
         // tracker for partition keys, and to working_'s pressure
         // tracker for the no-arg score read. The metric matches
@@ -312,18 +313,24 @@ class DfsSearch {
   // changes — at construction, at each ResetForReuse, and after
   // every best-improvement event in Recurse.
   //
-  // The improvement_offset is policy-controlled via
-  // kRefineOccupancyAtSameLength:
-  //   false (default): offset = 1 → bound = best.length - 1, so
-  //     same-length completions are pruned and only strictly
-  //     shorter completions are produced.
-  //   true (refine mode): offset = 0 → bound = best.length, so
-  //     same-length completions are produced and IsBetterThan can
-  //     pick the one with the higher continuous occupancy score.
+  // The improvement_offset is policy-controlled via two flags
+  // that both express "allow same-length completions":
+  //   - kRefineOccupancyAtSameLength: refine occupancy within
+  //     same length.
+  //   - kRefineIlpAtSameLength: refine ILP within same length.
+  // Either being true relaxes the bound from best.length - 1 to
+  // best.length so same-length completions are produced and
+  // IsBetterThan picks among them.
+  //   neither set: offset = 1 → bound = best.length - 1, only
+  //     strictly shorter completions are produced.
+  //   either set:  offset = 0 → bound = best.length, same-length
+  //     completions allowed.
   void RecomputeWorkingMaxScheduleCycles() {
     int best_length = best_schedule_constructor_.GetScheduleLength();
-    constexpr int kImprovementOffset =
-        Policy::kRefineOccupancyAtSameLength ? 0 : 1;
+    constexpr bool kAllowSameLength =
+        Policy::kRefineOccupancyAtSameLength ||
+        Policy::kRefineIlpAtSameLength;
+    constexpr int kImprovementOffset = kAllowSameLength ? 0 : 1;
     working_schedule_constructor_.SetMaxAcceptableScheduleLength(
         std::min(requested_target_length_,
                  best_length - kImprovementOffset));

@@ -358,6 +358,22 @@ bool DfsMinimizeLengthRefineOccupancyPolicy::ShouldEndSearch(
       .RegisterOnlyOccupancyExceedsFunctionOccupancyTarget();
 }
 
+bool DfsMinimizeLengthRefineIlpPolicy::ShouldEndSearch(
+    const ScheduleConstructor & /*schedule_constructor*/,
+    const ScheduleConstructor &best_schedule_constructor) {
+  // No natural "no further ILP refinement possible" condition —
+  // unlike occupancy refine, where exceeding the function target
+  // makes further refinement worthless. ILP can in principle
+  // keep improving until every producer is fully saturated, and
+  // we have no cheap test for that. Always return false; the
+  // per-region timeout (Policy::kTimeoutSecondsPerRegion) is the
+  // only stopping condition for refine-ILP at length floor.
+  // Above floor, we'd want to keep going for length improvement
+  // anyway, so the answer is uniformly false.
+  (void)best_schedule_constructor;
+  return false;
+}
+
 void DfsMaximizeOccupancyPolicy::FilterAndSortReadyList(
     const ScheduleConstructor &working,
     SmallVectorImpl<const ScheduleNode *> &out) {

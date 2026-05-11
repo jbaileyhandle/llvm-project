@@ -15,11 +15,15 @@ LengthHistoryTracker::LengthHistoryTracker(
     const ScheduledSetTracker *scheduled_set_tracker,
     const ScheduleLengthTracker *length_tracker,
     const GCNRegisterTracker *pressure_tracker,
-    bool include_pressure_dim)
+    const IlpTracker *ilp_tracker,
+    bool include_pressure_dim,
+    bool include_ilp_dim)
     : scheduled_set_tracker_(scheduled_set_tracker),
       length_tracker_(length_tracker),
       pressure_tracker_(pressure_tracker),
-      include_pressure_dim_(include_pressure_dim) {
+      ilp_tracker_(ilp_tracker),
+      include_pressure_dim_(include_pressure_dim),
+      include_ilp_dim_(include_ilp_dim) {
   if (scheduled_set_tracker_ == nullptr) {
     report_fatal_error(
         "LengthHistoryTracker: scheduled_set_tracker must not be null");
@@ -28,18 +32,43 @@ LengthHistoryTracker::LengthHistoryTracker(
     report_fatal_error(
         "LengthHistoryTracker: length_tracker must not be null");
   }
-  // pressure_tracker_ may be null. When non-null and
-  // include_pressure_dim_ is true, IsDominated/IsDominatedElseInsert
-  // populate Entry's continuous_occupancy_score from the tracker
-  // and dominance consults it. When null, the score field is
-  // populated with 0 — useful for tests that use
-  // InsertEntryForTest to set scores explicitly without driving
-  // the production query path. Production callers that opt into
-  // include_pressure_dim are expected to supply a real tracker;
-  // there's no runtime check for that misconfiguration since the
-  // sole production caller (DfsSearch) wires it consistently.
-  // Bitset-size >= 2 invariant is enforced by ScheduledSetTracker's
-  // ctor — no recheck here.
+  // pressure_tracker_ and ilp_tracker_ may be null. When non-null
+  // and the corresponding gate is true, IsDominated /
+  // IsDominatedElseInsert populate the matching Entry fields from
+  // the tracker and dominance consults them. When null, the
+  // fields are populated with fallback values (typically 0 / empty)
+  // — useful for tests that use InsertEntryForTest to stage scores
+  // explicitly without driving the production query path.
+  // Production callers that opt into a gate are expected to supply
+  // the matching tracker; there's no runtime check for that
+  // misconfiguration since the sole production caller (DfsSearch)
+  // wires it consistently. Bitset-size >= 2 invariant is enforced
+  // by ScheduledSetTracker's ctor — no recheck here.
+}
+
+LengthHistoryTracker::Entry LengthHistoryTracker::BuildQueryEntry() const {
+  // Skip the work when the corresponding gate is off — leave the
+  // field at its default (0 / empty) since DoesDominate won't
+  // consult it. When the gate is on but the tracker is null
+  // (test paths only — production wires both consistently), fall
+  // back to default too.
+  int continuous_occupancy_score = 0;
+  if (include_pressure_dim_ && pressure_tracker_ != nullptr) {
+    continuous_occupancy_score =
+        pressure_tracker_->GetContinuousOccupancyScore();
+  }
+  int ilp_score = 0;
+  SmallVector<IlpTracker::OpenProducerInstCount, 16>
+      open_producer_inst_counts;
+  if (include_ilp_dim_ && ilp_tracker_ != nullptr) {
+    ilp_score = ilp_tracker_->GetIlpScore();
+    open_producer_inst_counts =
+        ilp_tracker_->GetOpenProducerInstCountsSnapshot();
+  }
+  return Entry{length_tracker_->GetCurrentCycle(),
+               GetFrontierLbsSnapshot(),
+               continuous_occupancy_score, ilp_score,
+               std::move(open_producer_inst_counts)};
 }
 
 SmallVector<FrontierLb, 16>
@@ -75,6 +104,31 @@ bool LengthHistoryTracker::DoesDominate(const Entry &a,
       return false;
     }
   }
+  // ILP dimension (in priority order before pressure: matches
+  // the IsBetterThan tiebreak hierarchy length → ILP → pressure).
+  // Two required-no-worse Pareto checks:
+  //   1. Per-open-producer: a.inst_count[R] <= b.inst_count[R]
+  //      for every R (same-partition entries share the same
+  //      reg-sorted order of open producers, so a parallel walk
+  //      aligns them). Ensures a has same-or-more future ILP
+  //      cover for every open producer.
+  //   2. Locked-in: a.ilp_score >= b.ilp_score (reversed
+  //      direction: higher is better).
+  // Together (1) and (2) imply a's max completion ILP >=
+  // b's max completion ILP — sound for refine-ILP dominance.
+  // Gated on include_ilp_dim_ (false in policies that don't
+  // refine ILP).
+  if (include_ilp_dim_) {
+    for (size_t i = 0; i < a.open_producer_inst_counts.size(); ++i) {
+      if (a.open_producer_inst_counts[i].inst_count >
+          b.open_producer_inst_counts[i].inst_count) {
+        return false;
+      }
+    }
+    if (a.ilp_score < b.ilp_score) {
+      return false;
+    }
+  }
   // Pressure-score dimension. Reversed direction: higher score is
   // better, so a dominates iff a.score >= b.score. Pressure is
   // monotonically non-decreasing during search, so the recorded
@@ -97,14 +151,7 @@ bool LengthHistoryTracker::IsDominated() const {
   if (it == table_.end()) {
     return false;
   }
-  // pressure_tracker_ may be null when include_pressure_dim_ is
-  // false (tests don't always have one). The score field is dead
-  // weight in that case — store 0 so the field is initialized.
-  int score = pressure_tracker_ != nullptr
-                  ? pressure_tracker_->GetContinuousOccupancyScore()
-                  : 0;
-  Entry query{length_tracker_->GetCurrentCycle(),
-              GetFrontierLbsSnapshot(), score};
+  Entry query = BuildQueryEntry();
   for (const Entry &existing : it->second) {
     if (DoesDominate(existing, query)) {
       return true;
@@ -115,12 +162,7 @@ bool LengthHistoryTracker::IsDominated() const {
 
 bool LengthHistoryTracker::IsDominatedElseInsert() {
   PartitionKeyView view = scheduled_set_tracker_->GetPartitionKeyView();
-  // See IsDominated above for the nullable-pressure-tracker rationale.
-  int score = pressure_tracker_ != nullptr
-                  ? pressure_tracker_->GetContinuousOccupancyScore()
-                  : 0;
-  Entry query{length_tracker_->GetCurrentCycle(),
-              GetFrontierLbsSnapshot(), score};
+  Entry query = BuildQueryEntry();
 
   // Lookup via view — no bitset copy in the existing-bucket path.
   // We construct an owning PartitionKey only when we have to insert
@@ -218,6 +260,20 @@ LengthHistoryTracker::GetBucketForTest(const PartitionKey &key) const {
     return {};
   }
   return it->second;
+}
+
+bool LengthHistoryTracker::IsDominatedByEntryForTest(
+    const PartitionKey &key, const Entry &query) const {
+  auto it = table_.find(key);
+  if (it == table_.end()) {
+    return false;
+  }
+  for (const Entry &existing : it->second) {
+    if (DoesDominate(existing, query)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 } // namespace hierarchical_scheduler

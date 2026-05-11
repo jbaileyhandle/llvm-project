@@ -1960,7 +1960,8 @@ struct LengthHistoryTrackerFixture {
 
 static LengthHistoryTrackerFixture
 BuildLengthHistoryTrackerFixture(const GCNSubtarget &st,
-                                 bool include_pressure_dim = false) {
+                                 bool include_pressure_dim = false,
+                                 bool include_ilp_dim = false) {
   LengthHistoryTrackerFixture fixture;
   fixture.graph = ScheduleGraph::BuildTestDAG();
   fixture.graph->ValidateAndComputeTopologicalOrder();
@@ -1974,14 +1975,13 @@ BuildLengthHistoryTrackerFixture(const GCNSubtarget &st,
       std::make_unique<ScheduleLengthTracker>(*fixture.graph, st);
   fixture.scheduled_set_tracker = std::make_unique<ScheduledSetTracker>(
       fixture.graph.get(), fixture.length_tracker.get());
-  // Tests pass nullptr for pressure_tracker. With
-  // include_pressure_dim=true, IsDominated still works — the
-  // query's continuous_occupancy_score is read as 0 (null
-  // tracker), and tests stage prior entries' scores explicitly via
-  // InsertEntryForTest.
+  // Score-source trackers are nullptr; tests stage Entry contents
+  // directly via InsertEntryForTest rather than driving the
+  // production query path.
   fixture.length_history_tracker = std::make_unique<LengthHistoryTracker>(
       fixture.scheduled_set_tracker.get(), fixture.length_tracker.get(),
-      /*pressure_tracker=*/nullptr, include_pressure_dim);
+      /*pressure_tracker=*/nullptr, /*ilp_tracker=*/nullptr,
+      include_pressure_dim, include_ilp_dim);
   return fixture;
 }
 
@@ -2328,6 +2328,164 @@ static void RunLengthHistoryPressureDimShakedown(const GCNSubtarget &st) {
   }
 }
 
+// ILP dimension on dominance. With include_ilp_dim=true, dominance
+// also requires (both must hold for prior to dominate query):
+//   1. For every open producer R,
+//      prior.inst_count[R] <= query.inst_count[R].
+//   2. prior.ilp_score >= query.ilp_score.
+//
+// Tests stage BOTH prior (via InsertEntryForTest) and query (via
+// IsDominatedByEntryForTest). This is needed because the fixture's
+// LengthHistoryTracker has a null IlpTracker, so the live-trackers
+// path would produce a query with empty opens and ilp_score=0 —
+// which can't exercise the per-producer walk or non-trivial ILP
+// score checks. Staging the query directly lets us drive all the
+// new logic.
+//
+// Cases:
+//   A. ilp_dim=true, opens tied, prior.ilp > query.ilp → dominates.
+//   B. ilp_dim=true, opens tied, prior.ilp < query.ilp → not.
+//   C. ilp_dim=true, prior.inst_count[R] all < query's, ilp tied
+//      → dominates.
+//   D. ilp_dim=true, prior.inst_count Pareto-incomparable with
+//      query (one R better in prior, another better in query)
+//      → not dominated.
+//   E. ilp_dim=false, all ILP fields conflicting → still dominates
+//      because the gate is off and length dims alone tie.
+static void RunLengthHistoryIlpDimShakedown(const GCNSubtarget &st) {
+  // Build an Entry with the same length-state as the query post-
+  // Schedule(a), plus caller-supplied ILP fields.
+  auto make_entry = [](
+      const LengthHistoryTrackerFixture &f, int ilp_score,
+      SmallVector<IlpTracker::OpenProducerInstCount, 16> opens) {
+    LengthHistoryTracker::Entry entry;
+    entry.end_cycle = 1;
+    entry.frontier_lbs = {
+        {f.h->GetTopoIndex(), 1},
+        {f.c->GetTopoIndex(), 2},
+        {f.d->GetTopoIndex(), 3},
+    };
+    entry.continuous_occupancy_score = 0;
+    entry.ilp_score = ilp_score;
+    entry.open_producer_inst_counts = std::move(opens);
+    return entry;
+  };
+
+  // Two synthetic open-producer vregs used in cases below. Reg
+  // values are arbitrary but stable; same set in prior and query
+  // for parallel-walk correctness.
+  constexpr unsigned kRegX = 100;
+  constexpr unsigned kRegY = 200;
+
+  // Case A: opens tied, prior.ilp > query.ilp → dominates.
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/true);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    auto prior = make_entry(fixture, /*ilp=*/5,
+                            {{kRegX, 0}, {kRegY, 1}});
+    auto query = make_entry(fixture, /*ilp=*/0,
+                            {{kRegX, 0}, {kRegY, 1}});
+    fixture.length_history_tracker->InsertEntryForTest(key,
+                                                       std::move(prior));
+    bool dominated =
+        fixture.length_history_tracker->IsDominatedByEntryForTest(key,
+                                                                  query);
+    llvm::outs()
+        << "    A: opens tied, prior.ilp>query.ilp: dominated="
+        << (dominated ? "true" : "false") << "  "
+        << (dominated ? "PASS\n" : "FAIL\n");
+  }
+
+  // Case B: opens tied, prior.ilp < query.ilp → not dominated.
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/true);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    auto prior = make_entry(fixture, /*ilp=*/-1,
+                            {{kRegX, 0}, {kRegY, 1}});
+    auto query = make_entry(fixture, /*ilp=*/0,
+                            {{kRegX, 0}, {kRegY, 1}});
+    fixture.length_history_tracker->InsertEntryForTest(key,
+                                                       std::move(prior));
+    bool not_dominated =
+        !fixture.length_history_tracker->IsDominatedByEntryForTest(key,
+                                                                   query);
+    llvm::outs()
+        << "    B: opens tied, prior.ilp<query.ilp: not_dominated="
+        << (not_dominated ? "true" : "false") << "  "
+        << (not_dominated ? "PASS\n" : "FAIL\n");
+  }
+
+  // Case C: prior.inst_count strictly less on every open, ilp
+  // tied → dominates (prior has more future cover everywhere).
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/true);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    auto prior = make_entry(fixture, /*ilp=*/0,
+                            {{kRegX, 0}, {kRegY, 1}});
+    auto query = make_entry(fixture, /*ilp=*/0,
+                            {{kRegX, 2}, {kRegY, 3}});
+    fixture.length_history_tracker->InsertEntryForTest(key,
+                                                       std::move(prior));
+    bool dominated =
+        fixture.length_history_tracker->IsDominatedByEntryForTest(key,
+                                                                  query);
+    llvm::outs()
+        << "    C: prior.opens earlier on every R: dominated="
+        << (dominated ? "true" : "false") << "  "
+        << (dominated ? "PASS\n" : "FAIL\n");
+  }
+
+  // Case D: inst_counts Pareto-incomparable (X earlier in prior,
+  // Y earlier in query) → prior does NOT dominate.
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/true);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    auto prior = make_entry(fixture, /*ilp=*/5,
+                            {{kRegX, 0}, {kRegY, 5}});
+    auto query = make_entry(fixture, /*ilp=*/0,
+                            {{kRegX, 2}, {kRegY, 1}});
+    fixture.length_history_tracker->InsertEntryForTest(key,
+                                                       std::move(prior));
+    bool not_dominated =
+        !fixture.length_history_tracker->IsDominatedByEntryForTest(key,
+                                                                   query);
+    llvm::outs()
+        << "    D: opens Pareto-incomparable: not_dominated="
+        << (not_dominated ? "true" : "false") << "  "
+        << (not_dominated ? "PASS\n" : "FAIL\n");
+  }
+
+  // Case E: ilp_dim=false. Even with prior strictly worse on
+  // every ILP field, the gate is off and dominance reduces to
+  // length-only — which tie, so prior dominates.
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/false);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    auto prior = make_entry(fixture, /*ilp=*/-5,
+                            {{kRegX, 9}, {kRegY, 9}});
+    auto query = make_entry(fixture, /*ilp=*/0,
+                            {{kRegX, 0}, {kRegY, 0}});
+    fixture.length_history_tracker->InsertEntryForTest(key,
+                                                       std::move(prior));
+    bool dominated =
+        fixture.length_history_tracker->IsDominatedByEntryForTest(key,
+                                                                  query);
+    llvm::outs() << "    E: ilp_dim=false (gate off): dominated="
+                 << (dominated ? "true" : "false") << "  "
+                 << (dominated ? "PASS\n" : "FAIL\n");
+  }
+}
+
 void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
   llvm::outs() << "  RunLengthHistoryTrackerShakedown:\n";
   RunLengthHistoryEmptyShakedown(st);
@@ -2339,6 +2497,7 @@ void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
   RunLengthHistoryDistinctPartitionsShakedown(st);
   RunLengthHistoryHashCollisionShakedown(st);
   RunLengthHistoryPressureDimShakedown(st);
+  RunLengthHistoryIlpDimShakedown(st);
 }
 
 // =============================================================================
@@ -3182,12 +3341,13 @@ void RunScheduleLengthTrackerShakedown(ScheduleGraph &graph,
 // nodes in topo order, exercising the producer-to-first-consumer
 // scoring (open/close, weight propagation, count bump). Verifies:
 //   - Initial empty state.
-//   - Op-type weight buckets are populated for real instructions
-//     (informational stat — no PASS/FAIL).
-//   - Forward GetIlpScore is monotone non-decreasing.
+//   - Op-type desirable_spacing buckets populated for real
+//     instructions (informational stat — no PASS/FAIL).
+//   - Forward GetIlpScore (locked-in) is monotone non-decreasing.
 //   - At full schedule, the open-producer map is empty (the exit
 //     sentinel must have closed all live-out producers).
-//   - Reverse Unschedule restores GetIlpScore to each forward-step
+//   - At completion, GetProvisionalIlpScore == GetIlpScore.
+//   - Reverse Unschedule restores both scores to each forward-step
 //     snapshot exactly.
 //   - Round-trip returns to initial empty state.
 //
@@ -3204,7 +3364,7 @@ void RunIlpTrackerShakedown(ScheduleGraph &graph,
 
   // --- Initial empty state ---
   bool initial_ok = tracker.GetIlpScore() == 0 &&
-                    tracker.GetClosedIlpScore() == 0 &&
+                    tracker.GetProvisionalIlpScore() == 0 &&
                     tracker.GetInstructionsIssuedCount() == 0 &&
                     tracker.GetOpenProducerVregCount() == 0;
   llvm::outs() << "  Initial empty state: "
@@ -3242,40 +3402,78 @@ void RunIlpTrackerShakedown(ScheduleGraph &graph,
                << " default(2)=" << default_count << "\n";
 
   // --- Forward pass: schedule in topo order ---
-  // ilp_score_after[i] / closed_score_after[i] = GetIlpScore() /
-  // GetClosedIlpScore() after i nodes have been scheduled. Index 0
-  // = empty state; index N = fully scheduled.
-  std::vector<int> ilp_score_after;
-  std::vector<int> closed_score_after;
-  ilp_score_after.push_back(tracker.GetIlpScore());
-  closed_score_after.push_back(tracker.GetClosedIlpScore());
+  // ilp_after[i] / provisional_after[i] = GetIlpScore() /
+  // GetProvisionalIlpScore() after i nodes have been scheduled.
+  // Index 0 = empty state; index N = fully scheduled.
+  std::vector<int> ilp_after;
+  std::vector<int> provisional_after;
+  ilp_after.push_back(tracker.GetIlpScore());
+  provisional_after.push_back(tracker.GetProvisionalIlpScore());
+
+  // Per-step verification of GetOpenProducerInstCountsSnapshot:
+  //   - Size matches GetOpenProducerVregCount.
+  //   - Sorted strictly ascending by reg.
+  //   - Every inst_count is in [0, GetInstructionsIssuedCount()).
+  // Accumulate violations across all steps; report once after the
+  // forward pass.
+  int snapshot_violations = 0;
+  bool any_step_with_nonempty_opens = false;
 
   llvm::outs() << "  ILP trace (topo order):\n";
   for (ScheduleNode *node : graph.GetTopoOrder()) {
     tracker.Schedule(node);
-    ilp_score_after.push_back(tracker.GetIlpScore());
-    closed_score_after.push_back(tracker.GetClosedIlpScore());
+    ilp_after.push_back(tracker.GetIlpScore());
+    provisional_after.push_back(tracker.GetProvisionalIlpScore());
     llvm::outs() << "    " << node->ToString() << "  ->  "
                  << tracker.Describe() << "\n";
-  }
 
-  // --- Forward invariants ---
-  // (a) GetClosedIlpScore is monotone non-decreasing — every close
-  // (real or re-def-implicit) only ever ADDS to closed_ilp_score_,
-  // so this is a strict invariant. The combined GetIlpScore can
-  // dip at a re-def event, so we don't check that here.
-  int closed_monotonicity_violations = 0;
-  for (int i = 1; i < static_cast<int>(closed_score_after.size()); ++i) {
-    if (closed_score_after[i] < closed_score_after[i - 1]) {
-      llvm::outs() << "  Closed-score monotonicity violated at step "
-                   << i << ": " << closed_score_after[i - 1] << " -> "
-                   << closed_score_after[i] << "\n";
-      ++closed_monotonicity_violations;
+    auto snapshot = tracker.GetOpenProducerInstCountsSnapshot();
+    if (static_cast<int>(snapshot.size()) !=
+        tracker.GetOpenProducerVregCount()) {
+      ++snapshot_violations;
+    }
+    for (int i = 1; i < static_cast<int>(snapshot.size()); ++i) {
+      if (snapshot[i - 1].reg >= snapshot[i].reg) {
+        ++snapshot_violations;
+      }
+    }
+    const int issued = tracker.GetInstructionsIssuedCount();
+    for (const auto &producer : snapshot) {
+      if (producer.inst_count < 0 || producer.inst_count >= issued) {
+        ++snapshot_violations;
+      }
+    }
+    if (!snapshot.empty()) {
+      any_step_with_nonempty_opens = true;
     }
   }
-  llvm::outs() << "  Closed-score monotonicity:"
-               << (closed_monotonicity_violations == 0 ? "  PASS\n"
-                                                       : "  FAIL\n");
+  // Coverage flag: if no step had non-empty opens (degenerate
+  // small region), the snapshot logic wasn't really exercised.
+  // Don't FAIL on that — just tag the output.
+  llvm::outs() << "  Snapshot invariants (size, sorted, in-range):"
+               << (snapshot_violations == 0 ? "  PASS" : "  FAIL")
+               << "    (nonempty-opens steps: "
+               << (any_step_with_nonempty_opens ? "yes" : "no")
+               << ")\n";
+
+  // --- Forward invariants ---
+  // (a) GetIlpScore (locked in) is monotone non-decreasing —
+  // every close (real or re-def-implicit) only ever ADDS to
+  // closed_ilp_score_, so this is a strict invariant.
+  // GetProvisionalIlpScore can dip at re-def events, so we don't
+  // check it here.
+  int monotonicity_violations = 0;
+  for (int i = 1; i < static_cast<int>(ilp_after.size()); ++i) {
+    if (ilp_after[i] < ilp_after[i - 1]) {
+      llvm::outs() << "  GetIlpScore monotonicity violated at step "
+                   << i << ": " << ilp_after[i - 1] << " -> "
+                   << ilp_after[i] << "\n";
+      ++monotonicity_violations;
+    }
+  }
+  llvm::outs() << "  GetIlpScore monotonicity:"
+               << (monotonicity_violations == 0 ? "  PASS\n"
+                                                : "  FAIL\n");
 
   // (b) After full schedule, open-producer count must be 0 — the
   // exit sentinel processes its uses (live-outs) and closes them.
@@ -3289,32 +3487,33 @@ void RunIlpTrackerShakedown(ScheduleGraph &graph,
                << "    (" << tracker.GetOpenProducerVregCount()
                << " left open)\n";
 
-  // (c) At completion, GetIlpScore == GetClosedIlpScore (open map
-  // is empty, so the pending portion is zero).
+  // (c) At completion, GetProvisionalIlpScore == GetIlpScore (open
+  // map is empty, so the pending portion is zero).
   bool completion_scores_match =
-      tracker.GetIlpScore() == tracker.GetClosedIlpScore();
-  llvm::outs() << "  Completion: GetIlpScore == GetClosedIlpScore: "
-               << (completion_scores_match ? "PASS\n" : "FAIL\n");
+      tracker.GetProvisionalIlpScore() == tracker.GetIlpScore();
+  llvm::outs()
+      << "  Completion: GetProvisionalIlpScore == GetIlpScore: "
+      << (completion_scores_match ? "PASS\n" : "FAIL\n");
 
   // --- Reverse pass: unschedule everything ---
   // After unscheduling node i (in reverse topo order), the tracker
   // state should equal the state just before that node was
-  // scheduled forward — both GetIlpScore and GetClosedIlpScore
-  // should equal their forward snapshots at index i.
+  // scheduled forward — both scores should equal their forward
+  // snapshots at index i.
   llvm::outs() << "  ILP trace (unschedule):\n";
   int reverse_violations = 0;
   for (int i = static_cast<int>(graph.GetTopoOrder().size()) - 1;
        i >= 0; --i) {
     tracker.Unschedule(graph.GetTopoOrder()[i]);
-    int ilp_score = tracker.GetIlpScore();
-    int closed_score = tracker.GetClosedIlpScore();
-    int expected_ilp = ilp_score_after[i];
-    int expected_closed = closed_score_after[i];
+    int ilp = tracker.GetIlpScore();
+    int provisional = tracker.GetProvisionalIlpScore();
+    int expected_ilp = ilp_after[i];
+    int expected_provisional = provisional_after[i];
     llvm::outs() << "    undo  " << tracker.Describe()
-                 << "  ilp=" << ilp_score << " (expected "
-                 << expected_ilp << ")  closed=" << closed_score
-                 << " (expected " << expected_closed << ")\n";
-    if (ilp_score != expected_ilp || closed_score != expected_closed) {
+                 << "  ilp=" << ilp << " (expected " << expected_ilp
+                 << ")  provisional=" << provisional << " (expected "
+                 << expected_provisional << ")\n";
+    if (ilp != expected_ilp || provisional != expected_provisional) {
       ++reverse_violations;
     }
   }
@@ -3323,7 +3522,7 @@ void RunIlpTrackerShakedown(ScheduleGraph &graph,
 
   // --- Round-trip ---
   bool roundtrip_ok = tracker.GetIlpScore() == 0 &&
-                      tracker.GetClosedIlpScore() == 0 &&
+                      tracker.GetProvisionalIlpScore() == 0 &&
                       tracker.GetInstructionsIssuedCount() == 0 &&
                       tracker.GetOpenProducerVregCount() == 0;
   llvm::outs() << "  Round-trip result: " << tracker.Describe()

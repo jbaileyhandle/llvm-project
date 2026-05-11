@@ -56,17 +56,25 @@ class SearchPolicyBase {
     out.assign(ready.begin(), ready.end());
   }
 
-  // Length-min refine-occupancy opt-in. When true, the search
-  // continues exploring same-length completions to refine
-  // continuous register-occupancy score. DfsSearch reads this to
-  // decide whether the per-Recurse max_acceptable bound should
-  // be best.length - 1 (default; reject same-length completions)
-  // or best.length (refine mode; accept same-length completions
-  // so IsBetterThan can pick the one with higher occupancy
-  // score). Default false; only the refine-occupancy length-min
-  // policy overrides to true. Other policies don't engage with
-  // this flag.
+  // Length-min refine opt-ins. When EITHER is true, DfsSearch
+  // relaxes the per-Recurse max_acceptable bound from
+  // best.length - 1 to best.length so same-length completions
+  // are produced and IsBetterThan picks among them under the
+  // policy's metric. Two flags rather than one because the two
+  // refinements are distinct policies — they could in principle
+  // be combined, but for now each policy enables exactly one.
+  //
+  //   kRefineOccupancyAtSameLength: refine continuous register-
+  //     occupancy within same length. Used by
+  //     DfsMinimizeLengthRefineOccupancyPolicy.
+  //   kRefineIlpAtSameLength: refine ILP within same length.
+  //     Used by DfsMinimizeLengthRefineIlpPolicy. Also gates
+  //     LengthHistoryTracker's ILP dim (per-open-producer
+  //     inst_counts and locked-in ILP score participate in
+  //     dominance) so the search isn't pruned prematurely on
+  //     paths that could refine ILP.
   static constexpr bool kRefineOccupancyAtSameLength = false;
+  static constexpr bool kRefineIlpAtSameLength = false;
 
   // History-based-domination pruning opt-in flags. Default false;
   // concrete policies override to true to enable the corresponding
@@ -226,6 +234,35 @@ class DfsMinimizeLengthRefineOccupancyPolicy
     : public DfsMinimizeLengthPolicy {
  public:
   static constexpr bool kRefineOccupancyAtSameLength = true;
+
+  static bool ShouldEndSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor);
+};
+
+// Length-min variant that, after finding a length-optimal schedule,
+// continues exploring same-length completions to refine ILP score
+// (defer first-uses to grow producer windows). Inherits everything
+// from DfsMinimizeLengthPolicy except:
+//   - kMetric: kMinimizeScheduleLengthRefineIlp — IsBetterThan
+//     tiebreaks length asc, then ILP desc, then occupancy desc.
+//   - kRefineIlpAtSameLength = true — relaxes the bound to allow
+//     same-length completions through, AND gates the
+//     LengthHistoryTracker's ILP dim (per-open-producer
+//     inst_counts and locked-in ILP score participate in
+//     dominance, so the search isn't pruned prematurely on
+//     paths that could refine ILP).
+//   - ShouldEndSearch never auto-stops at the length floor (no
+//     natural "no further refinement possible" condition for
+//     ILP — unlike occupancy refine, where exceeding the
+//     function target stops the search). Relies on the per-
+//     region timeout to bound total search.
+class DfsMinimizeLengthRefineIlpPolicy
+    : public DfsMinimizeLengthPolicy {
+ public:
+  static constexpr ScheduleMetric kMetric =
+      ScheduleMetric::kMinimizeScheduleLengthRefineIlp;
+  static constexpr bool kRefineIlpAtSameLength = true;
 
   static bool ShouldEndSearch(
       const ScheduleConstructor &schedule_constructor,

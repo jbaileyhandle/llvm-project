@@ -59,6 +59,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_LENGTHHISTORYTRACKER_H
 
 #include "GCNRegisterTracker.h"
+#include "IlpTracker.h"
 #include "ScheduleLengthTracker.h"
 #include "ScheduledSetTracker.h"
 #include "SearchStats.h"
@@ -121,20 +122,64 @@ class LengthHistoryTracker {
     /// occupancy policy, false otherwise. When the gate is off,
     /// this field is dead weight (~4 bytes/entry).
     int continuous_occupancy_score;
+    /// Locked-in ILP score (IlpTracker::GetIlpScore) at the time
+    /// this entry was inserted. Always populated. Whether it
+    /// participates in dominance is gated by `include_ilp_dim_`
+    /// on the owning tracker. Used as the final tiebreaker on
+    /// the ILP dim — when per-open-producer inst_counts all tie,
+    /// A dominates B requires A.ilp_score >= B.ilp_score.
+    int ilp_score;
+    /// Per-open-producer issue positions, sorted by reg ascending.
+    /// Always populated. Whether it participates in dominance is
+    /// gated by `include_ilp_dim_`. When the gate is on, A
+    /// dominates B requires A.inst_count[R] <= B.inst_count[R]
+    /// for every open producer R (so A has same-or-more future
+    /// ILP cover for each). Same-partition entries share the
+    /// same vreg set in the same reg-sorted order, so element-
+    /// wise comparison is well-defined.
+    ///
+    /// Inline-16 capacity matches frontier_lbs to avoid heap
+    /// allocs in the typical case (|open| ≤ 16). Cost: when
+    /// include_ilp_dim_ is off, 128B/entry of dead inline buffer.
+    /// If refine-ILP doesn't become the production default, drop
+    /// the inline capacity to 0 to reclaim that storage at the
+    /// cost of a heap alloc per populated entry.
+    SmallVector<IlpTracker::OpenProducerInstCount, 16>
+        open_producer_inst_counts;
   };
 
-  /// Construct over `scheduled_set_tracker`, `length_tracker`, and
-  /// `pressure_tracker`. All pointers must be non-null and outlive
-  /// this tracker.
+  /// Construct over the bound trackers. `scheduled_set_tracker`
+  /// and `length_tracker` must be non-null and outlive this
+  /// tracker. `pressure_tracker` and `ilp_tracker` may be null
+  /// (some tests / non-production paths don't supply them); when
+  /// null, the corresponding score fields populate from a
+  /// fallback (typically 0). Production callers (DfsSearch) wire
+  /// all four trackers consistently.
   ///
-  /// `include_pressure_dim` controls whether the partial schedule's
-  /// continuous occupancy score (at insertion time) participates in
-  /// dominance. False (default) reproduces the length-only behavior;
-  /// true adds a reversed-direction dimension (higher score is
-  /// better) so prior dominates only if its score >= current's.
-  /// Used by DfsMinimizeLengthRefineOccupancyPolicy. The score
-  /// field is always populated on Entry regardless — the gate is
-  /// only on whether the field is consulted.
+  /// Two optional dominance dims, in priority order (matching the
+  /// IsBetterThan tiebreak hierarchy length → ILP → occupancy):
+  ///
+  /// `include_ilp_dim` controls whether ILP participates in
+  /// dominance. False reproduces the prior behavior. True adds
+  /// two required-no-worse Pareto checks (both must hold for
+  /// prior to dominate current):
+  ///   1. For every open producer R, prior.inst_count[R] <=
+  ///      current.inst_count[R] (prior has same-or-more future
+  ///      ILP cover for every open producer).
+  ///   2. prior.ilp_score >= current.ilp_score (prior has same-
+  ///      or-more locked-in ILP).
+  /// Used by DfsMinimizeLengthRefineIlpPolicy.
+  ///
+  /// `include_pressure_dim` controls whether the partial
+  /// schedule's continuous occupancy score (at insertion time)
+  /// participates in dominance. False reproduces the length-
+  /// only behavior; true adds a reversed-direction dim (higher
+  /// score is better) so prior dominates only if its score >=
+  /// current's. Used by DfsMinimizeLengthRefineOccupancyPolicy.
+  ///
+  /// All Entry score fields are always populated regardless of
+  /// the gates — the gates only control whether the fields are
+  /// consulted by DoesDominate.
   ///
   /// The bitset-size >= 2 invariant required by PartitionKey's
   /// DenseMapInfo sentinels is enforced by ScheduledSetTracker's
@@ -142,7 +187,9 @@ class LengthHistoryTracker {
   LengthHistoryTracker(const ScheduledSetTracker *scheduled_set_tracker,
                        const ScheduleLengthTracker *length_tracker,
                        const GCNRegisterTracker *pressure_tracker,
-                       bool include_pressure_dim);
+                       const IlpTracker *ilp_tracker,
+                       bool include_pressure_dim,
+                       bool include_ilp_dim);
 
   /// True iff the bound trackers' current prefix is dominated by
   /// some existing entry in this partition's bucket. Pure read; no
@@ -212,22 +259,49 @@ class LengthHistoryTracker {
   /// mutation (Insert, InsertEntryForTest).
   ArrayRef<Entry> GetBucketForTest(const PartitionKey &key) const;
 
+  /// Test-only: ask "would `query` be dominated by some entry in
+  /// `key`'s bucket?" using the caller-supplied query Entry rather
+  /// than building one from the bound trackers. Lets tests stage
+  /// query Entries with arbitrary score / open-producer fields,
+  /// which is necessary to exercise the per-open-producer walk in
+  /// DoesDominate when no real IlpTracker is wired in the fixture.
+  /// Pure read; no insert; no prune-counter increment. Returns
+  /// false if `key`'s bucket doesn't exist.
+  bool IsDominatedByEntryForTest(const PartitionKey &key,
+                                 const Entry &query) const;
+
  private:
   /// Returns true iff `a` dominates `b` on every Pareto dimension.
   /// Length dimensions (end_cycle and each frontier LB) use
   /// smaller-is-better. When `include_pressure_dim` is true, also
   /// requires a's continuous_occupancy_score >= b's
-  /// (higher-is-better — a reversed-direction dimension). Both
-  /// Entries must be from the same partition: their frontier_lbs
-  /// vectors have equal length and parallel node_topo_idx ordering.
+  /// (higher-is-better — a reversed-direction dimension). When
+  /// `include_ilp_dim` is true, also requires a.inst_count[R] <=
+  /// b.inst_count[R] for every open producer R (parallel walk over
+  /// open_producer_inst_counts) AND a.ilp_score >= b.ilp_score.
+  /// Both Entries must be from the same partition: their
+  /// frontier_lbs and open_producer_inst_counts vectors have
+  /// equal length and parallel orderings.
   bool DoesDominate(const Entry &a, const Entry &b) const;
+
+  /// Snapshot the bound trackers' current state into an Entry.
+  /// Used by IsDominated and IsDominatedElseInsert to construct
+  /// the query Entry. Populates all score fields regardless of
+  /// the gates (DoesDominate consults them conditionally), with
+  /// fallback values when the corresponding tracker pointer is
+  /// null.
+  Entry BuildQueryEntry() const;
 
   const ScheduledSetTracker *scheduled_set_tracker_;
   const ScheduleLengthTracker *length_tracker_;
   const GCNRegisterTracker *pressure_tracker_;
+  const IlpTracker *ilp_tracker_;
   /// Gate for the pressure-score dimension on dominance. See
   /// constructor comment.
   bool include_pressure_dim_;
+  /// Gate for the ILP dimension on dominance. See constructor
+  /// comment.
+  bool include_ilp_dim_;
   DenseMap<PartitionKey, SmallVector<Entry, 2>> table_;
   int total_entries_ = 0;
   /// Incremented at every prune event. .current_run is cleared
