@@ -162,6 +162,16 @@ public:
   /// Get the machine model for this subtarget's CPU.
   const MCSchedModel &getSchedModel() const { return *CPUSchedModel; }
 
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  /// Swap the active scheduling model. Used by GCNSubtarget to opt into a
+  /// jbaile-custom model when misched.txt sets UseJbaileCustomTimingModel.
+  /// Must be called early in subtarget construction, before any consumer
+  /// (e.g. TargetSchedModel wrappers) caches the model.
+  void setSchedModel(const MCSchedModel *SM) { CPUSchedModel = SM; }
+  //========================================================================================
+
   /// Return an iterator at the first process resource consumed by the given
   /// scheduling class.
   const MCWriteProcResEntry *getWriteProcResBegin(

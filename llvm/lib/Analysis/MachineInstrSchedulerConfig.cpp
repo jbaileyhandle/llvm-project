@@ -148,6 +148,8 @@ MachineInstrSchedulerConfig::SchedulerOption MachineInstrSchedulerConfig::GetSch
         .Case("LengthMinRefineIlp", SchedulerOption::LengthMinRefineIlp)
         .Case("LengthMinRefineOccupancy",
               SchedulerOption::LengthMinRefineOccupancy)
+        .Case("UseJbaileCustomTimingModel",
+              SchedulerOption::UseJbaileCustomTimingModel)
         .Default(SchedulerOption::InvalidOption);
 
     if (option == SchedulerOption::InvalidOption) {
@@ -160,6 +162,7 @@ bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption opti
     switch (option) {
     // Generic — valid for any scheduler
     case SchedulerOption::DisablePostRAScheduling:
+    case SchedulerOption::UseJbaileCustomTimingModel:
         return true;
     // OptSched-specific
     case SchedulerOption::RunOnAllFunctions:

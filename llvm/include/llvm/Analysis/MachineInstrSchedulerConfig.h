@@ -39,6 +39,12 @@ class MachineInstrSchedulerConfig {
             // DfsMinimizeLengthPolicy (kNone).
             LengthMinRefineIlp,
             LengthMinRefineOccupancy,
+            // Generic: swap the AMDGPU subtarget's MCSchedModel to
+            // jbaile's custom gfx906 model. Affects every consumer of
+            // sched-model latency (LLVM's MachineScheduler,
+            // OptSched, HierarchicalScheduler, register-pressure
+            // analyses, etc.). Valid for any scheduler.
+            UseJbaileCustomTimingModel,
             // Sentinel
             InvalidOption
         };
@@ -160,7 +166,8 @@ class MachineInstrSchedulerConfig {
             {SchedulerOption::MaliciousScheduler, "MaliciousScheduler"},
             {SchedulerOption::RunShakedowns, "RunShakedowns"},
             {SchedulerOption::LengthMinRefineIlp, "LengthMinRefineIlp"},
-            {SchedulerOption::LengthMinRefineOccupancy, "LengthMinRefineOccupancy"}
+            {SchedulerOption::LengthMinRefineOccupancy, "LengthMinRefineOccupancy"},
+            {SchedulerOption::UseJbaileCustomTimingModel, "UseJbaileCustomTimingModel"}
         };
 
 

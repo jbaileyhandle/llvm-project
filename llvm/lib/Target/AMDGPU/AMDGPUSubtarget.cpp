@@ -28,6 +28,11 @@
 #include "llvm/IR/IntrinsicsR600.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/MC/MCSubtargetInfo.h"
+//========================================================================================
+// jbaile
+//========================================================================================
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+//========================================================================================
 #include <algorithm>
 
 using namespace llvm;
@@ -160,6 +165,28 @@ GCNSubtarget::initializeSubtargetDependencies(const Triple &TT,
                     << TargetID.getXnackSetting() << '\n');
   LLVM_DEBUG(dbgs() << "sramecc setting for subtarget: "
                     << TargetID.getSramEccSetting() << '\n');
+
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // If misched.txt opted into the jbaile custom timing model AND we're on
+  // a GFX9-or-later subtarget (where SIQuarterSpeedModel applies), swap the
+  // active MCSchedModel pointer. Every downstream consumer
+  // (LLVM's MachineScheduler, OptSched, HierarchicalScheduler,
+  // register-pressure analyses, etc.) reads from this pointer, so the swap
+  // is universal — not scoped to any particular scheduler. Must happen
+  // before any TargetSchedModel cache fills.
+  if (MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
+          MachineInstrSchedulerConfig::SchedulerOption::
+              UseJbaileCustomTimingModel) &&
+      getGeneration() >= AMDGPUSubtarget::GFX9) {
+    // The custom model symbol is static inside the MCTargetDesc TU and
+    // not directly visible here. Look it up through the processor table
+    // via the synthetic gfx906_jbaile_custom processor name registered
+    // in GCNProcessors.td.
+    setSchedModel(&getSchedModelForCPU("gfx906_jbaile_custom"));
+  }
+  //========================================================================================
 
   return *this;
 }

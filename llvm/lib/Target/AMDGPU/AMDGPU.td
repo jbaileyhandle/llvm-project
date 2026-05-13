@@ -1900,6 +1900,11 @@ def HasNotMADIntraFwdBug : Predicate<"!Subtarget->hasMADIntraFwdBug()">;
 
 // Include AMDGPU TD files
 include "SISchedule.td"
+//========================================================================================
+// jbaile
+//========================================================================================
+include "SIScheduleJbaileCustomGfx906.td"
+//========================================================================================
 include "GCNProcessors.td"
 include "AMDGPUInstrInfo.td"
 include "SIRegisterInfo.td"
