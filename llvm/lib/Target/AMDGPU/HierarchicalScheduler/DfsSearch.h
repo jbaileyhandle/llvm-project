@@ -196,7 +196,7 @@ class DfsSearch {
   }
 
   // True iff the region-level deadline (set in the ctor as
-  // Policy::kTimeoutSecondsPerRegion past construction time) has
+  // Policy::kTimeoutMsPerRegion past construction time) has
   // been reached at some point during this DfsSearch's lifetime,
   // and a Recurse aborted as a result. Sticky once set. The
   // single-bool shape is correct for this concept: once the
@@ -348,7 +348,7 @@ class DfsSearch {
   // so calling on every Recurse() entry is cheap.
   bool EndSearchIfTimedOut() {
     if (timing_.LifetimeElapsedMs() <
-        int64_t{Policy::kTimeoutSecondsPerRegion} * 1000) {
+        int64_t{Policy::kTimeoutMsPerRegion}) {
       return false;
     }
     region_timed_out_ = true;
