@@ -97,7 +97,7 @@ class SearchPolicyBase {
   // worse-than-input result. Concrete policies may override to give
   // one pass more budget than another (e.g. a longer length pass
   // once an occupancy ceiling has been pinned).
-  static constexpr int kTimeoutMsPerRegion = 10;
+  static constexpr int kTimeoutMsPerRegion = 10000;
 };
 
 // Policy for DFS when the objective is to minimize schedule length for
