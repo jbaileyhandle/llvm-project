@@ -44,6 +44,17 @@ NextIfDebug(MachineBasicBlock::iterator I,
   return I;
 }
 
+// True iff misched.txt sets `SkipSubgraphFormation`. When true, both
+// the occupancy and length passes run DFS on the flat (un-formed)
+// graph: the occupancy pass constructs DfsSearch with
+// `form_subgraphs=false`, and the length-pass orchestrator skips
+// its explicit `FormSubgraphs` call. DfsSearches inside the length
+// phases already pass `form_subgraphs=false` regardless.
+static bool ShouldSkipSubgraphFormation() {
+  return MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
+      MachineInstrSchedulerConfig::SchedulerOption::SkipSubgraphFormation);
+}
+
 ScheduleDAGHierarchicalScheduler::ScheduleDAGHierarchicalScheduler(
     MachineSchedContext *C, std::unique_ptr<MachineSchedStrategy> S)
     : ScheduleDAGMILive(C, std::move(S)) {}
@@ -423,7 +434,9 @@ int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     const ScheduleConstructor &input_schedule_constructor =
         graph.GetInputScheduleConstructor();
 
-    DfsSearch<DfsMaximizeOccupancyPolicy> search(graph, st, MF, *LIS);
+    DfsSearch<DfsMaximizeOccupancyPolicy> search(
+        graph, st, MF, *LIS,
+        /*form_subgraphs=*/!ShouldSkipSubgraphFormation());
     // Occupancy pass has no phases: input:/output: live directly under
     // region[N] at indent level 2 (\t\t).
     PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
@@ -771,7 +784,12 @@ static void RunMinimizeLengthForRegionWithPolicy(
   // call's side effect. Running formation twice on the same graph
   // would fatal in CheckNoNestedMembers (the existing proxies
   // would be treated as members of a new subgraph).
-  FormSubgraphs(graph, Policy::MakeFormationPolicy());
+  //
+  // misched.txt's SkipSubgraphFormation suppresses this call so
+  // DFS operates on the flat graph.
+  if (!ShouldSkipSubgraphFormation()) {
+    FormSubgraphs(graph, Policy::MakeFormationPolicy());
+  }
 
   // input: block shared by both phases — printed once per region
   // at indent level 2 (\t\t), directly under the region heading.

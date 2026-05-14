@@ -45,6 +45,12 @@ class MachineInstrSchedulerConfig {
             // OptSched, HierarchicalScheduler, register-pressure
             // analyses, etc.). Valid for any scheduler.
             UseJbaileCustomTimingModel,
+            // HierarchicalScheduler: skip subgraph formation in both
+            // the occupancy and length passes. DFS searches operate
+            // on the flat (un-formed) graph. Useful for isolating
+            // the cost/effect of formation when iterating on policy
+            // changes or comparing schedulers.
+            SkipSubgraphFormation,
             // Sentinel
             InvalidOption
         };
@@ -167,7 +173,8 @@ class MachineInstrSchedulerConfig {
             {SchedulerOption::RunShakedowns, "RunShakedowns"},
             {SchedulerOption::LengthMinRefineIlp, "LengthMinRefineIlp"},
             {SchedulerOption::LengthMinRefineOccupancy, "LengthMinRefineOccupancy"},
-            {SchedulerOption::UseJbaileCustomTimingModel, "UseJbaileCustomTimingModel"}
+            {SchedulerOption::UseJbaileCustomTimingModel, "UseJbaileCustomTimingModel"},
+            {SchedulerOption::SkipSubgraphFormation, "SkipSubgraphFormation"}
         };
 
 

@@ -150,6 +150,8 @@ MachineInstrSchedulerConfig::SchedulerOption MachineInstrSchedulerConfig::GetSch
               SchedulerOption::LengthMinRefineOccupancy)
         .Case("UseJbaileCustomTimingModel",
               SchedulerOption::UseJbaileCustomTimingModel)
+        .Case("SkipSubgraphFormation",
+              SchedulerOption::SkipSubgraphFormation)
         .Default(SchedulerOption::InvalidOption);
 
     if (option == SchedulerOption::InvalidOption) {
@@ -174,6 +176,7 @@ bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption opti
     case SchedulerOption::RunShakedowns:
     case SchedulerOption::LengthMinRefineIlp:
     case SchedulerOption::LengthMinRefineOccupancy:
+    case SchedulerOption::SkipSubgraphFormation:
         return (scheduler == Scheduler::HierarchicalScheduler);
     default:
         return false;
