@@ -241,6 +241,33 @@ public:
   /// within the same length.
   bool RegisterOnlyOccupancyExceedsFunctionOccupancyTarget() const;
 
+  /// Result of cross-checking the candidate schedule's register
+  /// pressure with LLVM's tracker. See VerifyPressureWithLlvmTracker.
+  struct LlvmTrackerVerification {
+    GCNRegPressure llvm_peak;
+    GCNRegPressure ours_peak;
+    int llvm_occupancy = 0;
+    int ours_occupancy = 0;
+    int target_occupancy = 0;
+    /// True iff llvm_occupancy >= target_occupancy — i.e., LLVM's
+    /// ground-truth tracker agrees the candidate meets the kernel
+    /// occupancy ceiling. The accept/reject decision in DfsSearch
+    /// keys on this flag.
+    bool target_met = false;
+  };
+
+  /// Run LLVM's GCNUpwardRPTracker over this schedule's order to
+  /// compute the LLVM-ground-truth peak pressure, then compare with
+  /// our own tracker. Used as a per-candidate verification in
+  /// DfsSearch before accepting a candidate as new best — guards
+  /// against silently letting an occupancy-dropping schedule
+  /// through if our tracker's pressure estimate disagrees with
+  /// LLVM's. Walks the schedule order backward via recede(); cost
+  /// is O(N) per call. Callers that don't have direct access to
+  /// MF/LIS can store the result; it's a value type.
+  LlvmTrackerVerification VerifyPressureWithLlvmTracker(
+      const MachineFunction &mf, const LiveIntervals &lis) const;
+
   /// Human-readable summary of current state.
   std::string Describe() const;
 

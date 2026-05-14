@@ -82,7 +82,9 @@ class DfsSearch {
       // — which is the PRE-formation input snapshot captured in
       // BuildFromSUnits Phase 4 and never re-derived, so it remains
       // a valid (unconstrained) baseline for the search to beat.
-      : working_schedule_constructor_(
+      : mf_(&mf),
+        lis_(&lis),
+        working_schedule_constructor_(
             MaybeFormSubgraphs(graph, form_subgraphs),
             st, mf, lis),
         best_schedule_constructor_(graph.GetInputScheduleConstructor()),
@@ -242,6 +244,14 @@ class DfsSearch {
     return complete_schedules_count_;
   }
   int BestUpdatesCount() const { return best_updates_count_; }
+  // Number of times a candidate beat `best` per our tracker but was
+  // rejected by the per-candidate LLVM-tracker verification because
+  // its ground-truth occupancy was below the kernel target. Should
+  // ideally be 0 — non-zero means our pressure tracker is
+  // under-counting somewhere relative to LLVM's.
+  int LlvmTrackerRejectionsCount() const {
+    return llvm_tracker_rejections_count_;
+  }
 
   // Read-only access to the pressure history tracker. Useful for
   // shakedowns and per-region stat reporting.
@@ -365,12 +375,41 @@ class DfsSearch {
       ++complete_schedules_count_;
       if (working_schedule_constructor_.IsBetterThan(
               best_schedule_constructor_, Policy::kMetric)) {
-        ++best_updates_count_;
-        best_schedule_constructor_ = working_schedule_constructor_;
-        // best.length may have shrunk; re-derive working's
-        // max-schedule-cycle table so the new (tighter) bound
-        // takes effect on subsequent steps.
-        RecomputeWorkingMaxScheduleCycles();
+        // Cross-check the candidate's register pressure against
+        // LLVM's GCNUpwardRPTracker before committing to it. If
+        // LLVM's tracker says the candidate's ground-truth
+        // occupancy is below the kernel target, we treat the
+        // candidate as if it didn't beat best — our tracker
+        // under-estimated pressure, and accepting the schedule
+        // would silently drop occupancy. Log the divergence and
+        // keep searching. No fatal error.
+        auto verification =
+            working_schedule_constructor_.VerifyPressureWithLlvmTracker(
+                *mf_, *lis_);
+        if (verification.target_met) {
+          ++best_updates_count_;
+          best_schedule_constructor_ = working_schedule_constructor_;
+          // best.length may have shrunk; re-derive working's
+          // max-schedule-cycle table so the new (tighter) bound
+          // takes effect on subsequent steps.
+          RecomputeWorkingMaxScheduleCycles();
+        } else {
+          ++llvm_tracker_rejections_count_;
+          llvm::outs()
+              << "\t\t\t\tLLVM verifier rejected candidate: target="
+              << verification.target_occupancy
+              << " ours_occ=" << verification.ours_occupancy
+              << " llvm_occ=" << verification.llvm_occupancy
+              << " ours_vgpr="
+              << verification.ours_peak.getVGPRNum(
+                     mf_->getSubtarget<GCNSubtarget>().hasGFX90AInsts())
+              << " llvm_vgpr="
+              << verification.llvm_peak.getVGPRNum(
+                     mf_->getSubtarget<GCNSubtarget>().hasGFX90AInsts())
+              << " ours_sgpr=" << verification.ours_peak.getSGPRNum()
+              << " llvm_sgpr=" << verification.llvm_peak.getSGPRNum()
+              << "\n";
+        }
       }
       if (Policy::ShouldEndSearch(working_schedule_constructor_,
                                   best_schedule_constructor_)) {
@@ -411,6 +450,15 @@ class DfsSearch {
     }
   }
 
+  // Captured at construction so the per-candidate LLVM-tracker
+  // verification step can build a GCNUpwardRPTracker against the
+  // same MF/LIS the schedule belongs to. Declared before
+  // working_schedule_constructor_ so init-list order matches the
+  // declaration order (mf_/lis_ have no member-init dependencies
+  // but are referenced first in the ctor's init list for clarity).
+  const MachineFunction *mf_;
+  const LiveIntervals *lis_;
+
   // Mutable search state; Schedule/Unschedule walk every branch.
   ScheduleConstructor working_schedule_constructor_;
 
@@ -422,6 +470,12 @@ class DfsSearch {
   // Diagnostic counters — see accessors above.
   int complete_schedules_count_ = 0;
   int best_updates_count_ = 0;
+  // Count of times a candidate would have updated best (passed
+  // IsBetterThan) but was rejected by LLVM's tracker because its
+  // ground-truth occupancy didn't meet the kernel target. Reflects
+  // disagreement between our tracker and LLVM's — a non-zero count
+  // means our tracker under-counted pressure on that schedule.
+  int llvm_tracker_rejections_count_ = 0;
 
   // Set true by Recurse when Policy::ShouldEndSearch fires, OR by
   // EndSearchIfTimedOut when the region deadline has been reached.

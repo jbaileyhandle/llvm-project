@@ -377,6 +377,7 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
       << search.GetPressureHistoryTracker().PruneCount().lifetime
       << " complete_schedules=" << search.CompleteSchedulesCount()
       << " best_updates=" << search.BestUpdatesCount()
+      << " llvm_verif_rejects=" << search.LlvmTrackerRejectionsCount()
       << "\n"
       << key_indent << "          timed_out="
       << (search.RegionTimedOut() ? "yes" : "no")

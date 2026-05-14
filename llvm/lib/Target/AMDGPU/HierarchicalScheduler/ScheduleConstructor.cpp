@@ -7,8 +7,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "ScheduleConstructor.h"
+#include "GCNRegPressure.h"
 #include "GCNSubtarget.h"
+#include "ScheduleGraph.h"
 #include "llvm/CodeGen/LiveIntervals.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 
@@ -398,6 +402,71 @@ bool ScheduleConstructor::RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarge
 bool ScheduleConstructor::RegisterOnlyOccupancyExceedsFunctionOccupancyTarget() const {
   return pressure_tracker_.GetRegisterOnlyOccupancy() >
          pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
+}
+
+ScheduleConstructor::LlvmTrackerVerification
+ScheduleConstructor::VerifyPressureWithLlvmTracker(
+    const MachineFunction &mf, const LiveIntervals &lis) const {
+  LlvmTrackerVerification result;
+
+  const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
+  result.ours_peak = pressure_tracker_.GetPeakPressure();
+  result.ours_occupancy =
+      pressure_tracker_.GetAllFactorsRegionOnlyOccupancy();
+  result.target_occupancy =
+      pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
+
+  // Collect MachineInstrs in schedule order, skipping subgraph
+  // proxies and entry/exit sentinels (no underlying MI).
+  SmallVector<MachineInstr *, 32> mis;
+  for (const ScheduleNode *node : GetScheduleOrder()) {
+    if (!node->IsSchedulingUnit()) {
+      continue;
+    }
+    SUnit *su = node->GetSUnit();
+    if (su && su->getInstr()) {
+      mis.push_back(su->getInstr());
+    }
+  }
+
+  if (mis.empty()) {
+    // Nothing to verify — treat as agreement with our tracker.
+    result.llvm_peak = result.ours_peak;
+    result.llvm_occupancy = result.ours_occupancy;
+    result.target_met = result.llvm_occupancy >= result.target_occupancy;
+    return result;
+  }
+
+  // GCNUpwardRPTracker.recede(MI) accepts arbitrary MIs (not just
+  // BB-order), so we walk our schedule order backward.
+  //
+  // Captured states in forward terms:
+  //   - reset(mis[N-1]): live set = "state after mis[N-1]"
+  //   - recede(mis[i])  for i = N-1 .. 1: live set = "state after
+  //                                       mis[i-1]"
+  //   - recede(mis[0]):  live set = "state before mis[0]" = the
+  //                      region's live-in pressure
+  //
+  // Peak is the max over every point in the region's execution,
+  // including the live-in state at region entry. Our own forward
+  // tracker captures live-ins in its peak too, so we include
+  // recede(mis[0]) here for symmetry.
+  const MachineRegisterInfo &mri = mf.getRegInfo();
+  GCNUpwardRPTracker tracker(lis);
+  tracker.reset(*mis.back());
+
+  GCNRegPressure peak = llvm::getRegPressure(mri, tracker.getLiveRegs());
+
+  for (int i = static_cast<int>(mis.size()) - 1; i >= 0; --i) {
+    tracker.recede(*mis[i]);
+    GCNRegPressure step = llvm::getRegPressure(mri, tracker.getLiveRegs());
+    peak = max(peak, step);
+  }
+
+  result.llvm_peak = peak;
+  result.llvm_occupancy = static_cast<int>(peak.getOccupancy(st));
+  result.target_met = result.llvm_occupancy >= result.target_occupancy;
+  return result;
 }
 
 // ============================================================================
