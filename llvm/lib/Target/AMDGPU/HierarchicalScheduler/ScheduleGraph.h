@@ -1272,8 +1272,16 @@ private:
 
   /// Phase 2: Translate SDep successor edges into ScheduleEdges
   /// between leaf nodes. Skips edges to/from LLVM's boundary nodes.
+  /// `latency_divisor` >= 1 divides each incoming SDep latency by
+  /// the given amount, clamped so the result is at least 1 (to
+  /// preserve the IssueWidth=1 ordering floor). Used by the
+  /// ScaleEdgeLatenciesByTargetOccupancy misched option to model
+  /// the fact that other waves cover memory latency at runtime.
+  /// Pass 1 for no scaling (the default; BuildFromSUnits computes
+  /// the appropriate value based on the misched config).
   void AddEdgesBetweenLeafNodes(
-      const DenseMap<const SUnit *, ScheduleNode *> &sunit_to_node);
+      const DenseMap<const SUnit *, ScheduleNode *> &sunit_to_node,
+      int latency_divisor = 1);
 
   /// Phase 3: Create entry and exit nodes, wire them to root/leaf
   /// nodes, and populate their register defs/uses from LiveIntervals.

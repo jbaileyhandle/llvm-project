@@ -152,6 +152,8 @@ MachineInstrSchedulerConfig::SchedulerOption MachineInstrSchedulerConfig::GetSch
               SchedulerOption::UseJbaileCustomTimingModel)
         .Case("SkipSubgraphFormation",
               SchedulerOption::SkipSubgraphFormation)
+        .Case("ScaleEdgeLatenciesByTargetOccupancy",
+              SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy)
         .Default(SchedulerOption::InvalidOption);
 
     if (option == SchedulerOption::InvalidOption) {
@@ -177,6 +179,7 @@ bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption opti
     case SchedulerOption::LengthMinRefineIlp:
     case SchedulerOption::LengthMinRefineOccupancy:
     case SchedulerOption::SkipSubgraphFormation:
+    case SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy:
         return (scheduler == Scheduler::HierarchicalScheduler);
     default:
         return false;

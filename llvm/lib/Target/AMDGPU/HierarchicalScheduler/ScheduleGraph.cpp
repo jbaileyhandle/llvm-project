@@ -9,12 +9,15 @@
 #include "GCNRegPressure.h"
 #include "RegionInfo.h"
 #include "ScheduleConstructor.h"
+#include "SIMachineFunctionInfo.h"
 #include "SubgraphInfo.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/LiveIntervals.h"
+#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -698,7 +701,34 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
   DenseMap<const SUnit *, ScheduleNode *> sunit_to_node;
 
   graph->CreateLeafNodesFromSUnits(sunits, sunit_to_node);
-  graph->AddEdgesBetweenLeafNodes(sunit_to_node);
+
+  // Compute the latency divisor for the
+  // ScaleEdgeLatenciesByTargetOccupancy misched option. When the
+  // option is set we divide each edge's data-latency by the
+  // function's current target occupancy, modeling the fact that
+  // other waves on the same SIMD cover most of the memory latency
+  // at runtime. MFI->getOccupancy() reflects the kernel-wide
+  // ceiling — initially the function default, lowered by
+  // RunMaximizeOccupancyPass's per-region limitOccupancy() calls.
+  // When the option is unset (the default), divisor stays at 1
+  // and edges pass through unchanged.
+  //
+  // Note on the occupancy pass: it uses a pressure-only metric
+  // (kMaximizeRegisterOccupancy) for accept/reject, so latency
+  // values don't affect its outcome. The fact that the divisor
+  // can vary across regions within the occupancy pass (as
+  // limitOccupancy tightens the ceiling) is therefore irrelevant
+  // to occupancy results. The length pass is where latency
+  // actually matters, and by then MFI->getOccupancy() has
+  // stabilized at the final kernel-wide ceiling.
+  int latency_divisor = 1;
+  if (MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
+          MachineInstrSchedulerConfig::SchedulerOption::
+              ScaleEdgeLatenciesByTargetOccupancy)) {
+    latency_divisor = static_cast<int>(
+        mf.getInfo<SIMachineFunctionInfo>()->getOccupancy());
+  }
+  graph->AddEdgesBetweenLeafNodes(sunit_to_node, latency_divisor);
   graph->CreateEntryAndExitNodes(lis, mri, region_begin_idx, region_end_idx);
   // Compute topo and both critical-path directions before Phase 4 so
   // the ScheduleLengthTracker inside input_schedule_constructor_
@@ -735,7 +765,12 @@ void ScheduleGraph::CreateLeafNodesFromSUnits(
 }
 
 void ScheduleGraph::AddEdgesBetweenLeafNodes(
-    const DenseMap<const SUnit *, ScheduleNode *> &sunit_to_node) {
+    const DenseMap<const SUnit *, ScheduleNode *> &sunit_to_node,
+    int latency_divisor) {
+  // Defensive: <=0 is meaningless. Treat as no-scaling.
+  if (latency_divisor < 1) {
+    latency_divisor = 1;
+  }
   for (ScheduleNode &node : nodes_) {
     SUnit *su = node.GetSUnit();
     if (!su) {
@@ -754,6 +789,18 @@ void ScheduleGraph::AddEdgesBetweenLeafNodes(
 
       ScheduleEdge::Kind kind = MapSDepToEdgeKind(sdep);
       int latency = static_cast<int>(sdep.getLatency());
+      if (latency_divisor > 1) {
+        // Wave-visible latency = ceil(SIMD-cycles / wave-issue-rate).
+        // Round-up (vs round-to-nearest) is the conservative choice:
+        // the load takes a fixed number of SIMD cycles, so the wave
+        // wakes up no earlier than ceil(latency / divisor) wave-slots
+        // later. Round-down would let the consumer issue before the
+        // load's result is ready. Floor of 1 preserves the
+        // IssueWidth=1 ordering invariant.
+        float scaled = static_cast<float>(latency) /
+                       static_cast<float>(latency_divisor);
+        latency = std::max(1, static_cast<int>(std::ceil(scaled)));
+      }
       AddEdge(&node, succ_node, kind, latency);
     }
   }

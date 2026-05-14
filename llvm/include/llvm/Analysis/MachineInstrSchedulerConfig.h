@@ -51,6 +51,16 @@ class MachineInstrSchedulerConfig {
             // the cost/effect of formation when iterating on policy
             // changes or comparing schedulers.
             SkipSubgraphFormation,
+            // HierarchicalScheduler: divide every SDep latency by the
+            // function's current target occupancy (MFI->getOccupancy)
+            // when building the schedule graph, using
+            // ceil(latency/divisor) with a floor of 1. Models the
+            // fact that other waves on the same SIMD cover most of
+            // the memory latency at runtime, so the wave-visible
+            // latency of a long-latency op is ~ raw / occupancy.
+            // Quick first-pass approximation of the occupancy-aware
+            // latency idea — applies to ALL edges, not just memory.
+            ScaleEdgeLatenciesByTargetOccupancy,
             // Sentinel
             InvalidOption
         };
@@ -174,7 +184,9 @@ class MachineInstrSchedulerConfig {
             {SchedulerOption::LengthMinRefineIlp, "LengthMinRefineIlp"},
             {SchedulerOption::LengthMinRefineOccupancy, "LengthMinRefineOccupancy"},
             {SchedulerOption::UseJbaileCustomTimingModel, "UseJbaileCustomTimingModel"},
-            {SchedulerOption::SkipSubgraphFormation, "SkipSubgraphFormation"}
+            {SchedulerOption::SkipSubgraphFormation, "SkipSubgraphFormation"},
+            {SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy,
+             "ScaleEdgeLatenciesByTargetOccupancy"}
         };
 
 
