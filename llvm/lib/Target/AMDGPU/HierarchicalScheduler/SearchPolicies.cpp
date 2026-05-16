@@ -390,6 +390,57 @@ bool DfsMinimizeLengthRefineIlpPolicy::ShouldEndSearch(
   return false;
 }
 
+void DfsMaximizeLengthPolicy::FilterAndSortReadyList(
+    const ScheduleConstructor &working,
+    SmallVectorImpl<const ScheduleNode *> &out) {
+  out.clear();
+  const ScheduleLengthTracker &length_tracker =
+      working.GetLengthTracker();
+  ArrayRef<const ScheduleNode *> ready = working.GetReadyList();
+
+  // End-proxy short-circuit. An end proxy is the sole entry in the
+  // ready list when all members of its subgraph have been scheduled
+  // — return it directly. Mirrors DfsMinimizeLengthPolicy's
+  // handling. Subgraph formation is currently a no-op for length-
+  // max (the policy's empty MakeFormationPolicy makes
+  // FormSubgraphs early-return), so under the present configuration
+  // end proxies never appear here; the check is kept for symmetry
+  // and to remain correct if formation is ever enabled.
+  for (const ScheduleNode *node : ready) {
+    if (node->IsSubgraphEndProxy()) {
+      if (ready.size() != 1) {
+        report_fatal_error(
+            "DfsMaximizeLengthPolicy::FilterAndSortReadyList: end "
+            "proxy node " +
+            Twine(node->GetId()) + " is in a ready list of size " +
+            Twine(static_cast<int>(ready.size())) +
+            "; expected to be the sole entry");
+      }
+      out.push_back(node);
+      return;
+    }
+  }
+
+  out.assign(ready.begin(), ready.end());
+
+  // Primary key: largest effective_min_schedule_cycle (=
+  // earliest_issue_cycle) first. When picked, current_cycle
+  // advances to max(current_cycle, this value) + 1, so the
+  // biggest such value yields the biggest forced bubble on
+  // this pick. Tiebreak: topo_index ascending for a
+  // deterministic total order.
+  std::sort(
+      out.begin(), out.end(),
+      [&length_tracker](const ScheduleNode *a, const ScheduleNode *b) {
+        int a_min = EffectiveMinScheduleCycle(a, length_tracker);
+        int b_min = EffectiveMinScheduleCycle(b, length_tracker);
+        if (a_min != b_min) {
+          return a_min > b_min;
+        }
+        return a->GetTopoIndex() < b->GetTopoIndex();
+      });
+}
+
 bool DfsMaximizeLengthPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor & /*best_schedule_constructor*/,

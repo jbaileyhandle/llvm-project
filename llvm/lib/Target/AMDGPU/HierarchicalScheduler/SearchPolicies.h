@@ -315,15 +315,21 @@ class DfsMinimizeLengthRefineIlpPolicy
 //     early-return). Length-max isn't trying to keep consumer-
 //     side pressure local; it benefits from the flat DAG so the
 //     search can spread instructions out arbitrarily.
-//   - FilterAndSortReadyList inherited unchanged from
-//     SearchPolicyBase (default copy-as-is) for now. A length-max-
-//     specific ranking (e.g. prefer ready instructions with the
-//     largest earliest_issue_cycle to force bigger bubbles) is a
-//     future change.
+//   - FilterAndSortReadyList overridden: primary key is the
+//     largest effective_min_schedule_cycle (= earliest_issue_cycle)
+//     among ready candidates. Picking that one advances
+//     current_cycle to max(current_cycle, picked.min) + 1,
+//     forcing the biggest clock jump available at this step.
+//     Tiebreak on topo_index ascending for determinism.
 class DfsMaximizeLengthPolicy : public SearchPolicyBase {
  public:
   static constexpr ScheduleMetric kMetric =
       ScheduleMetric::kMaximizeScheduleLength;
+
+  // See class comment for the ranking semantics.
+  static void FilterAndSortReadyList(
+      const ScheduleConstructor &working,
+      SmallVectorImpl<const ScheduleNode *> &out);
 
   // See LengthHistoryTracker constructor comment for the soundness
   // argument and the assertion that prevents pairing this with
