@@ -177,6 +177,25 @@ class LengthHistoryTracker {
   /// score is better) so prior dominates only if its score >=
   /// current's. Used by DfsMinimizeLengthRefineOccupancyPolicy.
   ///
+  /// `length_max_mode` flips the direction of the length
+  /// dimensions (end_cycle and per-frontier-node LB). False
+  /// (default) is length-min semantics: lower end_cycle and
+  /// lower frontier LBs dominate. True is length-max semantics:
+  /// higher end_cycle and higher frontier LBs dominate. The
+  /// soundness argument mirrors length-min — propagating
+  /// component-wise no-smaller starting LBs through any postfix
+  /// ordering yields no-shorter completions, so dominated
+  /// entries can be pruned. Pressure direction is unaffected by
+  /// this flag (lower peak pressure still dominates regardless
+  /// of length direction).
+  ///
+  /// Combining `length_max_mode = true` with `include_ilp_dim =
+  /// true` is unsupported by design — length-max policies do not
+  /// participate in ILP refinement here, for simplicity. The
+  /// constructor asserts against this combination so a stray
+  /// future configuration trips loudly instead of silently
+  /// producing meaningless dominance results.
+  ///
   /// All Entry score fields are always populated regardless of
   /// the gates — the gates only control whether the fields are
   /// consulted by DoesDominate.
@@ -189,7 +208,8 @@ class LengthHistoryTracker {
                        const GCNRegisterTracker *pressure_tracker,
                        const IlpTracker *ilp_tracker,
                        bool include_pressure_dim,
-                       bool include_ilp_dim);
+                       bool include_ilp_dim,
+                       bool length_max_mode);
 
   /// True iff the bound trackers' current prefix is dominated by
   /// some existing entry in this partition's bucket. Pure read; no
@@ -302,6 +322,9 @@ class LengthHistoryTracker {
   /// Gate for the ILP dimension on dominance. See constructor
   /// comment.
   bool include_ilp_dim_;
+  /// Flip the direction of length-axis dominance (end_cycle and
+  /// per-frontier-node LB). See constructor comment.
+  bool length_max_mode_;
   DenseMap<PartitionKey, SmallVector<Entry, 2>> table_;
   int total_entries_ = 0;
   /// Incremented at every prune event. .current_run is cleared

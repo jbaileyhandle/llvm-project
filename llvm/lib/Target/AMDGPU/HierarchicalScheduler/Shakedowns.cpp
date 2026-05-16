@@ -1961,7 +1961,8 @@ struct LengthHistoryTrackerFixture {
 static LengthHistoryTrackerFixture
 BuildLengthHistoryTrackerFixture(const GCNSubtarget &st,
                                  bool include_pressure_dim = false,
-                                 bool include_ilp_dim = false) {
+                                 bool include_ilp_dim = false,
+                                 bool length_max_mode = false) {
   LengthHistoryTrackerFixture fixture;
   fixture.graph = ScheduleGraph::BuildTestDAG();
   fixture.graph->ValidateAndComputeTopologicalOrder();
@@ -1981,7 +1982,7 @@ BuildLengthHistoryTrackerFixture(const GCNSubtarget &st,
   fixture.length_history_tracker = std::make_unique<LengthHistoryTracker>(
       fixture.scheduled_set_tracker.get(), fixture.length_tracker.get(),
       /*pressure_tracker=*/nullptr, /*ilp_tracker=*/nullptr,
-      include_pressure_dim, include_ilp_dim);
+      include_pressure_dim, include_ilp_dim, length_max_mode);
   return fixture;
 }
 
@@ -2486,6 +2487,115 @@ static void RunLengthHistoryIlpDimShakedown(const GCNSubtarget &st) {
   }
 }
 
+// Length-max-mode dominance. The min-mode shakedowns above (Strict
+// dominator, Pareto trim, Incomparable, etc.) cover the default
+// lower-end_cycle-and-lower-LB-dominates direction. With
+// length_max_mode=true the length axes flip: higher end_cycle and
+// higher frontier LBs dominate. Verify by staging the same query
+// state (after Schedule(a): end_cycle=1, frontier {H=1, C=2, D=3})
+// and four priors:
+//   A. Max-mode, prior strictly higher (end_cycle=5, LBs all higher)
+//      → dominates.
+//   B. Max-mode, prior strictly lower (end_cycle=0, LBs all lower)
+//      → does NOT dominate.
+//   C. Cross-check: the same "prior with higher end_cycle + higher
+//      LBs" entry from (A) is fed into a MIN-mode fixture. Confirms
+//      direction is actually flag-controlled (not a fluke of the
+//      specific values) — in min mode, this same entry should NOT
+//      dominate the query.
+//   D. Max-mode, prior is mixed — higher end_cycle but LOWER LB on
+//      one frontier node (Pareto-incomparable). Neither side wins
+//      on every axis, so it should NOT dominate. Mirrors the min-
+//      mode RunLengthHistoryIncomparableShakedown.
+static void RunLengthHistoryLengthMaxModeShakedown(const GCNSubtarget &st) {
+  auto make_prior_for_query_state = [](const LengthHistoryTrackerFixture &f,
+                                       int end_cycle, int h_lb, int c_lb,
+                                       int d_lb) {
+    LengthHistoryTracker::Entry prior;
+    prior.end_cycle = end_cycle;
+    prior.frontier_lbs = {
+        {f.h->GetTopoIndex(), h_lb},
+        {f.c->GetTopoIndex(), c_lb},
+        {f.d->GetTopoIndex(), d_lb},
+    };
+    return prior;
+  };
+
+  // Case A: max-mode, prior strictly higher on every length axis.
+  // Should dominate.
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/false,
+        /*length_max_mode=*/true);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    fixture.length_history_tracker->InsertEntryForTest(
+        key, make_prior_for_query_state(fixture, /*end_cycle=*/5,
+                                        /*h_lb=*/3, /*c_lb=*/4, /*d_lb=*/5));
+    bool dominated = fixture.length_history_tracker->IsDominated();
+    llvm::outs() << "    A: max-mode, prior strictly higher: dominated="
+                 << (dominated ? "true" : "false") << "  "
+                 << (dominated ? "PASS\n" : "FAIL\n");
+  }
+
+  // Case B: max-mode, prior strictly lower on every length axis.
+  // Should NOT dominate.
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/false,
+        /*length_max_mode=*/true);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    fixture.length_history_tracker->InsertEntryForTest(
+        key, make_prior_for_query_state(fixture, /*end_cycle=*/0,
+                                        /*h_lb=*/0, /*c_lb=*/1, /*d_lb=*/2));
+    bool not_dominated = !fixture.length_history_tracker->IsDominated();
+    llvm::outs() << "    B: max-mode, prior strictly lower: not_dominated="
+                 << (not_dominated ? "true" : "false") << "  "
+                 << (not_dominated ? "PASS\n" : "FAIL\n");
+  }
+
+  // Case C: same prior as (A) (higher end_cycle, higher LBs) under
+  // MIN-mode. Should NOT dominate — confirms the direction flip is
+  // actually flag-controlled.
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/false,
+        /*length_max_mode=*/false);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    fixture.length_history_tracker->InsertEntryForTest(
+        key, make_prior_for_query_state(fixture, /*end_cycle=*/5,
+                                        /*h_lb=*/3, /*c_lb=*/4, /*d_lb=*/5));
+    bool not_dominated = !fixture.length_history_tracker->IsDominated();
+    llvm::outs() << "    C: min-mode, same prior: not_dominated="
+                 << (not_dominated ? "true" : "false") << "  "
+                 << (not_dominated ? "PASS\n" : "FAIL\n");
+  }
+
+  // Case D: max-mode, prior is Pareto-incomparable with query —
+  // higher end_cycle (good in max) but lower H_lb (bad in max).
+  // Should NOT dominate. Mirrors the min-mode
+  // RunLengthHistoryIncomparableShakedown.
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/false,
+        /*length_max_mode=*/true);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    // end_cycle=5 (better than query's 1 in max-mode); H_lb=0
+    // (worse than query's 1 in max-mode). C and D LBs match.
+    // Neither side wins on every axis.
+    fixture.length_history_tracker->InsertEntryForTest(
+        key, make_prior_for_query_state(fixture, /*end_cycle=*/5,
+                                        /*h_lb=*/0, /*c_lb=*/2, /*d_lb=*/3));
+    bool not_dominated = !fixture.length_history_tracker->IsDominated();
+    llvm::outs() << "    D: max-mode, mixed (incomparable): not_dominated="
+                 << (not_dominated ? "true" : "false") << "  "
+                 << (not_dominated ? "PASS\n" : "FAIL\n");
+  }
+}
+
 void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
   llvm::outs() << "  RunLengthHistoryTrackerShakedown:\n";
   RunLengthHistoryEmptyShakedown(st);
@@ -2498,6 +2608,7 @@ void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
   RunLengthHistoryHashCollisionShakedown(st);
   RunLengthHistoryPressureDimShakedown(st);
   RunLengthHistoryIlpDimShakedown(st);
+  RunLengthHistoryLengthMaxModeShakedown(st);
 }
 
 // =============================================================================
@@ -3739,6 +3850,11 @@ void RunScheduleMetricShakedown(ScheduleGraph &graph,
       sc_empty.GetLengthTracker().GetCurrentCycle(),
       sc_full.GetLengthTracker().GetCurrentCycle(),
       /*higher_is_better=*/false);
+  check_metric(
+      ScheduleMetric::kMaximizeScheduleLength, "max_length",
+      sc_empty.GetLengthTracker().GetCurrentCycle(),
+      sc_full.GetLengthTracker().GetCurrentCycle(),
+      /*higher_is_better=*/true);
 
   // --- Part 4: RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget observability ---
   //

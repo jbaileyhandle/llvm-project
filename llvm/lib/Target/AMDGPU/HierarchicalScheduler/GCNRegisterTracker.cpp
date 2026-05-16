@@ -606,6 +606,11 @@ int GCNRegisterTracker::GetMetricScore(ScheduleMetric metric) const {
         "GCNRegisterTracker::GetMetricScore: kMinimizeScheduleLength is "
         "length-side, not pressure-side; length lives on "
         "ScheduleLengthTracker");
+  case ScheduleMetric::kMaximizeScheduleLength:
+    report_fatal_error(
+        "GCNRegisterTracker::GetMetricScore: kMaximizeScheduleLength is "
+        "length-side, not pressure-side; length lives on "
+        "ScheduleLengthTracker");
   }
   llvm_unreachable("Unknown ScheduleMetric");
 }

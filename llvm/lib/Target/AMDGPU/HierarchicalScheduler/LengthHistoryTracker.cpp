@@ -17,13 +17,15 @@ LengthHistoryTracker::LengthHistoryTracker(
     const GCNRegisterTracker *pressure_tracker,
     const IlpTracker *ilp_tracker,
     bool include_pressure_dim,
-    bool include_ilp_dim)
+    bool include_ilp_dim,
+    bool length_max_mode)
     : scheduled_set_tracker_(scheduled_set_tracker),
       length_tracker_(length_tracker),
       pressure_tracker_(pressure_tracker),
       ilp_tracker_(ilp_tracker),
       include_pressure_dim_(include_pressure_dim),
-      include_ilp_dim_(include_ilp_dim) {
+      include_ilp_dim_(include_ilp_dim),
+      length_max_mode_(length_max_mode) {
   if (scheduled_set_tracker_ == nullptr) {
     report_fatal_error(
         "LengthHistoryTracker: scheduled_set_tracker must not be null");
@@ -31,6 +33,15 @@ LengthHistoryTracker::LengthHistoryTracker(
   if (length_tracker_ == nullptr) {
     report_fatal_error(
         "LengthHistoryTracker: length_tracker must not be null");
+  }
+  // Length-max + ILP-dim is unsupported by design (see header).
+  // Trip loudly on a stray configuration rather than silently
+  // producing meaningless dominance results.
+  if (length_max_mode_ && include_ilp_dim_) {
+    report_fatal_error(
+        "LengthHistoryTracker: length_max_mode=true with "
+        "include_ilp_dim=true is unsupported — length-max policies "
+        "do not participate in ILP refinement here");
   }
   // pressure_tracker_ and ilp_tracker_ may be null. When non-null
   // and the corresponding gate is true, IsDominated /
@@ -92,16 +103,36 @@ LengthHistoryTracker::GetFrontierLbsSnapshot() const {
 
 bool LengthHistoryTracker::DoesDominate(const Entry &a,
                                         const Entry &b) const {
-  if (a.end_cycle > b.end_cycle) {
-    return false;
+  // Length axes flip direction based on length_max_mode_. In min
+  // mode, lower end_cycle / lower frontier LB dominates (a beats b
+  // iff a's value is no greater). In max mode, higher end_cycle /
+  // higher frontier LB dominates (a beats b iff a's value is no
+  // smaller). Soundness in max mode: propagating component-wise
+  // no-smaller starting LBs through any postfix ordering yields
+  // no-shorter completions — the symmetric argument to the min-mode
+  // case. See the LengthHistoryTracker constructor comment.
+  if (length_max_mode_) {
+    if (a.end_cycle < b.end_cycle) {
+      return false;
+    }
+  } else {
+    if (a.end_cycle > b.end_cycle) {
+      return false;
+    }
   }
   // Parallel walk over frontier_lbs. Same-partition invariant
   // (caller restricts to one DenseMap bucket) guarantees same
   // length and same node_topo_idx ordering, so we can ignore
   // node_topo_idx and compare only the LBs.
   for (size_t i = 0; i < a.frontier_lbs.size(); ++i) {
-    if (a.frontier_lbs[i].lower_bound > b.frontier_lbs[i].lower_bound) {
-      return false;
+    if (length_max_mode_) {
+      if (a.frontier_lbs[i].lower_bound < b.frontier_lbs[i].lower_bound) {
+        return false;
+      }
+    } else {
+      if (a.frontier_lbs[i].lower_bound > b.frontier_lbs[i].lower_bound) {
+        return false;
+      }
     }
   }
   // ILP dimension (in priority order before pressure: matches

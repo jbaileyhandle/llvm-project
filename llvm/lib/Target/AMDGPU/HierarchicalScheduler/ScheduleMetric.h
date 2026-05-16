@@ -34,6 +34,14 @@ enum class ScheduleMetric {
   /// Current schedule length in cycles.
   kMinimizeScheduleLength,
 
+  /// Current schedule length in cycles, taken in the opposite
+  /// direction: higher is better. Drives a "maximize length"
+  /// search — useful as a control / worst-legal-schedule baseline
+  /// for comparing against the length-min objective. Still subject
+  /// to the occupancy floor (the policy that uses this metric does
+  /// not relax the function-wide register-occupancy constraint).
+  kMaximizeScheduleLength,
+
   /// Length-min with ILP score as the same-length tiebreaker.
   /// Length asc primary; among same-length, higher locked-in
   /// IlpTracker::GetIlpScore wins; among same-length-same-ILP,

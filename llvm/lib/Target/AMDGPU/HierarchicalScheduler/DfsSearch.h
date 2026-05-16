@@ -102,7 +102,8 @@ class DfsSearch {
             &working_schedule_constructor_.GetPressureTracker(),
             &working_schedule_constructor_.GetIlpTracker(),
             Policy::kRefineOccupancyAtSameLength,
-            Policy::kRefineIlpAtSameLength),
+            Policy::kRefineIlpAtSameLength,
+            Policy::kLengthMaxMode),
         // pressure_history_ binds to working_'s scheduled-set
         // tracker for partition keys, and to working_'s pressure
         // tracker for the no-arg score read. The metric matches

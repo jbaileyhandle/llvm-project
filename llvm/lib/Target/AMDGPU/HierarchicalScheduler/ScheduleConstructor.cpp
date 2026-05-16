@@ -383,6 +383,22 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
            other.pressure_tracker_.GetContinuousOccupancyScore();
   }
 
+  case ScheduleMetric::kMaximizeScheduleLength: {
+    int my_length = length_tracker_.GetCurrentCycle();
+    int other_length = other.length_tracker_.GetCurrentCycle();
+    if (my_length != other_length) {
+      return my_length > other_length;
+    }
+    // Same length — tiebreak by continuous register occupancy
+    // score (higher = better). Parallel to the length-min tiebreak:
+    // when the length objective ties, prefer the schedule with
+    // more pressure headroom. The length-max policy does not
+    // relax the bound to allow same-length completions, so under
+    // the default this branch is dead code (same as length-min).
+    return pressure_tracker_.GetContinuousOccupancyScore() >
+           other.pressure_tracker_.GetContinuousOccupancyScore();
+  }
+
   case ScheduleMetric::kMinimizeRegisterOccupancy:
     return pressure_tracker_.GetRegisterOnlyOccupancy() <
            other.pressure_tracker_.GetRegisterOnlyOccupancy();

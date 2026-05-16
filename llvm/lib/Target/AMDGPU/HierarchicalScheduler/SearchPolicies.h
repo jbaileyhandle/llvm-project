@@ -76,6 +76,16 @@ class SearchPolicyBase {
   static constexpr bool kRefineOccupancyAtSameLength = false;
   static constexpr bool kRefineIlpAtSameLength = false;
 
+  // Length-axis direction flag for LengthHistoryTracker. Default
+  // (false) is length-min semantics: dominance uses lower
+  // end_cycle / lower frontier-LB. Override to true on a length-
+  // max policy to flip both length axes — see
+  // LengthHistoryTracker's constructor comment for the soundness
+  // argument. Independent of kUseLengthHistoryPruning (the flag
+  // controls direction, the pruning gate controls whether the
+  // table is consulted at all).
+  static constexpr bool kLengthMaxMode = false;
+
   // History-based-domination pruning opt-in flags. Default false;
   // concrete policies override to true to enable the corresponding
   // history table in DfsSearch. The `if constexpr` gate in
@@ -264,6 +274,85 @@ class DfsMinimizeLengthRefineIlpPolicy
       ScheduleMetric::kMinimizeScheduleLengthRefineIlp;
   static constexpr bool kRefineIlpAtSameLength = true;
 
+  static bool ShouldEndSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor);
+};
+
+// Policy for DFS when the objective is to MAXIMIZE schedule length
+// for a single region, SUBJECT TO not dropping the region's
+// register-only occupancy below the function-wide ceiling. Useful as
+// a control / worst-legal-schedule baseline for comparing against
+// the length-min objective.
+//
+// Inverts the length axis everywhere it appears (IsBetterThan via
+// kMetric, LengthHistoryTracker dominance via kLengthMaxMode), but
+// leaves pressure semantics unchanged: occupancy floor is still
+// enforced, pressure-history pruning would still use "lower peak
+// dominates" if enabled.
+//
+// Differences from DfsMinimizeLengthPolicy:
+//   - kMetric = kMaximizeScheduleLength (longer wins).
+//   - kLengthMaxMode = true (LengthHistoryTracker dominance flips
+//     end_cycle and frontier-LB directions).
+//   - ShouldBoundSearch drops every length-deadline bound check
+//     (length-min prunes via max-acceptable / per-node max-cycle
+//     deadlines; length-max has no comparable upper bound in use)
+//     and keeps only the occupancy floor and history-dominance
+//     pruning. An upper bound on remaining achievable length
+//     exists in principle — e.g. sum of all unscheduled op
+//     latencies — but any tight version is more work than it's
+//     worth here, and a loose version contracts too little during
+//     search to prune meaningfully, so we skip bound pruning
+//     entirely and rely on dominance + timeout.
+//   - ShouldEndSearch returns false unconditionally: we don't
+//     maintain a length upper bound (see above), so there's no
+//     cheap "we hit the optimum" early-exit. Termination is wall-
+//     clock budget only.
+//   - No MakeFormationPolicy override — subgraph formation is
+//     skipped for this policy (the base class default returns an
+//     empty SubgraphFormationPolicy, which makes FormSubgraphs
+//     early-return). Length-max isn't trying to keep consumer-
+//     side pressure local; it benefits from the flat DAG so the
+//     search can spread instructions out arbitrarily.
+//   - FilterAndSortReadyList inherited unchanged from
+//     SearchPolicyBase (default copy-as-is) for now. A length-max-
+//     specific ranking (e.g. prefer ready instructions with the
+//     largest earliest_issue_cycle to force bigger bubbles) is a
+//     future change.
+class DfsMaximizeLengthPolicy : public SearchPolicyBase {
+ public:
+  static constexpr ScheduleMetric kMetric =
+      ScheduleMetric::kMaximizeScheduleLength;
+
+  // See LengthHistoryTracker constructor comment for the soundness
+  // argument and the assertion that prevents pairing this with
+  // include_ilp_dim (length-max never participates in ILP refinement
+  // here, by design).
+  static constexpr bool kLengthMaxMode = true;
+
+  // Enable length history-domination pruning, with the axis
+  // direction flipped via kLengthMaxMode.
+  static constexpr bool kUseLengthHistoryPruning = true;
+
+  // Bound the current subtree if any of:
+  //   (a) the working schedule's register-only occupancy has dropped
+  //       below the function occupancy target — same monotonicity
+  //       argument as length-min: pressure only grows, occupancy
+  //       only drops, so no completion can recover.
+  //   (b) (when kUseLengthHistoryPruning is true) history dominance
+  //       fires under the flipped length-axis direction — see
+  //       LengthHistoryTracker.
+  //
+  // `pressure_history` parameter unused — uniform signature with
+  // other policies.
+  static bool ShouldBoundSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor,
+      LengthHistoryTracker &length_history,
+      PressureHistoryTracker &pressure_history);
+
+  // Always returns false — see class comment for the rationale.
   static bool ShouldEndSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);

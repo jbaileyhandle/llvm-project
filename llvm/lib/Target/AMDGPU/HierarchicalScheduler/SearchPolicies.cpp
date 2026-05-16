@@ -390,6 +390,40 @@ bool DfsMinimizeLengthRefineIlpPolicy::ShouldEndSearch(
   return false;
 }
 
+bool DfsMaximizeLengthPolicy::ShouldBoundSearch(
+    const ScheduleConstructor &schedule_constructor,
+    const ScheduleConstructor & /*best_schedule_constructor*/,
+    LengthHistoryTracker &length_history,
+    PressureHistoryTracker & /*pressure_history*/) {
+  // Occupancy floor: same monotonicity argument as length-min —
+  // pressure only grows, so once register-only occupancy drops
+  // below the function target, no completion can recover.
+  if (!schedule_constructor
+           .RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
+    return true;
+  }
+
+  // Length-axis-flipped dominance pruning. The tracker's
+  // DoesDominate consults length_max_mode_ (set true at
+  // construction for this policy via Policy::kLengthMaxMode) and
+  // flips end_cycle and frontier-LB direction accordingly.
+  if constexpr (kUseLengthHistoryPruning) {
+    if (length_history.IsDominatedElseInsert()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool DfsMaximizeLengthPolicy::ShouldEndSearch(
+    const ScheduleConstructor & /*schedule_constructor*/,
+    const ScheduleConstructor & /*best_schedule_constructor*/) {
+  // No length upper bound is maintained for this policy (see class
+  // comment in the header). Termination is wall-clock budget only —
+  // DfsSearch's per-region timeout check handles that.
+  return false;
+}
+
 void DfsMaximizeOccupancyPolicy::FilterAndSortReadyList(
     const ScheduleConstructor &working,
     SmallVectorImpl<const ScheduleNode *> &out) {
