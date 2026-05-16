@@ -25,13 +25,43 @@ using namespace llvm::hierarchical_scheduler;
 // Construction
 // ============================================================================
 
+GCNRegisterTracker GCNRegisterTracker::NoHistoryClone() const {
+  return GCNRegisterTracker(*this, NoHistoryCloneTag{});
+}
+
+// Init lists below follow the class's member-declaration order to
+// keep clang's -Wreorder-ctor quiet:
+//   node_reg_info_table_, remaining_uses_, live_regs_, cur_pressure_,
+//   ... (max_pressure_, undo_stack_, pressure_history_ default), ...,
+//   track_pressure_history_, mf_, st_, mfi_, mri_,
+//   continuous_score_tables_.
+GCNRegisterTracker::GCNRegisterTracker(const GCNRegisterTracker &source,
+                                       NoHistoryCloneTag)
+    : node_reg_info_table_(source.node_reg_info_table_),
+      remaining_uses_(source.remaining_uses_),
+      live_regs_(source.live_regs_),
+      cur_pressure_(source.cur_pressure_),
+      // max_pressure_, undo_stack_, pressure_history_ intentionally
+      // default-constructed (no copy from source). BFS-DP doesn't
+      // read max_pressure_ on per-LatticeNode clones, never
+      // Unschedules them, and never opts into history. Same for
+      // test_mode_ / test_vgpr_deltas_.
+      track_pressure_history_(false),
+      mf_(source.mf_),
+      st_(source.st_),
+      mfi_(source.mfi_),
+      mri_(source.mri_),
+      continuous_score_tables_(source.continuous_score_tables_) {}
+
 GCNRegisterTracker::GCNRegisterTracker(const ScheduleGraph &graph,
-                                       const MachineFunction &mf)
-    : mf_(&mf),
+                                       const MachineFunction &mf,
+                                       bool track_pressure_history)
+    : node_reg_info_table_(&graph.GetNodeRegInfoTable()),
+      track_pressure_history_(track_pressure_history),
+      mf_(&mf),
       st_(&mf.getSubtarget<GCNSubtarget>()),
       mfi_(mf.getInfo<SIMachineFunctionInfo>()),
       mri_(&mf.getRegInfo()),
-      node_reg_info_table_(&graph.GetNodeRegInfoTable()),
       continuous_score_tables_(
           &GetOrComputeContinuousOccupancyScoreTables(*st_)) {
   CheckForFunctionCalls(mf);
@@ -103,16 +133,17 @@ void GCNRegisterTracker::ProcessUses(const NodeRegInfo &info,
   }
 }
 
-void GCNRegisterTracker::Schedule(const ScheduleNode *node) {
+GCNRegPressure GCNRegisterTracker::Schedule(const ScheduleNode *node) {
   if (test_mode_) {
     TestSchedule(node);
-    return;
+    // Test-mode pressure has no transient bump (cur_pressure_ is
+    // the delta-driven snapshot post-step).
+    return cur_pressure_;
   }
   // Subgraph proxies have no register effect (synthetic node);
-  // skip the pressure-update / undo-step path for them. We still
-  // push a pressure_history_ entry at the end (the unchanged
-  // cur_pressure_) so the vector's length tracks every Schedule
-  // call, real or proxy.
+  // skip the pressure-update / undo-step path for them. The
+  // returned edge peak is just the unchanged cur_pressure_.
+  GCNRegPressure edge_peak;
   if (node->IsSchedulingUnit()) {
     ScheduleStep step;
     step.saved_max = max_pressure_;
@@ -124,23 +155,35 @@ void GCNRegisterTracker::Schedule(const ScheduleNode *node) {
     if constexpr (kModel == PressureModel::kAMDGPU) {
       // Defs first, peak, then dying uses.
       ProcessDefs(info, step);
+      // cur_pressure_ now holds the transient peak: old live + new
+      // defs, before any uses die. This is the edge_peak we report.
+      edge_peak = cur_pressure_;
       max_pressure_ = max(max_pressure_, cur_pressure_);
       ProcessUses(info, step);
     } else {
-      // Dying uses first, then defs, then peak.
+      // Dying uses first, then defs, then peak. In this model
+      // the peak coincides with the post-Schedule cur_pressure_.
       ProcessUses(info, step);
       ProcessDefs(info, step);
+      edge_peak = cur_pressure_;
       max_pressure_ = max(max_pressure_, cur_pressure_);
     }
 
     undo_stack_.push_back(std::move(step));
+  } else {
+    edge_peak = cur_pressure_;
   }
 
   // After any cur_pressure_ update (real path) or no-op (proxy
   // path), record the post-step pressure. "Pressure after step k"
   // semantics; lets PressureHistoryTracker derive postfix peaks
-  // via suffix-max.
-  pressure_history_.push_back(cur_pressure_);
+  // via suffix-max. Gated on opt-in: most callers don't read
+  // GetPressureHistory and the push/pop is pure overhead for them.
+  if (track_pressure_history_) {
+    pressure_history_.push_back(cur_pressure_);
+  }
+
+  return edge_peak;
 }
 
 void GCNRegisterTracker::UndoDefs(const ScheduleStep &step) {
@@ -202,10 +245,12 @@ void GCNRegisterTracker::Unschedule(const ScheduleNode *node) {
     return;
   }
   // Symmetric with Schedule: proxies were no-ops, so undo is also
-  // a no-op for cur_pressure_. Pop pressure_history_ unconditionally
-  // first — every Schedule call (proxy or real) pushed an entry, so
-  // every Unschedule pops one.
-  pressure_history_.pop_back();
+  // a no-op for cur_pressure_. Pop pressure_history_ first — every
+  // Schedule call (proxy or real) pushed an entry under the opt-in,
+  // so every Unschedule pops one under the same opt-in.
+  if (track_pressure_history_) {
+    pressure_history_.pop_back();
+  }
   if (!node->IsSchedulingUnit()) {
     return;
   }
@@ -269,11 +314,15 @@ void GCNRegisterTracker::TestSchedule(const ScheduleNode *node) {
   cur_pressure_ = GCNRegPressure(static_cast<unsigned>(new_vgpr));
   max_pressure_ = max(max_pressure_, cur_pressure_);
   undo_stack_.push_back(std::move(step));
-  pressure_history_.push_back(cur_pressure_);
+  if (track_pressure_history_) {
+    pressure_history_.push_back(cur_pressure_);
+  }
 }
 
 void GCNRegisterTracker::TestUnschedule(const ScheduleNode *node) {
-  pressure_history_.pop_back();
+  if (track_pressure_history_) {
+    pressure_history_.pop_back();
+  }
   if (undo_stack_.empty()) {
     report_fatal_error("GCNRegisterTracker test mode: TestUnschedule without "
                        "matching TestSchedule");

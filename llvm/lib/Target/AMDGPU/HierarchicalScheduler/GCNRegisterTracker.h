@@ -92,17 +92,61 @@ public:
   ///
   /// MF provides MachineRegisterInfo for pressure increments.
   ///
+  /// `track_pressure_history` opts the tracker into recording a
+  /// per-Schedule pressure snapshot in `pressure_history_`. Default
+  /// off because the only production consumer is the pressure
+  /// history-domination machinery — most callers don't read it,
+  /// and the per-Schedule push/pop is pure overhead for them.
+  /// PressureHistoryTracker callers (and shakedowns that read
+  /// GetPressureHistory) must pass true.
+  ///
   /// Warns if the MachineFunction contains non-inlined function
   /// calls.
   GCNRegisterTracker(const ScheduleGraph &graph,
-                     const MachineFunction &mf);
+                     const MachineFunction &mf,
+                     bool track_pressure_history = false);
 
   /// Update pressure after scheduling a node. Order depends on the
   /// pressure model (see PressureModel). Pushes an undo record.
-  void Schedule(const ScheduleNode *node);
+  ///
+  /// Returns the edge peak: the per-Schedule transient pressure
+  /// peak, captured at the moment all defs have landed but before
+  /// any dying uses have killed (kAMDGPU) — or after defs have
+  /// landed in kUsesFirst, where it coincides with cur_pressure_
+  /// at end-of-Schedule. For proxies and test-mode steps, the
+  /// returned value is just the post-Schedule cur_pressure_ (no
+  /// transient bump). BFS-DP reads this to compute
+  /// edge_peak(P, x) directly.
+  GCNRegPressure Schedule(const ScheduleNode *node);
 
   /// Reverse the last Schedule() call.
   void Unschedule(const ScheduleNode *node);
+
+  /// Return a fresh tracker with cur_pressure_, live_regs_, and
+  /// remaining_uses_ copied from `this`. Does NOT copy
+  /// undo_stack_, pressure_history_, or max_pressure_: the clone
+  /// starts with both vectors empty and max_pressure_ default-
+  /// constructed (zero), intended as a "frozen" starting state
+  /// that future Schedule() calls can extend. test_mode_ /
+  /// test_vgpr_deltas_ are NOT copied — clones come up in
+  /// production mode.
+  ///
+  /// node_reg_info_table_ and the MF/subtarget pointers are
+  /// pointer-copied (shared, not duplicated). The clone borrows
+  /// the original's graph; the graph must outlive both.
+  ///
+  /// track_pressure_history_ on the clone is forced to false —
+  /// the clone has no historical context for the parent's history,
+  /// and BFS-DP (the planned consumer) doesn't use the history
+  /// machinery. Construct a fresh tracker directly if you need
+  /// history on a derived state.
+  ///
+  /// Intended for BFS-DP: each LatticeNode owns a tracker snapshot
+  /// captured via NoHistoryClone() from its parent's post-Schedule
+  /// state. The light footprint (no undo stack, no history vector,
+  /// no max_pressure_ tracking on the clone) keeps per-LatticeNode
+  /// memory bounded by live_regs_ + remaining_uses_ + cur_pressure_.
+  GCNRegisterTracker NoHistoryClone() const;
 
   const GCNRegPressure &GetCurrentPressure() const { return cur_pressure_; }
   const GCNRegPressure &GetPeakPressure() const { return max_pressure_; }
@@ -121,7 +165,18 @@ public:
   /// duplicate-valued proxy entries reduces to suffix-max over
   /// real-instruction pressures, so proxy entries are absorbed
   /// without affecting peaks.
+  ///
+  /// Fatal error if the tracker was constructed with
+  /// `track_pressure_history = false` (the default) — calling this
+  /// method is then a caller bug. Construct with the flag true to
+  /// opt in.
   ArrayRef<GCNRegPressure> GetPressureHistory() const {
+    if (!track_pressure_history_) {
+      report_fatal_error(
+          "GCNRegisterTracker::GetPressureHistory called on a "
+          "tracker constructed with track_pressure_history=false. "
+          "Construct with track_pressure_history=true to enable.");
+    }
     return pressure_history_;
   }
 
@@ -390,8 +445,13 @@ private:
   GCNRegPressure max_pressure_;
   std::vector<ScheduleStep> undo_stack_;
 
-  /// See GetPressureHistory.
+  /// See GetPressureHistory. Populated only when
+  /// track_pressure_history_ is true (Schedule push / Unschedule
+  /// pop are gated on the flag).
   std::vector<GCNRegPressure> pressure_history_;
+
+  /// Opt-in flag for pressure_history_. Default false. See ctor.
+  bool track_pressure_history_;
 
   // --- Test-only state (see EnableTestModeForTest) ---
   bool test_mode_ = false;
@@ -443,6 +503,21 @@ public:
   static void CheckForFunctionCalls(const MachineFunction &mf);
 
 private:
+
+  /// Tag type for the NoHistoryClone-private constructor below.
+  /// Distinguishes the clone path from the public ctor without
+  /// adding a public-facing overload.
+  struct NoHistoryCloneTag {};
+
+  /// Private constructor used by NoHistoryClone. Member-init-lists
+  /// only the fields the clone keeps (live_regs_, remaining_uses_,
+  /// cur_pressure_, and pointer-typed bindings). Leaves
+  /// max_pressure_, undo_stack_, pressure_history_, and test-mode
+  /// state default-constructed — avoiding the heap-allocating
+  /// copies the default copy constructor would do for the vector
+  /// fields that the clone won't use.
+  GCNRegisterTracker(const GCNRegisterTracker &source,
+                     NoHistoryCloneTag);
 
   // --- Schedule helpers ---
 

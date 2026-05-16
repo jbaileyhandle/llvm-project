@@ -3165,7 +3165,9 @@ void RunGCNRegisterTrackerShakedown(ScheduleGraph &graph,
                                     const LiveIntervals &lis) {
   SmallVector<ScheduleNode *> nodes(graph.GetTopoOrder().begin(),
                                     graph.GetTopoOrder().end());
-  GCNRegisterTracker tracker(graph, mf);
+  // Opt into pressure history because this shakedown reads
+  // GetPressureHistory() to cross-check against expected_history.
+  GCNRegisterTracker tracker(graph, mf, /*track_pressure_history=*/true);
 
   // --- Forward pass: schedule in topo order ---
   // Capture cur_pressure_ after each Schedule call so we can
@@ -3225,6 +3227,90 @@ void RunGCNRegisterTrackerShakedown(ScheduleGraph &graph,
   if (!pass) {
     report_fatal_error("GCNRegisterTracker round-trip test failed: "
                        "state did not return to zero after full unschedule");
+  }
+}
+
+// Tests GCNRegisterTracker::NoHistoryClone:
+//   1. Build a parent tracker with track_pressure_history=true,
+//      schedule a prefix of nodes so it has non-trivial
+//      cur_pressure_ / live_regs_ / max_pressure_.
+//   2. Clone via NoHistoryClone.
+//   3. Verify clone.GetCurrentPressure() == parent.GetCurrentPressure()
+//      (cur_pressure_ copied).
+//   4. Verify clone.GetLiveRegs() == parent.GetLiveRegs() (live set
+//      copied — same size + same {reg, mask} entries).
+//   5. Verify clone.GetPeakPressure() == default (max_pressure_
+//      reset, NOT carried from parent — design choice per the
+//      NoHistoryClone header comment).
+//
+// No assumptions about what scheduling does to pressure; the
+// checks are relative ("matches parent at clone time" / "reset to
+// default"). Deep-copy / non-aliasing follows from the field
+// types being value types (DenseMap, std::vector, GCNRegPressure),
+// not pointers — the compiler-generated init copies handle it.
+void RunNoHistoryCloneShakedown(ScheduleGraph &graph,
+                                const MachineFunction &mf) {
+  llvm::outs() << "  NoHistoryClone shakedown:\n";
+
+  // track_pressure_history=true on the parent so we can also
+  // verify the clone resets the opt-in flag (via the fact that
+  // pressure_history_ is empty on the clone — implicit; we don't
+  // GetPressureHistory on the clone because that would fatal-error
+  // on the reset flag and we can't catch fatal-errors from here).
+  GCNRegisterTracker parent(graph, mf, /*track_pressure_history=*/true);
+
+  // Schedule the first three nodes in topo order so parent has
+  // non-trivial state. Picks 3 as a small number; the exact
+  // contents don't matter for the clone-correctness checks.
+  ArrayRef<ScheduleNode *> topo = graph.GetTopoOrder();
+  int scheduled_count = 0;
+  for (ScheduleNode *node : topo) {
+    parent.Schedule(node);
+    ++scheduled_count;
+    if (scheduled_count >= 3) {
+      break;
+    }
+  }
+
+  GCNRegPressure parent_cur = parent.GetCurrentPressure();
+  GCNRegisterTracker::LiveRegSet parent_live = parent.GetLiveRegs();
+
+  GCNRegisterTracker clone = parent.NoHistoryClone();
+
+  // Check 1: cur_pressure_ copied.
+  bool cur_match = clone.GetCurrentPressure() == parent_cur;
+  llvm::outs() << "    cur_pressure copied: "
+               << (cur_match ? "PASS" : "FAIL") << "\n";
+  if (!cur_match) {
+    report_fatal_error("NoHistoryClone: cur_pressure_ mismatch");
+  }
+
+  // Check 2: live_regs_ copied.
+  const GCNRegisterTracker::LiveRegSet &clone_live = clone.GetLiveRegs();
+  bool live_size_match = clone_live.size() == parent_live.size();
+  bool live_entries_match = live_size_match;
+  if (live_entries_match) {
+    for (const auto &[reg, mask] : parent_live) {
+      auto it = clone_live.find(reg);
+      if (it == clone_live.end() || it->second != mask) {
+        live_entries_match = false;
+        break;
+      }
+    }
+  }
+  llvm::outs() << "    live_regs copied (size=" << parent_live.size()
+               << "): "
+               << (live_entries_match ? "PASS" : "FAIL") << "\n";
+  if (!live_entries_match) {
+    report_fatal_error("NoHistoryClone: live_regs_ mismatch");
+  }
+
+  // Check 3: max_pressure_ reset.
+  bool max_reset = clone.GetPeakPressure() == GCNRegPressure();
+  llvm::outs() << "    max_pressure reset to default: "
+               << (max_reset ? "PASS" : "FAIL") << "\n";
+  if (!max_reset) {
+    report_fatal_error("NoHistoryClone: max_pressure_ not reset");
   }
 }
 
@@ -3941,6 +4027,7 @@ void RunRegionShakedowns(ScheduleGraph &graph,
 
   RunRegisterTrackerShakedown(graph, mf);
   RunGCNRegisterTrackerShakedown(graph, mf, lis);
+  RunNoHistoryCloneShakedown(graph, mf);
 
   SmallVector<ScheduleNode *> topo_nodes(graph.GetTopoOrder().begin(),
                                          graph.GetTopoOrder().end());
