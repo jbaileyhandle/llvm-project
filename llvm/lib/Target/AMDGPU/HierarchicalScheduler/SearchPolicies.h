@@ -341,6 +341,16 @@ class DfsMaximizeLengthPolicy : public SearchPolicyBase {
   // direction flipped via kLengthMaxMode.
   static constexpr bool kUseLengthHistoryPruning = true;
 
+  // Shorter per-region budget than the SearchPolicyBase default
+  // (10s). Length-max is a control / baseline experiment, not a
+  // production-quality pass — capping it tightly keeps compile
+  // time reasonable when this policy is exercised across many
+  // regions. The big-region case (e.g., hip_stencil region[0]
+  // 639 instrs) hits the budget at 10s and produces a
+  // 721 → 3951 stretch; 2s typically still produces useful
+  // stretch on that region while costing 5x less wall time.
+  static constexpr int kTimeoutMsPerRegion = 2000;
+
   // Bound the current subtree if any of:
   //   (a) the working schedule's register-only occupancy has dropped
   //       below the function occupancy target — same monotonicity
