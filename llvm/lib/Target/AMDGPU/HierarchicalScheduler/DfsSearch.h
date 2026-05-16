@@ -186,7 +186,7 @@ class DfsSearch {
   // exit.
   //
   // Designed for outer loops that walk a target value over
-  // multiple Run() calls (see ScheduleRegionForMinimumLength).
+  // multiple Run() calls (see ScheduleRegionForLengthPass).
   void ResetForReuse(int requested_target_length) {
     working_schedule_constructor_.Reset();
     length_history_.Reset();

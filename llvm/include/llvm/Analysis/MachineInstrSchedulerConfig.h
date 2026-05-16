@@ -39,6 +39,14 @@ class MachineInstrSchedulerConfig {
             // DfsMinimizeLengthPolicy (kNone).
             LengthMinRefineIlp,
             LengthMinRefineOccupancy,
+            // HierarchicalScheduler: replace the length-min pass
+            // with a length-MAX pass (DfsMaximizeLengthPolicy).
+            // Useful as a control / worst-legal-schedule baseline
+            // for comparing against the length-min objective. Still
+            // subject to the occupancy floor enforced by the
+            // earlier occupancy pass. Mutually exclusive with the
+            // LengthMin* refine options.
+            MaximizeLength,
             // Generic: swap the AMDGPU subtarget's MCSchedModel to
             // jbaile's custom gfx906 model. Affects every consumer of
             // sched-model latency (LLVM's MachineScheduler,
@@ -183,6 +191,7 @@ class MachineInstrSchedulerConfig {
             {SchedulerOption::RunShakedowns, "RunShakedowns"},
             {SchedulerOption::LengthMinRefineIlp, "LengthMinRefineIlp"},
             {SchedulerOption::LengthMinRefineOccupancy, "LengthMinRefineOccupancy"},
+            {SchedulerOption::MaximizeLength, "MaximizeLength"},
             {SchedulerOption::UseJbaileCustomTimingModel, "UseJbaileCustomTimingModel"},
             {SchedulerOption::SkipSubgraphFormation, "SkipSubgraphFormation"},
             {SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy,

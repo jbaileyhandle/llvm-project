@@ -459,9 +459,70 @@ int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
   return achieved_all_factors_occupancy;
 }
 
-// Outer loop of the length-minimization pass. See header.
-void ScheduleDAGHierarchicalScheduler::RunMinimizeLengthPass() {
-  llvm::outs() << "\n=== Pass: MinimizeLength === (" << regions_.size()
+// Runtime selector for which length-pass policy to use, resolved from
+// misched.txt at the start of each region in ScheduleRegionForLengthPass,
+// and once at the top of RunLengthPass for the banner / direction-aware
+// stats. Four choices:
+//   kMinimize:                pure length-min, no refinement (base
+//                             policy). Default when no option is set.
+//   kMinimizeRefineOccupancy: after length floor, continue exploring
+//                             same-length completions to refine
+//                             occupancy. Enabled by
+//                             SchedulerOption::LengthMinRefineOccupancy.
+//   kMinimizeRefineIlp:       after length floor, continue exploring
+//                             same-length completions to refine ILP.
+//                             Enabled by
+//                             SchedulerOption::LengthMinRefineIlp.
+//   kMaximize:                run a length-MAX search instead (control
+//                             / worst-legal-schedule baseline). Enabled
+//                             by SchedulerOption::MaximizeLength.
+// The four options are mutually exclusive at runtime — if more than
+// one is set, the resolver fatals.
+enum class LengthPolicyChoice {
+  kMinimize,
+  kMinimizeRefineOccupancy,
+  kMinimizeRefineIlp,
+  kMaximize,
+};
+
+static LengthPolicyChoice ResolveLengthPolicyChoice() {
+  const auto &cfg = MachineInstrSchedulerConfig::GetConfig();
+  bool ilp = cfg.HasSchedulingOption(
+      MachineInstrSchedulerConfig::SchedulerOption::LengthMinRefineIlp);
+  bool occ = cfg.HasSchedulingOption(
+      MachineInstrSchedulerConfig::SchedulerOption::LengthMinRefineOccupancy);
+  bool maxlen = cfg.HasSchedulingOption(
+      MachineInstrSchedulerConfig::SchedulerOption::MaximizeLength);
+  int count = (ilp ? 1 : 0) + (occ ? 1 : 0) + (maxlen ? 1 : 0);
+  if (count > 1) {
+    report_fatal_error(
+        "HierarchicalScheduler: LengthMinRefineIlp, "
+        "LengthMinRefineOccupancy, and MaximizeLength are mutually "
+        "exclusive");
+  }
+  if (ilp) {
+    return LengthPolicyChoice::kMinimizeRefineIlp;
+  }
+  if (occ) {
+    return LengthPolicyChoice::kMinimizeRefineOccupancy;
+  }
+  if (maxlen) {
+    return LengthPolicyChoice::kMaximize;
+  }
+  return LengthPolicyChoice::kMinimize;
+}
+
+// Outer loop of the length pass. See header.
+void ScheduleDAGHierarchicalScheduler::RunLengthPass() {
+  // Resolve direction once at the top. The per-region dispatch
+  // resolves it again from misched.txt for its own switch — that's
+  // a redundant cheap config read; both calls produce the same
+  // value because the config is static for the run.
+  const bool is_max = ResolveLengthPolicyChoice() ==
+                      LengthPolicyChoice::kMaximize;
+  StringRef pass_name = is_max ? "MaximizeLength" : "MinimizeLength";
+
+  llvm::outs() << "\n=== Pass: " << pass_name << " === (" << regions_.size()
                << " regions)\n";
 
   int regions_improved = 0;
@@ -474,14 +535,22 @@ void ScheduleDAGHierarchicalScheduler::RunMinimizeLengthPass() {
     // phase blocks below nest under it visually.
     llvm::outs() << "\n\tregion[" << i
                  << "]: instrs=" << regions_[i].GetNumInstrs() << "\n";
-    LengthRegionStats stats = ScheduleRegionForMinimumLength(regions_[i]);
+    LengthRegionStats stats = ScheduleRegionForLengthPass(regions_[i]);
 
-    if (stats.output_length < stats.input_length) {
+    // Direction-aware "improved": min wants shorter, max wants longer.
+    bool improved = is_max
+                        ? (stats.output_length > stats.input_length)
+                        : (stats.output_length < stats.input_length);
+    if (improved) {
       ++regions_improved;
     } else {
       ++regions_unchanged;
     }
-    if (stats.output_length == stats.floor) {
+    // at_floor is a length-MIN concept (the graph length floor is a
+    // lower bound; hitting it means the schedule is provably optimal).
+    // Length-MAX has no comparable bound in use here, so skip the
+    // counter in max mode.
+    if (!is_max && stats.output_length == stats.floor) {
       ++regions_at_floor;
     }
     if (stats.timed_out) {
@@ -491,9 +560,11 @@ void ScheduleDAGHierarchicalScheduler::RunMinimizeLengthPass() {
 
   llvm::outs() << "\n\tPASS RESULT: regions=" << regions_.size()
                << " improved=" << regions_improved
-               << " unchanged=" << regions_unchanged
-               << " at_floor=" << regions_at_floor
-               << " timed_out=" << regions_timed_out << "\n";
+               << " unchanged=" << regions_unchanged;
+  if (!is_max) {
+    llvm::outs() << " at_floor=" << regions_at_floor;
+  }
+  llvm::outs() << " timed_out=" << regions_timed_out << "\n";
 }
 
 // Per-iteration log entry, buffered during the outer loop so we
@@ -581,11 +652,12 @@ static void PrintIterativePhaseSummary(StringRef indent, int iterations_run,
 }
 
 // Compile-time gate for the target-feasibility outer loop in the
-// length pass. When false (default), ScheduleRegionForMinimumLength
-// makes a single search.Run() with the policy's INT_MAX target —
-// the plain-min-search path. When true, the search is driven by
-// an outer loop walking target from the static graph floor up to
-// input_length-1, calling search.Run() at each step.
+// length-min pass (does not apply to length-max — that path has its
+// own single-phase worker). When false, the per-region length-min
+// worker makes a single search.Run() with the policy's INT_MAX
+// target — the plain-min-search path. When true, the search is
+// driven by an outer loop walking target from the static graph
+// floor up to input_length-1, calling search.Run() at each step.
 //
 // The iteration mode is off until the per-instruction earliest /
 // latest window machinery is wired into the inner search. Without
@@ -597,41 +669,6 @@ static void PrintIterativePhaseSummary(StringRef indent, int iterations_run,
 // inside the inner search and a budget-exhausted fallback to
 // plain search.
 constexpr bool kUseTargetFeasibilityIteration = true;
-
-// Runtime selector for which length-min policy to use, resolved from
-// misched.txt at the start of each region in ScheduleRegionForMinimumLength.
-// Three choices:
-//   kNone:            pure length-min, no refinement (base policy).
-//                     Default when no option is set.
-//   kRefineOccupancy: after length floor, continue exploring same-
-//                     length completions to refine occupancy.
-//                     Enabled by SchedulerOption::LengthMinRefineOccupancy.
-//   kRefineIlp:       after length floor, continue exploring same-
-//                     length completions to refine ILP.
-//                     Enabled by SchedulerOption::LengthMinRefineIlp.
-// The two options are mutually exclusive at runtime — if both are set,
-// the resolver fatals.
-enum class LengthMinPolicyChoice { kNone, kRefineOccupancy, kRefineIlp };
-
-static LengthMinPolicyChoice ResolveLengthMinPolicyChoice() {
-  const auto &cfg = MachineInstrSchedulerConfig::GetConfig();
-  bool ilp = cfg.HasSchedulingOption(
-      MachineInstrSchedulerConfig::SchedulerOption::LengthMinRefineIlp);
-  bool occ = cfg.HasSchedulingOption(
-      MachineInstrSchedulerConfig::SchedulerOption::LengthMinRefineOccupancy);
-  if (ilp && occ) {
-    report_fatal_error(
-        "HierarchicalScheduler: LengthMinRefineIlp and "
-        "LengthMinRefineOccupancy are mutually exclusive");
-  }
-  if (ilp) {
-    return LengthMinPolicyChoice::kRefineIlp;
-  }
-  if (occ) {
-    return LengthMinPolicyChoice::kRefineOccupancy;
-  }
-  return LengthMinPolicyChoice::kNone;
-}
 
 // Phase 1 helper: target-feasibility iteration. Walks target
 // length from the static graph floor up to input_length-1 on a
@@ -655,10 +692,11 @@ static void RunIterativeLengthMinPhase(
   const int input_length =
       input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
 
-  // form_subgraphs=false: the orchestrator (ScheduleRegionForMinimumLength)
-  // ran formation once for the whole region before either phase
-  // started. Re-running here would treat the existing subgraph
-  // proxies as nested-subgraph candidates and fatal.
+  // form_subgraphs=false: the orchestrator
+  // (RunMinimizeLengthForRegionWithPolicy) ran formation once for
+  // the whole region before either phase started. Re-running here
+  // would treat the existing subgraph proxies as nested-subgraph
+  // candidates and fatal.
   DfsSearch<Policy> iter_search(graph, st, mf, lis,
                                 /*form_subgraphs=*/false);
 
@@ -765,12 +803,13 @@ static void RunPlainLengthMinPhase(
 }
 
 // Per-region per-policy worker. Templated on the length-min policy
-// so we can instantiate one copy per LengthMinPolicyChoice and
-// dispatch at runtime from ScheduleRegionForMinimumLength. Runs DFS
-// in two phases — gated target-feasibility iteration, then always-on
-// plain min-search — and writes the chosen schedule into
+// so we can instantiate one copy per length-min LengthPolicyChoice
+// variant and dispatch at runtime from ScheduleRegionForLengthPass.
+// Runs DFS in two phases — gated target-feasibility iteration, then
+// always-on plain min-search — and writes the chosen schedule into
 // `best_schedule_constructor`. `any_timed_out` aggregates the
-// per-region timeout from either phase.
+// per-region timeout from either phase. The length-max path uses a
+// dedicated worker (RunMaximizeLengthForRegion) — not this one.
 template <typename Policy>
 static void RunMinimizeLengthForRegionWithPolicy(
     ScheduleGraph &graph, const GCNSubtarget &st,
@@ -806,16 +845,71 @@ static void RunMinimizeLengthForRegionWithPolicy(
       best_schedule_constructor, any_timed_out);
 }
 
-// Per-region worker. Resolves the length-min policy from misched.txt
-// at the top of each region and dispatches to the corresponding
-// template instantiation of RunMinimizeLengthForRegionWithPolicy.
-// Output is no worse than the region's current MF order (each phase's
-// DfsSearch seeds best with the input) and no worse than plain alone
-// (the plain phase always runs with a fresh per-region budget).
-// Returns per-region stats for the driver to aggregate into the
-// PASS RESULT line.
+// Per-region worker for the length-MAX policy. Single-phase: no
+// target-feasibility iteration (the iteration concept is length-min-
+// specific — walking a target length up from the floor toward the
+// input). Length-max just runs a plain DFS that tries to find a
+// LONGER schedule than the input. Termination is wall-clock budget
+// only (ShouldEndSearch is unconditionally false for length-max).
+//
+// Formation gating mirrors RunMinimizeLengthForRegionWithPolicy.
+// DfsMaximizeLengthPolicy::MakeFormationPolicy returns the empty
+// SubgraphFormationPolicy, so FormSubgraphs early-returns on an
+// empty pipeline — meaning formation is effectively skipped for
+// this policy regardless of the SkipSubgraphFormation option. The
+// gate is still consulted for symmetry / future flexibility.
+static void RunMaximizeLengthForRegion(
+    ScheduleGraph &graph, const GCNSubtarget &st,
+    const MachineFunction &mf, const LiveIntervals &lis,
+    const ScheduleConstructor &input_schedule_constructor,
+    ScheduleConstructor &best_schedule_constructor,
+    bool &any_timed_out) {
+  if (!ShouldSkipSubgraphFormation()) {
+    FormSubgraphs(graph, DfsMaximizeLengthPolicy::MakeFormationPolicy());
+  }
+
+  PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
+
+  // form_subgraphs=false: see comment in RunIterativeLengthMinPhase
+  // — formation, if any, is a once-per-region mutation done above.
+  DfsSearch<DfsMaximizeLengthPolicy> plain_search(graph, st, mf, lis,
+                                                  /*form_subgraphs=*/false);
+  // Don't call ResetForReuse — the default requested_target_length_
+  // (INT_MAX) is the right value for length-max (no upper bound on
+  // achievable length, beyond what dominance + timeout enforce).
+  // RecomputeWorkingMaxScheduleCycles will still set a max-acceptable
+  // value on the working length tracker each Recurse, but length-
+  // max's policy hooks don't consult it.
+  ScheduleConstructor plain_result = plain_search.Run();
+  if (plain_result.IsBetterThan(best_schedule_constructor,
+                                DfsMaximizeLengthPolicy::kMetric)) {
+    best_schedule_constructor = plain_result;
+  }
+
+  bool changed = input_schedule_constructor.GetScheduleOrder() !=
+                 best_schedule_constructor.GetScheduleOrder();
+
+  // Reuse the plain_search label so downstream tools can rely on a
+  // stable section name across policies; the per-region heading
+  // already disambiguates which policy ran.
+  llvm::outs() << "\t\tplain_search:\n";
+  PrintPostScheduleInfo(graph, best_schedule_constructor, plain_search, st,
+                        changed, "\t\t\t");
+
+  if (plain_search.RegionTimedOut()) {
+    any_timed_out = true;
+  }
+}
+
+// Per-region worker. Resolves the length-pass policy from misched.txt
+// at the top of each region and dispatches accordingly — to one of
+// the templated length-min instantiations, or to the dedicated
+// length-MAX worker. Output is no worse than the region's current MF
+// order (each path's DfsSearch seeds best with the input). Returns
+// per-region stats for the driver to aggregate into the PASS RESULT
+// line.
 ScheduleDAGHierarchicalScheduler::LengthRegionStats
-ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
+ScheduleDAGHierarchicalScheduler::ScheduleRegionForLengthPass(
     RegionInfo &region) {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
@@ -829,23 +923,28 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMinimumLength(
         input_schedule_constructor;
     bool any_timed_out = false;
 
-    switch (ResolveLengthMinPolicyChoice()) {
-    case LengthMinPolicyChoice::kNone:
+    switch (ResolveLengthPolicyChoice()) {
+    case LengthPolicyChoice::kMinimize:
       RunMinimizeLengthForRegionWithPolicy<DfsMinimizeLengthPolicy>(
           graph, st, MF, *LIS, input_schedule_constructor,
           best_schedule_constructor, any_timed_out);
       break;
-    case LengthMinPolicyChoice::kRefineIlp:
+    case LengthPolicyChoice::kMinimizeRefineIlp:
       RunMinimizeLengthForRegionWithPolicy<
           DfsMinimizeLengthRefineIlpPolicy>(
           graph, st, MF, *LIS, input_schedule_constructor,
           best_schedule_constructor, any_timed_out);
       break;
-    case LengthMinPolicyChoice::kRefineOccupancy:
+    case LengthPolicyChoice::kMinimizeRefineOccupancy:
       RunMinimizeLengthForRegionWithPolicy<
           DfsMinimizeLengthRefineOccupancyPolicy>(
           graph, st, MF, *LIS, input_schedule_constructor,
           best_schedule_constructor, any_timed_out);
+      break;
+    case LengthPolicyChoice::kMaximize:
+      RunMaximizeLengthForRegion(graph, st, MF, *LIS,
+                                 input_schedule_constructor,
+                                 best_schedule_constructor, any_timed_out);
       break;
     }
 
@@ -878,7 +977,7 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   }
 
   RunMaximizeOccupancyPass();
-  RunMinimizeLengthPass();
+  RunLengthPass();
 }
 
 // Set up ScheduleDAGMILive state for the given region. Calls startBlock and

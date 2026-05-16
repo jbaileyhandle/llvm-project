@@ -109,17 +109,19 @@ public:
   // all-factors occupancy (i.e., no improvement).
   int ScheduleRegionForMaximumOccupancy(RegionInfo &region);
 
-  // Outer loop of the length-minimization pass. Iterates every region
-  // and calls ScheduleRegionForMinimumLength. Runs after
-  // RunMaximizeOccupancyPass so MFI->getOccupancy() already reflects
-  // the kernel-wide ceiling — the per-region DFS's occupancy-drop
-  // bound prevents the length search from degrading occupancy.
-  void RunMinimizeLengthPass();
+  // Outer loop of the length pass. Iterates every region and calls
+  // ScheduleRegionForLengthPass. Runs after RunMaximizeOccupancyPass
+  // so MFI->getOccupancy() already reflects the kernel-wide ceiling
+  // — the per-region DFS's occupancy-drop bound prevents the length
+  // search from degrading occupancy. Direction (minimize vs maximize
+  // length) is resolved from misched.txt: default is minimize;
+  // SchedulerOption::MaximizeLength flips to maximize.
+  void RunLengthPass();
 
-  // Aggregate stats returned by ScheduleRegionForMinimumLength. Used
-  // by the driver to print a PASS RESULT line at the end of the
-  // length pass (regions improved, regions hit floor, regions timed
-  // out).
+  // Aggregate stats returned by ScheduleRegionForLengthPass. Used by
+  // the driver to print a PASS RESULT line at the end of the length
+  // pass. Direction-neutral on its own — the driver interprets
+  // "improved" against the active direction.
   struct LengthRegionStats {
     int input_length = 0;
     int output_length = 0;
@@ -127,12 +129,14 @@ public:
     bool timed_out = false;
   };
 
-  // Per-region worker for RunMinimizeLengthPass. Runs DFS with
-  // DfsMinimizeLengthPolicy and applies the resulting schedule.
-  // DfsSearch seeds best with the input schedule, so the output is
-  // guaranteed no worse than the current MF order. Returns
-  // per-region stats for the outer loop to aggregate.
-  LengthRegionStats ScheduleRegionForMinimumLength(RegionInfo &region);
+  // Per-region worker for RunLengthPass. Resolves the length-pass
+  // policy from misched.txt and dispatches accordingly — to one of
+  // the length-MIN templated workers or to the dedicated length-MAX
+  // worker. DfsSearch seeds best with the input schedule in every
+  // case, so the output is guaranteed no worse than the current MF
+  // order under the active direction. Returns per-region stats for
+  // the outer loop to aggregate.
+  LengthRegionStats ScheduleRegionForLengthPass(RegionInfo &region);
 
   // Initialize per-function state. Called at the start of
   // RunHierarchicalScheduler / RunMaliciousScheduler. Stores mfi_
