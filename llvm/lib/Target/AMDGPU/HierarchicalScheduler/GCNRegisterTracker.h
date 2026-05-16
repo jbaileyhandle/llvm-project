@@ -40,6 +40,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_GCNREGISTERTRACKER_H
 
 #include "GCNRegPressure.h"
+#include "NodeRegInfo.h"
 #include "ScheduleGraph.h"
 #include "ScheduleMetric.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -80,36 +81,21 @@ class GCNRegisterTracker {
 public:
   using LiveRegSet = GCNRPTracker::LiveRegSet;
 
-  /// A register + lane mask pair. Used for pre-extracted defs and uses.
-  struct RegMask {
-    unsigned reg;
-    LaneBitmask mask;
-  };
-
-  /// Pre-extracted register info for one node. Computed once at
-  /// construction. Defs are deduplicated per register (sub-register
-  /// defs of the same register have their masks ORed). Dead defs
-  /// (isDead()) are excluded. Uses are similarly deduplicated.
-  struct NodeRegInfo {
-    SmallVector<RegMask, 4> defs;
-    SmallVector<RegMask, 4> uses;
-  };
-
-  /// Construct from graph nodes and MachineFunction. Derives
-  /// MachineRegisterInfo and TargetRegisterInfo from the MF.
+  /// Construct from a graph and MachineFunction. The per-node
+  /// register-operand info is read from `graph.GetNodeRegInfoTable()`
+  /// — the table must already be installed by the graph factory
+  /// (production: BuildFromSUnits installs via
+  /// NodeRegInfoTable::BuildForGraph; tests: factories install an
+  /// empty table sized for graph.Size()). Tracker keeps a const
+  /// pointer to the graph's table; the graph must outlive the
+  /// tracker.
   ///
-  /// For scheduling-unit nodes with a MachineInstr, extracts
-  /// defs/uses with lane masks. For entry/exit nodes (no MI), reads
-  /// from ScheduleNode::RegDefs()/RegUses(). Subgraph proxies are
-  /// silently skipped (their per-topo-index slot stays empty —
-  /// ScheduleConstructor's dispatch filters them at runtime).
+  /// MF provides MachineRegisterInfo for pressure increments.
   ///
-  /// LiveIntervals is needed for accurate use-mask extraction on
-  /// multi-lane registers.
-  /// Warns if the MachineFunction contains non-inlined function calls.
+  /// Warns if the MachineFunction contains non-inlined function
+  /// calls.
   GCNRegisterTracker(const ScheduleGraph &graph,
-                     const MachineFunction &mf,
-                     const LiveIntervals &lis);
+                     const MachineFunction &mf);
 
   /// Update pressure after scheduling a node. Order depends on the
   /// pressure model (see PressureModel). Pushes an undo record.
@@ -248,7 +234,7 @@ public:
   /// (potential first-consumers to close) without re-walking the
   /// MachineInstr operands.
   const NodeRegInfo &GetNodeRegInfo(const ScheduleNode *node) const {
-    return node_reg_info_by_topo_index_[node->GetTopoIndex()];
+    return node_reg_info_table_->GetForNode(node);
   }
 
   /// Test-only: switch this tracker to a delta-based synthetic
@@ -384,12 +370,12 @@ private:
 
   // --- Core state ---
 
-  /// Precomputed per-node register def/use info, indexed by
-  /// ScheduleNode::GetTopoIndex(). Sized to graph.Size() at
-  /// construction. Entries for nodes with no reg defs/uses are
-  /// left default-constructed (empty defs + empty uses) — the
-  /// Schedule/Unschedule path checks emptiness and skips processing.
-  std::vector<NodeRegInfo> node_reg_info_by_topo_index_;
+  /// Pointer to the graph's per-node register def/use table. The
+  /// graph owns the table (installed by its factory); the tracker
+  /// just reads from it. Borrowed pointer — graph must outlive
+  /// tracker. Schedule/Unschedule index in via
+  /// node_reg_info_table_->GetForNode(node).
+  const NodeRegInfoTable *node_reg_info_table_;
 
   // TODO(perf): live_regs_ is a DenseMap<unsigned, LaneBitmask>
   // keyed by vreg index. Virtual registers are dense across the
@@ -430,11 +416,9 @@ private:
 
   // --- Construction helpers ---
 
-  void ExtractNodeRegInfo(const ScheduleGraph &graph,
-                          const MachineRegisterInfo &mri,
-                          const TargetRegisterInfo &tri,
-                          const LiveIntervals &lis);
-
+  /// Walk the bound table once and seed remaining_uses_ with the
+  /// total user count for each register. Called by the constructor
+  /// after node_reg_info_table_ is set.
   void InitRemainingUses();
 
   /// Pointer into the per-subtarget cache, set in the constructor.
@@ -460,39 +444,12 @@ public:
 
 private:
 
-  // --- Extraction helpers (per-node-type) ---
-
-  /// Dedup helper: find reg in entries and OR in mask, or append.
-  static void AddRegMask(SmallVectorImpl<RegMask> &entries,
-                         unsigned reg, LaneBitmask mask);
-
-  /// Extract from a scheduling-unit node with a MachineInstr.
-  static void ExtractFromMachineInstr(const ScheduleNode *node,
-                                      NodeRegInfo &info,
-                                      const MachineRegisterInfo &mri,
-                                      const LiveIntervals &lis);
-
-  /// Extract from an entry/exit/test node (no MachineInstr).
-  static void ExtractFromNodeRegLists(const ScheduleNode *node,
-                                      NodeRegInfo &info);
-
   // --- Schedule helpers ---
 
   void ProcessDefs(const NodeRegInfo &info, ScheduleStep &step);
   void ProcessUses(const NodeRegInfo &info, ScheduleStep &step);
   void UndoDefs(const ScheduleStep &step);
   void UndoUses(const NodeRegInfo &info, const ScheduleStep &step);
-
-  // --- Lane mask helpers ---
-  // Reimplemented locally because GCNRegPressure.cpp defines these as
-  // static (file-local) functions, not accessible from other files.
-
-  static LaneBitmask GetDefMask(const MachineOperand &mo,
-                                const MachineRegisterInfo &mri);
-
-  static LaneBitmask GetUseMask(const MachineOperand &mo,
-                                const MachineRegisterInfo &mri,
-                                const LiveIntervals &lis);
 };
 
 } // namespace hierarchical_scheduler

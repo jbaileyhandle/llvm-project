@@ -82,8 +82,7 @@ public:
   /// FilterAndSortReadyList in SearchPolicies.h).
   ScheduleConstructor(const ScheduleGraph &graph,
                       const GCNSubtarget &st,
-                      const MachineFunction &mf,
-                      const LiveIntervals &lis);
+                      const MachineFunction &mf);
 
   /// Schedule a node. The node must be in the ready list.
   /// Updates register pressure, schedule length, ready list, and

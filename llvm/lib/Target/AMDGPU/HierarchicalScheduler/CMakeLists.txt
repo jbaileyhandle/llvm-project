@@ -16,6 +16,7 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/DominatorTree.cpp
   HierarchicalScheduler/RegisterTracker.cpp
   HierarchicalScheduler/GCNRegisterTracker.cpp
+  HierarchicalScheduler/NodeRegInfo.cpp
   HierarchicalScheduler/ScheduleLengthTracker.cpp
   HierarchicalScheduler/IlpTracker.cpp
   HierarchicalScheduler/MaxScheduleCycleHeap.cpp

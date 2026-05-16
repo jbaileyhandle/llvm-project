@@ -7,6 +7,7 @@
 #include "ScheduleGraph.h"
 #include "DominatorTree.h"
 #include "GCNRegPressure.h"
+#include "NodeRegInfo.h"
 #include "RegionInfo.h"
 #include "ScheduleConstructor.h"
 #include "SIMachineFunctionInfo.h"
@@ -239,6 +240,24 @@ ScheduleGraph::ScheduleGraph()
     : id_(GetAndIncrementScheduleId()),
       graph_local_id_(GetAndIncrementGraphLocalId()) {}
 ScheduleGraph::~ScheduleGraph() = default;
+
+// std::unique_ptr's default constructor value-initializes the stored
+// pointer to nullptr (C++ standard guarantee, [unique.ptr.single.ctor]),
+// so node_reg_info_table_ is null until SetNodeRegInfoTable installs
+// one. The null check below catches the "factory forgot to install"
+// bug at first read rather than crashing on the dereference.
+const NodeRegInfoTable &ScheduleGraph::GetNodeRegInfoTable() const {
+  if (node_reg_info_table_ == nullptr) {
+    report_fatal_error("ScheduleGraph::GetNodeRegInfoTable: table "
+                       "not yet installed by the graph factory");
+  }
+  return *node_reg_info_table_;
+}
+
+void ScheduleGraph::SetNodeRegInfoTable(NodeRegInfoTable table) {
+  node_reg_info_table_ =
+      std::make_unique<NodeRegInfoTable>(std::move(table));
+}
 
 std::string ScheduleGraph::ToString() const {
   return "graph[" + std::to_string(id_) + "](" +
@@ -739,7 +758,16 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
   // single-sink (entry / exit must each be unique by construction).
   graph->ValidateAndComputeTopologicalOrder();
   graph->ComputeCriticalPaths();
-  graph->PopulateInputScheduleConstructor(st, mf, lis, region);
+
+  // Install the per-node register-operand info table. Must come
+  // AFTER ValidateAndComputeTopologicalOrder (BuildForGraph indexes
+  // entries by topo_index, which the topo order assigns) and BEFORE
+  // PopulateInputScheduleConstructor (the input constructor builds
+  // a GCNRegisterTracker, which now reads from this table).
+  graph->SetNodeRegInfoTable(
+      NodeRegInfoTable::BuildForGraph(*graph, mf, lis));
+
+  graph->PopulateInputScheduleConstructor(st, mf, region);
 
   return graph;
 }
@@ -807,10 +835,9 @@ void ScheduleGraph::AddEdgesBetweenLeafNodes(
 }
 
 void ScheduleGraph::PopulateInputScheduleConstructorByTopoOrderForTest(
-    const GCNSubtarget &st, const MachineFunction &mf,
-    const LiveIntervals &lis) {
+    const GCNSubtarget &st, const MachineFunction &mf) {
   input_schedule_constructor_ =
-      std::make_unique<ScheduleConstructor>(*this, st, mf, lis);
+      std::make_unique<ScheduleConstructor>(*this, st, mf);
   for (ScheduleNode *node : topo_order_) {
     input_schedule_constructor_->Schedule(node);
   }
@@ -818,9 +845,9 @@ void ScheduleGraph::PopulateInputScheduleConstructorByTopoOrderForTest(
 
 void ScheduleGraph::PopulateInputScheduleConstructor(
     const GCNSubtarget &st, const MachineFunction &mf,
-    const LiveIntervals &lis, const RegionInfo &region) {
+    const RegionInfo &region) {
   input_schedule_constructor_ =
-      std::make_unique<ScheduleConstructor>(*this, st, mf, lis);
+      std::make_unique<ScheduleConstructor>(*this, st, mf);
 
   // nodes_ layout after Phase 1 + Phase 3:
   //   [0 .. N-1] : real-instruction leaves (Phase 1 emplacement order
@@ -1023,6 +1050,13 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAG() {
   graph->AddEdge(&h, &g, ScheduleEdge::kData, /*latency=*/5);
   graph->AddEdge(&f, &g, ScheduleEdge::kData, /*latency=*/2);
 
+  // Empty reg-info table sized for the graph so any tracker
+  // constructed over this DAG (test mode or otherwise) can hold a
+  // valid pointer to the table. All entries default to no defs / no
+  // uses, which matches the "synthetic node with no MachineInstr"
+  // case the tracker already handles.
+  graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
+
   return graph;
 }
 
@@ -1048,6 +1082,8 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildLengthLowerBoundTestDAG() {
   graph->AddEdge(&n2, &n4, ScheduleEdge::kData, /*latency=*/1);
   graph->AddEdge(&n3, &n5, ScheduleEdge::kData, /*latency=*/1);
   graph->AddEdge(&n4, &n5, ScheduleEdge::kData, /*latency=*/2);
+
+  graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
 
   return graph;
 }
@@ -1078,6 +1114,8 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildContiguityTestDAG() {
   graph->AddEdge(&x, &e, ScheduleEdge::kData, /*latency=*/0);
   graph->AddEdge(&y, &e, ScheduleEdge::kData, /*latency=*/0);
   graph->AddEdge(&c, &e, ScheduleEdge::kData, /*latency=*/0);
+
+  graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
 
   return graph;
 }
@@ -1120,6 +1158,8 @@ ScheduleGraph::BuildSubgraphFormationTestDAG() {
   graph->AddEdge(&q2, &exit, ScheduleEdge::kData, /*latency=*/1);
   graph->AddEdge(&f, &exit, ScheduleEdge::kData, /*latency=*/1);
 
+  graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
+
   return graph;
 }
 
@@ -1140,6 +1180,8 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildHistoryPruneTestDAG() {
   graph->AddEdge(&a, &c, ScheduleEdge::kData, /*latency=*/5);
   graph->AddEdge(&b, &d, ScheduleEdge::kData, /*latency=*/1);
   graph->AddEdge(&c, &d, ScheduleEdge::kData, /*latency=*/1);
+
+  graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
 
   return graph;
 }
@@ -1164,6 +1206,8 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildPressureHistoryPruneTestDAG()
   graph->AddEdge(&d, &f, ScheduleEdge::kData, /*latency=*/1);
   graph->AddEdge(&e, &f, ScheduleEdge::kData, /*latency=*/1);
 
+  graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
+
   return graph;
 }
 
@@ -1179,6 +1223,8 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAGWithCycle() {
   graph->AddEdge(&a, &b, ScheduleEdge::kData);
   graph->AddEdge(&b, &c, ScheduleEdge::kData);
   graph->AddEdge(&c, &b, ScheduleEdge::kData);  // cycle: C → B
+
+  graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
 
   return graph;
 }

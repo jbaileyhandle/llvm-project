@@ -154,9 +154,9 @@ void IlpTracker::CloseOneProducer(unsigned reg, int contribution,
 
 void IlpTracker::ProcessUsesAsCloses(const ScheduleNode *node,
                                      UndoRecord &undo) {
-  const GCNRegisterTracker::NodeRegInfo &info =
+  const NodeRegInfo &info =
       pressure_tracker_->GetNodeRegInfo(node);
-  for (const GCNRegisterTracker::RegMask &use : info.uses) {
+  for (const RegMask &use : info.uses) {
     auto it = open_producer_by_reg_.find(use.reg);
     if (it == open_producer_by_reg_.end()) {
       continue;
@@ -169,11 +169,11 @@ void IlpTracker::ProcessUsesAsCloses(const ScheduleNode *node,
 }
 
 void IlpTracker::OpenDefs(const ScheduleNode *node, UndoRecord &undo) {
-  const GCNRegisterTracker::NodeRegInfo &info =
+  const NodeRegInfo &info =
       pressure_tracker_->GetNodeRegInfo(node);
   const int desirable_spacing =
       desirable_spacing_by_topo_index_[node->GetTopoIndex()];
-  for (const GCNRegisterTracker::RegMask &def : info.defs) {
+  for (const RegMask &def : info.defs) {
     // Re-def with no intervening read: prior value is dead, nothing
     // stalled on it, no ILP credit. Read-modify-write was already
     // closed by ProcessUsesAsCloses (which runs first), so by here
@@ -293,10 +293,10 @@ int IlpTracker::CloseCostForNode(const ScheduleNode *node) const {
   }
 
   // Real instruction 
-  const GCNRegisterTracker::NodeRegInfo &info =
+  const NodeRegInfo &info =
       pressure_tracker_->GetNodeRegInfo(node);
   int cost = 0;
-  for (const GCNRegisterTracker::RegMask &use : info.uses) {
+  for (const RegMask &use : info.uses) {
     int desirable_spacing = GetDesirableSpacingForOpenProducer(use.reg);
     if (desirable_spacing == 0) {
       // Not an open producer — closing is a no-op, no ILP cost.

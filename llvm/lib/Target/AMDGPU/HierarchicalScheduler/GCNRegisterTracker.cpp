@@ -7,9 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "GCNRegisterTracker.h"
+#include "NodeRegInfo.h"
 #include "SIMachineFunctionInfo.h"
-#include "SIRegisterInfo.h"
-#include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -23,121 +22,19 @@ using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
 
 // ============================================================================
-// Lane mask helpers
-// ============================================================================
-// Local reimplementations of the static helpers in GCNRegPressure.cpp
-// (getDefRegMask, getUsedRegMask). Same logic, same cases.
-
-LaneBitmask GCNRegisterTracker::GetDefMask(const MachineOperand &mo,
-                                           const MachineRegisterInfo &mri) {
-  assert(mo.isDef() && mo.isReg() && mo.getReg().isVirtual());
-  // Don't rely on read-undef flag — it may not be set correctly for
-  // tentative schedules. See comment in GCNRegPressure.cpp.
-  if (mo.getSubReg() == 0) {
-    return mri.getMaxLaneMaskForVReg(mo.getReg());
-  }
-  return mri.getTargetRegisterInfo()->getSubRegIndexLaneMask(mo.getSubReg());
-}
-
-LaneBitmask GCNRegisterTracker::GetUseMask(const MachineOperand &mo,
-                                           const MachineRegisterInfo &mri,
-                                           const LiveIntervals &lis) {
-  assert(mo.isUse() && mo.isReg() && mo.getReg().isVirtual());
-
-  if (auto sub_reg = mo.getSubReg()) {
-    return mri.getTargetRegisterInfo()->getSubRegIndexLaneMask(sub_reg);
-  }
-
-  auto max_mask = mri.getMaxLaneMaskForVReg(mo.getReg());
-  if (SIRegisterInfo::getNumCoveredRegs(max_mask) > 1) {
-    return max_mask;
-  }
-
-  // Single-lane register: query LiveIntervals for the actual live
-  // mask at this instruction. Subreg defs can be reordered but all
-  // must dominate uses, so the live lane mask is schedule-invariant.
-  auto si = lis.getInstructionIndex(*mo.getParent()).getBaseIndex();
-  return getLiveLaneMask(mo.getReg(), si, lis, mri);
-}
-
-// ============================================================================
-// Extraction helpers
-// ============================================================================
-
-void GCNRegisterTracker::AddRegMask(SmallVectorImpl<RegMask> &entries,
-                                    unsigned reg, LaneBitmask mask) {
-  auto it = llvm::find_if(
-      entries, [reg](const RegMask &rm) { return rm.reg == reg; });
-  if (it != entries.end()) {
-    it->mask |= mask;
-  } else {
-    entries.push_back({reg, mask});
-  }
-}
-
-void GCNRegisterTracker::ExtractFromMachineInstr(
-    const ScheduleNode *node,
-    NodeRegInfo &info,
-    const MachineRegisterInfo &mri,
-    const LiveIntervals &lis) {
-  const MachineInstr &mi = *node->GetSUnit()->getInstr();
-
-  // Defs: skip non-virtual and dead.
-  for (const MachineOperand &mo : mi.all_defs()) {
-    if (!mo.getReg().isVirtual() || mo.isDead()) {
-      continue;
-    }
-    AddRegMask(info.defs, mo.getReg().id(), GetDefMask(mo, mri));
-  }
-
-  // Uses: skip non-virtual. Also skip operands that are syntactically
-  // uses but don't actually read the register (undef flag — appears
-  // as an implicit use to keep the live range alive for the register
-  // allocator, but no hardware read occurs).
-  for (const MachineOperand &mo : mi.operands()) {
-    if (!mo.isReg() || !mo.getReg().isVirtual()) {
-      continue;
-    }
-    if (!mo.isUse() || !mo.readsReg()) {
-      continue;
-    }
-    AddRegMask(info.uses, mo.getReg().id(), GetUseMask(mo, mri, lis));
-  }
-}
-
-void GCNRegisterTracker::ExtractFromNodeRegLists(
-    const ScheduleNode *node,
-    NodeRegInfo &info) {
-  for (const RegWithLaneMask &rm : node->RegDefs()) {
-    if (!rm.reg.isVirtual()) {
-      continue;
-    }
-    AddRegMask(info.defs, rm.reg.id(), rm.mask);
-  }
-  for (const RegWithLaneMask &rm : node->RegUses()) {
-    if (!rm.reg.isVirtual()) {
-      continue;
-    }
-    AddRegMask(info.uses, rm.reg.id(), rm.mask);
-  }
-}
-
-// ============================================================================
 // Construction
 // ============================================================================
 
 GCNRegisterTracker::GCNRegisterTracker(const ScheduleGraph &graph,
-                                       const MachineFunction &mf,
-                                       const LiveIntervals &lis)
+                                       const MachineFunction &mf)
     : mf_(&mf),
       st_(&mf.getSubtarget<GCNSubtarget>()),
       mfi_(mf.getInfo<SIMachineFunctionInfo>()),
       mri_(&mf.getRegInfo()),
+      node_reg_info_table_(&graph.GetNodeRegInfoTable()),
       continuous_score_tables_(
           &GetOrComputeContinuousOccupancyScoreTables(*st_)) {
   CheckForFunctionCalls(mf);
-  ExtractNodeRegInfo(graph, mf.getRegInfo(),
-                     *mf.getSubtarget().getRegisterInfo(), lis);
   InitRemainingUses();
 }
 
@@ -158,47 +55,13 @@ void GCNRegisterTracker::CheckForFunctionCalls(
   }
 }
 
-void GCNRegisterTracker::ExtractNodeRegInfo(const ScheduleGraph &graph,
-                                            const MachineRegisterInfo &mri,
-                                            const TargetRegisterInfo &tri,
-                                            const LiveIntervals &lis) {
-  // One slot per node, indexed by topo_index. Any node whose
-  // extraction produces no defs or uses leaves its slot
-  // default-constructed (empty defs/uses) — ProcessDefs /
-  // ProcessUses treat that as zero iterations, the semantically
-  // correct no-op.
-  node_reg_info_by_topo_index_.assign(graph.Size(), NodeRegInfo{});
-  for (const ScheduleNode &node : graph.Nodes()) {
-    if (!node.IsSchedulingUnit()) {
-      // Subgraph proxies are synthetic and have no register
-      // effect. Leave their slot in node_reg_info_by_topo_index_
-      // default-constructed (empty NodeRegInfo) — that's the
-      // semantically correct zero-effect entry. Trackers never
-      // see proxies at runtime anyway: ScheduleConstructor's
-      // dispatch filters them, and the Schedule/Unschedule
-      // safety-net guards below catch any dispatch bug that
-      // would let one through.
-      continue;
-    }
-
-    NodeRegInfo info;
-
-    SUnit *su = node.GetSUnit();
-    if (su && su->getInstr()) {
-      ExtractFromMachineInstr(&node, info, mri, lis);
-    } else {
-      ExtractFromNodeRegLists(&node, info);
-    }
-
-    if (!info.defs.empty() || !info.uses.empty()) {
-      node_reg_info_by_topo_index_[node.GetTopoIndex()] = std::move(info);
-    }
-  }
-}
-
 void GCNRegisterTracker::InitRemainingUses() {
-  for (const NodeRegInfo &info : node_reg_info_by_topo_index_) {
-    for (const RegMask &use : info.uses) {
+  // Walk every entry in the bound table once; for each use, bump
+  // its register's count. Subgraph proxies and other no-register
+  // nodes have empty uses vectors so they contribute nothing here.
+  for (int i = 0; i < node_reg_info_table_->Size(); ++i) {
+    for (const RegMask &use :
+         node_reg_info_table_->GetForGraphLocalId(i).uses) {
       remaining_uses_[use.reg]++;
     }
   }
@@ -255,7 +118,7 @@ void GCNRegisterTracker::Schedule(const ScheduleNode *node) {
     step.saved_max = max_pressure_;
 
     const NodeRegInfo &info =
-        node_reg_info_by_topo_index_[node->GetTopoIndex()];
+        node_reg_info_table_->GetForNode(node);
     // Empty info (no defs and no uses) is valid — ProcessDefs /
     // ProcessUses loop zero times.
     if constexpr (kModel == PressureModel::kAMDGPU) {
@@ -354,7 +217,7 @@ void GCNRegisterTracker::Unschedule(const ScheduleNode *node) {
   undo_stack_.pop_back();
 
   const NodeRegInfo &info =
-      node_reg_info_by_topo_index_[node->GetTopoIndex()];
+      node_reg_info_table_->GetForNode(node);
   // Empty info (no defs and no uses) is valid — UndoDefs / UndoUses
   // loop zero times. Their undo data structures in `step` are also
   // empty in that case, so the loops correctly do nothing.
@@ -648,7 +511,7 @@ int GCNRegisterTracker::GetAllFactorsRegionOnlyOccupancy() const {
 std::string
 GCNRegisterTracker::DescribeRegOps(const ScheduleNode *node) const {
   const NodeRegInfo &info =
-      node_reg_info_by_topo_index_[node->GetTopoIndex()];
+      node_reg_info_table_->GetForNode(node);
   if (info.defs.empty() && info.uses.empty()) {
     return "(no register ops)";
   }
@@ -690,7 +553,7 @@ int GCNRegisterTracker::GetDefCount(const ScheduleNode *node) const {
     return 0;
   }
   const NodeRegInfo &info =
-      node_reg_info_by_topo_index_[node->GetTopoIndex()];
+      node_reg_info_table_->GetForNode(node);
   return static_cast<int>(info.defs.size());
 }
 
@@ -699,7 +562,7 @@ int GCNRegisterTracker::CountLastUses(const ScheduleNode *node) const {
     return 0;
   }
   const NodeRegInfo &info =
-      node_reg_info_by_topo_index_[node->GetTopoIndex()];
+      node_reg_info_table_->GetForNode(node);
   int kills = 0;
   for (const RegMask &use : info.uses) {
     auto it = remaining_uses_.find(use.reg);

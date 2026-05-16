@@ -25,10 +25,9 @@ using namespace llvm::hierarchical_scheduler;
 
 ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
                                          const GCNSubtarget &st,
-                                         const MachineFunction &mf,
-                                         const LiveIntervals &lis)
+                                         const MachineFunction &mf)
     : graph_(&graph),
-      pressure_tracker_(graph, mf, lis),
+      pressure_tracker_(graph, mf),
       length_tracker_(graph, st),
       ilp_tracker_(graph, pressure_tracker_),
       // scheduled_set_tracker_ depends on length_tracker_ for cycle

@@ -96,6 +96,7 @@ class MachineRegisterInfo;
 namespace hierarchical_scheduler {
 
 class DominatorTree;
+class NodeRegInfoTable;
 class RegionInfo;
 class ScheduleConstructor;
 class ScheduleGraph;
@@ -745,6 +746,24 @@ public:
   ArrayRef<ScheduleNode> Nodes() const { return nodes_; }
   int Size() const { return static_cast<int>(nodes_.size()); }
 
+  /// Pre-extracted per-node register-operand info, indexed by
+  /// topo_index. Populated by graph factories (BuildFromSUnits uses
+  /// NodeRegInfoTable::BuildForGraph; test factories install an
+  /// empty table sized for Size()). Shared by reference with every
+  /// GCNRegisterTracker built over this graph — they no longer
+  /// extract their own copy. Fatal error if not installed.
+  ///
+  /// Defined in ScheduleGraph.cpp because the unique_ptr<>
+  /// dereference needs the full NodeRegInfoTable type, which would
+  /// otherwise force a circular include of NodeRegInfo.h here.
+  const NodeRegInfoTable &GetNodeRegInfoTable() const;
+
+  /// Install the per-node register-operand info table. Called by
+  /// the factories (BuildFromSUnits / BuildTestDAG / ...) once
+  /// during graph construction; not for general consumer use.
+  /// Defined in ScheduleGraph.cpp; see GetNodeRegInfoTable comment.
+  void SetNodeRegInfoTable(NodeRegInfoTable table);
+
   /// Total number of scheduling-unit nodes in this graph (real +
   /// entry/exit sentinels; excludes subgraph proxies). Phase 0: no
   /// proxies exist, so this equals Size(). Lazily counted; cached.
@@ -1115,8 +1134,7 @@ public:
   /// Preconditions: ValidateAndComputeTopologicalOrder and
   /// ComputeCriticalPathFromExit have been called.
   void PopulateInputScheduleConstructorByTopoOrderForTest(
-      const GCNSubtarget &st, const MachineFunction &mf,
-      const LiveIntervals &lis);
+      const GCNSubtarget &st, const MachineFunction &mf);
 
 private:
   /// Compute topological order using Kahn's algorithm (iterative
@@ -1156,6 +1174,13 @@ private:
   int graph_local_id_;
 
   std::vector<ScheduleNode> nodes_;
+
+  /// Pre-extracted per-node register-operand info. Owning unique_ptr
+  /// (rather than a value or std::optional) so the header only needs
+  /// a forward declaration of NodeRegInfoTable — avoids a circular
+  /// include through NodeRegInfo.h, which itself needs ScheduleNode.
+  /// Populated by SetNodeRegInfoTable, called from the factories.
+  std::unique_ptr<NodeRegInfoTable> node_reg_info_table_;
 
   /// Populated by ComputeTopologicalOrder. Empty == "not computed
   /// or invalidated since." IsTopoSorted() = !topo_order_.empty().
@@ -1303,7 +1328,6 @@ private:
   /// VerifyInputScheduleMatchesMFOrder.
   void PopulateInputScheduleConstructor(const GCNSubtarget &st,
                                         const MachineFunction &mf,
-                                        const LiveIntervals &lis,
                                         const RegionInfo &region);
 
   /// Cross-check that input_schedule_constructor_'s schedule order

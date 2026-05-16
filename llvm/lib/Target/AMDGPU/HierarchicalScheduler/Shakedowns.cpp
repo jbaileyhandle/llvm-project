@@ -1622,7 +1622,7 @@ void RunSubgraphContiguityShakedown(const MachineFunction &mf,
   // Greedy schedule helper: runs Schedule(first ready) until done,
   // returns the constructor for length / schedule_order inspection.
   auto greedy_schedule = [&](ScheduleGraph &graph) {
-    ScheduleConstructor sc(graph, st, mf, lis);
+    ScheduleConstructor sc(graph, st, mf);
     int safety = graph.Size() + 1;
     while (!sc.IsDone()) {
       if (--safety < 0) {
@@ -2912,7 +2912,7 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   auto graph = ScheduleGraph::BuildHistoryPruneTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
   graph->ComputeCriticalPaths();
-  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf, lis);
+  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
 
   DfsSearch<TestLengthPolicyNoBoundsNoHistory> no_hist_search(
       *graph, st, mf, lis, /*form_subgraphs=*/false);
@@ -3048,7 +3048,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   auto graph = ScheduleGraph::BuildPressureHistoryPruneTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
   graph->ComputeCriticalPaths();
-  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf, lis);
+  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
 
   std::vector<int> vgpr_deltas = {+1, +1, +1, -1, -1, -1};
 
@@ -3165,7 +3165,7 @@ void RunGCNRegisterTrackerShakedown(ScheduleGraph &graph,
                                     const LiveIntervals &lis) {
   SmallVector<ScheduleNode *> nodes(graph.GetTopoOrder().begin(),
                                     graph.GetTopoOrder().end());
-  GCNRegisterTracker tracker(graph, mf, lis);
+  GCNRegisterTracker tracker(graph, mf);
 
   // --- Forward pass: schedule in topo order ---
   // Capture cur_pressure_ after each Schedule call so we can
@@ -3300,7 +3300,7 @@ void VerifyGCNRegisterTracker(ScheduleGraph &graph,
   }
 
   // --- Our tracker: walk order forward, record pressure at each step ---
-  GCNRegisterTracker tracker(graph, mf, lis);
+  GCNRegisterTracker tracker(graph, mf);
 
   llvm::outs() << "  Cross-check per-instruction (same order):\n";
   llvm::outs() << "    " << std::string(60, '-') << "\n";
@@ -3470,7 +3470,7 @@ void RunScheduleLengthTrackerShakedown(ScheduleGraph &graph,
 void RunIlpTrackerShakedown(ScheduleGraph &graph,
                             const MachineFunction &mf,
                             const LiveIntervals &lis) {
-  GCNRegisterTracker pressure_tracker(graph, mf, lis);
+  GCNRegisterTracker pressure_tracker(graph, mf);
   IlpTracker tracker(graph, pressure_tracker);
 
   // --- Initial empty state ---
@@ -3652,7 +3652,7 @@ void RunScheduleConstructorShakedown(ScheduleGraph &graph,
                                      const LiveIntervals &lis) {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(mf.getSubtarget());
-  ScheduleConstructor sc(graph, st, mf, lis);
+  ScheduleConstructor sc(graph, st, mf);
 
   // --- Forward pass: always pick the first ready node ---
   // Also tracks expected state of ScheduledSetTracker: after each
@@ -3717,7 +3717,7 @@ void RunScheduleConstructorShakedown(ScheduleGraph &graph,
   }
 
   // --- Second pass: schedule in topo order for comparison ---
-  ScheduleConstructor sc2(graph, st, mf, lis);
+  ScheduleConstructor sc2(graph, st, mf);
   for (ScheduleNode *node : graph.GetTopoOrder()) {
     sc2.Schedule(node);
   }
@@ -3809,8 +3809,8 @@ void RunScheduleMetricShakedown(ScheduleGraph &graph,
   // comparison of the underlying getter — verifies metric dispatch,
   // comparison direction, and strict-vs-tie handling with real
   // (non-fabricated) values from the region.
-  ScheduleConstructor sc_empty(graph, st, mf, lis);
-  ScheduleConstructor sc_full(graph, st, mf, lis);
+  ScheduleConstructor sc_empty(graph, st, mf);
+  ScheduleConstructor sc_full(graph, st, mf);
   for (ScheduleNode *node : graph.GetTopoOrder()) {
     sc_full.Schedule(node);
   }

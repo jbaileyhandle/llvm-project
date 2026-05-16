@@ -85,8 +85,7 @@ class DfsSearch {
       : mf_(&mf),
         lis_(&lis),
         working_schedule_constructor_(
-            MaybeFormSubgraphs(graph, form_subgraphs),
-            st, mf, lis),
+            MaybeFormSubgraphs(graph, form_subgraphs), st, mf),
         best_schedule_constructor_(graph.GetInputScheduleConstructor()),
         // length_history_ binds to working_'s trackers. Constructed
         // unconditionally; queried only when Policy::
