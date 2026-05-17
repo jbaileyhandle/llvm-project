@@ -29,6 +29,8 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/ScheduledSetTracker.cpp
   HierarchicalScheduler/LengthHistoryTracker.cpp
   HierarchicalScheduler/PressureHistoryTracker.cpp
+  HierarchicalScheduler/PartitionDag.cpp
+  HierarchicalScheduler/BfsDpSearch.cpp
   PARENT_SCOPE
 )
 
