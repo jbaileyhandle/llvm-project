@@ -55,6 +55,14 @@ PartitionNode *PartitionDag::CreateSourceNode() {
   source_ = nodes_.back().get();
   source_->schedule_state.emplace(*graph_, *st_, *mf_,
                                   ScheduleConstructorOptions::BfsDp());
+  // Test-mode propagation: if EnableTestModeForTest was called on
+  // this dag, apply the deltas to the source's tracker now (before
+  // the first Schedule). GCNRegisterTracker::NoHistoryClone
+  // preserves test_mode_ / test_vgpr_deltas_, so clones inherit them.
+  if (!test_vgpr_deltas_.empty()) {
+    source_->schedule_state->GetPressureTrackerForTest()
+        .EnableTestModeForTest(test_vgpr_deltas_);
+  }
   partition_node_by_key_[source_->schedule_state->GetScheduledSetTracker()
                              .GetPartitionKey()] = source_;
   return source_;

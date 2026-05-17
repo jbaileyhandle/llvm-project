@@ -357,8 +357,10 @@ class DfsSearch {
   // wall hit). steady_clock::now() on Linux is vDSO-backed (~20ns),
   // so calling on every Recurse() entry is cheap.
   bool EndSearchIfTimedOut() {
-    if (timing_.LifetimeElapsedMs() <
-        int64_t{Policy::kTimeoutMsPerRegion}) {
+    // nullopt = timeout disabled (e.g., shakedown oracles where any
+    // early exit would yield a suboptimal reference answer).
+    if (!Policy::kTimeoutMsPerRegion.has_value() ||
+        timing_.LifetimeElapsedMs() < *Policy::kTimeoutMsPerRegion) {
       return false;
     }
     region_timed_out_ = true;

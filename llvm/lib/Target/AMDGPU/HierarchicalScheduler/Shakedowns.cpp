@@ -13,12 +13,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "ScheduleDAGHierarchicalScheduler.h"
+#include "BfsDpSearch.h"
 #include "DfsSearch.h"
 #include "DominatorTree.h"
 #include "GCNRegisterTracker.h"
 #include "GCNSubtarget.h"
 #include "IlpTracker.h"
 #include "LengthHistoryTracker.h"
+#include "PartitionDag.h"
 #include "PressureHistoryTracker.h"
 #include "RegisterTracker.h"
 #include "ScheduleConstructor.h"
@@ -3089,6 +3091,144 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
                << (calls_strictly_less_when_pruning ? "PASS\n" : "FAIL\n");
 }
 
+// DFS oracle policy for RunBfsDpVsDfsShakedown. Inherits the
+// production occupancy policy but disables two early-exit conditions
+// that would prevent the search from reaching the true optimum:
+//
+//   1. Per-region timeout (nullopt). The synthetic test DAG is tiny
+//      so DFS finishes in well under a millisecond, but disabling
+//      structurally rather than relying on a numerically-large value.
+//   2. ShouldEndSearch's "best meets function occupancy target"
+//      short-circuit. The synthetic VGPR deltas are tiny relative to
+//      any plausible target, so the first complete schedule found
+//      can easily meet target before the optimum is discovered.
+//      We want the search to keep going until it has truly visited
+//      every reachable partition.
+//
+// ShouldBoundSearch is left at the production default — its
+// score-bound prune is sound and accelerates the search.
+class BfsDpVsDfsShakedownOraclePolicy : public DfsMaximizeOccupancyPolicy {
+ public:
+  static constexpr std::optional<int64_t> kTimeoutMsPerRegion = std::nullopt;
+  static bool ShouldEndSearch(const ScheduleConstructor &,
+                              const ScheduleConstructor &) {
+    return false;
+  }
+};
+
+// Verifies that BFS-DP (PartitionDag) finds the same best continuous-
+// occupancy score as the production DFS occupancy search on the same
+// synthetic graph and synthetic VGPR deltas. Both algorithms aim at
+// the same optimum: the schedule whose worst-pressure edge has the
+// lowest pressure. DFS picks by max_pressure_ across the schedule;
+// BFS-DP picks by min-along-path edge score. Since
+// ComputeContinuousOccupancyScore is monotonically decreasing in
+// pressure, "min score along the path" corresponds to "max pressure
+// on the path's worst edge" — the same definition of peak — so the
+// two algorithms must agree.
+//
+// Uses BuildPressureHistoryPruneTestDAG with the same vgpr_deltas as
+// RunPressureHistoryDfsComparisonShakedown above (peak=2 is optimum).
+void RunBfsDpVsDfsShakedown(const GCNSubtarget &st,
+                            const MachineFunction &mf,
+                            const LiveIntervals &lis) {
+  llvm::outs() << "  RunBfsDpVsDfsShakedown:\n";
+
+  // Same metric DfsMaximizeOccupancyPolicy uses internally; referenced
+  // explicitly here for the post-Run score read.
+  constexpr ScheduleMetric kPolicyMetric =
+      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
+
+  auto graph = ScheduleGraph::BuildPressureHistoryPruneTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPaths();
+  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+
+  std::vector<int> vgpr_deltas = {+1, +1, +1, -1, -1, -1};
+
+  // DFS oracle: production policy with timeout disabled (see
+  // BfsDpVsDfsShakedownOraclePolicy). Pruning is sound, so this
+  // finds the global optimum.
+  DfsSearch<BfsDpVsDfsShakedownOraclePolicy> dfs_search(
+      *graph, st, mf, lis, /*form_subgraphs=*/false);
+  dfs_search.EnableTestModeForTest(vgpr_deltas);
+  ScheduleConstructor dfs_best = dfs_search.Run();
+  int dfs_score =
+      dfs_best.GetPressureTracker().GetMetricScore(kPolicyMetric);
+
+  // BFS-DP on the same graph + deltas. EnableTestModeForTest plumbs
+  // the deltas to the source PartitionNode's tracker; NoHistoryClone
+  // preserves test_mode_ / test_vgpr_deltas_ so per-PartitionNode
+  // probe Schedules see the synthetic pressure too.
+  BfsDpSearch bfs_search(graph.get(), &st, &mf);
+  bfs_search.EnableTestModeForTest(vgpr_deltas);
+  bfs_search.Run();
+  int bfs_score = bfs_search.GetDagForTest()
+                      .GetSink()
+                      ->best_path_bottleneck.continuous_occupancy_score;
+
+  llvm::outs() << "    DFS oracle score: " << dfs_score
+               << " (peak VGPR="
+               << dfs_best.GetPressureTracker()
+                      .GetPeakPressure()
+                      .getVGPRNum(st.hasGFX90AInsts())
+               << ")\n";
+  const PathBottleneck &bfs_bottleneck =
+      bfs_search.GetDagForTest().GetSink()->best_path_bottleneck;
+  llvm::outs() << "    BFS-DP score:     " << bfs_score
+               << " (bottleneck VGPR="
+               << bfs_bottleneck.register_pressure.getVGPRNum(
+                      st.hasGFX90AInsts())
+               << ")\n";
+  llvm::outs() << "    DFS schedule:    ";
+  for (const ScheduleNode *n : dfs_best.GetScheduleOrder()) {
+    llvm::outs() << " " << n->GetDebugName();
+  }
+  llvm::outs() << "\n";
+  llvm::outs() << "    BFS-DP schedule: ";
+  for (const ScheduleNode *n : bfs_search.GetDagForTest().GetSchedule()) {
+    llvm::outs() << " " << n->GetDebugName();
+  }
+  llvm::outs() << "\n";
+
+  // Sanity check: replay BFS-DP's recovered schedule through a fresh
+  // (full-featured) ScheduleConstructor with the same test-mode deltas
+  // and read GetMetricScore. This is the score that schedule
+  // *actually* produces when run end-to-end — independent of BFS-DP's
+  // internal DP bookkeeping. If it differs from the DP-claimed
+  // bottleneck score, BFS-DP's bookkeeping is inconsistent with the
+  // schedule it returns.
+  ScheduleConstructor replay(*graph, st, mf);
+  replay.GetPressureTrackerForTest().EnableTestModeForTest(vgpr_deltas);
+  for (const ScheduleNode *n : bfs_search.GetDagForTest().GetSchedule()) {
+    replay.Schedule(n);
+  }
+  int replay_score =
+      replay.GetPressureTracker().GetMetricScore(kPolicyMetric);
+  llvm::outs() << "    BFS-DP schedule replayed: score=" << replay_score
+               << " (peak VGPR="
+               << replay.GetPressureTracker()
+                      .GetPeakPressure()
+                      .getVGPRNum(st.hasGFX90AInsts())
+               << ")\n";
+  bool replay_matches_claim = replay_score == bfs_score;
+  llvm::outs() << "    Replay matches BFS-DP claim: "
+               << (replay_matches_claim ? "PASS\n" : "FAIL\n");
+
+  bool same_score = dfs_score == bfs_score;
+  llvm::outs() << "    Same best score: "
+               << (same_score ? "PASS\n" : "FAIL\n");
+  if (!replay_matches_claim) {
+    report_fatal_error(
+        "RunBfsDpVsDfsShakedown: BFS-DP claimed score does not match the "
+        "score obtained by replaying BFS-DP's own recovered schedule");
+  }
+  if (!same_score) {
+    report_fatal_error(
+        "RunBfsDpVsDfsShakedown: BFS-DP score does not match DFS oracle");
+  }
+}
+
 // Verifies ScheduleLengthTracker::GetLengthLowerBound against hand-
 // computed expected sequences on two synthetic DAGs. Builds both
 // graphs internally — this shakedown is self-contained and does not
@@ -4083,6 +4223,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunPressureHistoryTrackerShakedown(st);
   RunLengthHistoryDfsComparisonShakedown(st, MF, *LIS);
   RunPressureHistoryDfsComparisonShakedown(st, MF, *LIS);
+  RunBfsDpVsDfsShakedown(st, MF, *LIS);
   RunAllSubgraphFormationShakedowns();
 
   for (auto &region : regions_) {

@@ -126,6 +126,16 @@ class PartitionDag {
   /// Only valid after Build() has completed.
   ArrayRef<const ScheduleNode *> GetSchedule() const { return schedule_; }
 
+  /// Test-only: enable delta-based synthetic pressure on the source
+  /// PartitionNode's GCNRegisterTracker. Deltas propagate to every
+  /// cloned PartitionNode via GCNRegisterTracker::NoHistoryClone (which
+  /// preserves test_mode_ / test_vgpr_deltas_). Must be called before
+  /// Build(). Stores the deltas; CreateSourceNode applies them after
+  /// constructing the source's ScheduleConstructor.
+  void EnableTestModeForTest(const std::vector<int> &per_node_vgpr_deltas) {
+    test_vgpr_deltas_ = per_node_vgpr_deltas;
+  }
+
  private:
   /// Create the empty-set source PartitionNode: allocate it, build
   /// its initial BfsDp-preset ScheduleConstructor, register it in
@@ -184,6 +194,13 @@ class PartitionDag {
   /// Recovered schedule, populated by ReconstructSchedule at the end of
   /// Build().
   SmallVector<const ScheduleNode *> schedule_;
+
+  /// Test-only: per-topo-index VGPR deltas for synthetic-pressure
+  /// shakedowns. Empty in production. When non-empty, CreateSourceNode
+  /// applies them to the source's tracker via EnableTestModeForTest;
+  /// from there the deltas propagate to every clone (NoHistoryClone
+  /// preserves test_mode_ / test_vgpr_deltas_).
+  std::vector<int> test_vgpr_deltas_;
 };
 
 }  // namespace hierarchical_scheduler

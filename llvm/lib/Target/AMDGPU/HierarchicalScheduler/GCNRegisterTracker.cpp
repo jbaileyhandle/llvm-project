@@ -42,11 +42,20 @@ GCNRegisterTracker::GCNRegisterTracker(const GCNRegisterTracker &source,
       live_regs_(source.live_regs_),
       cur_pressure_(source.cur_pressure_),
       // max_pressure_, undo_stack_, pressure_history_ intentionally
-      // default-constructed (no copy from source). BFS-DP doesn't
-      // read max_pressure_ on per-LatticeNode clones, never
-      // Unschedules them, and never opts into history. Same for
-      // test_mode_ / test_vgpr_deltas_.
+      // default-constructed (no copy from source) — these are
+      // history, not live state. BFS-DP probes via Schedule /
+      // Unschedule on cloned PartitionNodes, but uses Schedule's
+      // returned edge_peak directly rather than reading max_pressure_,
+      // and the undo_stack_ is per-clone (Schedule pushes, Unschedule
+      // pops, balanced within each clone's lifetime).
       track_pressure_history_(false),
+      // test_mode_ and test_vgpr_deltas_ ARE live state (they define
+      // what Schedule(node) does), so propagate to the clone. Without
+      // this, a clone'd tracker silently falls back to RegDefs/RegUses
+      // -driven pressure, which is wrong (and identically zero) for
+      // synthetic test graphs with no per-node register info.
+      test_mode_(source.test_mode_),
+      test_vgpr_deltas_(source.test_vgpr_deltas_),
       mf_(source.mf_),
       st_(source.st_),
       mfi_(source.mfi_),

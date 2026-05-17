@@ -33,6 +33,18 @@ class BfsDpSearch {
   /// delegates to PartitionDag::Build().
   void Run();
 
+  /// Test-only pass-through to PartitionDag::EnableTestModeForTest.
+  /// Must be called before Run(); enables synthetic-pressure mode
+  /// for shakedowns by injecting per-topo-index VGPR deltas instead
+  /// of reading per-node register info.
+  void EnableTestModeForTest(const std::vector<int> &per_node_vgpr_deltas) {
+    dag_.EnableTestModeForTest(per_node_vgpr_deltas);
+  }
+
+  /// Test-only: access the dag for reading the recovered schedule
+  /// and the sink's PathBottleneck after Run().
+  const PartitionDag &GetDagForTest() const { return dag_; }
+
  private:
   PartitionDag dag_;
 };
