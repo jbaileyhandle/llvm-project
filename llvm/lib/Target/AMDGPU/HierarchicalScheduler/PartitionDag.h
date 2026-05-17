@@ -26,6 +26,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_PARTITIONDAG_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_PARTITIONDAG_H
 
+#include "GCNRegPressure.h"
 #include "ScheduleConstructor.h"
 #include "ScheduledSetTracker.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -39,6 +40,7 @@
 namespace llvm {
 
 class GCNSubtarget;
+class MachineFunction;
 
 namespace hierarchical_scheduler {
 
@@ -55,6 +57,17 @@ struct PartitionEdge {
   const ScheduleNode *scheduled;
 };
 
+/// The worst (bottleneck) edge along a path through the dag. The
+/// continuous-occupancy score is the comparator (used everywhere the
+/// DP picks a best path); register_pressure is the GCNRegPressure
+/// paired with that bottleneck edge, carried alongside the score so
+/// reconstruction / diagnostics can report the actual pressure
+/// numbers behind the score, not just the score itself.
+struct PathBottleneck {
+  int continuous_occupancy_score = INT_MAX;
+  GCNRegPressure register_pressure;
+};
+
 /// One node in the PartitionDag. Identity (PartitionKey) lives in the
 /// dag's lookup map, not here.
 struct PartitionNode {
@@ -67,10 +80,17 @@ struct PartitionNode {
   std::optional<ScheduleConstructor> schedule_state;
 
   /// DP value: max over all paths reaching this PartitionNode of the
-  /// min continuous-occupancy score encountered along that path.
-  /// Higher = better. INT_MAX at the source so the first edge sets the
-  /// value to the edge's score.
-  int best_path_score = INT_MAX;
+  /// bottleneck-edge metric (min continuous-occupancy score along the
+  /// path; pressure at that bottleneck edge).
+  ///
+  /// Default {INT_MAX, zeroed-pressure}:
+  ///   - On the source, never overwritten (no incoming edges). For
+  ///     the first edge out: min(INT_MAX, edge_score) = edge_score,
+  ///     so no special case is needed.
+  ///   - On non-source nodes, never read until the first writer
+  ///     overwrites it. First-writer detection keys off
+  ///     best_incoming_edge.has_value(), not the score value.
+  PathBottleneck best_path_bottleneck;
 
   /// The incoming edge on the best path discovered so far. nullopt at
   /// the source — terminates ReconstructSchedule.
@@ -79,8 +99,12 @@ struct PartitionNode {
 
 class PartitionDag {
  public:
-  /// `graph` and `st` must outlive this dag. Build() is called separately.
-  PartitionDag(const ScheduleGraph *graph, const GCNSubtarget *st);
+  /// `graph`, `st`, and `mf` must outlive this dag. `mf` is needed
+  /// only to construct the source PartitionNode's initial
+  /// ScheduleConstructor (subsequent PartitionNodes get their
+  /// snapshots via NoHistoryClone). Build() is called separately.
+  PartitionDag(const ScheduleGraph *graph, const GCNSubtarget *st,
+               const MachineFunction *mf);
 
   /// BFS from the empty-set source to the all-scheduled sink:
   ///   - creates the source PartitionNode with a fresh BfsDp-preset
@@ -103,6 +127,13 @@ class PartitionDag {
   ArrayRef<const ScheduleNode *> GetSchedule() const { return schedule_; }
 
  private:
+  /// Create the empty-set source PartitionNode: allocate it, build
+  /// its initial BfsDp-preset ScheduleConstructor, register it in
+  /// partition_node_by_key_, and set source_. Returns the new
+  /// PartitionNode so Build can seed current_layer with it. Called
+  /// exactly once, at the start of Build.
+  PartitionNode *CreateSourceNode();
+
   /// Enumerate `src`'s ready instructions and call VisitSuccessor for
   /// each. After the loop, drops src's schedule_state — src has been
   /// fully expanded and the snapshot is no longer needed (reconstruction
@@ -135,6 +166,7 @@ class PartitionDag {
 
   const ScheduleGraph *graph_;
   const GCNSubtarget *st_;
+  const MachineFunction *mf_;
 
   /// Stable storage of all PartitionNodes. unique_ptr because
   /// partition_node_by_key_ borrows pointers into this vector — a

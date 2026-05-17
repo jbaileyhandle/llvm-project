@@ -165,15 +165,19 @@ public:
 
   /// Schedule a node. The node must be in the ready list.
   /// Updates register pressure, schedule length, ready list, and
-  /// appends the node to the schedule order.
-  void Schedule(const ScheduleNode *node);
+  /// appends the node to the schedule order. Returns the inner
+  /// GCNRegisterTracker's edge-peak pressure for this Schedule (see
+  /// GCNRegisterTracker::Schedule for the precise definition) so
+  /// BFS-DP can read it directly without a separate query. Other
+  /// callers (DFS) discard the return.
+  GCNRegPressure Schedule(const ScheduleNode *node);
 
   /// Schedule the node currently at the current scope's ready list
   /// at `index`. Skips the binary search used by Schedule(const
   /// ScheduleNode*) — DFS knows the index from its iteration loop,
   /// so it can erase directly. Otherwise identical to
   /// Schedule(const ScheduleNode*).
-  void ScheduleByIndex(int index);
+  GCNRegPressure ScheduleByIndex(int index);
 
   /// Undo the last Schedule() call. Restores register pressure,
   /// schedule length, ready list, and removes the node from the

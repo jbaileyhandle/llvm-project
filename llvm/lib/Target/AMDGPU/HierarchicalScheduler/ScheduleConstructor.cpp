@@ -225,7 +225,7 @@ void ScheduleConstructor::UnreleaseSuccessors(const ScheduleNode *node) {
 // Schedule / Unschedule
 // ============================================================================
 
-void ScheduleConstructor::Schedule(const ScheduleNode *node) {
+GCNRegPressure ScheduleConstructor::Schedule(const ScheduleNode *node) {
   // DFS invariant: the picked node lives in the current scope. Look
   // it up in scopes_.back().ready rather than GetReadyListForNode(node),
   // to make that invariant explicit at the call site.
@@ -235,10 +235,10 @@ void ScheduleConstructor::Schedule(const ScheduleNode *node) {
                        Twine(node->GetId()) +
                        " which is not in the ready list");
   }
-  ScheduleByIndex(index);
+  return ScheduleByIndex(index);
 }
 
-void ScheduleConstructor::ScheduleByIndex(int index) {
+GCNRegPressure ScheduleConstructor::ScheduleByIndex(int index) {
   auto &ready_list = scopes_.back().ready;
   if (index < 0 || index >= static_cast<int>(ready_list.size())) {
     report_fatal_error(
@@ -258,7 +258,7 @@ void ScheduleConstructor::ScheduleByIndex(int index) {
   // — its frontier-LB computation reads the just-scheduled node's
   // cycle from length_tracker_ when length tracking is on (and
   // skips that work entirely when off).
-  pressure_tracker_.Schedule(node);
+  GCNRegPressure edge_peak = pressure_tracker_.Schedule(node);
   if (length_tracker_) {
     length_tracker_->Schedule(node);
   }
@@ -294,6 +294,8 @@ void ScheduleConstructor::ScheduleByIndex(int index) {
   // Release successors into their home scopes (now correctly set
   // up by the scope mutation above).
   ReleaseSuccessors(node);
+
+  return edge_peak;
 }
 
 void ScheduleConstructor::Unschedule() {

@@ -15,6 +15,7 @@
 namespace llvm {
 
 class GCNSubtarget;
+class MachineFunction;
 
 namespace hierarchical_scheduler {
 
@@ -22,8 +23,9 @@ class ScheduleGraph;
 
 class BfsDpSearch {
  public:
-  /// `graph` and `st` must outlive this object.
-  BfsDpSearch(const ScheduleGraph *graph, const GCNSubtarget *st);
+  /// `graph`, `st`, and `mf` must outlive this object.
+  BfsDpSearch(const ScheduleGraph *graph, const GCNSubtarget *st,
+              const MachineFunction *mf);
 
   /// Build the partition dag and apply the recovered schedule.
   /// Integration with the rest of the scheduler (formation,

@@ -9,8 +9,9 @@
 namespace llvm {
 namespace hierarchical_scheduler {
 
-BfsDpSearch::BfsDpSearch(const ScheduleGraph *graph, const GCNSubtarget *st)
-    : dag_(graph, st) {}
+BfsDpSearch::BfsDpSearch(const ScheduleGraph *graph, const GCNSubtarget *st,
+                         const MachineFunction *mf)
+    : dag_(graph, st, mf) {}
 
 void BfsDpSearch::Run() {
   dag_.Build();
