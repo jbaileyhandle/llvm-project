@@ -62,6 +62,7 @@
 #include "SearchStats.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
+#include <optional>
 #include <vector>
 
 namespace llvm {
@@ -71,6 +72,61 @@ class LiveIntervals;
 class MachineFunction;
 
 namespace hierarchical_scheduler {
+
+/// Construction-time configuration for ScheduleConstructor. All
+/// flags default to "full-featured" so existing call sites that
+/// don't pass an Options struct get the same behavior as before
+/// the refactor.
+///
+/// BFS-DP wants a stripped-down constructor: register tracker,
+/// scheduled-set tracker, and ready list, with everything else
+/// (length / ILP tracking, schedule_order_ history) off. Use
+/// `ScheduleConstructorOptions::BfsDp()` for that preset rather
+/// than spelling out each flip.
+///
+/// Caller bug to (a) consult a tracker that was disabled — e.g.,
+/// GetLengthTracker() / GetScheduleLength() when
+/// enable_length_tracking is false — or (b) clone via
+/// NoHistoryClone() when length / ILP tracking are enabled (the
+/// inner trackers don't have history-clearing clones yet; only
+/// GCNRegisterTracker does). Both fatal-error at runtime.
+struct ScheduleConstructorOptions {
+  /// Build a ScheduleLengthTracker. Disable when the caller has no
+  /// need for cycle / critical-path / max-acceptable-length info
+  /// (e.g., BFS-DP, whose objective is pressure not length).
+  bool enable_length_tracking = true;
+
+  /// Build an IlpTracker. Disable when ILP-score metrics aren't
+  /// needed (e.g., BFS-DP).
+  bool enable_ilp_tracking = true;
+
+  /// Forwarded to the inner GCNRegisterTracker's same-named flag.
+  /// Default false to match the tracker's default — the only
+  /// reader of GetPressureHistory() is shakedown code; nothing in
+  /// production consults it.
+  bool track_pressure_history = false;
+
+  /// Preset for the current full-featured behavior. Same as a
+  /// default-constructed Options, but lets callers spell it
+  /// explicitly: `ScheduleConstructorOptions::Default()` documents
+  /// "I want everything on" rather than relying on the implicit
+  /// default. Useful for tests / debug snippets where the intent
+  /// is to mirror production.
+  static ScheduleConstructorOptions Default() {
+    return ScheduleConstructorOptions{};
+  }
+
+  /// Preset for BFS-DP usage: register tracker + scheduled set +
+  /// ready list, nothing else. Lets per-LatticeNode snapshots
+  /// stay small and cheap to clone.
+  static ScheduleConstructorOptions BfsDp() {
+    ScheduleConstructorOptions opts;
+    opts.enable_length_tracking = false;
+    opts.enable_ilp_tracking = false;
+    opts.track_pressure_history = false;
+    return opts;
+  }
+};
 
 class ScheduleConstructor {
 public:
@@ -82,7 +138,30 @@ public:
   /// FilterAndSortReadyList in SearchPolicies.h).
   ScheduleConstructor(const ScheduleGraph &graph,
                       const GCNSubtarget &st,
-                      const MachineFunction &mf);
+                      const MachineFunction &mf,
+                      ScheduleConstructorOptions options =
+                          ScheduleConstructorOptions::Default());
+
+  /// Return a fresh ScheduleConstructor whose live state (register
+  /// tracker live regs / cur pressure / remaining uses,
+  /// scheduled-set bitset + frontier, ready list, remaining-strong-
+  /// pred counts, scope stack) is copied from `this`, but with all
+  /// past-step history cleared: schedule_order_ empty,
+  /// schedule_call_count_ reset, and the inner GCNRegisterTracker
+  /// constructed via its own NoHistoryClone (empty undo_stack_ and
+  /// pressure_history_, default max_pressure_).
+  ///
+  /// Intended for BFS-DP: each LatticeNode owns one of these
+  /// snapshots, capturing the state at partition P so the parent
+  /// search can branch on each ready instruction without copying
+  /// the parent's accumulated history.
+  ///
+  /// Fatal error if length / ILP tracking are enabled on the
+  /// source (the inner trackers don't have history-clearing
+  /// clones yet; only GCNRegisterTracker does). BFS-DP construct
+  /// the source with `ScheduleConstructorOptions::BfsDp()` so
+  /// both are off and this path is well-defined.
+  ScheduleConstructor NoHistoryClone() const;
 
   /// Schedule a node. The node must be in the ready list.
   /// Updates register pressure, schedule length, ready list, and
@@ -126,14 +205,21 @@ public:
   /// IsDone() — reports fatal error on a partial schedule, since
   /// "the schedule's length" isn't defined until the schedule is
   /// complete. For running cycle counts during construction, read
-  /// GetLengthTracker().GetCurrentCycle() directly.
+  /// GetLengthTracker().GetCurrentCycle() directly. Fatal error
+  /// if length tracking was disabled at construction (the value
+  /// isn't being maintained).
   int GetScheduleLength() const {
+    if (!length_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::GetScheduleLength called on a "
+          "constructor built with enable_length_tracking=false");
+    }
     if (!IsDone()) {
       report_fatal_error(
           "ScheduleConstructor::GetScheduleLength called on "
           "incomplete schedule");
     }
-    return length_tracker_.GetCurrentCycle();
+    return length_tracker_->GetCurrentCycle();
   }
 
   /// The current scope's ready list — nodes whose strong predecessors
@@ -177,18 +263,40 @@ public:
   const GCNRegisterTracker &GetPressureTracker() const {
     return pressure_tracker_;
   }
+  /// Fatal error if length tracking was disabled at construction.
   const ScheduleLengthTracker &GetLengthTracker() const {
-    return length_tracker_;
+    if (!length_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::GetLengthTracker called on a "
+          "constructor built with enable_length_tracking=false");
+    }
+    return *length_tracker_;
   }
-  const IlpTracker &GetIlpTracker() const { return ilp_tracker_; }
+  /// Fatal error if ILP tracking was disabled at construction.
+  const IlpTracker &GetIlpTracker() const {
+    if (!ilp_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::GetIlpTracker called on a "
+          "constructor built with enable_ilp_tracking=false");
+    }
+    return *ilp_tracker_;
+  }
 
   /// Set the maximum schedule length the search will accept for
   /// the next stretch of work on this constructor and populate the
   /// length tracker's per-node max-schedule-cycle table accordingly.
   /// Idempotent: subsequent calls overwrite. Production callers
-  /// pass min(iteration_target, best.length - 1).
+  /// pass min(iteration_target, best.length - 1). Fatal error if
+  /// length tracking was disabled at construction.
   void SetMaxAcceptableScheduleLength(int max_acceptable_schedule_length) {
-    length_tracker_.SetMaxAcceptableScheduleLength(max_acceptable_schedule_length);
+    if (!length_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::SetMaxAcceptableScheduleLength "
+          "called on a constructor built with "
+          "enable_length_tracking=false");
+    }
+    length_tracker_->SetMaxAcceptableScheduleLength(
+        max_acceptable_schedule_length);
   }
 
   const ScheduledSetTracker &GetScheduledSetTracker() const {
@@ -271,6 +379,20 @@ public:
   std::string Describe() const;
 
 private:
+  /// Tag type for the NoHistoryClone-private constructor below.
+  struct NoHistoryCloneTag {};
+
+  /// Private constructor used by NoHistoryClone. Member-init-lists
+  /// only the fields the clone keeps (pressure_tracker via its own
+  /// NoHistoryClone, scheduled_set_tracker, scopes including the
+  /// ready list, remaining-strong-pred counts, and the bookkeeping
+  /// fields). Leaves length_tracker_ / ilp_tracker_ as empty
+  /// optionals (the public NoHistoryClone preconditions both off),
+  /// schedule_order_ empty, and schedule_call_count_ defaulted —
+  /// no wasted copy of history-bearing fields.
+  ScheduleConstructor(const ScheduleConstructor &source,
+                      NoHistoryCloneTag);
+
   /// Drive the constructor back to its initial empty state by
   /// repeatedly invoking Unschedule(). Internal helper used by
   /// Reset(); not exposed publicly because callers should always
@@ -279,9 +401,15 @@ private:
   void UnscheduleAll();
 
   const ScheduleGraph *graph_;
+  ScheduleConstructorOptions options_;
   GCNRegisterTracker pressure_tracker_;
-  ScheduleLengthTracker length_tracker_;
-  IlpTracker ilp_tracker_;
+  /// std::optional so we can decline to build a length/ILP tracker
+  /// when the corresponding flag in options_ is false. Schedule /
+  /// Unschedule / Reset and the public accessors gate on
+  /// has_value(). Built (emplace'd) in the body of the public
+  /// ctor based on the options.
+  std::optional<ScheduleLengthTracker> length_tracker_;
+  std::optional<IlpTracker> ilp_tracker_;
   ScheduledSetTracker scheduled_set_tracker_;
 
   /// Nodes scheduled so far, in order.

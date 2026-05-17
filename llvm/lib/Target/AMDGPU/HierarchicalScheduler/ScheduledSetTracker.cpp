@@ -28,10 +28,11 @@ ScheduledSetTracker::ScheduledSetTracker(
   if (graph_ == nullptr) {
     report_fatal_error("ScheduledSetTracker: graph must not be null");
   }
-  if (length_tracker_ == nullptr) {
-    report_fatal_error(
-        "ScheduledSetTracker: length_tracker must not be null");
-  }
+  // length_tracker_ is now nullable. When null, frontier entries'
+  // lower_bound stays at 0 (the default) — callers that don't
+  // consult lower_bound (e.g., BFS-DP, which uses scheduled_set_
+  // + prefix_signature_ for PartitionKey but never reads frontier
+  // LBs) can skip building a ScheduleLengthTracker entirely.
 
   int n = graph_->Size();
   if (n < 2) {
@@ -70,6 +71,17 @@ void ScheduledSetTracker::Schedule(const ScheduleNode *node) {
     return;
   }
 
+  // Frontier maintenance is gated on having a length tracker:
+  // the only readers of the frontier (LengthHistoryTracker
+  // dominance, length-tracking shakedowns) all assume real LBs,
+  // which require length info. Callers that opt out of length
+  // tracking (e.g., BFS-DP) consume only scheduled_set_ +
+  // prefix_signature_ for PartitionKey and skip the frontier
+  // entirely — the work below would be wasted for them.
+  if (length_tracker_ == nullptr) {
+    return;
+  }
+
   // Real node: was in the frontier (all its strong predecessors
   // had been scheduled, otherwise we couldn't have scheduled it).
   // Remove.
@@ -87,6 +99,14 @@ void ScheduledSetTracker::Unschedule(const ScheduleNode *node) {
   scheduled_set_.reset(topo_idx);
 
   if (node->IsSubgraphProxy()) {
+    return;
+  }
+
+  // See Schedule's matching comment — frontier maintenance is
+  // gated on a length tracker being bound. Callers that opt out
+  // (BFS-DP) never read the frontier; the recompute below would
+  // be wasted.
+  if (length_tracker_ == nullptr) {
     return;
   }
 

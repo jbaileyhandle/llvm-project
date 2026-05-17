@@ -25,17 +25,64 @@ using namespace llvm::hierarchical_scheduler;
 
 ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
                                          const GCNSubtarget &st,
-                                         const MachineFunction &mf)
+                                         const MachineFunction &mf,
+                                         ScheduleConstructorOptions options)
     : graph_(&graph),
-      pressure_tracker_(graph, mf),
-      length_tracker_(graph, st),
-      ilp_tracker_(graph, pressure_tracker_),
-      // scheduled_set_tracker_ depends on length_tracker_ for cycle
-      // lookups; declared after it in the class so member init order
-      // is correct.
-      scheduled_set_tracker_(&graph, &length_tracker_) {
+      options_(options),
+      pressure_tracker_(graph, mf, options.track_pressure_history),
+      length_tracker_(
+          options.enable_length_tracking
+              ? std::make_optional<ScheduleLengthTracker>(graph, st)
+              : std::nullopt),
+      ilp_tracker_(options.enable_ilp_tracking
+                       ? std::make_optional<IlpTracker>(graph,
+                                                        pressure_tracker_)
+                       : std::nullopt),
+      scheduled_set_tracker_(
+          &graph,
+          length_tracker_ ? &*length_tracker_ : nullptr) {
   InitReadyList();
 }
+
+ScheduleConstructor ScheduleConstructor::NoHistoryClone() const {
+  // The inner trackers' history-cleared clones are only defined for
+  // GCNRegisterTracker today; length / ILP trackers maintain their
+  // own undo stacks but we haven't written NoHistoryClone equivalents
+  // for them. Catch the misconfiguration loudly rather than silently
+  // producing a clone with stale length/ILP state.
+  if (options_.enable_length_tracking || options_.enable_ilp_tracking) {
+    report_fatal_error(
+        "ScheduleConstructor::NoHistoryClone called on a constructor "
+        "with enable_length_tracking or enable_ilp_tracking set. "
+        "Only the BFS-DP preset (both off) is currently supported.");
+  }
+  return ScheduleConstructor(*this, NoHistoryCloneTag{});
+}
+
+// See the public NoHistoryClone for the length/ilp precondition;
+// this private ctor assumes both options are off and constructs
+// only the fields the clone needs.
+ScheduleConstructor::ScheduleConstructor(const ScheduleConstructor &source,
+                                         NoHistoryCloneTag)
+    : graph_(source.graph_),
+      options_(source.options_),
+      // pressure_tracker_ via its own NoHistoryClone — copies live
+      // state without dragging undo_stack_ / pressure_history_. C++17
+      // guaranteed copy elision constructs the return value directly
+      // in pressure_tracker_'s storage; no extra copy/move.
+      pressure_tracker_(source.pressure_tracker_.NoHistoryClone()),
+      // length_tracker_ / ilp_tracker_ left as default-constructed
+      // empty optionals (precondition: source had both off).
+      // scheduled_set_tracker_ copied by value: its DenseMap and
+      // BitVector copy themselves; matches what BFS-DP needs
+      // (scheduled_set + signature for PartitionKey; frontier is
+      // empty in the no-length-tracker case so copy is cheap).
+      scheduled_set_tracker_(source.scheduled_set_tracker_),
+      // schedule_order_ intentionally not copied — empty by default.
+      // schedule_call_count_ intentionally not copied — defaulted.
+      scopes_(source.scopes_),
+      remaining_strong_predecessors_by_topo_index_(
+          source.remaining_strong_predecessors_by_topo_index_) {}
 
 ScheduleConstructor::SubgraphScheduleScope &
 ScheduleConstructor::FindScopeOnStack(const ScheduleNode *target_proxy) {
@@ -205,13 +252,19 @@ void ScheduleConstructor::ScheduleByIndex(int index) {
 
   // Trackers self-skip for subgraph proxies (no register or cycle
   // effect — see each tracker's Schedule for the early-return).
-  // We call them uniformly here.
+  // We call them uniformly here, gating length / ILP on the
+  // options' enable flags (their optionals are empty otherwise).
   // ScheduleSetTracker.Schedule must come AFTER length_tracker_'s
   // — its frontier-LB computation reads the just-scheduled node's
-  // cycle from length_tracker_.
+  // cycle from length_tracker_ when length tracking is on (and
+  // skips that work entirely when off).
   pressure_tracker_.Schedule(node);
-  length_tracker_.Schedule(node);
-  ilp_tracker_.Schedule(node);
+  if (length_tracker_) {
+    length_tracker_->Schedule(node);
+  }
+  if (ilp_tracker_) {
+    ilp_tracker_->Schedule(node);
+  }
   scheduled_set_tracker_.Schedule(node);
 
   // Erase from current scope's ready list FIRST. ready_list must
@@ -304,9 +357,14 @@ void ScheduleConstructor::Unschedule() {
 
   // Undo trackers (reverse order of Schedule). Trackers self-skip
   // for subgraph proxies — see each tracker's Unschedule.
+  // length / ILP gated on the same flags as Schedule.
   scheduled_set_tracker_.Unschedule(node);
-  ilp_tracker_.Unschedule(node);
-  length_tracker_.Unschedule(node);
+  if (ilp_tracker_) {
+    ilp_tracker_->Unschedule(node);
+  }
+  if (length_tracker_) {
+    length_tracker_->Unschedule(node);
+  }
   pressure_tracker_.Unschedule(node);
 }
 
@@ -342,8 +400,13 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
            other.pressure_tracker_.GetContinuousOccupancyScore();
 
   case ScheduleMetric::kMinimizeScheduleLength: {
-    int my_length = length_tracker_.GetCurrentCycle();
-    int other_length = other.length_tracker_.GetCurrentCycle();
+    if (!length_tracker_ || !other.length_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::IsBetterThan: kMinimizeScheduleLength "
+          "requires both constructors to have length tracking enabled");
+    }
+    int my_length = length_tracker_->GetCurrentCycle();
+    int other_length = other.length_tracker_->GetCurrentCycle();
     if (my_length != other_length) {
       return my_length < other_length;
     }
@@ -359,8 +422,20 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
   }
 
   case ScheduleMetric::kMinimizeScheduleLengthRefineIlp: {
-    int my_length = length_tracker_.GetCurrentCycle();
-    int other_length = other.length_tracker_.GetCurrentCycle();
+    if (!length_tracker_ || !other.length_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::IsBetterThan: "
+          "kMinimizeScheduleLengthRefineIlp requires both constructors "
+          "to have length tracking enabled");
+    }
+    if (!ilp_tracker_ || !other.ilp_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::IsBetterThan: "
+          "kMinimizeScheduleLengthRefineIlp requires both constructors "
+          "to have ILP tracking enabled");
+    }
+    int my_length = length_tracker_->GetCurrentCycle();
+    int other_length = other.length_tracker_->GetCurrentCycle();
     if (my_length != other_length) {
       return my_length < other_length;
     }
@@ -373,8 +448,8 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
     // when the search policy opts into the bound relaxation via
     // kRefineIlpAtSameLength, so under any other policy these
     // tiebreak paths are effectively dead code.
-    int my_ilp = ilp_tracker_.GetIlpScore();
-    int other_ilp = other.ilp_tracker_.GetIlpScore();
+    int my_ilp = ilp_tracker_->GetIlpScore();
+    int other_ilp = other.ilp_tracker_->GetIlpScore();
     if (my_ilp != other_ilp) {
       return my_ilp > other_ilp;
     }
@@ -383,8 +458,13 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
   }
 
   case ScheduleMetric::kMaximizeScheduleLength: {
-    int my_length = length_tracker_.GetCurrentCycle();
-    int other_length = other.length_tracker_.GetCurrentCycle();
+    if (!length_tracker_ || !other.length_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::IsBetterThan: kMaximizeScheduleLength "
+          "requires both constructors to have length tracking enabled");
+    }
+    int my_length = length_tracker_->GetCurrentCycle();
+    int other_length = other.length_tracker_->GetCurrentCycle();
     if (my_length != other_length) {
       return my_length > other_length;
     }
@@ -502,7 +582,9 @@ std::string ScheduleConstructor::Describe() const {
               "]";
   }
   result += " ready=" + std::to_string(current_scope.ready.size());
-  result += " " + length_tracker_.Describe();
+  if (length_tracker_) {
+    result += " " + length_tracker_->Describe();
+  }
   result += " " + pressure_tracker_.DescribePressure();
   return result;
 }
