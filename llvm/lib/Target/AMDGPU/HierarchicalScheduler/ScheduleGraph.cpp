@@ -1211,6 +1211,67 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildPressureHistoryPruneTestDAG()
   return graph;
 }
 
+std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildBfsDpWideTestDAG() {
+  auto graph = std::make_unique<ScheduleGraph>();
+
+  // Nodes listed in topo order so creation index == topo index (no
+  // intra-level reordering needed; the test deltas are indexed by
+  // topo index).
+  graph->ReserveNodes(16);
+  ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
+  ScheduleNode &b = graph->EmplaceNode(nullptr, "B", graph.get());
+  ScheduleNode &c = graph->EmplaceNode(nullptr, "C", graph.get());
+  ScheduleNode &d = graph->EmplaceNode(nullptr, "D", graph.get());
+  ScheduleNode &e = graph->EmplaceNode(nullptr, "E", graph.get());
+  ScheduleNode &m = graph->EmplaceNode(nullptr, "M", graph.get());
+  ScheduleNode &o = graph->EmplaceNode(nullptr, "O", graph.get());
+  ScheduleNode &f = graph->EmplaceNode(nullptr, "F", graph.get());
+  ScheduleNode &g = graph->EmplaceNode(nullptr, "G", graph.get());
+  ScheduleNode &h = graph->EmplaceNode(nullptr, "H", graph.get());
+  ScheduleNode &i = graph->EmplaceNode(nullptr, "I", graph.get());
+  ScheduleNode &n = graph->EmplaceNode(nullptr, "N", graph.get());
+  ScheduleNode &p = graph->EmplaceNode(nullptr, "P", graph.get());
+  ScheduleNode &j = graph->EmplaceNode(nullptr, "J", graph.get());
+  ScheduleNode &k = graph->EmplaceNode(nullptr, "K", graph.get());
+  ScheduleNode &l = graph->EmplaceNode(nullptr, "L", graph.get());
+
+  // A → 6 level-1 children.
+  graph->AddEdge(&a, &b, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&a, &c, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&a, &d, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&a, &e, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&a, &m, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&a, &o, ScheduleEdge::kData, /*latency=*/1);
+
+  // Cross-edge cluster: F:{B,C}, G:{C,D}, H:{D,E}, I:{E}.
+  graph->AddEdge(&b, &f, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&c, &f, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&c, &g, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&d, &g, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&d, &h, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&e, &h, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&e, &i, ScheduleEdge::kData, /*latency=*/1);
+
+  // Pure-parallel chains.
+  graph->AddEdge(&m, &n, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&o, &p, ScheduleEdge::kData, /*latency=*/1);
+
+  // Intermediate joins inside the cluster.
+  graph->AddEdge(&f, &j, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&g, &j, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&h, &k, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&i, &k, ScheduleEdge::kData, /*latency=*/1);
+
+  // 4-way sink: J, K, N, P all feed L.
+  graph->AddEdge(&j, &l, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&k, &l, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&n, &l, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&p, &l, ScheduleEdge::kData, /*latency=*/1);
+
+  graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
+  return graph;
+}
+
 std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAGWithCycle() {
   auto graph = std::make_unique<ScheduleGraph>();
 

@@ -639,6 +639,35 @@ public:
   /// focus here).
   static std::unique_ptr<ScheduleGraph> BuildPressureHistoryPruneTestDAG();
 
+  /// Build a wider synthetic test DAG for exercising BFS-DP and DFS
+  /// on substantially more reachable partitions and orderings than
+  /// BuildPressureHistoryPruneTestDAG. Used with GCNRegisterTracker's
+  /// test mode and deltas
+  /// {+1,+1,+1,+1,+1,+1,+1,-1,-1,-1,-1,-1,-1,0,0,-1} (indexed by
+  /// topo index — matches creation order below).
+  ///
+  /// Structure (16 nodes):
+  ///   - A is the source.
+  ///   - Six level-1 nodes hang off A: B,C,D,E,M,O.
+  ///   - Six level-2 nodes consume level-1 with mixed dependencies:
+  ///       F:{B,C}, G:{C,D}, H:{D,E}, I:{E}   (cross-edge cluster)
+  ///       N:{M}, P:{O}                       (pure-parallel chains)
+  ///   - J:{F,G} and K:{H,I} are intermediate joins inside the
+  ///     cross-edge cluster.
+  ///   - L is the 4-way sink: L:{J,K,N,P}.
+  ///
+  /// Why this shape:
+  ///   - Cross-edges (F,G,H need two producers) create
+  ///     multi-source joins and reduce orderings within the cluster.
+  ///   - Two independent pure-parallel chains re-add enumeration
+  ///     breadth via multinomial interleaving with the cluster.
+  ///   - The two effects together stress BFS-DP's partition
+  ///     enumeration and DFS's pruning effectiveness beyond the
+  ///     trivial 6-node baseline.
+  ///
+  /// All edges have latency 1.
+  static std::unique_ptr<ScheduleGraph> BuildBfsDpWideTestDAG();
+
   /// Build a synthetic test DAG that contains a cycle, for testing that
   /// ComputeTopologicalOrder correctly detects it and calls
   /// report_fatal_error.

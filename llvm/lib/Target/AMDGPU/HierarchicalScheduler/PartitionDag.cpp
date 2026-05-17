@@ -34,6 +34,7 @@ void PartitionDag::Build() {
     }
     current_layer.swap(next_layer);
     next_layer.clear();
+    ++current_level_;
   }
 
   if (sink_ == nullptr) {
@@ -92,6 +93,7 @@ void PartitionDag::VisitSuccessor(
   // represents the successor partition — that's the state we want
   // FindOrInsert to read the PartitionKey from (and to NoHistoryClone
   // on a miss).
+  ++schedule_call_count_;
   GCNRegPressure edge_peak = src->schedule_state->Schedule(next);
 
   // Convert this edge's peak pressure to a continuous occupancy
@@ -111,6 +113,19 @@ void PartitionDag::VisitSuccessor(
     path_bottleneck = src->best_path_bottleneck;
   } else {
     path_bottleneck = {edge_score, edge_peak};
+  }
+
+  // Score-bound prune: any completion past this edge has bottleneck
+  // min(path_bottleneck, future) <= path_bottleneck. If this edge
+  // already drops the bottleneck strictly below the caller's
+  // achievable-baseline seed, no completion through here can beat
+  // the seed — don't even materialize the successor partition.
+  // Sound: a later (better) path to the same partition will create
+  // it on demand via FindOrInsert.
+  if (path_bottleneck.continuous_occupancy_score < initial_best_score_) {
+    ++prune_count_;
+    src->schedule_state->Unschedule();
+    return;
   }
 
   PartitionNode *succ = FindOrInsert(*src->schedule_state, next_layer);

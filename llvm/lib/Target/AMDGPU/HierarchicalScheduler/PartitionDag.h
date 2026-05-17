@@ -126,6 +126,50 @@ class PartitionDag {
   /// Only valid after Build() has completed.
   ArrayRef<const ScheduleNode *> GetSchedule() const { return schedule_; }
 
+  /// Number of Schedule() calls issued on PartitionNode schedule_states
+  /// across the entire Build (matched by an equal number of Unschedule
+  /// calls). Matches the counting convention of
+  /// DfsSearch::ScheduleCallCount — Unschedule is not counted, so this
+  /// is comparable apples-to-apples with the DFS counter.
+  int GetScheduleCallCount() const { return schedule_call_count_; }
+
+  /// Number of unique PartitionNodes in the dag (one per distinct
+  /// scheduled-set encountered during Build, including source and sink).
+  int GetPartitionNodeCount() const {
+    return static_cast<int>(nodes_.size());
+  }
+
+  /// Number of completed BFS layers (= number of current/next layer
+  /// swaps performed). For an N-node graph the source counts as level
+  /// 0 and the sink is reached at level N, so this ends equal to N
+  /// after a successful Build.
+  int GetCurrentLevel() const { return current_level_; }
+
+  /// Number of (src, next) extensions that were pruned by the
+  /// score-bound check (see SetInitialBestScore) — the per-edge
+  /// path bottleneck dropped strictly below the seed, so neither
+  /// the successor partition nor the dag edge was created. Zero
+  /// unless a seed score has been set.
+  int GetPruneCount() const { return prune_count_; }
+
+  /// Score-bound prune (analog of DfsSearch's). Pre-seeds a known
+  /// best-achievable continuous-occupancy score; during Build,
+  /// per-edge probes whose resulting path bottleneck is strictly
+  /// less than this seed are not followed (any completion past
+  /// such an edge can only make the bottleneck smaller, so no path
+  /// through it can beat the seed). Skips creating the successor
+  /// PartitionNode entirely — a later (better) path to the same
+  /// partition will create it on demand.
+  ///
+  /// The seed itself must be achievable (e.g., the score of a
+  /// baseline schedule the caller already knows), or the prune
+  /// will eliminate all paths to sink and Build will fatal-error.
+  /// Strict less-than so paths that exactly match the seed survive
+  /// — Build can confirm the optimum with far less work when a
+  /// tight seed is available. Default unset (INT_MIN sentinel)
+  /// disables pruning entirely.
+  void SetInitialBestScore(int score) { initial_best_score_ = score; }
+
   /// Test-only: enable delta-based synthetic pressure on the source
   /// PartitionNode's GCNRegisterTracker. Deltas propagate to every
   /// cloned PartitionNode via GCNRegisterTracker::NoHistoryClone (which
@@ -201,6 +245,15 @@ class PartitionDag {
   /// from there the deltas propagate to every clone (NoHistoryClone
   /// preserves test_mode_ / test_vgpr_deltas_).
   std::vector<int> test_vgpr_deltas_;
+
+  /// Stats — populated incrementally during Build.
+  int schedule_call_count_ = 0;
+  int current_level_ = 0;
+  int prune_count_ = 0;
+
+  /// Score-bound prune threshold (see SetInitialBestScore). INT_MIN
+  /// sentinel means no seed → prune never fires.
+  int initial_best_score_ = INT_MIN;
 };
 
 }  // namespace hierarchical_scheduler

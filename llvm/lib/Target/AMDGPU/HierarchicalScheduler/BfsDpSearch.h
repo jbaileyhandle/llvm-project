@@ -41,6 +41,12 @@ class BfsDpSearch {
     dag_.EnableTestModeForTest(per_node_vgpr_deltas);
   }
 
+  /// Pass-through to PartitionDag::SetInitialBestScore. See that
+  /// method for the pruning semantics.
+  void SetInitialBestScore(int score) {
+    dag_.SetInitialBestScore(score);
+  }
+
   /// Test-only: access the dag for reading the recovered schedule
   /// and the sink's PathBottleneck after Run().
   const PartitionDag &GetDagForTest() const { return dag_; }
