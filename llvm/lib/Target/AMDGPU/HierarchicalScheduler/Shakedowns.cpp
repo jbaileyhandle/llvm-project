@@ -14,6 +14,7 @@
 
 #include "ScheduleDAGHierarchicalScheduler.h"
 #include "BfsDpSearch.h"
+#include "BfsDpSettings.h"
 #include "DfsSearch.h"
 #include "DominatorTree.h"
 #include "GCNRegisterTracker.h"
@@ -3216,7 +3217,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
                << dfs_no_history.ScheduleCallCount().lifetime << "\n";
 
   // BFS-DP continuous, unseeded — soundness anchor: must match DFS.
-  BfsDpSearch bfs_cont(&graph, &st, &mf, kContinuous);
+  BfsDpSearch bfs_cont(&graph, &st, &mf, BfsDpSettings{kContinuous});
   bfs_cont.EnableTestModeForTest(vgpr_deltas);
   if (!bfs_cont.Run().schedule) {
     report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
@@ -3238,7 +3239,8 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   // the only target that can strictly beat the seed; this demonstrates
   // pruning at the boundary AND that the optimum is recovered when
   // only it can survive.
-  BfsDpSearch bfs_cont_seed_below(&graph, &st, &mf, kContinuous);
+  BfsDpSearch bfs_cont_seed_below(&graph, &st, &mf,
+                                  BfsDpSettings{kContinuous});
   bfs_cont_seed_below.EnableTestModeForTest(vgpr_deltas);
   bfs_cont_seed_below.SetInitialBestScore(dfs_continuous - 1);
   bool bfs_cont_seed_below_found =
@@ -3261,7 +3263,8 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
 
   // BFS-DP continuous seeded AT the optimum. <= prunes the optimum
   // too; expect no sink.
-  BfsDpSearch bfs_cont_seed_opt(&graph, &st, &mf, kContinuous);
+  BfsDpSearch bfs_cont_seed_opt(&graph, &st, &mf,
+                                BfsDpSettings{kContinuous});
   bfs_cont_seed_opt.EnableTestModeForTest(vgpr_deltas);
   bfs_cont_seed_opt.SetInitialBestScore(dfs_continuous);
   bool bfs_cont_seed_opt_found =
@@ -3275,7 +3278,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
                << bfs_cont_seed_opt.GetDagForTest().GetPruneCount() << "\n";
 
   // BFS-DP integer, unseeded — same integer optimum, different metric.
-  BfsDpSearch bfs_int(&graph, &st, &mf, kInteger);
+  BfsDpSearch bfs_int(&graph, &st, &mf, BfsDpSettings{kInteger});
   bfs_int.EnableTestModeForTest(vgpr_deltas);
   if (!bfs_int.Run().schedule) {
     report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
@@ -3293,7 +3296,8 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
                << " levels=" << bfs_int_dag.GetCurrentLevel() << "\n";
 
   // BFS-DP integer seeded AT the DFS integer optimum. Expect no sink.
-  BfsDpSearch bfs_int_seed_opt(&graph, &st, &mf, kInteger);
+  BfsDpSearch bfs_int_seed_opt(&graph, &st, &mf,
+                               BfsDpSettings{kInteger});
   bfs_int_seed_opt.EnableTestModeForTest(vgpr_deltas);
   bfs_int_seed_opt.SetInitialBestScore(dfs_integer);
   bool bfs_int_seed_opt_found =

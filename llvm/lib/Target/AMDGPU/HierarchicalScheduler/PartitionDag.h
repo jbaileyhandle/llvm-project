@@ -26,6 +26,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_PARTITIONDAG_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_PARTITIONDAG_H
 
+#include "BfsDpSettings.h"
 #include "GCNRegPressure.h"
 #include "ScheduleConstructor.h"
 #include "ScheduleMetric.h"
@@ -110,30 +111,32 @@ class PartitionDag {
   /// ScheduleConstructor (subsequent PartitionNodes get their
   /// snapshots via NoHistoryClone).
   ///
-  /// `metric` selects the per-edge score function. Must be a
-  /// MAX-direction metric (higher = better) — BFS-DP's bottleneck
-  /// semantics (max-over-paths of min-along-path edge score) only
-  /// make sense when higher scores are better. Currently supported:
-  ///   - kMaximizeRegisterOccupancy (default): integer occupancy
-  ///       bracket derived from peak register pressure. Coarse —
-  ///       many distinct pressures map to the same integer level,
-  ///       so the score-bound prune fires aggressively against any
-  ///       baseline at the same level. Matches the production
-  ///       "replace input only on strict occupancy improvement"
-  ///       intent.
+  /// `settings` configures the search (see BfsDpSettings).
+  /// `settings.metric` selects the per-edge score function and must
+  /// be a MAX-direction metric (higher = better) — BFS-DP's
+  /// bottleneck DP (max-over-paths of min-along-path edge score)
+  /// only makes sense when higher is better. Supported:
+  ///   - kMaximizeRegisterOccupancy: integer occupancy bracket
+  ///       derived from peak register pressure. Coarse — many
+  ///       distinct pressures map to the same integer level, so the
+  ///       score-bound prune fires aggressively against any baseline
+  ///       at the same level. Matches the production "replace input
+  ///       only on strict occupancy improvement" intent.
   ///   - kMaximizeContinuousRegisterOccupancyScore: fine-grained,
   ///       distinguishes within-bracket pressure differences. Use
-  ///       when a strict occupancy improvement isn't required —
-  ///       the prune still fires when a path can't even match the
+  ///       when a strict occupancy improvement isn't required — the
+  ///       prune still fires when a path can't even match the
   ///       baseline's continuous score, but ties in occupancy are
   ///       distinguished by within-bracket pressure.
-  /// Other metric values fatal-error at construction.
+  /// Any other metric fatal-errors at construction.
+  ///
+  /// `settings.timeout_ms` is the per-region wall-clock budget; see
+  /// Build() for what happens when it fires and BfsDpSettings for
+  /// the value's meaning.
   ///
   /// Build() is called separately.
   PartitionDag(const ScheduleGraph *graph, const GCNSubtarget *st,
-               const MachineFunction *mf,
-               ScheduleMetric metric =
-                   ScheduleMetric::kMaximizeRegisterOccupancy);
+               const MachineFunction *mf, BfsDpSettings settings = {});
 
   /// BFS from the empty-set source to the all-scheduled sink:
   ///   - creates the source PartitionNode with a fresh BfsDp-preset
@@ -144,11 +147,15 @@ class PartitionDag {
   ///   - calls ReconstructSchedule to populate schedule_.
   ///
   /// Returns true on success: sink was reached and schedule_ is
-  /// populated. Returns false when the score-bound prune (see
-  /// SetInitialBestScore) eliminated every path to the sink — i.e.,
-  /// no schedule strictly beats the seed. In that case sink_ stays
-  /// null and GetSchedule returns empty; the caller falls back to
-  /// the baseline schedule the seed represents.
+  /// populated. Returns false in two cases, both leaving
+  /// GetSchedule empty so the caller falls back to the baseline
+  /// schedule the seed represents:
+  ///   - the score-bound prune (see SetInitialBestScore)
+  ///     eliminated every path to the sink — no schedule strictly
+  ///     beats the seed, and sink_ stays null;
+  ///   - the per-region timeout (settings.timeout_ms) was exhausted
+  ///     before the BFS drained — TimedOut() returns true,
+  ///     distinguishing this from the prune case.
   ///
   /// Must be called exactly once per PartitionDag instance. A second
   /// call would re-traverse the search redundantly and produce a
@@ -209,6 +216,13 @@ class PartitionDag {
   /// unless a seed score has been set.
   int GetPruneCount() const { return prune_count_; }
 
+  /// True iff Build() stopped early because the settings.timeout_ms
+  /// budget was exhausted before the BFS drained. False when no
+  /// timeout was set, or the search completed within budget —
+  /// whether it reached the sink or the score-bound prune emptied
+  /// the frontier. Meaningful only after Build() has run.
+  bool TimedOut() const { return timed_out_; }
+
   /// Score-bound prune (analog of DfsSearch's). Pre-seed with the
   /// score of a known baseline schedule; during Build, per-edge
   /// probes whose resulting path bottleneck is <= this seed are
@@ -237,7 +251,7 @@ class PartitionDag {
   /// to BFS-DP's per-edge scores).
   void SetInitialBestScore(const ScheduleConstructor &init) {
     SetInitialBestScore(
-        init.GetPressureTracker().GetMetricScore(metric_));
+        init.GetPressureTracker().GetMetricScore(settings_.metric));
   }
 
   /// Test-only: enable delta-based synthetic pressure on the source
@@ -293,10 +307,11 @@ class PartitionDag {
   /// scheduling order (source → sink). Populates schedule_.
   void ReconstructSchedule();
 
-  /// Convert a GCNRegPressure to an int score using metric_'s
-  /// formula. Used both for per-edge edge_score computation in
-  /// VisitSuccessor and for the bottleneck-pressure soundness
-  /// assert. Fatal-errors on metric_ values rejected by the ctor.
+  /// Convert a GCNRegPressure to an int score using
+  /// settings_.metric's formula. Used both for per-edge edge_score
+  /// computation in VisitSuccessor and for the bottleneck-pressure
+  /// soundness assert. Fatal-errors on metric values rejected by
+  /// the ctor.
   int ComputeScoreFromPressure(const GCNRegPressure &pressure) const;
 
   /// Input-order index for `node`: SUnit::NodeNum (LLVM's pre-RA
@@ -319,7 +334,10 @@ class PartitionDag {
   const ScheduleGraph *graph_;
   const GCNSubtarget *st_;
   const MachineFunction *mf_;
-  ScheduleMetric metric_;
+
+  /// Search configuration (metric + timeout). Set once at
+  /// construction; see BfsDpSettings.
+  const BfsDpSettings settings_;
 
   /// Stable storage of all PartitionNodes. unique_ptr because
   /// partition_node_by_key_ borrows pointers into this vector — a
@@ -359,6 +377,10 @@ class PartitionDag {
   /// Score-bound prune threshold (see SetInitialBestScore). INT_MIN
   /// sentinel means no seed → prune never fires.
   int initial_best_score_ = INT_MIN;
+
+  /// Set by Build() when the timeout_ms_ budget was exhausted
+  /// before the BFS drained. Read by TimedOut().
+  bool timed_out_ = false;
 };
 
 }  // namespace hierarchical_scheduler

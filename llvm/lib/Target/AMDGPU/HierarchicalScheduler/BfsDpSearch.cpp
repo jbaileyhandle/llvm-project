@@ -11,13 +11,13 @@ namespace hierarchical_scheduler {
 
 BfsDpSearch::BfsDpSearch(const ScheduleGraph *graph, const GCNSubtarget *st,
                          const MachineFunction *mf,
-                         ScheduleMetric metric)
-    : dag_(graph, st, mf, metric) {}
+                         BfsDpSettings settings)
+    : dag_(graph, st, mf, settings) {}
 
 SearchResult BfsDpSearch::Run() {
-  bool reached_sink = dag_.Build();
+  bool built = dag_.Build();
   std::optional<ScheduleConstructor> schedule;
-  if (reached_sink) {
+  if (built) {
     // Copy the dag's reconstructed constructor into the result.
     // One deep copy per region that found a schedule — not a hot
     // path. The dag (and its reconstructed constructor) outlive
@@ -25,11 +25,16 @@ SearchResult BfsDpSearch::Run() {
     // the dag queryable afterward (GetDagForTest).
     schedule = dag_.GetScheduleConstructor();
   }
-  // BFS-DP has no timeout or ShouldEndSearch hook yet — Build
-  // always runs the (score-bound-pruned) partition dag to
-  // exhaustion.
-  return SearchResult{std::move(schedule),
-                      SearchTerminationCause::kFullyExplored};
+  // Build runs the (score-bound-pruned) partition dag to
+  // exhaustion unless the settings.timeout_ms budget fired.
+  // kTimedOut when it did — BFS-DP has no complete schedule to
+  // salvage mid-search, so `schedule` is empty there too.
+  // Otherwise kFullyExplored, whether or not a schedule was found
+  // (an empty result there means the prune beat every path).
+  SearchTerminationCause cause =
+      dag_.TimedOut() ? SearchTerminationCause::kTimedOut
+                      : SearchTerminationCause::kFullyExplored;
+  return SearchResult{std::move(schedule), cause};
 }
 
 }  // namespace hierarchical_scheduler

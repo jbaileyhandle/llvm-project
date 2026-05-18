@@ -13,6 +13,7 @@
 #include "llvm/CodeGen/ScheduleDAG.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
+#include <chrono>
 
 namespace llvm {
 namespace hierarchical_scheduler {
@@ -20,14 +21,14 @@ namespace hierarchical_scheduler {
 PartitionDag::PartitionDag(const ScheduleGraph *graph,
                            const GCNSubtarget *st,
                            const MachineFunction *mf,
-                           ScheduleMetric metric)
-    : graph_(graph), st_(st), mf_(mf), metric_(metric) {
+                           BfsDpSettings settings)
+    : graph_(graph), st_(st), mf_(mf), settings_(settings) {
   // Only MAX-direction metrics make sense for BFS-DP's
   // max-over-paths of min-along-path bottleneck DP. Min-direction
   // metrics would invert the semantics (we'd want min-over-paths of
   // max-along-path); not implemented.
-  if (metric_ != ScheduleMetric::kMaximizeRegisterOccupancy &&
-      metric_ !=
+  if (settings_.metric != ScheduleMetric::kMaximizeRegisterOccupancy &&
+      settings_.metric !=
           ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore) {
     report_fatal_error(
         "PartitionDag: only kMaximizeRegisterOccupancy and "
@@ -43,6 +44,15 @@ bool PartitionDag::Build() {
         "construct a new PartitionDag instead");
   }
 
+  // Absolute wall-clock deadline for this Build. nullopt when the
+  // ctor was given no timeout_ms — the per-expansion check below
+  // is gated on it, so an unset budget runs the BFS to exhaustion.
+  std::optional<std::chrono::steady_clock::time_point> deadline;
+  if (settings_.timeout_ms) {
+    deadline = std::chrono::steady_clock::now() +
+               std::chrono::milliseconds(*settings_.timeout_ms);
+  }
+
   // Two rolling layers — current = the level we're expanding now,
   // next = nodes discovered during this expansion (the next level).
   // Swap-and-clear at the end of each level. No global level-index
@@ -52,6 +62,17 @@ bool PartitionDag::Build() {
   std::vector<PartitionNode *> next_layer;
   while (!current_layer.empty()) {
     for (PartitionNode *src : current_layer) {
+      // Timeout check, once per partition-node expansion. Per-node
+      // rather than per-layer: a single middle layer of the
+      // partition dag can hold an enormous number of nodes, so a
+      // per-layer check could overshoot the budget by minutes.
+      // ExpandSource is one bounded ready-list sweep, so the
+      // overshoot between checks stays small. steady_clock::now()
+      // is vDSO-backed (~20ns) — cheap to call per node.
+      if (deadline && std::chrono::steady_clock::now() >= *deadline) {
+        timed_out_ = true;
+        return false;
+      }
       ExpandSource(src, next_layer);
     }
     current_layer.swap(next_layer);
@@ -248,7 +269,7 @@ int PartitionDag::GetInputOrderIndex(const ScheduleNode *node) {
 
 int PartitionDag::ComputeScoreFromPressure(
     const GCNRegPressure &pressure) const {
-  switch (metric_) {
+  switch (settings_.metric) {
     case ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore:
       return GCNRegisterTracker::ComputeContinuousOccupancyScore(
           *st_, pressure.getVGPRNum(st_->hasGFX90AInsts()),

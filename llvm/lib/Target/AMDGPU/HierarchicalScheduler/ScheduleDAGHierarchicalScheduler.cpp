@@ -9,6 +9,7 @@
 
 #include "ScheduleDAGHierarchicalScheduler.h"
 #include "BfsDpSearch.h"
+#include "BfsDpSettings.h"
 #include "BranchAndBoundSearch.h"
 #include "DfsSearch.h"
 #include "GCNRegisterTracker.h"
@@ -23,6 +24,7 @@
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 
 #define DEBUG_TYPE "machine-scheduler"
@@ -501,15 +503,41 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     // Run the selected search; each branch fills `search_result`.
     SearchResult search_result;
     if (ShouldUseBfsDpForOccupancy()) {
-      // Integer occupancy metric, score-bound prune seeded with the
-      // region's original register-only occupancy: BfsDpSearch only
-      // materializes schedules that strictly beat the input.
+      // Occupancy-pass preset: integer-occupancy metric plus a
+      // per-region timeout (see BfsDpSettings::ForOccupancyPass).
+      // Score-bound prune seeded with the region's original
+      // register-only occupancy — BfsDpSearch only materializes
+      // schedules that strictly beat the input.
       BfsDpSearch search(&graph, &st, &MF,
-                         ScheduleMetric::kMaximizeRegisterOccupancy);
+                         BfsDpSettings::ForOccupancyPass());
       search.SetInitialBestScore(region.GetOriginalRegisterOnlyOccupancy());
       search_result = search.Run();
       llvm::outs() << "\t\toutput: (BFS-DP) found_improvement="
                    << search_result.schedule.has_value() << "\n";
+      if (search_result.termination_cause ==
+          SearchTerminationCause::kTimedOut) {
+        // The BFS expands one partition-dag layer per graph node, so
+        // the all-scheduled sink sits at depth graph.Size(). Layers
+        // completed before the budget fired, over that depth, is the
+        // approximate fraction of the search that was explored.
+        // Floating-point on purpose: a timeout typically fires only a
+        // few layers into a large graph, where integer division would
+        // round the percentage to 0.
+        int levels_explored = search.GetLevelsExplored();
+        int total_levels = graph.Size();
+        double percent_explored =
+            total_levels > 0
+                ? (100.0 * levels_explored) / total_levels
+                : 0.0;
+        // Fixed-point: raw_ostream's operator<<(double) prints %e
+        // (scientific), unreadable for a percentage. A timeout that
+        // fires a few layers into a large graph yields a sub-1%
+        // value, so keep two decimals.
+        llvm::outs() << "\t\t\ttimed out: explored ~"
+                     << llvm::format("%.2f", percent_explored)
+                     << "% of levels (" << levels_explored << "/"
+                     << total_levels << ")\n";
+      }
     } else {
       DfsSearch<DfsMaximizeOccupancyPolicy> search(
           graph, st, MF, *LIS,
