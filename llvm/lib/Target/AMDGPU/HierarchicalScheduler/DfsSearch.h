@@ -28,6 +28,16 @@ class LiveIntervals;
 
 namespace hierarchical_scheduler {
 
+// How a completed DfsSearch::Run ended. See
+// DfsSearch::GetTerminationCause for the per-case semantics.
+// Lives outside DfsSearch<Policy> so the type name doesn't carry
+// a policy template argument at use sites.
+enum class DfsSearchTerminationCause {
+  kFullyExplored,
+  kTimedOut,
+  kPolicySatisfied,
+};
+
 // Policy contract (the static methods below — Policy classes don't
 // inherit, they just have these by name):
 //   static constexpr ScheduleMetric kMetric;
@@ -208,6 +218,45 @@ class DfsSearch {
   // separate field) would get a DualRunAndLifetimeFlag because
   // its per-run and lifetime values can genuinely diverge.
   bool RegionTimedOut() const { return region_timed_out_; }
+
+  // How the most recent Run ended. The three cases:
+  //   kFullyExplored:   recursion drained naturally — every reachable
+  //                     schedule was visited. Returned best is
+  //                     provably optimal under the policy.
+  //   kPolicySatisfied: Policy::ShouldEndSearch returned true on a
+  //                     complete schedule (for the occupancy policy,
+  //                     the current best hit the function occupancy
+  //                     target). The policy decided the current best
+  //                     is good enough; could have kept going but
+  //                     saw no point.
+  //   kTimedOut:        the region budget
+  //                     (Policy::kTimeoutMsPerRegion) was exhausted
+  //                     before search completed and before the
+  //                     policy declared success. Returned best is
+  //                     the best found so far; no optimality claim,
+  //                     and the search would have kept looking for
+  //                     something better.
+  //
+  // Per single Run() the two end-paths (timeout vs. policy) are
+  // mutually exclusive: timeout returns up the stack immediately,
+  // and policy fires only at a completed schedule, after which the
+  // unwind doesn't re-enter Recurse and therefore doesn't re-check
+  // the timeout. So we can derive the cause from the existing
+  // flags without an extra "policy fired" bit. (The order of the
+  // checks below codifies "if policy fired, classify as
+  // policy-satisfied even if a stale region_timed_out_ from a
+  // hypothetical earlier Run also happens to be set" — relevant
+  // only if a future caller starts running multiple Run()s per
+  // region; the occupancy pass runs Run() exactly once.)
+  DfsSearchTerminationCause GetTerminationCause() const {
+    if (should_end_search_ && !region_timed_out_) {
+      return DfsSearchTerminationCause::kPolicySatisfied;
+    }
+    if (region_timed_out_) {
+      return DfsSearchTerminationCause::kTimedOut;
+    }
+    return DfsSearchTerminationCause::kFullyExplored;
+  }
 
   // Read-only access to the working constructor's
   // schedule-call counter. `.current_run` measures search effort

@@ -254,6 +254,15 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
   llvm::outs() << "\n=== Pass: MaximizeOccupancy === (configured_limit="
                << configured_limit << ")\n";
 
+  // Per-pass counters. `attempted` is regions where DFS actually ran
+  // (i.e., not short-circuited by the "already at kernel ceiling"
+  // skip). The three termination buckets are mutually exclusive and
+  // sum to `attempted`.
+  int attempted_count = 0;
+  int fully_explored_count = 0;
+  int timed_out_count = 0;
+  int policy_satisfied_count = 0;
+
   for (size_t i = 0; i < regions_.size(); ++i) {
     RegionInfo &region = regions_[i];
     int original_register_only_occupancy =
@@ -290,11 +299,24 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
                  << "\n";
 
     // Determine highest occupancy achievable for region.
-    int best_region_occupancy = ScheduleRegionForMaximumOccupancy(region);
+    MaxOccupancyRegionResult region_result =
+        ScheduleRegionForMaximumOccupancy(region);
+    ++attempted_count;
+    switch (region_result.termination_cause) {
+      case DfsSearchTerminationCause::kFullyExplored:
+        ++fully_explored_count;
+        break;
+      case DfsSearchTerminationCause::kTimedOut:
+        ++timed_out_count;
+        break;
+      case DfsSearchTerminationCause::kPolicySatisfied:
+        ++policy_satisfied_count;
+        break;
+    }
 
     // Update kernel_occupancy_so_far.
-    int kernel_occupancy_after_region =
-        std::min(kernel_occupancy_so_far, best_region_occupancy);
+    int kernel_occupancy_after_region = std::min(
+        kernel_occupancy_so_far, region_result.all_factors_occupancy);
     llvm::outs() << "\t\tkernel_occupancy: " << kernel_occupancy_so_far
                  << " -> " << kernel_occupancy_after_region << "\n";
     kernel_occupancy_so_far = kernel_occupancy_after_region;
@@ -309,9 +331,28 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     mfi_->limitOccupancy(static_cast<unsigned>(kernel_occupancy_so_far));
   }
 
+  int total_regions = static_cast<int>(regions_.size());
+  int skipped_count = total_regions - attempted_count;
   llvm::outs() << "\n\tPASS RESULT: kernel_occupancy="
                << kernel_occupancy_so_far
-               << " (MFI->Occupancy now " << mfi_->getOccupancy() << ")\n";
+               << " (MFI->Occupancy now " << mfi_->getOccupancy() << ")\n"
+               << "\t\tregions: total=" << total_regions
+               << " attempted=" << attempted_count
+               << " skipped=" << skipped_count << "\n";
+  if (attempted_count > 0) {
+    // Percent-of-attempted for each termination bucket. timed_out
+    // last because the user reads it as the "bad outcome" anchor.
+    auto pct = [&](int count) {
+      return (count * 100) / attempted_count;
+    };
+    llvm::outs() << "\t\tattempted breakdown: fully_explored="
+                 << fully_explored_count << " ("
+                 << pct(fully_explored_count) << "%)"
+                 << " policy_satisfied=" << policy_satisfied_count
+                 << " (" << pct(policy_satisfied_count) << "%)"
+                 << " timed_out=" << timed_out_count
+                 << " (" << pct(timed_out_count) << "%)\n";
+  }
 }
 
 // Pre-search per-region telemetry: shape of the region the DFS is
@@ -424,12 +465,16 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
 // as good as the input — no non-regression check needed here. If
 // DFS found nothing better, ApplyScheduleOrder is a no-op move-wise
 // because every MI is already at its CurrentTop position.
-int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
+ScheduleDAGHierarchicalScheduler::MaxOccupancyRegionResult
+ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     RegionInfo &region) {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
 
-  int achieved_all_factors_occupancy = 0;
+  MaxOccupancyRegionResult result{
+      /*all_factors_occupancy=*/0,
+      /*termination_cause=*/DfsSearchTerminationCause::kFullyExplored,
+  };
   WithRegionGraph(region, [&](ScheduleGraph &graph) {
     const ScheduleConstructor &input_schedule_constructor =
         graph.GetInputScheduleConstructor();
@@ -452,11 +497,12 @@ int ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
 
     ApplyScheduleOrder(region, dfs_best_schedule_constructor);
 
-    achieved_all_factors_occupancy =
+    result.all_factors_occupancy =
         dfs_best_schedule_constructor.GetPressureTracker()
             .GetAllFactorsRegionOnlyOccupancy();
+    result.termination_cause = search.GetTerminationCause();
   });
-  return achieved_all_factors_occupancy;
+  return result;
 }
 
 // Runtime selector for which length-pass policy to use, resolved from

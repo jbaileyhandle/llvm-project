@@ -15,6 +15,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_H
 
+#include "DfsSearch.h"
 #include "RegionInfo.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
@@ -101,13 +102,21 @@ public:
   // ComputeNonRegisterOccupancy before starting.
   void RunMaximizeOccupancyPass();
 
-  // Per-region worker for RunMaximizeOccupancyPass. Returns the
-  // maximum achieved all-factors occupancy for this region (arch max
-  // ∩ LDS ∩ launch bounds ∩ best register-pressure dimension). This
-  // is the per-region contribution to the kernel-wide occupancy
-  // min. Currently a stub that returns the original schedule's
-  // all-factors occupancy (i.e., no improvement).
-  int ScheduleRegionForMaximumOccupancy(RegionInfo &region);
+  // Per-region worker for RunMaximizeOccupancyPass. Returns:
+  //   - all_factors_occupancy: the maximum achieved all-factors
+  //     occupancy for this region (arch max ∩ LDS ∩ launch bounds
+  //     ∩ best register-pressure dimension). Per-region contribution
+  //     to the kernel-wide occupancy min.
+  //   - termination_cause: how the per-region DFS ended (see
+  //     DfsSearchTerminationCause). The pass aggregates these into
+  //     counts of regions that timed out vs. ran to completion vs.
+  //     ended because the policy was satisfied.
+  struct MaxOccupancyRegionResult {
+    int all_factors_occupancy;
+    DfsSearchTerminationCause termination_cause;
+  };
+  MaxOccupancyRegionResult ScheduleRegionForMaximumOccupancy(
+      RegionInfo &region);
 
   // Outer loop of the length pass. Iterates every region and calls
   // ScheduleRegionForLengthPass. Runs after RunMaximizeOccupancyPass
