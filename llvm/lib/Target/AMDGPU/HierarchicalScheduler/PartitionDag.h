@@ -28,6 +28,7 @@
 
 #include "GCNRegPressure.h"
 #include "ScheduleConstructor.h"
+#include "ScheduleMetric.h"
 #include "ScheduledSetTracker.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
@@ -57,14 +58,17 @@ struct PartitionEdge {
   const ScheduleNode *scheduled;
 };
 
-/// The worst (bottleneck) edge along a path through the dag. The
-/// continuous-occupancy score is the comparator (used everywhere the
-/// DP picks a best path); register_pressure is the GCNRegPressure
-/// paired with that bottleneck edge, carried alongside the score so
-/// reconstruction / diagnostics can report the actual pressure
-/// numbers behind the score, not just the score itself.
+/// The worst (bottleneck) edge along a path through the dag. `score`
+/// is the comparator (used everywhere the DP picks a best path) —
+/// its meaning depends on the metric the dag was constructed with
+/// (continuous-occupancy score for
+/// kMaximizeContinuousRegisterOccupancyScore, integer occupancy
+/// for kMaximizeRegisterOccupancy; both MAX-direction, higher =
+/// better). `register_pressure` is the GCNRegPressure paired with
+/// that bottleneck edge, carried so reconstruction / diagnostics
+/// can report the actual pressure numbers behind the score.
 struct PathBottleneck {
-  int continuous_occupancy_score = INT_MAX;
+  int score = INT_MAX;
   GCNRegPressure register_pressure;
 };
 
@@ -80,8 +84,9 @@ struct PartitionNode {
   std::optional<ScheduleConstructor> schedule_state;
 
   /// DP value: max over all paths reaching this PartitionNode of the
-  /// bottleneck-edge metric (min continuous-occupancy score along the
-  /// path; pressure at that bottleneck edge).
+  /// bottleneck-edge metric (min metric-score along the path; pressure
+  /// at that bottleneck edge). The metric is selected at dag
+  /// construction; see PartitionDag's ctor.
   ///
   /// Default {INT_MAX, zeroed-pressure}:
   ///   - On the source, never overwritten (no incoming edges). For
@@ -102,9 +107,32 @@ class PartitionDag {
   /// `graph`, `st`, and `mf` must outlive this dag. `mf` is needed
   /// only to construct the source PartitionNode's initial
   /// ScheduleConstructor (subsequent PartitionNodes get their
-  /// snapshots via NoHistoryClone). Build() is called separately.
+  /// snapshots via NoHistoryClone).
+  ///
+  /// `metric` selects the per-edge score function. Must be a
+  /// MAX-direction metric (higher = better) — BFS-DP's bottleneck
+  /// semantics (max-over-paths of min-along-path edge score) only
+  /// make sense when higher scores are better. Currently supported:
+  ///   - kMaximizeRegisterOccupancy (default): integer occupancy
+  ///       bracket derived from peak register pressure. Coarse —
+  ///       many distinct pressures map to the same integer level,
+  ///       so the score-bound prune fires aggressively against any
+  ///       baseline at the same level. Matches the production
+  ///       "replace input only on strict occupancy improvement"
+  ///       intent.
+  ///   - kMaximizeContinuousRegisterOccupancyScore: fine-grained,
+  ///       distinguishes within-bracket pressure differences. Use
+  ///       when a strict occupancy improvement isn't required —
+  ///       the prune still fires when a path can't even match the
+  ///       baseline's continuous score, but ties in occupancy are
+  ///       distinguished by within-bracket pressure.
+  /// Other metric values fatal-error at construction.
+  ///
+  /// Build() is called separately.
   PartitionDag(const ScheduleGraph *graph, const GCNSubtarget *st,
-               const MachineFunction *mf);
+               const MachineFunction *mf,
+               ScheduleMetric metric =
+                   ScheduleMetric::kMaximizeRegisterOccupancy);
 
   /// BFS from the empty-set source to the all-scheduled sink:
   ///   - creates the source PartitionNode with a fresh BfsDp-preset
@@ -114,10 +142,21 @@ class PartitionDag {
   ///   - records the sink (the unique all-scheduled PartitionNode);
   ///   - calls ReconstructSchedule to populate schedule_.
   ///
-  /// After Build returns, GetSchedule() and GetSource()/GetSink() are
-  /// valid. Build is intended to be called exactly once on a given
-  /// PartitionDag instance.
-  void Build();
+  /// Returns true on success: sink was reached and schedule_ is
+  /// populated. Returns false when the score-bound prune (see
+  /// SetInitialBestScore) eliminated every path to the sink — i.e.,
+  /// no schedule strictly beats the seed. In that case sink_ stays
+  /// null and GetSchedule returns empty; the caller falls back to
+  /// the baseline schedule the seed represents.
+  ///
+  /// Must be called exactly once per PartitionDag instance. A second
+  /// call would re-traverse the search redundantly and produce a
+  /// dag with duplicate work in nodes_; we fatal-error on entry if
+  /// source_ is already set.
+  ///
+  /// After Build returns true, GetSchedule() and GetSink() are valid.
+  /// GetSource() is always valid post-Build.
+  bool Build();
 
   PartitionNode *GetSource() const { return source_; }
   PartitionNode *GetSink() const { return sink_; }
@@ -152,23 +191,36 @@ class PartitionDag {
   /// unless a seed score has been set.
   int GetPruneCount() const { return prune_count_; }
 
-  /// Score-bound prune (analog of DfsSearch's). Pre-seeds a known
-  /// best-achievable continuous-occupancy score; during Build,
-  /// per-edge probes whose resulting path bottleneck is strictly
-  /// less than this seed are not followed (any completion past
-  /// such an edge can only make the bottleneck smaller, so no path
-  /// through it can beat the seed). Skips creating the successor
-  /// PartitionNode entirely — a later (better) path to the same
-  /// partition will create it on demand.
+  /// Score-bound prune (analog of DfsSearch's). Pre-seed with the
+  /// score of a known baseline schedule; during Build, per-edge
+  /// probes whose resulting path bottleneck is <= this seed are
+  /// not followed. "Tied with seed" is pruned because a schedule
+  /// with the same score as the baseline gives no improvement —
+  /// the caller would take the baseline anyway. Skips creating the
+  /// successor PartitionNode entirely; a later (strictly better)
+  /// path to the same partition will create it on demand via
+  /// FindOrInsert.
   ///
-  /// The seed itself must be achievable (e.g., the score of a
-  /// baseline schedule the caller already knows), or the prune
-  /// will eliminate all paths to sink and Build will fatal-error.
-  /// Strict less-than so paths that exactly match the seed survive
-  /// — Build can confirm the optimum with far less work when a
-  /// tight seed is available. Default unset (INT_MIN sentinel)
-  /// disables pruning entirely.
+  /// If no schedule strictly beats the seed, Build returns false
+  /// and GetSchedule returns empty — the caller falls back to the
+  /// baseline schedule the seed represents.
+  ///
+  /// Default unset (INT_MIN sentinel) disables pruning entirely:
+  /// `score <= INT_MIN` is never true for real scores.
   void SetInitialBestScore(int score) { initial_best_score_ = score; }
+
+  /// Convenience overload: extract the score from `init`'s pressure
+  /// tracker using this dag's metric, then SetInitialBestScore on
+  /// the result. Use when the caller already has a baseline
+  /// ScheduleConstructor (e.g., from replaying the input order
+  /// through a fresh tracker) and doesn't want to spell out the
+  /// metric a second time. `init` must be in the same test/production
+  /// mode the dag will run in (so the extracted score is comparable
+  /// to BFS-DP's per-edge scores).
+  void SetInitialBestScore(const ScheduleConstructor &init) {
+    SetInitialBestScore(
+        init.GetPressureTracker().GetMetricScore(metric_));
+  }
 
   /// Test-only: enable delta-based synthetic pressure on the source
   /// PartitionNode's GCNRegisterTracker. Deltas propagate to every
@@ -218,9 +270,16 @@ class PartitionDag {
   /// scheduling order (source → sink). Populates schedule_.
   void ReconstructSchedule();
 
+  /// Convert a GCNRegPressure to an int score using metric_'s
+  /// formula. Used both for per-edge edge_score computation in
+  /// VisitSuccessor and for the bottleneck-pressure soundness
+  /// assert. Fatal-errors on metric_ values rejected by the ctor.
+  int ComputeScoreFromPressure(const GCNRegPressure &pressure) const;
+
   const ScheduleGraph *graph_;
   const GCNSubtarget *st_;
   const MachineFunction *mf_;
+  ScheduleMetric metric_;
 
   /// Stable storage of all PartitionNodes. unique_ptr because
   /// partition_node_by_key_ borrows pointers into this vector — a

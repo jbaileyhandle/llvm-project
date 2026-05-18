@@ -23,15 +23,21 @@ class ScheduleGraph;
 
 class BfsDpSearch {
  public:
-  /// `graph`, `st`, and `mf` must outlive this object.
+  /// `graph`, `st`, and `mf` must outlive this object. `metric`
+  /// is passed straight through to PartitionDag; see that class's
+  /// doc for the supported values and defaults.
   BfsDpSearch(const ScheduleGraph *graph, const GCNSubtarget *st,
-              const MachineFunction *mf);
+              const MachineFunction *mf,
+              ScheduleMetric metric =
+                  ScheduleMetric::kMaximizeRegisterOccupancy);
 
   /// Build the partition dag and apply the recovered schedule.
   /// Integration with the rest of the scheduler (formation,
   /// telemetry) is added incrementally; this shell currently just
-  /// delegates to PartitionDag::Build().
-  void Run();
+  /// delegates to PartitionDag::Build(). Returns true on success,
+  /// false if no schedule strictly beats the seed (see
+  /// PartitionDag::SetInitialBestScore).
+  bool Run();
 
   /// Test-only pass-through to PartitionDag::EnableTestModeForTest.
   /// Must be called before Run(); enables synthetic-pressure mode
@@ -45,6 +51,12 @@ class BfsDpSearch {
   /// method for the pruning semantics.
   void SetInitialBestScore(int score) {
     dag_.SetInitialBestScore(score);
+  }
+
+  /// Pass-through to PartitionDag::SetInitialBestScore's
+  /// ScheduleConstructor overload.
+  void SetInitialBestScore(const ScheduleConstructor &init) {
+    dag_.SetInitialBestScore(init);
   }
 
   /// Test-only: access the dag for reading the recovered schedule

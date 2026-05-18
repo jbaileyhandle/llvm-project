@@ -17,10 +17,30 @@ namespace hierarchical_scheduler {
 
 PartitionDag::PartitionDag(const ScheduleGraph *graph,
                            const GCNSubtarget *st,
-                           const MachineFunction *mf)
-    : graph_(graph), st_(st), mf_(mf) {}
+                           const MachineFunction *mf,
+                           ScheduleMetric metric)
+    : graph_(graph), st_(st), mf_(mf), metric_(metric) {
+  // Only MAX-direction metrics make sense for BFS-DP's
+  // max-over-paths of min-along-path bottleneck DP. Min-direction
+  // metrics would invert the semantics (we'd want min-over-paths of
+  // max-along-path); not implemented.
+  if (metric_ != ScheduleMetric::kMaximizeRegisterOccupancy &&
+      metric_ !=
+          ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore) {
+    report_fatal_error(
+        "PartitionDag: only kMaximizeRegisterOccupancy and "
+        "kMaximizeContinuousRegisterOccupancyScore are currently "
+        "supported metrics");
+  }
+}
 
-void PartitionDag::Build() {
+bool PartitionDag::Build() {
+  if (source_ != nullptr) {
+    report_fatal_error(
+        "PartitionDag::Build called twice on the same instance; "
+        "construct a new PartitionDag instead");
+  }
+
   // Two rolling layers — current = the level we're expanding now,
   // next = nodes discovered during this expansion (the next level).
   // Swap-and-clear at the end of each level. No global level-index
@@ -38,11 +58,13 @@ void PartitionDag::Build() {
   }
 
   if (sink_ == nullptr) {
-    report_fatal_error(
-        "PartitionDag::Build: BFS completed without finding the "
-        "all-scheduled sink");
+    // Score-bound prune killed every path to the all-scheduled
+    // partition. No schedule strictly beats the seed. schedule_
+    // stays empty; caller falls back to the baseline.
+    return false;
   }
   ReconstructSchedule();
+  return true;
 }
 
 PartitionNode *PartitionDag::CreateSourceNode() {
@@ -95,34 +117,37 @@ void PartitionDag::VisitSuccessor(
   // on a miss).
   ++schedule_call_count_;
   GCNRegPressure edge_peak = src->schedule_state->Schedule(next);
+  int edge_score = ComputeScoreFromPressure(edge_peak);
 
-  // Convert this edge's peak pressure to a continuous occupancy
-  // score (higher = better). The lookup tables inside the tracker
-  // already key on (vgpr, sgpr); the static helper just reads them.
-  int edge_score = GCNRegisterTracker::ComputeContinuousOccupancyScore(
-      *st_, edge_peak.getVGPRNum(st_->hasGFX90AInsts()),
-      edge_peak.getSGPRNum());
-
-  // Running bottleneck along the path through src then via this
-  // edge: whichever of {src's prior bottleneck, this edge} has the
-  // lower score wins (the new bottleneck), and we carry its
-  // register_pressure alongside. src=source has score = INT_MAX
-  // (default), so any real edge wins — no special case needed.
+  // Running bottleneck along the path through src then via this edge:
+  //   - score: min-along-path (the actual bottleneck metric value).
+  //     src=source has score = INT_MAX, so min(INT_MAX, edge_score)
+  //     = edge_score on the first edge — no special case needed.
+  //   - register_pressure: element-wise max-along-path; reports the
+  //     schedule's actual per-component peak.
   PathBottleneck path_bottleneck;
-  if (src->best_path_bottleneck.continuous_occupancy_score < edge_score) {
-    path_bottleneck = src->best_path_bottleneck;
-  } else {
-    path_bottleneck = {edge_score, edge_peak};
-  }
+  path_bottleneck.score =
+      std::min(src->best_path_bottleneck.score, edge_score);
+  path_bottleneck.register_pressure =
+      max(src->best_path_bottleneck.register_pressure, edge_peak);
+
+  // Sanity check: score should be reproducible from register_pressure
+  // (holds by construction for both metrics — score = min over per-
+  // class monotone fns, so score(element-wise max) = min of scores).
+  assert(ComputeScoreFromPressure(path_bottleneck.register_pressure) ==
+             path_bottleneck.score &&
+         "PartitionDag: bottleneck score and register_pressure "
+         "disagree");
 
   // Score-bound prune: any completion past this edge has bottleneck
-  // min(path_bottleneck, future) <= path_bottleneck. If this edge
-  // already drops the bottleneck strictly below the caller's
-  // achievable-baseline seed, no completion through here can beat
-  // the seed — don't even materialize the successor partition.
+  // min(path_bottleneck, future) <= path_bottleneck. If this edge's
+  // path bottleneck is already <= the caller's known-baseline seed,
+  // no completion through here can STRICTLY beat the seed — and
+  // matching the seed isn't an improvement, so we'd take the
+  // baseline schedule anyway. Don't materialize the successor.
   // Sound: a later (better) path to the same partition will create
   // it on demand via FindOrInsert.
-  if (path_bottleneck.continuous_occupancy_score < initial_best_score_) {
+  if (path_bottleneck.score <= initial_best_score_) {
     ++prune_count_;
     src->schedule_state->Unschedule();
     return;
@@ -135,8 +160,8 @@ void PartitionDag::VisitSuccessor(
   // writers update only on strict improvement; ties leave the prior
   // path alone (first-writer-wins).
   if (!succ->best_incoming_edge.has_value() ||
-      path_bottleneck.continuous_occupancy_score >
-          succ->best_path_bottleneck.continuous_occupancy_score) {
+      path_bottleneck.score >
+          succ->best_path_bottleneck.score) {
     succ->best_path_bottleneck = path_bottleneck;
     succ->best_incoming_edge = PartitionEdge{src, next};
   }
@@ -172,6 +197,23 @@ PartitionNode *PartitionDag::FindOrInsert(
     sink_ = new_node;
   }
   return new_node;
+}
+
+int PartitionDag::ComputeScoreFromPressure(
+    const GCNRegPressure &pressure) const {
+  switch (metric_) {
+    case ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore:
+      return GCNRegisterTracker::ComputeContinuousOccupancyScore(
+          *st_, pressure.getVGPRNum(st_->hasGFX90AInsts()),
+          pressure.getSGPRNum());
+    case ScheduleMetric::kMaximizeRegisterOccupancy:
+      return static_cast<int>(pressure.getOccupancy(*st_));
+    default:
+      // Constructor rejected all other values.
+      llvm_unreachable(
+          "PartitionDag: unsupported metric in ComputeScoreFromPressure "
+          "— constructor validation lapse");
+  }
 }
 
 void PartitionDag::ReconstructSchedule() {

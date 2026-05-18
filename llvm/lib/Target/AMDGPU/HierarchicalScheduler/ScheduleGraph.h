@@ -643,8 +643,13 @@ public:
   /// on substantially more reachable partitions and orderings than
   /// BuildPressureHistoryPruneTestDAG. Used with GCNRegisterTracker's
   /// test mode and deltas
-  /// {+1,+1,+1,+1,+1,+1,+1,-1,-1,-1,-1,-1,-1,0,0,-1} (indexed by
-  /// topo index — matches creation order below).
+  /// {+5,+5,+5,+5,+5,+5,+5,-5,-5,-5,-5,-5,-5,0,0,-5} (indexed by
+  /// topo index — matches creation order below). The +/-5 magnitude
+  /// is chosen so the peak VGPR range across orderings (10 .. 35 on
+  /// gfx906) crosses integer occupancy brackets — important when
+  /// BFS-DP runs with the integer occupancy metric (otherwise every
+  /// ordering would map to the same maximum occupancy bracket and
+  /// the score-bound prune would have no signal).
   ///
   /// Structure (16 nodes):
   ///   - A is the source.

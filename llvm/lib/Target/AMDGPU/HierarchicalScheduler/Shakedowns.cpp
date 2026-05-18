@@ -3143,12 +3143,28 @@ class BfsDpVsDfsShakedownOracleNoHistoryPolicy
   }
 };
 
-// Per-graph comparison driver shared by all RunBfsDpVsDfsShakedown
-// cases. Runs DFS oracle + BFS-DP on `graph` with `vgpr_deltas`,
-// prints stats and schedules, replays BFS-DP's recovered schedule
-// through a fresh ScheduleConstructor to verify the DP-claimed
-// bottleneck matches end-to-end execution, and fatal-errors on any
-// mismatch. `graph` is mutated (topo computation + critical paths +
+// Per-graph driver for the BFS-DP comparison shakedown. Runs:
+//   - DFS oracle (continuous metric) — gold-standard optimum.
+//   - DFS no-history-prune variant — isolates score-bound prune
+//     contribution.
+//   - BFS-DP continuous unseeded — finds the optimum from scratch;
+//     soundness anchor (must match DFS).
+//   - BFS-DP continuous seeded with DFS_continuous - 1 — only the
+//     optimum can strictly beat this seed, so BFS-DP must recover
+//     exactly the optimum.
+//   - BFS-DP continuous seeded with DFS_continuous — under <=
+//     semantics, no path strictly beats the optimum; Build returns
+//     false. Exercises the "no improvement" path.
+//   - BFS-DP integer unseeded — finds the same integer optimum
+//     (different metric, but both monotone in peak pressure).
+//   - BFS-DP integer seeded with DFS_integer — also no improvement.
+//
+// Caveat: BFS-DP integer is only guaranteed to match DFS's integer
+// score, NOT DFS's continuous score or peak VGPR — multiple
+// distinct peaks can fall in the same integer occupancy bracket and
+// BFS-DP integer treats them as equivalent.
+//
+// `graph` is mutated (topo computation + critical paths +
 // input-schedule populate); caller retains ownership.
 void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
                                     ScheduleGraph &graph,
@@ -3158,10 +3174,10 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
                                     const LiveIntervals &lis) {
   llvm::outs() << "  RunBfsDpVsDfsShakedown[" << case_name << "]:\n";
 
-  // Same metric DfsMaximizeOccupancyPolicy uses internally; referenced
-  // explicitly here for the post-Run score read.
-  constexpr ScheduleMetric kPolicyMetric =
+  constexpr ScheduleMetric kContinuous =
       ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
+  constexpr ScheduleMetric kInteger =
+      ScheduleMetric::kMaximizeRegisterOccupancy;
 
   graph.ValidateAndComputeTopologicalOrder();
   graph.ComputeCriticalPaths();
@@ -3174,125 +3190,198 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
       graph, st, mf, lis, /*form_subgraphs=*/false);
   dfs_search.EnableTestModeForTest(vgpr_deltas);
   ScheduleConstructor dfs_best = dfs_search.Run();
-  int dfs_score =
-      dfs_best.GetPressureTracker().GetMetricScore(kPolicyMetric);
-  int64_t dfs_schedule_calls = dfs_search.ScheduleCallCount().lifetime;
-  int64_t dfs_history_prunes =
-      dfs_search.GetPressureHistoryTracker().PruneCount().lifetime;
+  int dfs_continuous =
+      dfs_best.GetPressureTracker().GetMetricScore(kContinuous);
+  int dfs_integer =
+      dfs_best.GetPressureTracker().GetMetricScore(kInteger);
+  unsigned dfs_peak =
+      dfs_best.GetPressureTracker().GetPeakPressure().getVGPRNum(
+          st.hasGFX90AInsts());
+  llvm::outs() << "    DFS oracle: peak_vgpr=" << dfs_peak
+               << " continuous=" << dfs_continuous
+               << " integer=" << dfs_integer
+               << " schedule_calls=" << dfs_search.ScheduleCallCount().lifetime
+               << " history_prunes="
+               << dfs_search.GetPressureHistoryTracker().PruneCount().lifetime
+               << "\n";
 
-  // Variant: same oracle but with pressure-history pruning disabled
-  // (only the score-bound prune remains). Lets us see how much of
-  // the prune-driven work reduction is attributable to history vs
-  // score-bound alone.
+  // DFS variant with history pruning off — isolates score-bound prune.
   DfsSearch<BfsDpVsDfsShakedownOracleNoHistoryPolicy> dfs_no_history(
       graph, st, mf, lis, /*form_subgraphs=*/false);
   dfs_no_history.EnableTestModeForTest(vgpr_deltas);
   dfs_no_history.Run();
-  int64_t dfs_no_history_schedule_calls =
-      dfs_no_history.ScheduleCallCount().lifetime;
-
-  // BFS-DP on the same graph + deltas. EnableTestModeForTest plumbs
-  // the deltas to the source PartitionNode's tracker; NoHistoryClone
-  // preserves test_mode_ / test_vgpr_deltas_ so per-PartitionNode
-  // probe Schedules see the synthetic pressure too.
-  BfsDpSearch bfs_search(&graph, &st, &mf);
-  bfs_search.EnableTestModeForTest(vgpr_deltas);
-  bfs_search.Run();
-  const PartitionDag &bfs_dag = bfs_search.GetDagForTest();
-  int bfs_score =
-      bfs_dag.GetSink()->best_path_bottleneck.continuous_occupancy_score;
-
-  // Second BFS-DP run: same setup but pre-seeded with the DFS
-  // oracle's score, so the per-edge score-bound prune fires. Must
-  // still reach a sink with the same optimal score.
-  BfsDpSearch bfs_seeded(&graph, &st, &mf);
-  bfs_seeded.EnableTestModeForTest(vgpr_deltas);
-  bfs_seeded.SetInitialBestScore(dfs_score);
-  bfs_seeded.Run();
-  const PartitionDag &bfs_seeded_dag = bfs_seeded.GetDagForTest();
-  int bfs_seeded_score = bfs_seeded_dag.GetSink()
-                             ->best_path_bottleneck
-                             .continuous_occupancy_score;
-
-  llvm::outs() << "    DFS oracle score: " << dfs_score
-               << " (peak VGPR="
-               << dfs_best.GetPressureTracker()
-                      .GetPeakPressure()
-                      .getVGPRNum(st.hasGFX90AInsts())
-               << ", schedule_calls=" << dfs_schedule_calls
-               << ", history_prunes=" << dfs_history_prunes << ")\n";
   llvm::outs() << "    DFS oracle (no history pruning): schedule_calls="
-               << dfs_no_history_schedule_calls << "\n";
-  llvm::outs() << "    BFS-DP score:     " << bfs_score
-               << " (bottleneck VGPR="
-               << bfs_dag.GetSink()
+               << dfs_no_history.ScheduleCallCount().lifetime << "\n";
+
+  // BFS-DP continuous, unseeded — soundness anchor: must match DFS.
+  BfsDpSearch bfs_cont(&graph, &st, &mf, kContinuous);
+  bfs_cont.EnableTestModeForTest(vgpr_deltas);
+  if (!bfs_cont.Run()) {
+    report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
+                       "]: unseeded BFS-DP continuous found no sink");
+  }
+  const PartitionDag &bfs_cont_dag = bfs_cont.GetDagForTest();
+  int bfs_cont_score = bfs_cont_dag.GetSink()->best_path_bottleneck.score;
+  llvm::outs() << "    BFS-DP continuous (unseeded): score="
+               << bfs_cont_score
+               << " peak_vgpr="
+               << bfs_cont_dag.GetSink()
                       ->best_path_bottleneck.register_pressure
                       .getVGPRNum(st.hasGFX90AInsts())
-               << ", schedule_calls=" << bfs_dag.GetScheduleCallCount()
-               << ", partition_nodes=" << bfs_dag.GetPartitionNodeCount()
-               << ", levels=" << bfs_dag.GetCurrentLevel() << ")\n";
-  llvm::outs() << "    BFS-DP (seeded with DFS score): score="
-               << bfs_seeded_score
-               << " schedule_calls=" << bfs_seeded_dag.GetScheduleCallCount()
-               << " partition_nodes=" << bfs_seeded_dag.GetPartitionNodeCount()
-               << " prunes=" << bfs_seeded_dag.GetPruneCount() << "\n";
-  llvm::outs() << "    DFS schedule:    ";
+               << " schedule_calls=" << bfs_cont_dag.GetScheduleCallCount()
+               << " partitions=" << bfs_cont_dag.GetPartitionNodeCount()
+               << " levels=" << bfs_cont_dag.GetCurrentLevel() << "\n";
+
+  // BFS-DP continuous seeded just below the optimum. The optimum is
+  // the only target that can strictly beat the seed; this demonstrates
+  // pruning at the boundary AND that the optimum is recovered when
+  // only it can survive.
+  BfsDpSearch bfs_cont_seed_below(&graph, &st, &mf, kContinuous);
+  bfs_cont_seed_below.EnableTestModeForTest(vgpr_deltas);
+  bfs_cont_seed_below.SetInitialBestScore(dfs_continuous - 1);
+  bool bfs_cont_seed_below_found = bfs_cont_seed_below.Run();
+  const PartitionDag &bfs_cont_seed_below_dag =
+      bfs_cont_seed_below.GetDagForTest();
+  llvm::outs() << "    BFS-DP continuous (seeded=" << (dfs_continuous - 1)
+               << " [DFS optimum - 1]): found_improvement="
+               << bfs_cont_seed_below_found;
+  if (bfs_cont_seed_below_found) {
+    llvm::outs() << " score="
+                 << bfs_cont_seed_below_dag.GetSink()
+                        ->best_path_bottleneck.score;
+  }
+  llvm::outs() << " schedule_calls="
+               << bfs_cont_seed_below_dag.GetScheduleCallCount()
+               << " partitions=" << bfs_cont_seed_below_dag.GetPartitionNodeCount()
+               << " prunes=" << bfs_cont_seed_below_dag.GetPruneCount()
+               << "\n";
+
+  // BFS-DP continuous seeded AT the optimum. <= prunes the optimum
+  // too; expect no sink.
+  BfsDpSearch bfs_cont_seed_opt(&graph, &st, &mf, kContinuous);
+  bfs_cont_seed_opt.EnableTestModeForTest(vgpr_deltas);
+  bfs_cont_seed_opt.SetInitialBestScore(dfs_continuous);
+  bool bfs_cont_seed_opt_found = bfs_cont_seed_opt.Run();
+  llvm::outs() << "    BFS-DP continuous (seeded=" << dfs_continuous
+               << " [DFS optimum]): found_improvement="
+               << bfs_cont_seed_opt_found
+               << " schedule_calls="
+               << bfs_cont_seed_opt.GetDagForTest().GetScheduleCallCount()
+               << " prunes="
+               << bfs_cont_seed_opt.GetDagForTest().GetPruneCount() << "\n";
+
+  // BFS-DP integer, unseeded — same integer optimum, different metric.
+  BfsDpSearch bfs_int(&graph, &st, &mf, kInteger);
+  bfs_int.EnableTestModeForTest(vgpr_deltas);
+  if (!bfs_int.Run()) {
+    report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
+                       "]: unseeded BFS-DP integer found no sink");
+  }
+  const PartitionDag &bfs_int_dag = bfs_int.GetDagForTest();
+  int bfs_int_score = bfs_int_dag.GetSink()->best_path_bottleneck.score;
+  unsigned bfs_int_peak =
+      bfs_int_dag.GetSink()->best_path_bottleneck.register_pressure
+          .getVGPRNum(st.hasGFX90AInsts());
+  llvm::outs() << "    BFS-DP integer (unseeded): score=" << bfs_int_score
+               << " peak_vgpr=" << bfs_int_peak
+               << " schedule_calls=" << bfs_int_dag.GetScheduleCallCount()
+               << " partitions=" << bfs_int_dag.GetPartitionNodeCount()
+               << " levels=" << bfs_int_dag.GetCurrentLevel() << "\n";
+
+  // BFS-DP integer seeded AT the DFS integer optimum. Expect no sink.
+  BfsDpSearch bfs_int_seed_opt(&graph, &st, &mf, kInteger);
+  bfs_int_seed_opt.EnableTestModeForTest(vgpr_deltas);
+  bfs_int_seed_opt.SetInitialBestScore(dfs_integer);
+  bool bfs_int_seed_opt_found = bfs_int_seed_opt.Run();
+  llvm::outs() << "    BFS-DP integer (seeded=" << dfs_integer
+               << " [DFS optimum]): found_improvement="
+               << bfs_int_seed_opt_found
+               << " schedule_calls="
+               << bfs_int_seed_opt.GetDagForTest().GetScheduleCallCount()
+               << " prunes="
+               << bfs_int_seed_opt.GetDagForTest().GetPruneCount() << "\n";
+
+  // Schedules for visual inspection.
+  llvm::outs() << "    DFS schedule:               ";
   for (const ScheduleNode *n : dfs_best.GetScheduleOrder()) {
     llvm::outs() << " " << n->GetDebugName();
   }
   llvm::outs() << "\n";
-  llvm::outs() << "    BFS-DP schedule: ";
-  for (const ScheduleNode *n : bfs_dag.GetSchedule()) {
+  llvm::outs() << "    BFS-DP continuous schedule: ";
+  for (const ScheduleNode *n : bfs_cont_dag.GetSchedule()) {
+    llvm::outs() << " " << n->GetDebugName();
+  }
+  llvm::outs() << "\n";
+  llvm::outs() << "    BFS-DP integer schedule:    ";
+  for (const ScheduleNode *n : bfs_int_dag.GetSchedule()) {
     llvm::outs() << " " << n->GetDebugName();
   }
   llvm::outs() << "\n";
 
-  // Sanity check: replay BFS-DP's recovered schedule through a fresh
-  // (full-featured) ScheduleConstructor with the same test-mode deltas
-  // and read GetMetricScore. This is the score that schedule
-  // *actually* produces when run end-to-end — independent of BFS-DP's
-  // internal DP bookkeeping. If it differs from the DP-claimed
-  // bottleneck score, BFS-DP's bookkeeping is inconsistent with the
-  // schedule it returns.
+  // Sanity check: replay BFS-DP continuous's recovered schedule and
+  // confirm the score matches the DP claim end-to-end.
   ScheduleConstructor replay(graph, st, mf);
   replay.GetPressureTrackerForTest().EnableTestModeForTest(vgpr_deltas);
-  for (const ScheduleNode *n : bfs_dag.GetSchedule()) {
+  for (const ScheduleNode *n : bfs_cont_dag.GetSchedule()) {
     replay.Schedule(n);
   }
-  int replay_score =
-      replay.GetPressureTracker().GetMetricScore(kPolicyMetric);
-  llvm::outs() << "    BFS-DP schedule replayed: score=" << replay_score
-               << " (peak VGPR="
-               << replay.GetPressureTracker()
-                      .GetPeakPressure()
-                      .getVGPRNum(st.hasGFX90AInsts())
-               << ")\n";
-  bool replay_matches_claim = replay_score == bfs_score;
-  llvm::outs() << "    Replay matches BFS-DP claim: "
-               << (replay_matches_claim ? "PASS\n" : "FAIL\n");
+  int replay_score = replay.GetPressureTracker().GetMetricScore(kContinuous);
+  bool replay_matches = replay_score == bfs_cont_score;
+  llvm::outs() << "    BFS-DP continuous replayed: score=" << replay_score
+               << " matches_claim=" << (replay_matches ? "PASS" : "FAIL")
+               << "\n";
 
-  bool same_score = dfs_score == bfs_score;
-  llvm::outs() << "    Same best score: "
-               << (same_score ? "PASS\n" : "FAIL\n");
-  bool seeded_matches = bfs_seeded_score == bfs_score;
-  llvm::outs() << "    Seeded BFS-DP score matches unseeded: "
-               << (seeded_matches ? "PASS\n" : "FAIL\n");
-  if (!seeded_matches) {
-    report_fatal_error(
-        "RunBfsDpVsDfsShakedown[" + case_name +
-        "]: seeded BFS-DP score differs from unseeded; seed pruning "
-        "altered the optimum");
+  // Soundness asserts.
+  bool dfs_cont_matches = dfs_continuous == bfs_cont_score;
+  bool dfs_int_matches = dfs_integer == bfs_int_score;
+  bool seed_below_recovers_optimum =
+      bfs_cont_seed_below_found &&
+      bfs_cont_seed_below_dag.GetSink()->best_path_bottleneck.score ==
+          dfs_continuous;
+  llvm::outs() << "    DFS continuous == BFS-DP continuous (unseeded): "
+               << (dfs_cont_matches ? "PASS\n" : "FAIL\n");
+  llvm::outs() << "    DFS integer == BFS-DP integer (unseeded): "
+               << (dfs_int_matches ? "PASS\n" : "FAIL\n");
+  llvm::outs() << "    Seeded-with-(DFS optimum - 1) recovers optimum "
+                  "(continuous): "
+               << (seed_below_recovers_optimum ? "PASS\n" : "FAIL\n");
+  llvm::outs() << "    Seeded-with-DFS-optimum found no improvement "
+                  "(continuous): "
+               << (!bfs_cont_seed_opt_found ? "PASS\n" : "FAIL\n");
+  llvm::outs() << "    Seeded-with-DFS-optimum found no improvement "
+                  "(integer): "
+               << (!bfs_int_seed_opt_found ? "PASS\n" : "FAIL\n");
+
+  if (!replay_matches) {
+    report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
+                       "]: BFS-DP continuous claimed score does not "
+                       "match replay");
   }
-  if (!replay_matches_claim) {
-    report_fatal_error(
-        "RunBfsDpVsDfsShakedown[" + case_name +
-        "]: BFS-DP claimed score does not match the score obtained "
-        "by replaying BFS-DP's own recovered schedule");
+  if (!dfs_cont_matches) {
+    report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
+                       "]: BFS-DP continuous score does not match DFS "
+                       "oracle");
   }
-  if (!same_score) {
-    report_fatal_error(
-        "RunBfsDpVsDfsShakedown[" + case_name +
-        "]: BFS-DP score does not match DFS oracle");
+  if (!dfs_int_matches) {
+    report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
+                       "]: BFS-DP integer score does not match DFS "
+                       "oracle");
+  }
+  if (!seed_below_recovers_optimum) {
+    report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
+                       "]: BFS-DP continuous seeded with DFS optimum - 1 "
+                       "failed to recover the optimum");
+  }
+  if (bfs_cont_seed_opt_found) {
+    report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
+                       "]: BFS-DP continuous seeded with the DFS optimum "
+                       "found a sink, but no strict improvement should "
+                       "be possible");
+  }
+  if (bfs_int_seed_opt_found) {
+    report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
+                       "]: BFS-DP integer seeded with the DFS integer "
+                       "optimum found a sink");
   }
 }
 
@@ -3315,15 +3404,17 @@ void RunBfsDpVsDfsShakedown(const GCNSubtarget &st,
       /*vgpr_deltas=*/{+1, +1, +1, -1, -1, -1}, st, mf, lis);
 
   // Wide case: 16 nodes, cross-edges + pure-parallel chains. Deltas
-  // indexed by topo idx (matches creation order in
-  // BuildBfsDpWideTestDAG): A=+1, B,C,D,E,M,O=+1, F,G,H,I,N,P=-1,
-  // J=0, K=0, L=-1. Sum = 0.
+  // are +/-5 (not +/-1) so the peak VGPR range across orderings
+  // (10 .. 35) crosses integer occupancy brackets — otherwise BFS-DP
+  // integer would have no signal. Indexed by topo idx (matches
+  // creation order in BuildBfsDpWideTestDAG): A=+5, B,C,D,E,M,O=+5,
+  // F,G,H,I,N,P=-5, J=0, K=0, L=-5. Sum = 0.
   auto wide_graph = ScheduleGraph::BuildBfsDpWideTestDAG();
   RunBfsDpVsDfsComparisonOnGraph(
       "wide", *wide_graph,
-      /*vgpr_deltas=*/{+1, +1, +1, +1, +1, +1, +1,
-                       -1, -1, -1, -1, -1, -1,
-                       0, 0, -1},
+      /*vgpr_deltas=*/{+5, +5, +5, +5, +5, +5, +5,
+                       -5, -5, -5, -5, -5, -5,
+                       0, 0, -5},
       st, mf, lis);
 }
 
