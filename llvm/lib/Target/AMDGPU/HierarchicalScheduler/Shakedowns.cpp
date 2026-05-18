@@ -2918,14 +2918,15 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
 
   DfsSearch<TestLengthPolicyNoBoundsNoHistory> no_hist_search(
       *graph, st, mf, lis, /*form_subgraphs=*/false);
-  ScheduleConstructor no_hist_best = no_hist_search.Run();
+  ScheduleConstructor no_hist_best =
+      std::move(*no_hist_search.Run().schedule);
   int no_hist_length =
       no_hist_best.GetLengthTracker().GetCurrentCycle();
   int64_t no_hist_calls = no_hist_search.ScheduleCallCount().lifetime;
 
   DfsSearch<TestLengthPolicyNoBoundsWithHistory> hist_search(
       *graph, st, mf, lis, /*form_subgraphs=*/false);
-  ScheduleConstructor hist_best = hist_search.Run();
+  ScheduleConstructor hist_best = std::move(*hist_search.Run().schedule);
   int hist_length = hist_best.GetLengthTracker().GetCurrentCycle();
   int64_t hist_calls = hist_search.ScheduleCallCount().lifetime;
   int hist_prunes =
@@ -3057,7 +3058,8 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   DfsSearch<TestPressurePolicyNoBoundsNoHistory> no_hist_search(
       *graph, st, mf, lis, /*form_subgraphs=*/false);
   no_hist_search.EnableTestModeForTest(vgpr_deltas);
-  ScheduleConstructor no_hist_best = no_hist_search.Run();
+  ScheduleConstructor no_hist_best =
+      std::move(*no_hist_search.Run().schedule);
   int64_t no_hist_calls = no_hist_search.ScheduleCallCount().lifetime;
   int no_hist_score =
       no_hist_best.GetPressureTracker().GetMetricScore(kPolicyMetric);
@@ -3065,7 +3067,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   DfsSearch<TestPressurePolicyNoBoundsWithHistory> hist_search(
       *graph, st, mf, lis, /*form_subgraphs=*/false);
   hist_search.EnableTestModeForTest(vgpr_deltas);
-  ScheduleConstructor hist_best = hist_search.Run();
+  ScheduleConstructor hist_best = std::move(*hist_search.Run().schedule);
   int64_t hist_calls = hist_search.ScheduleCallCount().lifetime;
   int hist_score =
       hist_best.GetPressureTracker().GetMetricScore(kPolicyMetric);
@@ -3189,7 +3191,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   DfsSearch<BfsDpVsDfsShakedownOraclePolicy> dfs_search(
       graph, st, mf, lis, /*form_subgraphs=*/false);
   dfs_search.EnableTestModeForTest(vgpr_deltas);
-  ScheduleConstructor dfs_best = dfs_search.Run();
+  ScheduleConstructor dfs_best = std::move(*dfs_search.Run().schedule);
   int dfs_continuous =
       dfs_best.GetPressureTracker().GetMetricScore(kContinuous);
   int dfs_integer =
@@ -3216,7 +3218,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   // BFS-DP continuous, unseeded — soundness anchor: must match DFS.
   BfsDpSearch bfs_cont(&graph, &st, &mf, kContinuous);
   bfs_cont.EnableTestModeForTest(vgpr_deltas);
-  if (!bfs_cont.Run()) {
+  if (!bfs_cont.Run().schedule) {
     report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
                        "]: unseeded BFS-DP continuous found no sink");
   }
@@ -3239,7 +3241,8 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   BfsDpSearch bfs_cont_seed_below(&graph, &st, &mf, kContinuous);
   bfs_cont_seed_below.EnableTestModeForTest(vgpr_deltas);
   bfs_cont_seed_below.SetInitialBestScore(dfs_continuous - 1);
-  bool bfs_cont_seed_below_found = bfs_cont_seed_below.Run();
+  bool bfs_cont_seed_below_found =
+      bfs_cont_seed_below.Run().schedule.has_value();
   const PartitionDag &bfs_cont_seed_below_dag =
       bfs_cont_seed_below.GetDagForTest();
   llvm::outs() << "    BFS-DP continuous (seeded=" << (dfs_continuous - 1)
@@ -3261,7 +3264,8 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   BfsDpSearch bfs_cont_seed_opt(&graph, &st, &mf, kContinuous);
   bfs_cont_seed_opt.EnableTestModeForTest(vgpr_deltas);
   bfs_cont_seed_opt.SetInitialBestScore(dfs_continuous);
-  bool bfs_cont_seed_opt_found = bfs_cont_seed_opt.Run();
+  bool bfs_cont_seed_opt_found =
+      bfs_cont_seed_opt.Run().schedule.has_value();
   llvm::outs() << "    BFS-DP continuous (seeded=" << dfs_continuous
                << " [DFS optimum]): found_improvement="
                << bfs_cont_seed_opt_found
@@ -3273,7 +3277,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   // BFS-DP integer, unseeded — same integer optimum, different metric.
   BfsDpSearch bfs_int(&graph, &st, &mf, kInteger);
   bfs_int.EnableTestModeForTest(vgpr_deltas);
-  if (!bfs_int.Run()) {
+  if (!bfs_int.Run().schedule) {
     report_fatal_error("RunBfsDpVsDfsShakedown[" + case_name +
                        "]: unseeded BFS-DP integer found no sink");
   }
@@ -3292,7 +3296,8 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   BfsDpSearch bfs_int_seed_opt(&graph, &st, &mf, kInteger);
   bfs_int_seed_opt.EnableTestModeForTest(vgpr_deltas);
   bfs_int_seed_opt.SetInitialBestScore(dfs_integer);
-  bool bfs_int_seed_opt_found = bfs_int_seed_opt.Run();
+  bool bfs_int_seed_opt_found =
+      bfs_int_seed_opt.Run().schedule.has_value();
   llvm::outs() << "    BFS-DP integer (seeded=" << dfs_integer
                << " [DFS optimum]): found_improvement="
                << bfs_int_seed_opt_found

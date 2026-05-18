@@ -33,6 +33,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <climits>
 #include <memory>
 #include <optional>
@@ -162,8 +163,25 @@ class PartitionDag {
   PartitionNode *GetSink() const { return sink_; }
 
   /// The recovered schedule (source → sink ordering of ScheduleNodes).
-  /// Only valid after Build() has completed.
+  /// Only valid after a Build() that returned true; empty otherwise.
   ArrayRef<const ScheduleNode *> GetSchedule() const { return schedule_; }
+
+  /// The recovered schedule as a fully-populated ScheduleConstructor:
+  /// a fresh Default-preset constructor with GetSchedule()'s nodes
+  /// Schedule()d into it in order. This is what most callers
+  /// actually want — it can be handed to ApplyScheduleOrder and its
+  /// trackers queried for pressure / occupancy / length, exactly
+  /// like the ScheduleConstructor that DfsSearch::Run returns.
+  /// Built by ReconstructSchedule at the end of a successful Build.
+  /// Fatal-errors if Build() did not return true.
+  const ScheduleConstructor &GetScheduleConstructor() const {
+    if (!reconstructed_schedule_constructor_) {
+      report_fatal_error(
+          "PartitionDag::GetScheduleConstructor called when no "
+          "schedule was reconstructed (Build did not return true)");
+    }
+    return *reconstructed_schedule_constructor_;
+  }
 
   /// Number of Schedule() calls issued on PartitionNode schedule_states
   /// across the entire Build (matched by an equal number of Unschedule
@@ -317,8 +335,14 @@ class PartitionDag {
   PartitionNode *sink_ = nullptr;
 
   /// Recovered schedule, populated by ReconstructSchedule at the end of
-  /// Build().
+  /// Build(). Empty when Build returned false.
   SmallVector<const ScheduleNode *> schedule_;
+
+  /// Recovered schedule as a populated ScheduleConstructor. Built by
+  /// ReconstructSchedule alongside schedule_ (a fresh Default-preset
+  /// constructor with schedule_'s nodes Schedule()d in). nullopt when
+  /// Build returned false. See GetScheduleConstructor.
+  std::optional<ScheduleConstructor> reconstructed_schedule_constructor_;
 
   /// Test-only: per-topo-index VGPR deltas for synthetic-pressure
   /// shakedowns. Empty in production. When non-empty, CreateSourceNode

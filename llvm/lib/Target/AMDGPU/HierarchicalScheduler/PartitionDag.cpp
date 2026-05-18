@@ -284,6 +284,21 @@ void PartitionDag::ReconstructSchedule() {
         Twine(schedule_.size()) + " nodes but graph has " +
         Twine(graph_->Size()));
   }
+
+  // Build the recovered schedule as a fully-populated
+  // ScheduleConstructor. Default preset (length + ILP trackers on)
+  // so it's a drop-in for what DfsSearch::Run returns — callers can
+  // ApplyScheduleOrder it and query any tracker. If the dag is in
+  // test mode, mirror the synthetic deltas onto this constructor's
+  // pressure tracker so its pressure numbers match the search's.
+  reconstructed_schedule_constructor_.emplace(*graph_, *st_, *mf_);
+  if (!test_vgpr_deltas_.empty()) {
+    reconstructed_schedule_constructor_->GetPressureTrackerForTest()
+        .EnableTestModeForTest(test_vgpr_deltas_);
+  }
+  for (const ScheduleNode *node : schedule_) {
+    reconstructed_schedule_constructor_->Schedule(node);
+  }
 }
 
 }  // namespace hierarchical_scheduler

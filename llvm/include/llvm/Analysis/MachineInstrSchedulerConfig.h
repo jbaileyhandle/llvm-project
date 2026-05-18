@@ -69,6 +69,11 @@ class MachineInstrSchedulerConfig {
             // Quick first-pass approximation of the occupancy-aware
             // latency idea — applies to ALL edges, not just memory.
             ScaleEdgeLatenciesByTargetOccupancy,
+            // HierarchicalScheduler: in the occupancy-maximization
+            // pass, schedule every region with the BFS / dynamic-
+            // programming partition search (BfsDpSearch) instead of
+            // the default DFS occupancy search.
+            BfsDpForOccupancy,
             // Sentinel
             InvalidOption
         };
@@ -195,7 +200,8 @@ class MachineInstrSchedulerConfig {
             {SchedulerOption::UseJbaileCustomTimingModel, "UseJbaileCustomTimingModel"},
             {SchedulerOption::SkipSubgraphFormation, "SkipSubgraphFormation"},
             {SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy,
-             "ScaleEdgeLatenciesByTargetOccupancy"}
+             "ScaleEdgeLatenciesByTargetOccupancy"},
+            {SchedulerOption::BfsDpForOccupancy, "BfsDpForOccupancy"}
         };
 
 

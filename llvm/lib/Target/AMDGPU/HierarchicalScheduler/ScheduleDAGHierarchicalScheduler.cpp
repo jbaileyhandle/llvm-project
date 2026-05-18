@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ScheduleDAGHierarchicalScheduler.h"
+#include "BfsDpSearch.h"
 #include "BranchAndBoundSearch.h"
 #include "DfsSearch.h"
 #include "GCNRegisterTracker.h"
@@ -53,6 +54,15 @@ NextIfDebug(MachineBasicBlock::iterator I,
 static bool ShouldSkipSubgraphFormation() {
   return MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
       MachineInstrSchedulerConfig::SchedulerOption::SkipSubgraphFormation);
+}
+
+// True iff misched.txt sets `BfsDpForOccupancy`. When true, the
+// occupancy-maximization pass schedules each region with BfsDpSearch
+// (the BFS / dynamic-programming partition search) instead of the
+// default DfsSearch<DfsMaximizeOccupancyPolicy>.
+static bool ShouldUseBfsDpForOccupancy() {
+  return MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
+      MachineInstrSchedulerConfig::SchedulerOption::BfsDpForOccupancy);
 }
 
 ScheduleDAGHierarchicalScheduler::ScheduleDAGHierarchicalScheduler(
@@ -303,13 +313,13 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
         ScheduleRegionForMaximumOccupancy(region);
     ++attempted_count;
     switch (region_result.termination_cause) {
-      case DfsSearchTerminationCause::kFullyExplored:
+      case SearchTerminationCause::kFullyExplored:
         ++fully_explored_count;
         break;
-      case DfsSearchTerminationCause::kTimedOut:
+      case SearchTerminationCause::kTimedOut:
         ++timed_out_count;
         break;
-      case DfsSearchTerminationCause::kPolicySatisfied:
+      case SearchTerminationCause::kPolicySatisfied:
         ++policy_satisfied_count;
         break;
     }
@@ -458,13 +468,19 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
                << "\n";
 }
 
-// Runs DFS with DfsMaximizeOccupancyPolicy on the region's graph and
-// applies whatever schedule it returns. DfsSearch seeds best with the
-// graph's input ScheduleConstructor (the region's current MF-order
-// schedule), so the returned schedule is guaranteed to be at least
-// as good as the input — no non-regression check needed here. If
-// DFS found nothing better, ApplyScheduleOrder is a no-op move-wise
-// because every MI is already at its CurrentTop position.
+// Schedules the region for maximum occupancy and applies the result.
+// One of two search strategies, selected by the BfsDpForOccupancy
+// misched.txt option (see ShouldUseBfsDpForOccupancy):
+//
+//   DFS (default): DfsSearch<DfsMaximizeOccupancyPolicy>, seeded
+//     with the graph's input ScheduleConstructor.
+//   BFS-DP: BfsDpSearch, score-bound prune seeded with the region's
+//     original register-only occupancy.
+//
+// Either search returns a SearchResult; when its `schedule` is
+// empty (only BFS-DP, when no schedule strictly beats the seed) the
+// input order is kept. Applying a schedule equal to the input is a
+// no-op move-wise — every MI is already at its CurrentTop position.
 ScheduleDAGHierarchicalScheduler::MaxOccupancyRegionResult
 ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     RegionInfo &region) {
@@ -473,34 +489,48 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
 
   MaxOccupancyRegionResult result{
       /*all_factors_occupancy=*/0,
-      /*termination_cause=*/DfsSearchTerminationCause::kFullyExplored,
+      /*termination_cause=*/SearchTerminationCause::kFullyExplored,
   };
   WithRegionGraph(region, [&](ScheduleGraph &graph) {
     const ScheduleConstructor &input_schedule_constructor =
         graph.GetInputScheduleConstructor();
-
-    DfsSearch<DfsMaximizeOccupancyPolicy> search(
-        graph, st, MF, *LIS,
-        /*form_subgraphs=*/!ShouldSkipSubgraphFormation());
     // Occupancy pass has no phases: input:/output: live directly under
     // region[N] at indent level 2 (\t\t).
     PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
 
-    ScheduleConstructor dfs_best_schedule_constructor = search.Run();
+    // Run the selected search; each branch fills `search_result`.
+    SearchResult search_result;
+    if (ShouldUseBfsDpForOccupancy()) {
+      // Integer occupancy metric, score-bound prune seeded with the
+      // region's original register-only occupancy: BfsDpSearch only
+      // materializes schedules that strictly beat the input.
+      BfsDpSearch search(&graph, &st, &MF,
+                         ScheduleMetric::kMaximizeRegisterOccupancy);
+      search.SetInitialBestScore(region.GetOriginalRegisterOnlyOccupancy());
+      search_result = search.Run();
+      llvm::outs() << "\t\toutput: (BFS-DP) found_improvement="
+                   << search_result.schedule.has_value() << "\n";
+    } else {
+      DfsSearch<DfsMaximizeOccupancyPolicy> search(
+          graph, st, MF, *LIS,
+          /*form_subgraphs=*/!ShouldSkipSubgraphFormation());
+      search_result = search.Run();
+      // DFS always populates schedule (best is seeded with input).
+      bool changed = input_schedule_constructor.GetScheduleOrder() !=
+                     search_result.schedule->GetScheduleOrder();
+      PrintPostScheduleInfo(graph, *search_result.schedule, search, st,
+                            changed, "\t\t");
+    }
 
-    bool changed =
-        input_schedule_constructor.GetScheduleOrder() !=
-            dfs_best_schedule_constructor.GetScheduleOrder();
-
-    PrintPostScheduleInfo(graph, dfs_best_schedule_constructor, search, st,
-                          changed, "\t\t");
-
-    ApplyScheduleOrder(region, dfs_best_schedule_constructor);
-
+    // Common tail. Apply the search's schedule, or keep the input
+    // order when the search produced none (only BFS-DP can).
+    const ScheduleConstructor &applied =
+        search_result.schedule ? *search_result.schedule
+                               : input_schedule_constructor;
+    ApplyScheduleOrder(region, applied);
     result.all_factors_occupancy =
-        dfs_best_schedule_constructor.GetPressureTracker()
-            .GetAllFactorsRegionOnlyOccupancy();
-    result.termination_cause = search.GetTerminationCause();
+        applied.GetPressureTracker().GetAllFactorsRegionOnlyOccupancy();
+    result.termination_cause = search_result.termination_cause;
   });
   return result;
 }
@@ -765,7 +795,9 @@ static void RunIterativeLengthMinPhase(
 
   for (int target = floor; target < input_length; ++target) {
     iter_search.ResetForReuse(target);
-    ScheduleConstructor result = iter_search.Run();
+    // DfsSearch::Run always populates SearchResult::schedule, so the
+    // deref is unconditional here.
+    ScheduleConstructor result = std::move(*iter_search.Run().schedule);
     ++iterations_run;
 
     const int result_length =
@@ -828,7 +860,8 @@ static void RunPlainLengthMinPhase(
   int plain_target =
       best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
   plain_search.ResetForReuse(plain_target);
-  ScheduleConstructor plain_result = plain_search.Run();
+  // DfsSearch::Run always populates SearchResult::schedule.
+  ScheduleConstructor plain_result = std::move(*plain_search.Run().schedule);
   if (plain_result.IsBetterThan(best_schedule_constructor,
                                  Policy::kMetric)) {
     best_schedule_constructor = plain_result;
@@ -926,7 +959,8 @@ static void RunMaximizeLengthForRegion(
   // RecomputeWorkingMaxScheduleCycles will still set a max-acceptable
   // value on the working length tracker each Recurse, but length-
   // max's policy hooks don't consult it.
-  ScheduleConstructor plain_result = plain_search.Run();
+  // DfsSearch::Run always populates SearchResult::schedule.
+  ScheduleConstructor plain_result = std::move(*plain_search.Run().schedule);
   if (plain_result.IsBetterThan(best_schedule_constructor,
                                 DfsMaximizeLengthPolicy::kMetric)) {
     best_schedule_constructor = plain_result;

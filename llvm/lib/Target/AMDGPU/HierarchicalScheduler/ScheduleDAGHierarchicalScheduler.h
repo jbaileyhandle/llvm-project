@@ -107,13 +107,13 @@ public:
   //     occupancy for this region (arch max ∩ LDS ∩ launch bounds
   //     ∩ best register-pressure dimension). Per-region contribution
   //     to the kernel-wide occupancy min.
-  //   - termination_cause: how the per-region DFS ended (see
-  //     DfsSearchTerminationCause). The pass aggregates these into
+  //   - termination_cause: how the per-region search ended (see
+  //     SearchTerminationCause). The pass aggregates these into
   //     counts of regions that timed out vs. ran to completion vs.
   //     ended because the policy was satisfied.
   struct MaxOccupancyRegionResult {
     int all_factors_occupancy;
-    DfsSearchTerminationCause termination_cause;
+    SearchTerminationCause termination_cause;
   };
   MaxOccupancyRegionResult ScheduleRegionForMaximumOccupancy(
       RegionInfo &region);

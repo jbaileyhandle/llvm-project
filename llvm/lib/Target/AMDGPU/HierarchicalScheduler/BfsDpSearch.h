@@ -11,6 +11,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_BFSDPSEARCH_H
 
 #include "PartitionDag.h"
+#include "SearchResult.h"
 
 namespace llvm {
 
@@ -31,13 +32,13 @@ class BfsDpSearch {
               ScheduleMetric metric =
                   ScheduleMetric::kMaximizeRegisterOccupancy);
 
-  /// Build the partition dag and apply the recovered schedule.
-  /// Integration with the rest of the scheduler (formation,
-  /// telemetry) is added incrementally; this shell currently just
-  /// delegates to PartitionDag::Build(). Returns true on success,
-  /// false if no schedule strictly beats the seed (see
-  /// PartitionDag::SetInitialBestScore).
-  bool Run();
+  /// Build the partition dag and return the result. SearchResult::
+  /// schedule carries the recovered schedule when the dag reached
+  /// the sink, and is empty when the score-bound prune (see
+  /// SetInitialBestScore) eliminated every path. BFS-DP has no
+  /// timeout or ShouldEndSearch hook yet, so termination_cause is
+  /// always kFullyExplored.
+  SearchResult Run();
 
   /// Test-only pass-through to PartitionDag::EnableTestModeForTest.
   /// Must be called before Run(); enables synthetic-pressure mode
@@ -59,8 +60,8 @@ class BfsDpSearch {
     dag_.SetInitialBestScore(init);
   }
 
-  /// Test-only: access the dag for reading the recovered schedule
-  /// and the sink's PathBottleneck after Run().
+  /// Test-only: access the dag for reading the sink's PathBottleneck
+  /// and dag stats after Run().
   const PartitionDag &GetDagForTest() const { return dag_; }
 
  private:

@@ -155,6 +155,7 @@ MachineInstrSchedulerConfig::SchedulerOption MachineInstrSchedulerConfig::GetSch
         .Case("ScaleEdgeLatenciesByTargetOccupancy",
               SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy)
         .Case("MaximizeLength", SchedulerOption::MaximizeLength)
+        .Case("BfsDpForOccupancy", SchedulerOption::BfsDpForOccupancy)
         .Default(SchedulerOption::InvalidOption);
 
     if (option == SchedulerOption::InvalidOption) {
@@ -182,6 +183,7 @@ bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption opti
     case SchedulerOption::SkipSubgraphFormation:
     case SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy:
     case SchedulerOption::MaximizeLength:
+    case SchedulerOption::BfsDpForOccupancy:
         return (scheduler == Scheduler::HierarchicalScheduler);
     default:
         return false;

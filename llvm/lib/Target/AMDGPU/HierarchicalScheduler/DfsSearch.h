@@ -16,10 +16,12 @@
 #include "PressureHistoryTracker.h"
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
+#include "SearchResult.h"
 #include "SubgraphFormation.h"
 #include "llvm/ADT/SmallVector.h"
 #include <chrono>
 #include <limits>
+#include <optional>
 
 namespace llvm {
 class GCNSubtarget;
@@ -27,16 +29,6 @@ class MachineFunction;
 class LiveIntervals;
 
 namespace hierarchical_scheduler {
-
-// How a completed DfsSearch::Run ended. See
-// DfsSearch::GetTerminationCause for the per-case semantics.
-// Lives outside DfsSearch<Policy> so the type name doesn't carry
-// a policy template argument at use sites.
-enum class DfsSearchTerminationCause {
-  kFullyExplored,
-  kTimedOut,
-  kPolicySatisfied,
-};
 
 // Policy contract (the static methods below — Policy classes don't
 // inherit, they just have these by name):
@@ -156,15 +148,21 @@ class DfsSearch {
     // DFS's perspective; we never iterate its ready list for order.
   }
 
-  // Runs DFS, returns a copy of the best schedule found. Calls
-  // timing_.Start() at entry, which resets current_run_start so
-  // per-Run telemetry (GetCurrentRunElapsedMs) measures from this
-  // point. timing_.lifetime_start was set at construction and is
-  // not touched here.
-  ScheduleConstructor Run() {
+  // Runs DFS and returns a SearchResult. Calls timing_.Start() at
+  // entry, which resets current_run_start so per-Run telemetry
+  // (GetCurrentRunElapsedMs) measures from this point.
+  // timing_.lifetime_start was set at construction and is not
+  // touched here.
+  //
+  // SearchResult::schedule is always populated for DFS — best is
+  // seeded with the input order, so worst case it carries a copy
+  // of the input (see SearchResult.h). It is therefore never
+  // nullopt here; the optional shape exists for searches that can
+  // genuinely produce nothing (BFS-DP).
+  SearchResult Run() {
     timing_.Start();
     Recurse();
-    return best_schedule_constructor_;
+    return SearchResult{best_schedule_constructor_, GetTerminationCause()};
   }
 
   // Wall-clock elapsed (milliseconds) for the most recent Run().
@@ -248,14 +246,14 @@ class DfsSearch {
   // hypothetical earlier Run also happens to be set" — relevant
   // only if a future caller starts running multiple Run()s per
   // region; the occupancy pass runs Run() exactly once.)
-  DfsSearchTerminationCause GetTerminationCause() const {
+  SearchTerminationCause GetTerminationCause() const {
     if (should_end_search_ && !region_timed_out_) {
-      return DfsSearchTerminationCause::kPolicySatisfied;
+      return SearchTerminationCause::kPolicySatisfied;
     }
     if (region_timed_out_) {
-      return DfsSearchTerminationCause::kTimedOut;
+      return SearchTerminationCause::kTimedOut;
     }
-    return DfsSearchTerminationCause::kFullyExplored;
+    return SearchTerminationCause::kFullyExplored;
   }
 
   // Read-only access to the working constructor's
