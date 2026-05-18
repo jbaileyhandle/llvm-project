@@ -50,12 +50,12 @@ class ScheduleNode;
 
 struct PartitionNode;
 
-/// One directed edge in the PartitionDag: scheduling `scheduled` on top
-/// of `source`'s partial schedule yields the partition of the
-/// PartitionNode that owns this edge.
+/// One directed edge in the PartitionDag: scheduling `scheduled_node`
+/// on top of `source_partition`'s partial schedule yields the
+/// partition of the PartitionNode that owns this edge.
 struct PartitionEdge {
-  PartitionNode *source;
-  const ScheduleNode *scheduled;
+  PartitionNode *source_partition;
+  const ScheduleNode *scheduled_node;
 };
 
 /// The worst (bottleneck) edge along a path through the dag. `score`
@@ -240,18 +240,23 @@ class PartitionDag {
   /// exactly once, at the start of Build.
   PartitionNode *CreateSourceNode();
 
-  /// Enumerate `src`'s ready instructions and call VisitSuccessor for
-  /// each. After the loop, drops src's schedule_state — src has been
-  /// fully expanded and the snapshot is no longer needed (reconstruction
+  /// Enumerate `source_partition`'s ready instructions and call
+  /// VisitSuccessor for each. After the loop, drops
+  /// source_partition's schedule_state — it has been fully
+  /// expanded and the snapshot is no longer needed (reconstruction
   /// reads best_incoming_edge, not schedule_state).
-  void ExpandSource(PartitionNode *src,
+  void ExpandSource(PartitionNode *source_partition,
                     std::vector<PartitionNode *> &next_layer);
 
-  /// Probe-schedule `next` on a NoHistoryClone of src's state, compute
-  /// the resulting partition's continuous-occupancy edge score, hand
+  /// Probe-schedule `scheduled_node` on source_partition's state,
+  /// compute the resulting partition's per-metric edge score, hand
   /// the probe to FindOrInsert, then DP-merge into the returned
-  /// PartitionNode's best_path_score / best_incoming_edge.
-  void VisitSuccessor(PartitionNode *src, const ScheduleNode *next,
+  /// PartitionNode's best_path_bottleneck / best_incoming_edge.
+  /// Arg names match PartitionEdge's field names so the
+  /// `PartitionEdge{source_partition, scheduled_node}` construction
+  /// at the merge site reads as field-by-name init.
+  void VisitSuccessor(PartitionNode *source_partition,
+                      const ScheduleNode *scheduled_node,
                       std::vector<PartitionNode *> &next_layer);
 
   /// Look up the partition identified by probe_state's PartitionKey.
@@ -275,6 +280,23 @@ class PartitionDag {
   /// VisitSuccessor and for the bottleneck-pressure soundness
   /// assert. Fatal-errors on metric_ values rejected by the ctor.
   int ComputeScoreFromPressure(const GCNRegPressure &pressure) const;
+
+  /// Input-order index for `node`: SUnit::NodeNum (LLVM's pre-RA
+  /// scheduler emission order, register-pressure-aware) on
+  /// scheduling-unit nodes; min over members' indices on proxies
+  /// (matches EffectiveNodeNum in SearchPolicies.cpp). Returns 0
+  /// for synthetic test nodes (no SUnit) and for proxies with no
+  /// members.
+  ///
+  /// Used to break score ties in the DP merge: when multiple paths
+  /// reach the same partition with the same metric score, prefer
+  /// the path whose just-scheduled instruction is later in input
+  /// order (higher index). Biases the recovered schedule toward
+  /// the input schedule's ordering, which in production is already
+  /// a reasonable register-pressure-aware schedule. Same trick as
+  /// the SortKey.nid tiebreak in DfsMaximizeOccupancyPolicy and
+  /// OptSched's NID heuristic.
+  static int GetInputOrderIndex(const ScheduleNode *node);
 
   const ScheduleGraph *graph_;
   const GCNSubtarget *st_;

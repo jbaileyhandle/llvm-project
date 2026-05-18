@@ -9,6 +9,8 @@
 #include "GCNSubtarget.h"
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
+#include "SubgraphInfo.h"
+#include "llvm/CodeGen/ScheduleDAG.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 
@@ -91,45 +93,49 @@ PartitionNode *PartitionDag::CreateSourceNode() {
   return source_;
 }
 
-void PartitionDag::ExpandSource(PartitionNode *src,
+void PartitionDag::ExpandSource(PartitionNode *source_partition,
                                 std::vector<PartitionNode *> &next_layer) {
-  // VisitSuccessor probes by Schedule/Unschedule directly on src's
-  // state (no per-probe clone); the round-trip restores src's ready
-  // list to identical contents and order, so the ArrayRef stays
-  // valid across iterations.
+  // VisitSuccessor probes by Schedule/Unschedule directly on
+  // source_partition's state (no per-probe clone); the round-trip
+  // restores its ready list to identical contents and order, so
+  // the ArrayRef stays valid across iterations.
   ArrayRef<const ScheduleNode *> ready =
-      src->schedule_state->GetReadyList();
-  for (const ScheduleNode *next : ready) {
-    VisitSuccessor(src, next, next_layer);
+      source_partition->schedule_state->GetReadyList();
+  for (const ScheduleNode *scheduled_node : ready) {
+    VisitSuccessor(source_partition, scheduled_node, next_layer);
   }
-  // src has been fully expanded; drop the snapshot. Reconstruction
-  // walks best_incoming_edge, not schedule_state.
-  src->schedule_state.reset();
+  // source_partition has been fully expanded; drop the snapshot.
+  // Reconstruction walks best_incoming_edge, not schedule_state.
+  source_partition->schedule_state.reset();
 }
 
 void PartitionDag::VisitSuccessor(
-    PartitionNode *src, const ScheduleNode *next,
+    PartitionNode *source_partition, const ScheduleNode *scheduled_node,
     std::vector<PartitionNode *> &next_layer) {
-  // Probe-schedule `next` directly on src's state. Between this
-  // Schedule and the matching Unschedule below, src->schedule_state
-  // represents the successor partition — that's the state we want
-  // FindOrInsert to read the PartitionKey from (and to NoHistoryClone
-  // on a miss).
+  // Probe-schedule `scheduled_node` directly on source_partition's
+  // state. Between this Schedule and the matching Unschedule below,
+  // source_partition->schedule_state represents the successor
+  // partition — that's the state we want FindOrInsert to read the
+  // PartitionKey from (and to NoHistoryClone on a miss).
   ++schedule_call_count_;
-  GCNRegPressure edge_peak = src->schedule_state->Schedule(next);
+  GCNRegPressure edge_peak =
+      source_partition->schedule_state->Schedule(scheduled_node);
   int edge_score = ComputeScoreFromPressure(edge_peak);
 
-  // Running bottleneck along the path through src then via this edge:
+  // Running bottleneck along the path through source_partition then
+  // via this edge:
   //   - score: min-along-path (the actual bottleneck metric value).
-  //     src=source has score = INT_MAX, so min(INT_MAX, edge_score)
-  //     = edge_score on the first edge — no special case needed.
+  //     The dag source has score = INT_MAX, so
+  //     min(INT_MAX, edge_score) = edge_score on the first edge —
+  //     no special case needed.
   //   - register_pressure: element-wise max-along-path; reports the
   //     schedule's actual per-component peak.
   PathBottleneck path_bottleneck;
   path_bottleneck.score =
-      std::min(src->best_path_bottleneck.score, edge_score);
+      std::min(source_partition->best_path_bottleneck.score, edge_score);
   path_bottleneck.register_pressure =
-      max(src->best_path_bottleneck.register_pressure, edge_peak);
+      max(source_partition->best_path_bottleneck.register_pressure,
+          edge_peak);
 
   // Sanity check: score should be reproducible from register_pressure
   // (holds by construction for both metrics — score = min over per-
@@ -149,25 +155,49 @@ void PartitionDag::VisitSuccessor(
   // it on demand via FindOrInsert.
   if (path_bottleneck.score <= initial_best_score_) {
     ++prune_count_;
-    src->schedule_state->Unschedule();
+    source_partition->schedule_state->Unschedule();
     return;
   }
 
-  PartitionNode *succ = FindOrInsert(*src->schedule_state, next_layer);
+  PartitionNode *succ =
+      FindOrInsert(*source_partition->schedule_state, next_layer);
 
-  // First writer always wins (succ->best_incoming_edge unset signals
-  // succ's score is still the meaningless INT_MAX default). Subsequent
-  // writers update only on strict improvement; ties leave the prior
-  // path alone (first-writer-wins).
-  if (!succ->best_incoming_edge.has_value() ||
-      path_bottleneck.score >
-          succ->best_path_bottleneck.score) {
+  // DP merge:
+  //   - First writer: always wins (succ->best_incoming_edge unset
+  //     signals succ's bottleneck is still the default placeholder).
+  //   - Strict score improvement: update.
+  //   - Score tie: break by input-order index (SUnit::NodeNum) of
+  //     the just-scheduled instruction — higher (= later in input
+  //     order) wins. Biases reconstruction toward the input
+  //     schedule's ordering. Not for register pressure (we already
+  //     optimize that explicitly via the metric); it's about ILP /
+  //     schedule length, which the input schedule has already been
+  //     tuned for and we can inherit on ties for free. Matters most
+  //     when many edges tie at the same metric score (e.g., the
+  //     integer occupancy metric on schedules that fit in one
+  //     bracket).
+  //   - Score strictly worse: ignore.
+  bool should_update = false;
+  if (!succ->best_incoming_edge.has_value()) {
+    should_update = true;
+  } else if (path_bottleneck.score >
+             succ->best_path_bottleneck.score) {
+    should_update = true;
+  } else if (path_bottleneck.score ==
+             succ->best_path_bottleneck.score) {
+    should_update =
+        GetInputOrderIndex(scheduled_node) >
+        GetInputOrderIndex(succ->best_incoming_edge->scheduled_node);
+  }
+  if (should_update) {
     succ->best_path_bottleneck = path_bottleneck;
-    succ->best_incoming_edge = PartitionEdge{src, next};
+    succ->best_incoming_edge =
+        PartitionEdge{source_partition, scheduled_node};
   }
 
-  // Restore src's state for the next ready-list iteration.
-  src->schedule_state->Unschedule();
+  // Restore source_partition's state for the next ready-list
+  // iteration.
+  source_partition->schedule_state->Unschedule();
 }
 
 PartitionNode *PartitionDag::FindOrInsert(
@@ -199,6 +229,23 @@ PartitionNode *PartitionDag::FindOrInsert(
   return new_node;
 }
 
+int PartitionDag::GetInputOrderIndex(const ScheduleNode *node) {
+  if (node->IsSchedulingUnit()) {
+    const SUnit *su = node->GetSUnit();
+    return su != nullptr ? static_cast<int>(su->NodeNum) : 0;
+  }
+  // Proxy: min over members' input orders. Matches
+  // EffectiveNodeNum in SearchPolicies.cpp — proxy represents the
+  // earliest-in-input-order member of its subgraph. Returns 0 if
+  // the proxy has no members.
+  SubgraphInfo *info = node->GetSubgraphInfo();
+  int result = INT_MAX;
+  for (ScheduleNode *member : info->members) {
+    result = std::min(result, GetInputOrderIndex(member));
+  }
+  return (result == INT_MAX) ? 0 : result;
+}
+
 int PartitionDag::ComputeScoreFromPressure(
     const GCNRegPressure &pressure) const {
   switch (metric_) {
@@ -222,8 +269,8 @@ void PartitionDag::ReconstructSchedule() {
   // scheduled instructions along the way. Source has nullopt for
   // best_incoming_edge — the loop terminates there.
   for (PartitionNode *cur = sink_; cur->best_incoming_edge.has_value();
-       cur = cur->best_incoming_edge->source) {
-    schedule_.push_back(cur->best_incoming_edge->scheduled);
+       cur = cur->best_incoming_edge->source_partition) {
+    schedule_.push_back(cur->best_incoming_edge->scheduled_node);
   }
   std::reverse(schedule_.begin(), schedule_.end());
 
