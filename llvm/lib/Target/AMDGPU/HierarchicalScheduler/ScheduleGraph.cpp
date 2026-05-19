@@ -414,6 +414,37 @@ void ScheduleGraph::InsertSubgraphProxies(
   ComputeCriticalPaths();
 }
 
+void ScheduleGraph::AddSubgraphOrderEdges() {
+  for (SubgraphInfo *info : subgraph_infos_) {
+    // A subgraph with no recorded schedule is left free — its members
+    // keep whatever ordering freedom the real edges allow.
+    if (!info->schedule_result.has_value()) {
+      continue;
+    }
+    ArrayRef<ScheduleNode *> order = info->schedule_result->order;
+    assert(order.size() == info->members.size() &&
+           "AddSubgraphOrderEdges: schedule_result.order must list "
+           "all subgraph members");
+    // Chain consecutive members. Each kSubgraphOrderEdge is the last
+    // of order[i+1]'s predecessors to be satisfied (a valid topo
+    // order places every other predecessor in order[0..i]), so
+    // ReleaseSuccessors releases order[i+1] exactly when order[i] is
+    // scheduled — one member ready at a time, in the chosen order.
+    for (int i = 0; i + 1 < static_cast<int>(order.size()); ++i) {
+      AddEdge(order[i], order[i + 1], ScheduleEdge::kSubgraphOrderEdge,
+              /*latency=*/0);
+    }
+  }
+
+  // AddEdge invalidated the topo order and critical paths; re-derive
+  // them so the graph is queryable for the proxied-graph search. The
+  // topo recompute also re-runs cycle detection: a recorded order
+  // that contradicts the real edges surfaces here as a graph cycle.
+  // Both calls are cache-aware — a no-op when no edge was added.
+  ValidateAndComputeTopologicalOrder();
+  ComputeCriticalPaths();
+}
+
 void ScheduleGraph::PrintSubgraphInfos(raw_ostream &os,
                                        StringRef indent) const {
   int total_members_covered = 0;

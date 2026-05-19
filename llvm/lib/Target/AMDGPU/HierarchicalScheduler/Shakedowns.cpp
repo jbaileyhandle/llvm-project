@@ -4737,6 +4737,116 @@ void RunScheduleSubgraphShakedown(const GCNSubtarget &st,
   }
 }
 
+// Exercises ScheduleGraph::AddSubgraphOrderEdges. On BuildTestDAG,
+// wraps {C, D, E, F} as subgraph S and records a non-trivial interior
+// order — C, E, D, F. D and E each depend only on C and each feed F,
+// so swapping them is still a valid topo order, distinct from the
+// input order C, D, E, F. Checks that:
+//   - with no schedule_result, AddSubgraphOrderEdges adds no edges;
+//   - with the order recorded, the order-edge chain forces an
+//     adversarially-driven ScheduleConstructor over the proxied graph
+//     to replay exactly C, E, D, F, never offering more than one
+//     member of S as ready at a time.
+void RunAddSubgraphOrderEdgesShakedown(const GCNSubtarget &st,
+                                       const MachineFunction &mf) {
+  llvm::outs() << "  RunAddSubgraphOrderEdgesShakedown:\n";
+
+  auto check = [](StringRef desc, bool ok) {
+    llvm::outs() << "    " << desc << ": " << (ok ? "PASS" : "FAIL")
+                 << "\n";
+  };
+
+  // Build BuildTestDAG and wrap {C, D, E, F} as subgraph S.
+  // BuildTestDAG emplaces in order [A, C, D, E, F, G, H].
+  auto build_proxied_graph = [] {
+    auto graph = ScheduleGraph::BuildTestDAG();
+    graph->ValidateAndComputeTopologicalOrder();
+    SmallVector<ScheduleNode *, 4> members = {
+        &graph->Nodes()[1], &graph->Nodes()[2], &graph->Nodes()[3],
+        &graph->Nodes()[4]};
+    std::vector<std::unique_ptr<SubgraphInfo>> infos;
+    infos.push_back(std::make_unique<SubgraphInfo>(members, "S"));
+    graph->InsertSubgraphProxies(std::move(infos));
+    return graph;
+  };
+
+  // Case 1: with no schedule_result, AddSubgraphOrderEdges adds
+  // nothing — the subgraph is left free.
+  {
+    auto graph = build_proxied_graph();
+    auto count_edges = [&] {
+      int edges = 0;
+      for (const ScheduleNode &n : graph->Nodes()) {
+        edges += n.NumSuccessors();
+      }
+      return edges;
+    };
+    int edges_before = count_edges();
+    graph->AddSubgraphOrderEdges();
+    check("no schedule_result: no order edges added",
+          count_edges() == edges_before);
+  }
+
+  // Case 2: with a recorded order, the order-edge chain enforces it.
+  {
+    auto graph = build_proxied_graph();
+    ScheduleNode *c = &graph->Nodes()[1];
+    ScheduleNode *d = &graph->Nodes()[2];
+    ScheduleNode *e = &graph->Nodes()[3];
+    ScheduleNode *f = &graph->Nodes()[4];
+
+    // Record the non-trivial interior order C, E, D, F on subgraph S
+    // (the lone subgraph, so GetSubgraphInfos()[0]).
+    SubgraphInfo *info = graph->GetSubgraphInfos()[0];
+    info->schedule_result = SubgraphScheduleResult{
+        /*order=*/{c, e, d, f},
+        /*peak_pressure=*/GCNRegPressure{},
+        /*termination_cause=*/SearchTerminationCause::kFullyExplored};
+    graph->AddSubgraphOrderEdges();
+
+    // Drive a ScheduleConstructor over the proxied + chained graph,
+    // adversarially picking the last ready node each step. A correct
+    // chain leaves the search no choice inside S.
+    auto is_member = [&](const ScheduleNode *n) {
+      return n == c || n == d || n == e || n == f;
+    };
+    ScheduleConstructor sc(*graph, st, mf);
+    bool at_most_one_member_ready = true;
+    bool ready_always_nonempty = true;
+    while (!sc.IsDone()) {
+      ArrayRef<const ScheduleNode *> ready = sc.GetReadyList();
+      if (ready.empty()) {
+        ready_always_nonempty = false;
+        break;
+      }
+      int members_ready = 0;
+      for (const ScheduleNode *n : ready) {
+        if (is_member(n)) {
+          ++members_ready;
+        }
+      }
+      if (members_ready > 1) {
+        at_most_one_member_ready = false;
+      }
+      sc.Schedule(ready.back());
+    }
+
+    std::vector<const ScheduleNode *> member_order;
+    for (const ScheduleNode *n : sc.GetScheduleOrder()) {
+      if (is_member(n)) {
+        member_order.push_back(n);
+      }
+    }
+    check("members emerge in the recorded order C, E, D, F",
+          member_order ==
+              std::vector<const ScheduleNode *>{c, e, d, f});
+    check("at most one member of S ready at any step",
+          at_most_one_member_ready);
+    check("ready list never empty before the schedule completes",
+          ready_always_nonempty);
+  }
+}
+
 } // namespace
 
 // The only class-member shakedown entry point. All the per-shakedown
@@ -4753,6 +4863,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunSubgraphContiguityShakedown(MF, *LIS);
   RunBuildFromNodeSubsetShakedown(st, MF);
   RunScheduleSubgraphShakedown(st, MF);
+  RunAddSubgraphOrderEdgesShakedown(st, MF);
   RunLengthLowerBoundShakedown(st);
   RunScheduledSetTrackerShakedown(st);
   RunLengthHistoryTrackerShakedown(st);

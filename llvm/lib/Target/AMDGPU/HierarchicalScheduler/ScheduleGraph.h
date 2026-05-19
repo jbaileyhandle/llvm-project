@@ -959,6 +959,36 @@ public:
   void InsertSubgraphProxies(
       std::vector<std::unique_ptr<SubgraphInfo>> infos);
 
+  /// Lock each formed subgraph's chosen interior order into the graph
+  /// structure. For every SubgraphInfo carrying a `schedule_result`
+  /// (populated by ScheduleSubgraph), add a chain of kSubgraphOrderEdge
+  /// edges along `schedule_result.order`:
+  ///   order[0] → order[1] → ... → order[n-1]
+  /// — a Hamiltonian path through the members in the chosen order.
+  ///
+  /// With the chain in place the normal ready-list machinery
+  /// (ScheduleConstructor::ReleaseSuccessors) releases order[i+1] only
+  /// once order[i] is scheduled, so a search over the proxied graph
+  /// has no ordering freedom inside the subgraph — it replays the
+  /// schedule chosen in isolation. See §6 of
+  /// AMDGPUSubgraphSchedulingDesign.md.
+  ///
+  /// The edges are kSubgraphOrderEdge: strong (they constrain
+  /// scheduling order) but not latency-contributing (they do not
+  /// inflate cycle counts). A subgraph with no `schedule_result` is
+  /// left unchained.
+  ///
+  /// Runs AFTER InsertSubgraphProxies and AFTER ScheduleSubgraph has
+  /// populated the schedule_results — the chosen order is not known
+  /// at formation time. Like InsertSubgraphProxies, the topological
+  /// recompute doubles as a cycle check: a recorded order that
+  /// contradicts the graph's real edges closes a cycle, which
+  /// ValidateAndComputeTopologicalOrder reports.
+  ///
+  /// On return the graph is topologically sorted with critical paths
+  /// recomputed.
+  void AddSubgraphOrderEdges();
+
   /// Read-only access to the SubgraphInfos held by this graph (one
   /// per subgraph that InsertSubgraphProxies has installed). Sorted
   /// by member count descending — largest subgraphs first.
