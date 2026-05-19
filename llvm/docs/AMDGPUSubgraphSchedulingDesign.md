@@ -65,39 +65,38 @@ structure is built so recursion is a drop-in (§3).
 
 ## 2. The Process Loop
 
-The core routine, `ProcessGraph`, is recursive. It takes a
-ScheduleGraph and returns a `SearchResult`:
+The core routine, `DecomposeAndSchedule`, takes a ScheduleGraph and
+an options bundle and returns a `SearchResult`:
 
 ```
-SearchResult ProcessGraph(ScheduleGraph &graph, int depth,
-                          PolicyProvider provider):
-    LevelPolicy policy = provider(depth, graph)
+SearchResult DecomposeAndSchedule(
+        ScheduleGraph &graph,
+        const DecomposeAndScheduleOptions &opts):
 
     // 1. FORM — partition `graph`, insert start/end proxy pairs.
     //    May decline to subdivide (graph small enough, or a depth
     //    bound reached); then steps 2-3 see no subgraphs and this
     //    call behaves as a leaf.
-    FormSubgraphs(graph, policy.formation)
+    FormSubgraphs(graph, opts.formation)
 
-    // 2. SCHEDULE SUBGRAPHS — each in isolation, recursively.
+    // 2. SCHEDULE SUBGRAPHS — each in isolation. opts.subgraph_functor
+    //    decides what to do with each: run a leaf search directly,
+    //    or recurse via DecomposeAndSchedule with chosen inner options.
     for (SubgraphInfo *info : graph.GetSubgraphInfos()):
-        ScheduleSubgraph(*info, graph, st, mf,
-            /*functor=*/[&](ScheduleGraph &sub) {
-                return ProcessGraph(sub, depth + 1, provider);
-            })
+        ScheduleSubgraph(*info, graph, st, mf, opts.subgraph_functor)
 
     // 3. LOCK + SCHEDULE — pin the chosen interiors into `graph`,
     //    then run the top-level search over it.
     AddSubgraphOrderEdges(graph)
-    return RunSearch(graph, policy.search)
+    return RunSearch(graph, opts.search)
 ```
 
 **Step 1 — Form.** `FormSubgraphs` (see
 `AMDGPUSubgraphFormationDesign.md`) partitions `graph` and calls
 `InsertSubgraphProxies`, which replaces each member set with a
 start/end proxy pair and records a `SubgraphInfo`. If formation
-declines to subdivide, this is a no-op and `ProcessGraph` bottoms out
-as a leaf.
+declines to subdivide, this is a no-op and the call bottoms out as a
+leaf.
 
 **Step 2 — Schedule subgraphs.** For each `SubgraphInfo`,
 `ScheduleSubgraph` extracts the members into a standalone
@@ -109,20 +108,21 @@ register metadata on `info.schedule_result`.
 subgraph's chosen interior into `graph` (§6); `RunSearch` then runs
 the top-level search, whose subgraph interiors are now fixed.
 
-### 2.1 Recursion is injected through the functor
+### 2.1 Recursion rides on the functor
 
 `ScheduleSubgraph`'s `functor` parameter has type
-`function_ref<SearchResult(ScheduleGraph &)>`. That is exactly
-`ProcessGraph`'s shape (minus the captured `depth`/`provider`). So
-recursion needs no new extraction machinery: an internal subgraph's
-functor is `ProcessGraph` itself, and `ProcessGraph` bottoms out on
-its own when `FormSubgraphs` declines to subdivide.
+`function_ref<SearchResult(ScheduleGraph &)>` — the seam through
+which per-subgraph behavior is injected. A flat use sets a leaf
+functor (BFS-DP or DFS directly). A recursive use sets a functor
+that calls `DecomposeAndSchedule(sub, inner_opts)`, closing over the
+inner options it wants. Either way the driver code is the same; the
+driver itself takes no `depth` or provider.
 
 `ScheduleSubgraph` and `BuildFromNodeSubset` were written to this
 contract. The one change recursion will need: `ScheduleSubgraph` must
 pass the extracted graph to the functor by **non-const** reference —
-today's leaf searches do not mutate it, but a recursive `ProcessGraph`
-runs `FormSubgraphs` on it.
+today's leaf searches do not mutate it, but a recursive
+`DecomposeAndSchedule` runs `FormSubgraphs` on it.
 
 ### 2.2 Existing vs. new components
 
@@ -132,8 +132,8 @@ runs `FormSubgraphs` on it.
 | `ScheduleGraph::BuildFromNodeSubset` | exists |
 | `ScheduleSubgraph` | exists |
 | Scope push/pop in `ScheduleConstructor` | exists |
-| `ScheduleGraph::AddSubgraphOrderEdges` (§6) | next to implement |
-| `ProcessGraph` driver, `LevelPolicy` / `PolicyProvider` (§4) | future |
+| `ScheduleGraph::AddSubgraphOrderEdges` (§6) | exists |
+| `DecomposeAndSchedule` driver, `DecomposeAndScheduleOptions` (§4) | next to implement |
 
 ---
 
@@ -142,7 +142,7 @@ runs `FormSubgraphs` on it.
 ### 3.1 A depth-first walk of the subgraph tree
 
 The subgraphs of a region form a tree: the region is the root, each
-subgraph a child, recursively. `ProcessGraph` walks that tree
+subgraph a child, recursively. `DecomposeAndSchedule` walks that tree
 depth-first. Within one call, **formation precedes scheduling**:
 step 1 forms, step 2 recurses into each child (forming and scheduling
 its whole subtree), step 3 schedules this graph.
@@ -165,7 +165,7 @@ latency splitters) and the formation policy. Two consequences:
   memory the way a two-phase split would.
 - If formation should ever react to schedule results, that belongs in
   an explicit outer refinement loop (form → schedule → re-form), not
-  smeared into `ProcessGraph`.
+  smeared into `DecomposeAndSchedule`.
 
 ### 3.2 The base case
 
@@ -199,20 +199,21 @@ is emitted.)
 ### 3.4 Worked example: two levels
 
 Take a region graph **G** that forms one subgraph **A**, whose
-interior in turn forms one sub-subgraph **A1**; **A1** is small enough
-that formation declines to subdivide it. `ProcessGraph(G, depth=0)`
-runs:
+interior in turn forms one sub-subgraph **A1**; **A1** is small
+enough that formation declines to subdivide it. At each level the
+caller supplies a `subgraph_functor` that recurses into
+`DecomposeAndSchedule` with that level's inner options:
 
 ```
-ProcessGraph(G, depth=0)
+DecomposeAndSchedule(G, outer_opts)
   1. FormSubgraphs(G)              → subgraph A; proxies inserted into G
-  2. ScheduleSubgraph(A, G, …, functor = ProcessGraph)
+  2. ScheduleSubgraph(A, G, …, outer_opts.subgraph_functor)
        BuildFromNodeSubset(A.members, G)        → standalone graph G_A
-       functor → ProcessGraph(G_A, depth=1)
+       functor → DecomposeAndSchedule(G_A, level_1_opts)
          1. FormSubgraphs(G_A)     → sub-subgraph A1; proxies into G_A
-         2. ScheduleSubgraph(A1, G_A, …, functor = ProcessGraph)
+         2. ScheduleSubgraph(A1, G_A, …, level_1_opts.subgraph_functor)
               BuildFromNodeSubset(A1.members, G_A) → standalone G_A1
-              functor → ProcessGraph(G_A1, depth=2)
+              functor → DecomposeAndSchedule(G_A1, level_2_opts)
                 1. FormSubgraphs(G_A1) → declines (small) — leaf
                 2. (no subgraphs)
                 3. RunSearch(G_A1)     → order over G_A1 nodes
@@ -223,13 +224,13 @@ ProcessGraph(G, depth=0)
 ```
 
 Formation fires on the way **down** (G, then G_A, then G_A1);
-scheduling completes on the way **up** (G_A1's `RunSearch` first, then
-G_A's, then G's). `ProcessGraph(G_A1)` is the leaf — `FormSubgraphs`
-declined, so steps 2–3 collapse to a single `RunSearch`. Each
-`ScheduleSubgraph` translates the order it received into *its own*
-graph's node terms before recording it (G_A1→G_A, then G_A→G), so
-`A.schedule_result.order` is already a flat sequence of **G** nodes
-when step 3 of the outermost call consumes it (§3.3).
+scheduling completes on the way **up** (G_A1's `RunSearch` first,
+then G_A's, then G's). `DecomposeAndSchedule(G_A1)` is the leaf —
+`FormSubgraphs` declined, so steps 2–3 collapse to a single
+`RunSearch`. Each `ScheduleSubgraph` translates the order it received
+into *its own* graph's node terms before recording it (G_A1→G_A,
+then G_A→G), so `A.schedule_result.order` is already a flat sequence
+of **G** nodes when step 3 of the outermost call consumes it (§3.3).
 
 ---
 
@@ -250,26 +251,52 @@ the continuous score distinguishes within-bracket pressure — and may
 skip the input-order seed and run on a smaller budget. The outer
 search uses the hardware-meaningful integer occupancy.
 
-### 4.1 LevelPolicy and the provider
+### 4.1 DecomposeAndScheduleOptions
 
-Proposed: a runtime `LevelPolicy` bundling a `SubgraphFormationPolicy`
-with a search selection (algorithm + objective + budget + seeding),
-and a `PolicyProvider` —
-`function_ref<LevelPolicy(int depth, const ScheduleGraph &)>` — that
-`ProcessGraph` consults per node. The initial provider is trivial:
-depth 0 → outer policy, deeper → inner policy. A later provider can
-key on subgraph size or estimated pressure.
+The driver's configuration is one bundle:
 
-### 4.2 The runtime/compile-time bridge
+```cpp
+struct DecomposeAndScheduleOptions {
+  SubgraphFormationPolicy                     formation;
+  SearchSelection                             search;   // algo + metric + budget + seed
+  SubgraphScheduleMode                        mode;     // serialized | interleaved
+  function_ref<SearchResult(ScheduleGraph &)> subgraph_functor;
+};
+```
 
-DFS search policies are compile-time classes (`DfsSearch` is a
-template — see `SearchPolicies.h`); BFS-DP takes a runtime
-`BfsDpSettings` struct. A `LevelPolicy` is a runtime value, so
-`RunSearch` is the one place that bridges: it switches an objective
-enum over the `DfsSearch<…>` instantiations and constructs a
-`BfsDpSettings` for the BFS-DP path. `LengthPolicyChoice` in
-`ScheduleDAGHierarchicalScheduler.cpp` is the established pattern for
-this runtime→compile-time switch.
+It *holds* the existing focused config objects rather than replacing
+them. `subgraph_functor` is the per-subgraph behavior — a leaf search
+for flat use, a closure around `DecomposeAndSchedule(sub, inner_opts)`
+for recursive use. Per-level differences (outer vs. inner) are
+handled at the closure boundary; the driver itself does not consult
+depth or a provider.
+
+### 4.2 Compile-time policy is scoped to one place
+
+`DfsSearch` is a template parameterized on a `SearchPolicy*` class
+(see `SearchPolicies.h`): the search calls
+`Policy::ShouldBoundSearch`, `Policy::FilterAndSortReadyList`, and
+`Policy::ShouldEndSearch` from its inner `Recurse` loop, and
+`if constexpr` gates on policy flags dead-strip pruning paths the
+policy hasn't opted into. That earns its compile-time templating —
+the calls are millions per region and the dead-stripping is real.
+
+Everywhere else is runtime. The driver, the per-subgraph search
+choice, `DecomposeAndScheduleOptions` — all runtime structs and
+`function_ref`s. The seam is `ScheduleSubgraph`'s functor parameter,
+`function_ref<SearchResult(ScheduleGraph &)>`: above it, runtime; the
+factory that builds a leaf functor from `SearchSelection` does the
+one `switch` over `DfsSearch<…>` instantiations needed to cross into
+the compile-time world. `LengthPolicyChoice` in
+`ScheduleDAGHierarchicalScheduler.cpp` is the established precedent
+for that runtime→compile-time switch.
+
+So new knobs follow a simple placement rule:
+
+- A new knob *called from `DfsSearch::Recurse`*: add it to a
+  `SearchPolicy*` class.
+- Anything else (new mode, new threshold, new budget, new flag the
+  driver reads): a runtime field on the relevant struct.
 
 ### 4.3 Note: BFS-DP runs only on proxy-free graphs
 
@@ -376,7 +403,7 @@ receives proxies is convex, and its order chain is cycle-free.
 ### 6.4 Timing
 
 `schedule_result.order` is known only *after* isolated scheduling, so
-`AddSubgraphOrderEdges` runs as a step of `ProcessGraph` after step 2
+`AddSubgraphOrderEdges` runs as a step of `DecomposeAndSchedule` after step 2
 — it is not part of formation-time `InsertSubgraphProxies`.
 
 The chosen order is **compiled into the graph structure** and is
@@ -515,20 +542,18 @@ relaxation plus scopes-or-not.**
 - `ScheduleSubgraph` — schedule one subgraph in isolation and record
   the result on its `SubgraphInfo`.
 - Scope push/pop in `ScheduleConstructor` (contiguity).
+- `ScheduleGraph::AddSubgraphOrderEdges()` — enforcement approach A
+  (§6), with shakedown.
 
 **Immediate next:**
 
-- `ScheduleGraph::AddSubgraphOrderEdges()` — enforcement approach A
-  (§6).
-- A shakedown: form subgraphs, set known non-trivial
-  `schedule_result.order`s, add the order edges, schedule the proxied
-  graph adversarially, and assert each subgraph's members emerge in
-  exactly `schedule_result.order` with at most one member ready at a
-  time.
+- The `DecomposeAndSchedule` driver and `DecomposeAndScheduleOptions`
+  bundle (flat, no recursion yet), plus a shakedown that exercises
+  the whole pipeline end-to-end on a test DAG.
 
 **Later:**
 
-- The `ProcessGraph` driver, `LevelPolicy`, and `PolicyProvider`
-  (§2, §4); the non-const functor argument noted in §2.1.
-- Recursion (the structure is in place; §3).
+- Recursion (swap the leaf `subgraph_functor` for one that recurses
+  into `DecomposeAndSchedule`; non-const functor argument on
+  `ScheduleSubgraph`, per §2.1).
 - Interleaving mode (§8).
