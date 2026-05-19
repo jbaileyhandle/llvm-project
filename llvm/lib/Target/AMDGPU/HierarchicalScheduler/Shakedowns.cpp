@@ -28,6 +28,7 @@
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
+#include "ScheduleSubgraph.h"
 #include "ScheduledSetTracker.h"
 #include "SearchPolicies.h"
 #include "SubgraphFormation.h"
@@ -4594,6 +4595,148 @@ void RunBuildFromNodeSubsetShakedown(const GCNSubtarget &st,
         subgraph_graph->IsTopoSorted());
 }
 
+// Shakedown for ScheduleSubgraph. Extracts members {C,D,E,F} from
+// BuildTestDAG (staged as in RunBuildFromNodeSubsetShakedown) and
+// checks that ScheduleSubgraph records the search's schedule —
+// translated to parent nodes — on the SubgraphInfo, falling back to
+// the input order when the search produces none.
+void RunScheduleSubgraphShakedown(const GCNSubtarget &st,
+                                  const MachineFunction &mf) {
+  llvm::outs() << "  RunScheduleSubgraphShakedown:\n";
+
+  auto parent_graph = ScheduleGraph::BuildTestDAG();
+  // BuildTestDAG emplacement order: [A, C, D, E, F, G, H].
+  ScheduleNode *pA = &parent_graph->Nodes()[0];
+  ScheduleNode *pC = &parent_graph->Nodes()[1];
+  ScheduleNode *pD = &parent_graph->Nodes()[2];
+  ScheduleNode *pE = &parent_graph->Nodes()[3];
+  ScheduleNode *pF = &parent_graph->Nodes()[4];
+  ScheduleNode *pG = &parent_graph->Nodes()[5];
+
+  // Stage a register pattern (same as RunBuildFromNodeSubsetShakedown):
+  //   A def r0;  C use r0 def r1;  D use r1 def r2;  E use r1 def r3;
+  //   F use r2,r3 def r4;  G use r4.
+  auto vreg = [](unsigned i) { return Register::index2VirtReg(i); };
+  LaneBitmask all = LaneBitmask::getAll();
+  NodeRegInfoTable parent_table(parent_graph->GetNumGraphLocalIds());
+  parent_table.AddDef(pA, vreg(0).id(), all);
+  parent_table.AddUse(pC, vreg(0).id(), all);
+  parent_table.AddDef(pC, vreg(1).id(), all);
+  parent_table.AddUse(pD, vreg(1).id(), all);
+  parent_table.AddDef(pD, vreg(2).id(), all);
+  parent_table.AddUse(pE, vreg(1).id(), all);
+  parent_table.AddDef(pE, vreg(3).id(), all);
+  parent_table.AddUse(pF, vreg(2).id(), all);
+  parent_table.AddUse(pF, vreg(3).id(), all);
+  parent_table.AddDef(pF, vreg(4).id(), all);
+  parent_table.AddUse(pG, vreg(4).id(), all);
+  parent_graph->SetNodeRegInfoTable(std::move(parent_table));
+  parent_graph->ValidateAndComputeTopologicalOrder();
+  parent_graph->ComputeCriticalPaths();
+  parent_graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+
+  auto check = [](StringRef desc, bool ok) {
+    llvm::outs() << "    " << desc << ": " << (ok ? "PASS" : "FAIL")
+                 << "\n";
+  };
+  // Debug-name list of a recorded schedule's order.
+  auto order_names = [](const SubgraphScheduleResult &result) {
+    std::vector<std::string> names;
+    for (const ScheduleNode *node : result.order) {
+      names.push_back(node->GetDebugName().str());
+    }
+    return names;
+  };
+  using NameList = std::vector<std::string>;
+
+  // Case 1: the search produces no schedule — ScheduleSubgraph
+  // records the subgraph's input order (C,D,E,F) and preserves the
+  // search's termination cause.
+  {
+    SubgraphInfo info({pC, pD, pE, pF}, "S");
+    const SubgraphScheduleResult &result = ScheduleSubgraph(
+        info, *parent_graph, st, mf, [](const ScheduleGraph &) {
+          return SearchResult{std::nullopt,
+                              SearchTerminationCause::kTimedOut};
+        });
+    check("empty search: schedule_result is populated",
+          info.schedule_result.has_value());
+    check("empty search: input order recorded (C,D,E,F)",
+          order_names(result) == NameList{"C", "D", "E", "F"});
+    check("empty search: termination_cause is kTimedOut",
+          result.termination_cause ==
+              SearchTerminationCause::kTimedOut);
+  }
+
+  // Case 2: the search produces a schedule — ScheduleSubgraph records
+  // *that* order, not the input order. The functor reorders the
+  // members to C,E,D,F (D and E each depend only on C and each feed
+  // F, so swapping them is valid), distinguishing it from the input
+  // order C,D,E,F.
+  {
+    SubgraphInfo info({pC, pD, pE, pF}, "S");
+    const SubgraphScheduleResult &result = ScheduleSubgraph(
+        info, *parent_graph, st, mf,
+        [&st, &mf](const ScheduleGraph &graph) {
+          const ScheduleNode *c = nullptr, *d = nullptr, *e = nullptr,
+                             *f = nullptr, *entry = nullptr,
+                             *exit = nullptr;
+          for (const ScheduleNode &node : graph.Nodes()) {
+            StringRef name = node.GetDebugName();
+            if (name == "C") {
+              c = &node;
+            } else if (name == "D") {
+              d = &node;
+            } else if (name == "E") {
+              e = &node;
+            } else if (name == "F") {
+              f = &node;
+            } else if (name == "SubgraphEntry") {
+              entry = &node;
+            } else if (name == "SubgraphExit") {
+              exit = &node;
+            }
+          }
+          ScheduleConstructor sc(graph, st, mf);
+          sc.Schedule(entry);
+          sc.Schedule(c);
+          sc.Schedule(e);
+          sc.Schedule(d);
+          sc.Schedule(f);
+          sc.Schedule(exit);
+          return SearchResult{std::move(sc),
+                              SearchTerminationCause::kFullyExplored};
+        });
+    check("search schedule: that order recorded (C,E,D,F)",
+          order_names(result) == NameList{"C", "E", "D", "F"});
+    check("search schedule: termination_cause is kFullyExplored",
+          result.termination_cause ==
+              SearchTerminationCause::kFullyExplored);
+  }
+
+  // Case 3: drive ScheduleSubgraph with a real search strategy —
+  // BfsDpSearch — on the extracted graph. On this 6-node subgraph
+  // BFS-DP runs to completion, so the recorded order must be one of
+  // the two valid member linearizations (C,D,E,F or C,E,D,F: D and E
+  // are interchangeable).
+  {
+    SubgraphInfo info({pC, pD, pE, pF}, "S");
+    const SubgraphScheduleResult &result = ScheduleSubgraph(
+        info, *parent_graph, st, mf,
+        [&st, &mf](const ScheduleGraph &graph) {
+          BfsDpSearch search(&graph, &st, &mf, BfsDpSettings{});
+          return search.Run();
+        });
+    NameList order = order_names(result);
+    check("BFS-DP: recorded order is a valid member linearization",
+          order == NameList{"C", "D", "E", "F"} ||
+              order == NameList{"C", "E", "D", "F"});
+    check("BFS-DP: termination_cause is kFullyExplored",
+          result.termination_cause ==
+              SearchTerminationCause::kFullyExplored);
+  }
+}
+
 } // namespace
 
 // The only class-member shakedown entry point. All the per-shakedown
@@ -4609,6 +4752,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunInsertSubgraphProxiesShakedown();
   RunSubgraphContiguityShakedown(MF, *LIS);
   RunBuildFromNodeSubsetShakedown(st, MF);
+  RunScheduleSubgraphShakedown(st, MF);
   RunLengthLowerBoundShakedown(st);
   RunScheduledSetTrackerShakedown(st);
   RunLengthHistoryTrackerShakedown(st);

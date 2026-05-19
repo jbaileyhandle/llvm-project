@@ -29,15 +29,37 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SUBGRAPHINFO_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SUBGRAPHINFO_H
 
+#include "GCNRegPressure.h"
+#include "SearchTerminationCause.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include <optional>
 #include <string>
 
 namespace llvm {
 namespace hierarchical_scheduler {
 
 class ScheduleNode;
+
+/// The schedule ScheduleSubgraph chose for a subgraph, with snapshot
+/// register-pressure metadata. Stored on
+/// SubgraphInfo::schedule_result. Snapshot values rather than the
+/// search's ScheduleConstructor: that constructor is bound to the
+/// extracted subgraph graph, which ScheduleSubgraph frees on return.
+struct SubgraphScheduleResult {
+  /// The chosen schedule, as parent-graph member nodes in scheduled
+  /// order.
+  SmallVector<ScheduleNode *, 32> order;
+
+  /// Peak register pressure of `order` scheduled in isolation — the
+  /// subgraph's modeled register boundary, pass-through registers
+  /// excluded (see ScheduleGraph::BuildFromNodeSubset).
+  GCNRegPressure peak_pressure;
+
+  /// How the search that produced `order` ended.
+  SearchTerminationCause termination_cause;
+};
 
 struct SubgraphInfo {
   /// Members of this subgraph. Stable set; used as the membership
@@ -87,6 +109,10 @@ struct SubgraphInfo {
   /// Pops the scope when scheduled. Null until InsertSubgraphProxies
   /// runs.
   ScheduleNode *end_proxy = nullptr;
+
+  /// The schedule chosen for this subgraph, set by ScheduleSubgraph.
+  /// nullopt until ScheduleSubgraph has run.
+  std::optional<SubgraphScheduleResult> schedule_result;
 
   /// Build from a member list and a debug name. Walks `members` once
   /// to compute ext_predecessors (predecessors of any member that

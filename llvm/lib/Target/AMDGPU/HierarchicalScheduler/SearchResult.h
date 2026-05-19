@@ -11,28 +11,11 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SEARCHRESULT_H
 
 #include "ScheduleConstructor.h"
+#include "SearchTerminationCause.h"
 #include <optional>
 
 namespace llvm {
 namespace hierarchical_scheduler {
-
-/// How a completed schedule search ended. Mutually exclusive.
-enum class SearchTerminationCause {
-  /// The search visited every reachable schedule (DFS: recursion
-  /// drained; BFS-DP: the partition dag was built to the sink). The
-  /// result is provably optimal under the search's metric.
-  kFullyExplored,
-  /// The per-region wall-clock budget was exhausted before the
-  /// search completed. The result is the best found so far; no
-  /// optimality claim.
-  kTimedOut,
-  /// The search's policy declared the current best good enough and
-  /// stopped early (DfsSearch's Policy::ShouldEndSearch hook — for
-  /// the occupancy policy, the best hit the function occupancy
-  /// target). Searches with no such hook (BFS-DP) never produce
-  /// this value.
-  kPolicySatisfied,
-};
 
 /// The outcome of running a region schedule search.
 struct SearchResult {
