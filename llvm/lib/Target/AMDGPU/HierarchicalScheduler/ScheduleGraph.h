@@ -533,6 +533,58 @@ public:
       const MachineRegisterInfo &mri,
       const RegionInfo &region);
 
+  /// Build a standalone leaf graph from a subset of another graph's
+  /// scheduling-unit nodes — the extraction step behind isolated
+  /// subgraph scheduling (see the ScheduleSubgraph design).
+  ///
+  /// `members` are nodes of `parent_graph`. One new leaf ScheduleNode
+  /// is created per member, wrapping the same SUnit; intra-subgraph
+  /// edges (both endpoints in `members`) are copied verbatim, and
+  /// boundary edges (to/from a non-member) are dropped. A synthetic
+  /// entry/exit pair models the subgraph's register boundary:
+  ///   - entry defines every register live INTO the subgraph (a lane
+  ///     used by a member, defined by no member);
+  ///   - exit uses every register live OUT (a lane defined by a
+  ///     member, used by a non-member of `parent_graph`).
+  /// The boundary is derived structurally from `parent_graph`'s
+  /// NodeRegInfoTable, not from a LiveIntervals slot query: a
+  /// subgraph's members may not be contiguous in the
+  /// MachineFunction, so there is no single slot range to query.
+  /// Pass-through registers (live across the subgraph but touched by
+  /// no member) are deliberately NOT modeled — they are a constant
+  /// pressure offset that does not affect the isolated ordering.
+  ///
+  /// Members are handled uniformly by node identity alone: a member
+  /// may be any scheduling-unit node, `parent_graph`'s own synthetic
+  /// entry/exit included. Nothing here special-cases node kind.
+  ///
+  /// On return the graph is topologically sorted, has both
+  /// critical-path directions and a NodeRegInfoTable computed, and
+  /// carries an input ScheduleConstructor holding the members in the
+  /// order they appear in `parent_graph`'s input schedule. That
+  /// order — taken from the input *schedule*, not graph-local-id —
+  /// places `parent_graph`'s entry/exit correctly even when they are
+  /// themselves members. `parent_graph` must therefore already carry
+  /// an input ScheduleConstructor (BuildFromSUnits populates one;
+  /// a test parent must populate one first).
+  ///
+  /// `subgraph_node_to_parent_member` is filled with one entry per
+  /// member: the new member node mapped to the `parent_graph` node
+  /// it was built from. The two synthetic boundary nodes are not
+  /// members and are not added to it. A caller translating a
+  /// schedule over the returned graph back to `parent_graph` thus
+  /// looks each scheduled node up in this map and skips the ones not
+  /// found — which are exactly the synthetic entry/exit.
+  ///
+  /// Every member must be a scheduling unit (no nested proxies).
+  static std::unique_ptr<ScheduleGraph> BuildFromNodeSubset(
+      ArrayRef<ScheduleNode *> members,
+      const ScheduleGraph &parent_graph,
+      const GCNSubtarget &st,
+      const MachineFunction &mf,
+      DenseMap<const ScheduleNode *, ScheduleNode *>
+          &subgraph_node_to_parent_member);
+
   /// Build a synthetic test DAG with known structure for testing algorithms
   /// like topological sort, transitive reduction, dominator trees, and
   /// critical-path-from-exit. Does not depend on LLVM SUnits — nodes are
@@ -1372,6 +1424,76 @@ private:
   /// compares MachineInstr* directly. Called once from Phase 4
   /// after the replay completes.
   void VerifyInputScheduleMatchesMFOrder(const RegionInfo &region) const;
+
+  // --- Construction helpers (used by BuildFromNodeSubset) ---
+  //
+  // Vocabulary: a "member" is one of the parent graph's nodes that
+  // the subgraph is built from; its "subgraph node" is the
+  // counterpart node created for it in this graph.
+
+  /// Emplace into this graph one subgraph node per member, wrapping
+  /// the member's SUnit. Records the correspondence both ways —
+  /// `parent_member_to_subgraph_node` and its inverse
+  /// `subgraph_node_to_parent_member` (the public translation map).
+  /// Register info is not set here: BuildSubgraphRegInfoTable copies
+  /// it from the parent graph once all nodes exist.
+  ///
+  /// Members of every kind are emplaced alike — an ordinary
+  /// instruction node and the parent graph's synthetic entry/exit
+  /// all become subgraph nodes. A subgraph proxy is the one rejected
+  /// case: it is not a scheduling unit and triggers
+  /// report_fatal_error.
+  void CreateLeafNodesFromMembers(
+      ArrayRef<ScheduleNode *> members,
+      DenseMap<const ScheduleNode *, ScheduleNode *>
+          &parent_member_to_subgraph_node,
+      DenseMap<const ScheduleNode *, ScheduleNode *>
+          &subgraph_node_to_parent_member);
+
+  /// For each edge of the parent graph with both endpoints among
+  /// the members, add the matching edge between their subgraph
+  /// nodes (mapped via `parent_member_to_subgraph_node`). An edge
+  /// with a non-member endpoint is a boundary edge and is skipped —
+  /// the synthetic entry/exit model the boundary instead.
+  void CopyIntraSubgraphEdges(
+      ArrayRef<ScheduleNode *> members,
+      const DenseMap<const ScheduleNode *, ScheduleNode *>
+          &parent_member_to_subgraph_node);
+
+  /// Emplace the synthetic SubgraphEntry/SubgraphExit nodes and
+  /// install the boundary register sets on them: entry defines
+  /// `live_in`, exit uses `live_out`. Then wire SubgraphEntry to
+  /// every node with no predecessor, and every node with no
+  /// successor to SubgraphExit — because the intra-subgraph edges
+  /// are already present, those nodes are exactly the subgraph's
+  /// roots and leaves.
+  void CreateSubgraphBoundaryNodes(
+      const DenseMap<unsigned, LaneBitmask> &live_in,
+      const DenseMap<unsigned, LaneBitmask> &live_out);
+
+  /// Build and install this graph's NodeRegInfoTable. Each member
+  /// node's entry is copied from `parent_graph`'s table — register
+  /// info is intrinsic to the instruction, so it is not re-derived
+  /// from the MachineInstr. The synthetic SubgraphEntry/SubgraphExit
+  /// entries are taken from the boundary register info that
+  /// CreateSubgraphBoundaryNodes installed on those nodes.
+  /// `subgraph_node_to_parent_member` identifies which nodes are
+  /// members and maps each to its parent entry.
+  void BuildSubgraphRegInfoTable(
+      const ScheduleGraph &parent_graph,
+      const DenseMap<const ScheduleNode *, ScheduleNode *>
+          &subgraph_node_to_parent_member);
+
+  /// Create this graph's input_schedule_constructor_ and replay into
+  /// it SubgraphEntry, then the `member_count` subgraph nodes in
+  /// nodes_ storage order, then SubgraphExit. BuildFromNodeSubset
+  /// emplaced those subgraph nodes in the order their members
+  /// appear in the parent graph's input schedule, so this replay
+  /// reproduces that input ordering as the subgraph's baseline
+  /// schedule.
+  void PopulateSubgraphInputScheduleConstructor(const GCNSubtarget &st,
+                                                const MachineFunction &mf,
+                                                int member_count);
 };
 
 /// Lightweight adjacency-list representation produced by transitive

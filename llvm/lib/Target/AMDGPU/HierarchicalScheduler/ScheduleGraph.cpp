@@ -772,6 +772,247 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
   return graph;
 }
 
+// Helpers below are defined in BuildFromNodeSubset's call order; the
+// orchestrator itself follows them. See ScheduleGraph.h for the
+// member/subgraph-node vocabulary and the per-helper contracts.
+
+// Return the members in the order they appear in parent_graph's input
+// schedule: scan that schedule once, keeping the nodes in member_set.
+// No sort — the scan yields input order directly. Order is taken from
+// the schedule (not graph-local-id order) so a member that is itself
+// parent_graph's entry/exit still lands consistently with the
+// subgraph's edges.
+static SmallVector<ScheduleNode *> MembersInParentInputOrder(
+    const SmallPtrSetImpl<const ScheduleNode *> &member_set,
+    const ScheduleGraph &parent_graph) {
+  SmallVector<ScheduleNode *> ordered;
+  ordered.reserve(member_set.size());
+  for (const ScheduleNode *node :
+       parent_graph.GetInputScheduleConstructor().GetScheduleOrder()) {
+    if (member_set.contains(node)) {
+      // const_cast is sound: parent_graph's nodes are non-const
+      // objects — the caller passed non-const member pointers to the
+      // same objects; GetScheduleOrder only hands back a const view.
+      ordered.push_back(const_cast<ScheduleNode *>(node));
+    }
+  }
+  return ordered;
+}
+
+void ScheduleGraph::CreateLeafNodesFromMembers(
+    ArrayRef<ScheduleNode *> members,
+    DenseMap<const ScheduleNode *, ScheduleNode *>
+        &parent_member_to_subgraph_node,
+    DenseMap<const ScheduleNode *, ScheduleNode *>
+        &subgraph_node_to_parent_member) {
+  for (ScheduleNode *member : members) {
+    if (!member->IsSchedulingUnit()) {
+      report_fatal_error(
+          "ScheduleGraph::BuildFromNodeSubset: a member is a subgraph "
+          "proxy; only scheduling-unit members are supported");
+    }
+    ScheduleNode &subgraph_node = EmplaceNode(
+        member->GetSUnit(), member->GetDebugName().str(), this);
+    parent_member_to_subgraph_node[member] = &subgraph_node;
+    subgraph_node_to_parent_member[&subgraph_node] = member;
+  }
+}
+
+void ScheduleGraph::CopyIntraSubgraphEdges(
+    ArrayRef<ScheduleNode *> members,
+    const DenseMap<const ScheduleNode *, ScheduleNode *>
+        &parent_member_to_subgraph_node) {
+  for (ScheduleNode *member : members) {
+    ScheduleNode *from = parent_member_to_subgraph_node.lookup(member);
+    for (const ScheduleEdge &edge : member->Successors()) {
+      auto it = parent_member_to_subgraph_node.find(edge.node_);
+      if (it == parent_member_to_subgraph_node.end()) {
+        continue;  // boundary edge — the successor is not a member
+      }
+      AddEdge(from, it->second, edge.kind_, edge.latency_);
+    }
+  }
+}
+
+// Compute the subgraph's register boundary from parent_graph's
+// NodeRegInfoTable. Fills live_in (lanes the subgraph consumes from
+// outside) and live_out (lanes it produces for outside). Per-lane
+// masks make the set arithmetic exact — each (vreg, lane) has a
+// single definition.
+static void ComputeSubgraphRegisterBoundary(
+    const SmallPtrSetImpl<const ScheduleNode *> &member_set,
+    const ScheduleGraph &parent_graph,
+    DenseMap<unsigned, LaneBitmask> &live_in,
+    DenseMap<unsigned, LaneBitmask> &live_out) {
+  const NodeRegInfoTable &parent_reg_table =
+      parent_graph.GetNodeRegInfoTable();
+
+  // Union the lanes defined and used across all member nodes.
+  DenseMap<unsigned, LaneBitmask> member_defs;
+  DenseMap<unsigned, LaneBitmask> member_uses;
+  for (const ScheduleNode *member : member_set) {
+    const NodeRegInfo &info = parent_reg_table.GetForNode(member);
+    for (const RegMask &def : info.defs) {
+      member_defs[def.reg] |= def.mask;
+    }
+    for (const RegMask &use : info.uses) {
+      member_uses[use.reg] |= use.mask;
+    }
+  }
+
+  // Union the lanes used by every non-member node of parent_graph.
+  DenseMap<unsigned, LaneBitmask> nonmember_uses;
+  for (const ScheduleNode &node : parent_graph.Nodes()) {
+    if (member_set.contains(&node)) {
+      continue;
+    }
+    for (const RegMask &use : parent_reg_table.GetForNode(&node).uses) {
+      nonmember_uses[use.reg] |= use.mask;
+    }
+  }
+
+  // live_in = member-used lanes minus member-defined lanes. When no
+  // member defines `reg`, member_defs.lookup(reg) is a default
+  // LaneBitmask — i.e. none — so ~it is all lanes and the whole
+  // use_mask survives: a register no member produces is fully live
+  // into the subgraph.
+  for (const auto &[reg, use_mask] : member_uses) {
+    LaneBitmask mask = use_mask & ~member_defs.lookup(reg);
+    if (mask.any()) {
+      live_in[reg] = mask;
+    }
+  }
+  // live_out = member-defined lanes that some non-member uses. When
+  // no non-member uses `reg`, nonmember_uses.lookup(reg) is none, the
+  // masked result is empty, and the register is correctly omitted.
+  for (const auto &[reg, def_mask] : member_defs) {
+    LaneBitmask mask = def_mask & nonmember_uses.lookup(reg);
+    if (mask.any()) {
+      live_out[reg] = mask;
+    }
+  }
+}
+
+void ScheduleGraph::CreateSubgraphBoundaryNodes(
+    const DenseMap<unsigned, LaneBitmask> &live_in,
+    const DenseMap<unsigned, LaneBitmask> &live_out) {
+  ScheduleNode &entry =
+      EmplaceNode(static_cast<SUnit *>(nullptr), "SubgraphEntry", this);
+  ScheduleNode &exit =
+      EmplaceNode(static_cast<SUnit *>(nullptr), "SubgraphExit", this);
+  for (const auto &[reg, mask] : live_in) {
+    entry.AddRegDef(Register(reg), mask);
+  }
+  for (const auto &[reg, mask] : live_out) {
+    exit.AddRegUse(Register(reg), mask);
+  }
+  for (ScheduleNode &node : nodes_) {
+    if (&node == &entry || &node == &exit) {
+      continue;
+    }
+    if (node.NumPredecessors() == 0) {
+      AddEdge(&entry, &node, ScheduleEdge::kArtificial);
+    }
+    if (node.NumSuccessors() == 0) {
+      AddEdge(&node, &exit, ScheduleEdge::kArtificial);
+    }
+  }
+}
+
+void ScheduleGraph::BuildSubgraphRegInfoTable(
+    const ScheduleGraph &parent_graph,
+    const DenseMap<const ScheduleNode *, ScheduleNode *>
+        &subgraph_node_to_parent_member) {
+  const NodeRegInfoTable &parent_reg_table =
+      parent_graph.GetNodeRegInfoTable();
+  NodeRegInfoTable table(GetNumGraphLocalIds());
+  for (const ScheduleNode &node : nodes_) {
+    auto it = subgraph_node_to_parent_member.find(&node);
+    if (it != subgraph_node_to_parent_member.end()) {
+      // A member node: register info is intrinsic to the
+      // instruction, so copy the parent's entry rather than
+      // re-deriving it from the MachineInstr.
+      table.SetEntry(&node, parent_reg_table.GetForNode(it->second));
+    } else {
+      // SubgraphEntry / SubgraphExit: the boundary register info
+      // CreateSubgraphBoundaryNodes installed on the node.
+      for (const RegWithLaneMask &def : node.RegDefs()) {
+        table.AddDef(&node, def.reg.id(), def.mask);
+      }
+      for (const RegWithLaneMask &use : node.RegUses()) {
+        table.AddUse(&node, use.reg.id(), use.mask);
+      }
+    }
+  }
+  SetNodeRegInfoTable(std::move(table));
+}
+
+void ScheduleGraph::PopulateSubgraphInputScheduleConstructor(
+    const GCNSubtarget &st, const MachineFunction &mf, int member_count) {
+  // nodes_ layout: [0 .. member_count-1] subgraph nodes in input
+  // order, [member_count] SubgraphEntry, [member_count+1] SubgraphExit.
+  ScheduleNode *entry = &nodes_[member_count];
+  ScheduleNode *exit = &nodes_[member_count + 1];
+  input_schedule_constructor_ =
+      std::make_unique<ScheduleConstructor>(*this, st, mf);
+  input_schedule_constructor_->Schedule(entry);
+  for (int i = 0; i < member_count; ++i) {
+    input_schedule_constructor_->Schedule(&nodes_[i]);
+  }
+  input_schedule_constructor_->Schedule(exit);
+}
+
+std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildFromNodeSubset(
+    ArrayRef<ScheduleNode *> members, const ScheduleGraph &parent_graph,
+    const GCNSubtarget &st, const MachineFunction &mf,
+    DenseMap<const ScheduleNode *, ScheduleNode *>
+        &subgraph_node_to_parent_member) {
+  if (members.empty()) {
+    report_fatal_error(
+        "ScheduleGraph::BuildFromNodeSubset: members is empty");
+  }
+  // Membership set, built once and shared by the helpers below.
+  SmallPtrSet<const ScheduleNode *, 32> member_set;
+  for (const ScheduleNode *member : members) {
+    member_set.insert(member);
+  }
+  SmallVector<ScheduleNode *> ordered_members =
+      MembersInParentInputOrder(member_set, parent_graph);
+
+  auto graph = std::make_unique<ScheduleGraph>();
+  // ReserveNodes over-reserves (3N+2) for subgraph-proxy headroom this
+  // graph will not use — harmless, and the sanctioned way to size
+  // nodes_ before emplacing into a graph whose edges store raw node
+  // pointers (a reallocation would invalidate them).
+  graph->ReserveNodes(static_cast<int>(ordered_members.size()));
+
+  DenseMap<const ScheduleNode *, ScheduleNode *>
+      parent_member_to_subgraph_node;
+  graph->CreateLeafNodesFromMembers(ordered_members,
+                                    parent_member_to_subgraph_node,
+                                    subgraph_node_to_parent_member);
+  graph->CopyIntraSubgraphEdges(ordered_members,
+                                parent_member_to_subgraph_node);
+
+  DenseMap<unsigned, LaneBitmask> live_in;
+  DenseMap<unsigned, LaneBitmask> live_out;
+  ComputeSubgraphRegisterBoundary(member_set, parent_graph, live_in,
+                                  live_out);
+  graph->CreateSubgraphBoundaryNodes(live_in, live_out);
+
+  // The input ScheduleConstructor's trackers read the critical paths
+  // and the register table, so finalize both before it; the critical
+  // paths in turn require the topological order.
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPaths();
+  graph->BuildSubgraphRegInfoTable(parent_graph,
+                                   subgraph_node_to_parent_member);
+  graph->PopulateSubgraphInputScheduleConstructor(
+      st, mf, static_cast<int>(ordered_members.size()));
+
+  return graph;
+}
+
 void ScheduleGraph::CreateLeafNodesFromSUnits(
     MutableArrayRef<SUnit> sunits,
     DenseMap<const SUnit *, ScheduleNode *> &sunit_to_node) {

@@ -21,6 +21,7 @@
 #include "GCNSubtarget.h"
 #include "IlpTracker.h"
 #include "LengthHistoryTracker.h"
+#include "NodeRegInfo.h"
 #include "PartitionDag.h"
 #include "PressureHistoryTracker.h"
 #include "RegisterTracker.h"
@@ -4401,6 +4402,198 @@ void RunRegionShakedowns(ScheduleGraph &graph,
   llvm::outs() << "\n";
 }
 
+// Round-trip shakedown for ScheduleGraph::BuildFromNodeSubset. Takes
+// BuildTestDAG (nodes A,C,D,E,F,G,H; edges A->H, A->C, A->D, C->D,
+// C->E, D->F, E->F, H->G, F->G), stages a register pattern on it, and
+// extracts members {C,D,E,F} as a standalone subgraph.
+//
+// Staged register pattern:
+//   A def r0;  C use r0 def r1;  D use r1 def r2;  E use r1 def r3;
+//   F use r2,r3 def r4;  G use r4;  H none.
+// With members {C,D,E,F}: r0 is used by C but defined by no member,
+// so it is live-in; r4 is defined by F and used by non-member G, so
+// it is live-out. r1/r2/r3 are defined and used entirely within the
+// subgraph — neither boundary.
+void RunBuildFromNodeSubsetShakedown(const GCNSubtarget &st,
+                                     const MachineFunction &mf) {
+  llvm::outs() << "  RunBuildFromNodeSubsetShakedown:\n";
+
+  auto parent_graph = ScheduleGraph::BuildTestDAG();
+  // BuildTestDAG emplacement order: [A, C, D, E, F, G, H].
+  ScheduleNode *pA = &parent_graph->Nodes()[0];
+  ScheduleNode *pC = &parent_graph->Nodes()[1];
+  ScheduleNode *pD = &parent_graph->Nodes()[2];
+  ScheduleNode *pE = &parent_graph->Nodes()[3];
+  ScheduleNode *pF = &parent_graph->Nodes()[4];
+  ScheduleNode *pG = &parent_graph->Nodes()[5];
+
+  // Stage the parent's register table to the pattern above.
+  auto vreg = [](unsigned i) { return Register::index2VirtReg(i); };
+  LaneBitmask all = LaneBitmask::getAll();
+  NodeRegInfoTable parent_table(parent_graph->GetNumGraphLocalIds());
+  parent_table.AddDef(pA, vreg(0).id(), all);
+  parent_table.AddUse(pC, vreg(0).id(), all);
+  parent_table.AddDef(pC, vreg(1).id(), all);
+  parent_table.AddUse(pD, vreg(1).id(), all);
+  parent_table.AddDef(pD, vreg(2).id(), all);
+  parent_table.AddUse(pE, vreg(1).id(), all);
+  parent_table.AddDef(pE, vreg(3).id(), all);
+  parent_table.AddUse(pF, vreg(2).id(), all);
+  parent_table.AddUse(pF, vreg(3).id(), all);
+  parent_table.AddDef(pF, vreg(4).id(), all);
+  parent_table.AddUse(pG, vreg(4).id(), all);
+  parent_graph->SetNodeRegInfoTable(std::move(parent_table));
+
+  // Finalize the parent so it carries the topo order, critical
+  // paths, and input schedule BuildFromNodeSubset reads.
+  parent_graph->ValidateAndComputeTopologicalOrder();
+  parent_graph->ComputeCriticalPaths();
+  parent_graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+
+  std::vector<ScheduleNode *> members = {pC, pD, pE, pF};
+  DenseMap<const ScheduleNode *, ScheduleNode *> subgraph_to_parent;
+  auto subgraph_graph = ScheduleGraph::BuildFromNodeSubset(
+      members, *parent_graph, st, mf, subgraph_to_parent);
+
+  auto check = [](StringRef desc, bool ok) {
+    llvm::outs() << "    " << desc << ": " << (ok ? "PASS" : "FAIL")
+                 << "\n";
+  };
+
+  // Locate the subgraph nodes by debug name (members inherit their
+  // member's name; the synthetic pair is SubgraphEntry/SubgraphExit).
+  ScheduleNode *sC = nullptr, *sD = nullptr, *sE = nullptr,
+               *sF = nullptr, *sEntry = nullptr, *sExit = nullptr;
+  for (ScheduleNode &n : subgraph_graph->Nodes()) {
+    StringRef name = n.GetDebugName();
+    if (name == "C") {
+      sC = &n;
+    } else if (name == "D") {
+      sD = &n;
+    } else if (name == "E") {
+      sE = &n;
+    } else if (name == "F") {
+      sF = &n;
+    } else if (name == "SubgraphEntry") {
+      sEntry = &n;
+    } else if (name == "SubgraphExit") {
+      sExit = &n;
+    }
+  }
+  check("node count is 6 (4 members + entry + exit)",
+        subgraph_graph->Size() == 6);
+  if (!sC || !sD || !sE || !sF || !sEntry || !sExit) {
+    check("all six expected nodes present", false);
+    return;
+  }
+
+  // Members emplaced first in parent input order (topo: C,D,E,F),
+  // then the synthetic entry/exit.
+  check("layout: members in input order, then entry/exit",
+        &subgraph_graph->Nodes()[0] == sC &&
+            &subgraph_graph->Nodes()[1] == sD &&
+            &subgraph_graph->Nodes()[2] == sE &&
+            &subgraph_graph->Nodes()[3] == sF &&
+            &subgraph_graph->Nodes()[4] == sEntry &&
+            &subgraph_graph->Nodes()[5] == sExit);
+
+  // Translation map: one entry per member, entry/exit absent.
+  check("translation map maps members, omits entry/exit",
+        subgraph_to_parent.size() == 4 &&
+            subgraph_to_parent.lookup(sC) == pC &&
+            subgraph_to_parent.lookup(sD) == pD &&
+            subgraph_to_parent.lookup(sE) == pE &&
+            subgraph_to_parent.lookup(sF) == pF &&
+            !subgraph_to_parent.count(sEntry) &&
+            !subgraph_to_parent.count(sExit));
+
+  // Debug-name sets of a node's successors / predecessors, and a
+  // check of a node's complete set of incident edges.
+  auto succ_names = [](const ScheduleNode &n) {
+    std::set<std::string> s;
+    for (const ScheduleEdge &e : n.Successors()) {
+      s.insert(e.node_->GetDebugName().str());
+    }
+    return s;
+  };
+  auto pred_names = [](const ScheduleNode &n) {
+    std::set<std::string> s;
+    for (const ScheduleEdge &e : n.Predecessors()) {
+      s.insert(e.node_->GetDebugName().str());
+    }
+    return s;
+  };
+  using NameSet = std::set<std::string>;
+  auto edges_ok = [&](const ScheduleNode &n, NameSet preds,
+                      NameSet succs) {
+    return pred_names(n) == preds && succ_names(n) == succs;
+  };
+
+  // Every node's complete incident edges. Intra-subgraph edges
+  // (C->D, C->E, D->F, E->F) are copied; boundary edges (A->C, F->G)
+  // are dropped; SubgraphEntry feeds the root C, SubgraphExit is fed
+  // by the leaf F.
+  check("C edges: pred {SubgraphEntry}, succ {D,E}",
+        edges_ok(*sC, {"SubgraphEntry"}, {"D", "E"}));
+  check("D edges: pred {C}, succ {F}", edges_ok(*sD, {"C"}, {"F"}));
+  check("E edges: pred {C}, succ {F}", edges_ok(*sE, {"C"}, {"F"}));
+  check("F edges: pred {D,E}, succ {SubgraphExit}",
+        edges_ok(*sF, {"D", "E"}, {"SubgraphExit"}));
+  check("SubgraphEntry edges: no pred, succ {C}",
+        edges_ok(*sEntry, {}, {"C"}));
+  check("SubgraphExit edges: pred {F}, no succ",
+        edges_ok(*sExit, {"F"}, {}));
+
+  // Register boundary: entry defines live-in {r0}, exit uses
+  // live-out {r4}.
+  check("entry defines live-in {r0}",
+        sEntry->RegDefs().size() == 1 &&
+            sEntry->RegDefs()[0].reg == vreg(0));
+  check("exit uses live-out {r4}",
+        sExit->RegUses().size() == 1 &&
+            sExit->RegUses()[0].reg == vreg(4));
+
+  // Each member's register-table entry is copied from the parent.
+  auto reg_ids = [](ArrayRef<RegMask> masks) {
+    std::set<unsigned> ids;
+    for (const RegMask &m : masks) {
+      ids.insert(m.reg);
+    }
+    return ids;
+  };
+  auto member_table_ok = [&](const ScheduleNode *member,
+                             std::set<unsigned> uses,
+                             std::set<unsigned> defs) {
+    const NodeRegInfo &info =
+        subgraph_graph->GetNodeRegInfoTable().GetForNode(member);
+    return reg_ids(info.uses) == uses && reg_ids(info.defs) == defs;
+  };
+  check("member C reg table: use {r0}, def {r1}",
+        member_table_ok(sC, {vreg(0).id()}, {vreg(1).id()}));
+  check("member D reg table: use {r1}, def {r2}",
+        member_table_ok(sD, {vreg(1).id()}, {vreg(2).id()}));
+  check("member E reg table: use {r1}, def {r3}",
+        member_table_ok(sE, {vreg(1).id()}, {vreg(3).id()}));
+  check("member F reg table: use {r2,r3}, def {r4}",
+        member_table_ok(sF, {vreg(2).id(), vreg(3).id()},
+                        {vreg(4).id()}));
+
+  // Input schedule: SubgraphEntry, the members in input order, then
+  // SubgraphExit.
+  std::vector<std::string> input_order;
+  for (const ScheduleNode *n :
+       subgraph_graph->GetInputScheduleConstructor().GetScheduleOrder()) {
+    input_order.push_back(n->GetDebugName().str());
+  }
+  check("input schedule order: Entry, C, D, E, F, Exit",
+        input_order == std::vector<std::string>{"SubgraphEntry", "C",
+                                                "D", "E", "F",
+                                                "SubgraphExit"});
+
+  check("subgraph graph is topologically sorted",
+        subgraph_graph->IsTopoSorted());
+}
+
 } // namespace
 
 // The only class-member shakedown entry point. All the per-shakedown
@@ -4415,6 +4608,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunTestDAGShakedown(st);
   RunInsertSubgraphProxiesShakedown();
   RunSubgraphContiguityShakedown(MF, *LIS);
+  RunBuildFromNodeSubsetShakedown(st, MF);
   RunLengthLowerBoundShakedown(st);
   RunScheduledSetTrackerShakedown(st);
   RunLengthHistoryTrackerShakedown(st);
