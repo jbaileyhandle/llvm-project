@@ -1,0 +1,534 @@
+# HierarchicalScheduler: Subgraph Scheduling Design
+
+## Purpose of this Document
+
+`AMDGPUSubgraphFormationDesign.md` specifies how a region's graph is
+*partitioned* into subgraphs. `AMDGPUClusteringDesign.md` (Approach B)
+specifies how a chosen subgraph is *represented* in the ScheduleGraph
+— a start/end proxy node pair plus a `SubgraphInfo`. Neither says how
+the pieces are driven: when each subgraph is scheduled, in what order
+relative to formation, or how a subgraph's chosen interior is held
+fixed while the enclosing graph is scheduled.
+
+This doc fills that gap. It covers:
+
+- the recursive **process loop** that ties formation and scheduling
+  together (§2–§4); and
+- the **enforcement** mechanism that pins a subgraph's chosen
+  schedule when the enclosing graph is scheduled (§5–§7).
+
+It assumes the formation and clustering docs and describes the
+machinery around them.
+
+## Table of Contents
+
+1. [Motivation](#1-motivation)
+2. [The Process Loop](#2-the-process-loop)
+3. [Formation/Scheduling Order and Recursion](#3-formationscheduling-order-and-recursion)
+4. [Policy](#4-policy)
+5. [Schedule Enforcement: The Requirement](#5-schedule-enforcement-the-requirement)
+6. [Enforcement A: Order Edges (Selected)](#6-enforcement-a-order-edges-selected)
+7. [Enforcement B: Stack-Based Cursor (Alternative)](#7-enforcement-b-stack-based-cursor-alternative)
+8. [Interleaving Mode (Future)](#8-interleaving-mode-future)
+9. [Status and Next Steps](#9-status-and-next-steps)
+
+---
+
+## 1. Motivation
+
+The HierarchicalScheduler schedules each region with a near-exhaustive
+search (BFS-DP, DFS, or branch-and-bound). Search cost grows
+super-linearly in graph size: large regions are expensive and some
+time out before the search completes (e.g. `hip_stencil` region[0],
+~639 instructions).
+
+Decomposition trades one large search for several small ones plus a
+reduced top-level search:
+
+1. Partition the region's graph into subgraphs.
+2. Schedule each subgraph **in isolation** — a small graph, a cheap
+   search.
+3. **Lock** each subgraph's chosen interior order and schedule the
+   whole graph, with the subgraph interiors fixed.
+
+In step 3 the top-level search no longer orders all *N* instructions;
+it orders the *K* subgraphs and the non-subgraph instructions, and
+each subgraph's interior is a single forced sequence. The number of
+free decisions drops sharply.
+
+The design is **recursive**: a subgraph may itself be partitioned, so
+"schedule a subgraph in isolation" is the same operation as "schedule
+the region." The first implementation is flat (one level); the
+structure is built so recursion is a drop-in (§3).
+
+---
+
+## 2. The Process Loop
+
+The core routine, `ProcessGraph`, is recursive. It takes a
+ScheduleGraph and returns a `SearchResult`:
+
+```
+SearchResult ProcessGraph(ScheduleGraph &graph, int depth,
+                          PolicyProvider provider):
+    LevelPolicy policy = provider(depth, graph)
+
+    // 1. FORM — partition `graph`, insert start/end proxy pairs.
+    //    May decline to subdivide (graph small enough, or a depth
+    //    bound reached); then steps 2-3 see no subgraphs and this
+    //    call behaves as a leaf.
+    FormSubgraphs(graph, policy.formation)
+
+    // 2. SCHEDULE SUBGRAPHS — each in isolation, recursively.
+    for (SubgraphInfo *info : graph.GetSubgraphInfos()):
+        ScheduleSubgraph(*info, graph, st, mf,
+            /*functor=*/[&](ScheduleGraph &sub) {
+                return ProcessGraph(sub, depth + 1, provider);
+            })
+
+    // 3. LOCK + SCHEDULE — pin the chosen interiors into `graph`,
+    //    then run the top-level search over it.
+    AddSubgraphOrderEdges(graph)
+    return RunSearch(graph, policy.search)
+```
+
+**Step 1 — Form.** `FormSubgraphs` (see
+`AMDGPUSubgraphFormationDesign.md`) partitions `graph` and calls
+`InsertSubgraphProxies`, which replaces each member set with a
+start/end proxy pair and records a `SubgraphInfo`. If formation
+declines to subdivide, this is a no-op and `ProcessGraph` bottoms out
+as a leaf.
+
+**Step 2 — Schedule subgraphs.** For each `SubgraphInfo`,
+`ScheduleSubgraph` extracts the members into a standalone
+ScheduleGraph (`ScheduleGraph::BuildFromNodeSubset`), runs the
+caller-supplied `functor` on it, and records the recovered order plus
+register metadata on `info.schedule_result`.
+
+**Step 3 — Lock and schedule.** `AddSubgraphOrderEdges` bakes each
+subgraph's chosen interior into `graph` (§6); `RunSearch` then runs
+the top-level search, whose subgraph interiors are now fixed.
+
+### 2.1 Recursion is injected through the functor
+
+`ScheduleSubgraph`'s `functor` parameter has type
+`function_ref<SearchResult(ScheduleGraph &)>`. That is exactly
+`ProcessGraph`'s shape (minus the captured `depth`/`provider`). So
+recursion needs no new extraction machinery: an internal subgraph's
+functor is `ProcessGraph` itself, and `ProcessGraph` bottoms out on
+its own when `FormSubgraphs` declines to subdivide.
+
+`ScheduleSubgraph` and `BuildFromNodeSubset` were written to this
+contract. The one change recursion will need: `ScheduleSubgraph` must
+pass the extracted graph to the functor by **non-const** reference —
+today's leaf searches do not mutate it, but a recursive `ProcessGraph`
+runs `FormSubgraphs` on it.
+
+### 2.2 Existing vs. new components
+
+| Component | Status |
+|---|---|
+| `FormSubgraphs`, `InsertSubgraphProxies` | exists |
+| `ScheduleGraph::BuildFromNodeSubset` | exists |
+| `ScheduleSubgraph` | exists |
+| Scope push/pop in `ScheduleConstructor` | exists |
+| `ScheduleGraph::AddSubgraphOrderEdges` (§6) | next to implement |
+| `ProcessGraph` driver, `LevelPolicy` / `PolicyProvider` (§4) | future |
+
+---
+
+## 3. Formation/Scheduling Order and Recursion
+
+### 3.1 A depth-first walk of the subgraph tree
+
+The subgraphs of a region form a tree: the region is the root, each
+subgraph a child, recursively. `ProcessGraph` walks that tree
+depth-first. Within one call, **formation precedes scheduling**:
+step 1 forms, step 2 recurses into each child (forming and scheduling
+its whole subtree), step 3 schedules this graph.
+
+So formation is the **pre-order** action — a graph must be
+partitioned before its children exist — and scheduling is the
+**post-order** action — a parent's step-3 search needs its children's
+locked orders. Along any root-to-leaf path this reads as "form down,
+schedule up."
+
+This is **not** a global two-phase split (all formation, then all
+scheduling). It does not need to be: formation consumes **no** schedule
+results — it is a pure function of graph structure (dominator tree +
+latency splitters) and the formation policy. Two consequences:
+
+- The per-subgraph loop in step 2 is data-independent — each
+  iteration writes a distinct `SubgraphInfo` and reads `graph` only
+  through `const` references. Subtrees are independent work and the
+  loop is **parallelizable**, without holding the whole tree in
+  memory the way a two-phase split would.
+- If formation should ever react to schedule results, that belongs in
+  an explicit outer refinement loop (form → schedule → re-form), not
+  smeared into `ProcessGraph`.
+
+### 3.2 The base case
+
+`FormSubgraphs` declines to subdivide when the graph is small enough
+or a depth bound is hit. Then step 2's loop is empty and step 3
+schedules the graph directly. That is the recursion's base case —
+there is no separate "leaf" code path.
+
+### 3.3 Results flatten automatically
+
+A subgraph's recorded order must end up expressed in nodes that
+outlive the transient extracted graphs. This happens for free.
+
+`ScheduleSubgraph` translates a recovered order back to parent-graph
+member nodes: it keeps each node that `BuildFromNodeSubset`'s
+extraction map resolves to a parent member and drops the rest. The map
+has an entry for every extracted member node. When the extracted graph
+is recursively sub-formed, the sub-subgraphs' members are a *subset*
+of those member nodes — all still in the map — while the proxy nodes
+sub-formation *adds* are not. So the existing translation flattens
+automatically: members at any nesting depth survive; proxies at any
+depth drop, by the same mechanism that already drops the extracted
+graph's synthetic entry/exit sentinels.
+
+No "proxy expansion" step is needed. Each recursion level translates
+one step up and sheds the proxies it created; the root call returns a
+flat sequence of atomic instruction nodes. (The root graph's own
+proxies are dropped by the final consumer when the instruction order
+is emitted.)
+
+### 3.4 Worked example: two levels
+
+Take a region graph **G** that forms one subgraph **A**, whose
+interior in turn forms one sub-subgraph **A1**; **A1** is small enough
+that formation declines to subdivide it. `ProcessGraph(G, depth=0)`
+runs:
+
+```
+ProcessGraph(G, depth=0)
+  1. FormSubgraphs(G)              → subgraph A; proxies inserted into G
+  2. ScheduleSubgraph(A, G, …, functor = ProcessGraph)
+       BuildFromNodeSubset(A.members, G)        → standalone graph G_A
+       functor → ProcessGraph(G_A, depth=1)
+         1. FormSubgraphs(G_A)     → sub-subgraph A1; proxies into G_A
+         2. ScheduleSubgraph(A1, G_A, …, functor = ProcessGraph)
+              BuildFromNodeSubset(A1.members, G_A) → standalone G_A1
+              functor → ProcessGraph(G_A1, depth=2)
+                1. FormSubgraphs(G_A1) → declines (small) — leaf
+                2. (no subgraphs)
+                3. RunSearch(G_A1)     → order over G_A1 nodes
+              translate G_A1 order → G_A nodes; record A1.schedule_result
+         3. AddSubgraphOrderEdges(G_A); RunSearch(G_A) → order over G_A nodes
+       translate G_A order → G nodes; record A.schedule_result
+  3. AddSubgraphOrderEdges(G); RunSearch(G)     → final order over G nodes
+```
+
+Formation fires on the way **down** (G, then G_A, then G_A1);
+scheduling completes on the way **up** (G_A1's `RunSearch` first, then
+G_A's, then G's). `ProcessGraph(G_A1)` is the leaf — `FormSubgraphs`
+declined, so steps 2–3 collapse to a single `RunSearch`. Each
+`ScheduleSubgraph` translates the order it received into *its own*
+graph's node terms before recording it (G_A1→G_A, then G_A→G), so
+`A.schedule_result.order` is already a flat sequence of **G** nodes
+when step 3 of the outermost call consumes it (§3.3).
+
+---
+
+## 4. Policy
+
+Three things are configured per level of the tree:
+
+- **Formation** — which passes run, splitter/size thresholds. Carried
+  by `SubgraphFormationPolicy` (a runtime struct; exists).
+- **Search algorithm** — BFS-DP, DFS, or branch-and-bound.
+- **Search objective and tuning** — metric, seeding, time budget.
+
+An **inner** (subgraph) search and the **outer** (region) search
+differ deliberately. An inner search on a small graph may use a
+*continuous* register-occupancy metric — integer occupancy ties every
+schedule in the same bracket and gives the search no gradient, while
+the continuous score distinguishes within-bracket pressure — and may
+skip the input-order seed and run on a smaller budget. The outer
+search uses the hardware-meaningful integer occupancy.
+
+### 4.1 LevelPolicy and the provider
+
+Proposed: a runtime `LevelPolicy` bundling a `SubgraphFormationPolicy`
+with a search selection (algorithm + objective + budget + seeding),
+and a `PolicyProvider` —
+`function_ref<LevelPolicy(int depth, const ScheduleGraph &)>` — that
+`ProcessGraph` consults per node. The initial provider is trivial:
+depth 0 → outer policy, deeper → inner policy. A later provider can
+key on subgraph size or estimated pressure.
+
+### 4.2 The runtime/compile-time bridge
+
+DFS search policies are compile-time classes (`DfsSearch` is a
+template — see `SearchPolicies.h`); BFS-DP takes a runtime
+`BfsDpSettings` struct. A `LevelPolicy` is a runtime value, so
+`RunSearch` is the one place that bridges: it switches an objective
+enum over the `DfsSearch<…>` instantiations and constructs a
+`BfsDpSettings` for the BFS-DP path. `LengthPolicyChoice` in
+`ScheduleDAGHierarchicalScheduler.cpp` is the established pattern for
+this runtime→compile-time switch.
+
+### 4.3 Note: BFS-DP runs only on proxy-free graphs
+
+BFS-DP is an inner/leaf strategy: it schedules extracted subgraphs,
+which contain no subgraph proxies. The proxied-graph search in step 3
+is always DFS or branch-and-bound. The enforcement machinery (§5–§7)
+therefore never has to interact with BFS-DP.
+
+---
+
+## 5. Schedule Enforcement: The Requirement
+
+After step 2, `info.schedule_result.order` is the interior chosen for
+the subgraph, as a sequence of `graph`'s member nodes. Step 3
+schedules the whole proxied graph and must **honor** that interior —
+otherwise the step-3 search re-derives it from scratch and the
+isolated scheduling work is wasted.
+
+There are two distinct requirements:
+
+- **Order** — the subgraph's members appear in step 3's schedule in
+  exactly `schedule_result.order`.
+- **Contiguity** — the members are scheduled as one uninterrupted run
+  (nothing else between them). Required in the default mode; dropped
+  in interleaving mode (§8).
+
+**Contiguity already exists.** `ScheduleConstructor` maintains a stack
+of scheduling scopes: scheduling a start proxy pushes a scope,
+scheduling an end proxy pops it, and the search only ever picks from
+the top scope. So once the search enters a subgraph it cannot schedule
+anything outside it until the subgraph is drained.
+
+This document's enforcement question is therefore only about
+**order**. §6 and §7 are two ways to enforce it.
+
+---
+
+## 6. Enforcement A: Order Edges (Selected)
+
+After isolated scheduling, for each subgraph add artificial edges
+along the chosen sequence:
+
+```
+order[0] → order[1] → order[2] → … → order[n-1]
+```
+
+— a Hamiltonian path through the members. The edges are
+`kSubgraphOrderEdge`: **strong** (they constrain scheduling order) but
+**not latency-contributing** (they do not inflate cycle counts and are
+invisible to the length and frontier trackers).
+
+### 6.1 How it enforces order
+
+`ScheduleConstructor::ReleaseSuccessors` decrements each successor's
+count of unscheduled strong predecessors and moves a successor to the
+ready list when that count hits zero.
+
+The order edge is one of `order[i+1]`'s strong predecessors, so
+`order[i+1]` cannot be ready until `order[i]` is scheduled. And once
+`order[i]` is scheduled, all of `order[i+1]`'s other predecessors are
+already satisfied — its intra-subgraph predecessors lie within
+`order[0..i]`, and its external predecessors were gated by the start
+proxy. So `order[i+1]` becomes ready *exactly* when `order[i]` is
+scheduled, and `order[i+2]` stays blocked behind it. At most one
+member of the subgraph is ready at a time; the step-3 search has no
+choice to make inside a subgraph.
+
+### 6.2 What this costs — and does not
+
+- **No `ScheduleConstructor` changes.** Scope push/pop already exists;
+  `ReleaseSuccessors` already releases the next member when the order
+  edge clears; the order edges are ordinary strong edges.
+- **Backtracking is free.** `ReleaseSuccessors` / `UnreleaseSuccessors`
+  already do/undo ordinary edges in lockstep with `Schedule` /
+  `Unschedule`.
+- **Locking is graph construction, not search logic.** A new
+  `ScheduleGraph::AddSubgraphOrderEdges()`: for every `SubgraphInfo`
+  with a populated `schedule_result`, add the chain, then re-derive
+  the topological order and critical paths (the same tail as
+  `InsertSubgraphProxies`).
+
+The cost is ~O(members) extra edges per subgraph — the same order as
+the proxy edges `InsertSubgraphProxies` already adds.
+
+### 6.3 Correctness condition: convexity
+
+The chain follows `schedule_result.order`, a topological order of the
+subgraph's intra-member edges. It is cycle-free **iff** that order is
+consistent with how the full graph orders those members — which holds
+iff the subgraph is **convex**: no path between two members escapes
+through a non-member.
+
+Convexity is already guaranteed. In a non-convex subgraph some path
+runs `member → … → member` by way of non-members; that path leaves the
+member set through an *external successor* and re-enters through an
+*external predecessor*. `InsertSubgraphProxies` wires
+`end_proxy → (external successor)` and
+`(external predecessor) → start_proxy`, so the escaping path closes a
+cycle with the `start_proxy → … → end_proxy` path through the members.
+`InsertSubgraphProxies` re-runs the topological sort, detects the
+cycle, and `report_fatal_error`s. So any subgraph that successfully
+receives proxies is convex, and its order chain is cycle-free.
+
+### 6.4 Timing
+
+`schedule_result.order` is known only *after* isolated scheduling, so
+`AddSubgraphOrderEdges` runs as a step of `ProcessGraph` after step 2
+— it is not part of formation-time `InsertSubgraphProxies`.
+
+The chosen order is **compiled into the graph structure** and is
+static for the lifetime of the step-3 search. §7.3 discusses when that
+becomes a limitation.
+
+---
+
+## 7. Enforcement B: Stack-Based Cursor (Alternative)
+
+This approach was designed and then **not** selected, in favor of §6.
+It is recorded here because it is the cleaner substrate if scheduling
+ever has to *choose* among multiple candidate subgraph schedules
+(§7.3).
+
+Instead of compiling the order into edges, keep `schedule_result.order`
+as data and track a **cursor** — a per-subgraph `int` index meaning
+"members of this subgraph scheduled so far." Drive the ready list from
+the cursor.
+
+### 7.1 Storage
+
+The cursor lives on the scheduling scope. `SubgraphScheduleScope` gains
+a `DenseMap<const ScheduleNode * /*start proxy*/, int>`. In the default
+mode a subgraph scope holds one cursor; in interleaving mode (§8, no
+subgraph scopes) the base scope holds all of them. Tying cursor
+storage to the scope means a single decision — push a scope or not —
+encodes the mode.
+
+### 7.2 Mechanics
+
+All in `ScheduleConstructor`, alongside the existing scope push/pop:
+
+- **Start proxy scheduled** → push scope; cursor = 0; release
+  `order[0]`.
+- **Member scheduled** → `++cursor`; release `order[cursor]` if in
+  range.
+- **Member unscheduled** → un-release `order[cursor]` if in range;
+  `--cursor`.
+- **End proxy scheduled** → pop scope. **End proxy unscheduled** →
+  re-push scope; cursor = `order.size()` (all members are scheduled at
+  that point, so the value is determined — no stored history needed).
+- **Start proxy unscheduled** → un-release `order[0]`, then pop.
+
+A **guard** in `ReleaseSuccessors` / `UnreleaseSuccessors` keeps them
+from touching the ready-list membership of locked-subgraph members —
+the cursor owns it — while still maintaining those members'
+predecessor counts so the end proxy (gated behind all members) still
+fires. The guard is a symmetric `IsLockedSubgraphMember` check in both
+functions.
+
+The cursor is reversible search state: `++`/`--` mirror exactly, and
+at the one point a scope is built from nothing (end-proxy unschedule)
+the correct value is `order.size()`.
+
+### 7.3 When the stack-based approach is preferable
+
+Order edges compile **one** order into the graph. If a future step-3
+search needs to **select** among several candidate schedules per
+subgraph — e.g. isolated scheduling emits the top-K orders trading
+length against register pressure, and the top-level search picks one
+per subgraph based on surrounding context — order edges become
+awkward: trying a different candidate means removing one edge set,
+inserting another, and re-running the topological sort, *inside* the
+search's do/undo loop. That is graph surgery on the hot path.
+
+The cursor keeps the order as data. A subgraph can carry K candidate
+sequences; "use candidate j" is the cursor reading sequence j — an
+O(1) branch point, with no graph mutation and no topology re-derive.
+Per-subgraph schedule selection becomes a first-class decision the
+step-3 search can explore and backtrack over.
+
+So the dividing line is *when* a subgraph's order is decided. Order
+edges (§6) are correct and simplest when the order is fixed **before**
+step 3. The stack-based cursor wins if the order must be chosen
+**during** step 3.
+
+### 7.4 Why §6 was chosen for now
+
+In the current design each subgraph has exactly one chosen order,
+fixed before step 3. Under that assumption order edges are strictly
+simpler: no `ScheduleConstructor` changes, backtracking for free, and
+interleaving mode (§8) for free — whereas the cursor needs new
+hot-path logic, hand-written backtracking, and a "conjunction" upgrade
+for interleaving (§8).
+
+---
+
+## 8. Interleaving Mode (Future)
+
+The default mode requires a subgraph to be scheduled **contiguously**:
+once entered, nothing else is scheduled until it is drained.
+
+A future **interleaving mode** would let pre-scheduled subgraphs
+interleave their members with each other and with non-subgraph nodes —
+only each subgraph's *internal order* stays fixed. Two changes:
+
+1. **No scope push/pop.** All nodes live in the base scope, so the
+   step-3 search can move between subgraphs freely.
+2. **Relaxed proxy edges.** Today the start proxy waits for *every*
+   external predecessor of the subgraph, and *every* external
+   successor waits for the end proxy. That is too strict for
+   interleaving: the start proxy need only wait for the predecessors
+   of the *first scheduled member*, and only the *last scheduled
+   member*'s successors need wait for the end proxy — the per-member
+   predecessor/successor edges carry the rest. This relaxed wiring
+   depends on `schedule_result.order`, so like the order edges it is
+   applied after isolated scheduling.
+
+Enforcement is **mode-independent under §6**: the order edges work
+unchanged. A member's predecessor count naturally ANDs its order edge
+with its real data-dependency edges, so a member becomes ready only
+when both its locked-order predecessor and its real predecessors are
+scheduled — exactly the gating interleaving needs.
+
+Under §7 the cursor would need a "conjunction" upgrade for this: a
+member becomes ready when cursor-reached **and** its real predecessor
+count is zero, whichever happens second. (In the default mode the
+count is always already zero when the cursor arrives, so the cursor's
+simple form suffices.) That extra logic is one more reason §6 was
+chosen.
+
+So: **enforcement is mode-independent; the mode is proxy-edge
+relaxation plus scopes-or-not.**
+
+---
+
+## 9. Status and Next Steps
+
+**Implemented:**
+
+- `FormSubgraphs` + `InsertSubgraphProxies` (formation; see
+  `AMDGPUSubgraphFormationDesign.md`).
+- `ScheduleGraph::BuildFromNodeSubset` — extract a member set into a
+  standalone graph with a modeled register boundary.
+- `ScheduleSubgraph` — schedule one subgraph in isolation and record
+  the result on its `SubgraphInfo`.
+- Scope push/pop in `ScheduleConstructor` (contiguity).
+
+**Immediate next:**
+
+- `ScheduleGraph::AddSubgraphOrderEdges()` — enforcement approach A
+  (§6).
+- A shakedown: form subgraphs, set known non-trivial
+  `schedule_result.order`s, add the order edges, schedule the proxied
+  graph adversarially, and assert each subgraph's members emerge in
+  exactly `schedule_result.order` with at most one member ready at a
+  time.
+
+**Later:**
+
+- The `ProcessGraph` driver, `LevelPolicy`, and `PolicyProvider`
+  (§2, §4); the non-const functor argument noted in §2.1.
+- Recursion (the structure is in place; §3).
+- Interleaving mode (§8).
