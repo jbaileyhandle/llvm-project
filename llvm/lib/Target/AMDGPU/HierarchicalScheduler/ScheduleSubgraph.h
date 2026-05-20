@@ -48,7 +48,7 @@ class ScheduleGraph;
 const SubgraphScheduleResult &ScheduleSubgraph(
     SubgraphInfo &info, const ScheduleGraph &parent_graph,
     const GCNSubtarget &st, const MachineFunction &mf,
-    function_ref<SearchResult(const ScheduleGraph &)> schedule);
+    function_ref<SearchResult(ScheduleGraph &)> schedule);
 
 }  // namespace hierarchical_scheduler
 }  // namespace llvm

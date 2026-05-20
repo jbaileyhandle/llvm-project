@@ -15,6 +15,7 @@
 #include "ScheduleDAGHierarchicalScheduler.h"
 #include "BfsDpSearch.h"
 #include "BfsDpSettings.h"
+#include "DecomposeAndSchedule.h"
 #include "DfsSearch.h"
 #include "DominatorTree.h"
 #include "GCNRegisterTracker.h"
@@ -4847,6 +4848,108 @@ void RunAddSubgraphOrderEdgesShakedown(const GCNSubtarget &st,
   }
 }
 
+// Exercises the end-to-end DecomposeAndSchedule pipeline on the
+// subgraph-formation test DAG: drives FormSubgraphs through
+// AddSubgraphOrderEdges and the outer search in one call.
+//   - subgraph_functor: BfsDpSearch on each extracted subgraph.
+//   - outer_search: a ScheduleConstructor driven greedy-adversarially
+//     over the proxied + chained graph (the chain leaves no choice
+//     inside subgraphs; topo-last picking is fine outside).
+// Verifies the returned schedule is complete and that each formed
+// subgraph's members appear in step 3's schedule in exactly the order
+// BFS-DP chose for it.
+void RunDecomposeAndScheduleShakedown(const GCNSubtarget &st,
+                                      const MachineFunction &mf) {
+  llvm::outs() << "  RunDecomposeAndScheduleShakedown:\n";
+
+  auto check = [](StringRef desc, bool ok) {
+    llvm::outs() << "    " << desc << ": " << (ok ? "PASS" : "FAIL")
+                 << "\n";
+  };
+
+  // Use the formation-test DAG: purpose-built so BottomUpDefault
+  // emits a subgraph.
+  auto graph = ScheduleGraph::BuildSubgraphFormationTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPaths();
+  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+
+  auto inner_search =
+      [&st, &mf](ScheduleGraph &sub) -> SearchResult {
+    BfsDpSearch search(&sub, &st, &mf, BfsDpSettings{});
+    return search.Run();
+  };
+
+  auto outer_search = [&st, &mf](ScheduleGraph &g) -> SearchResult {
+    ScheduleConstructor sc(g, st, mf);
+    while (!sc.IsDone()) {
+      ArrayRef<const ScheduleNode *> ready = sc.GetReadyList();
+      if (ready.empty()) {
+        report_fatal_error(
+            "outer_search: ready list empty while not done");
+      }
+      sc.Schedule(ready.back());
+    }
+    return SearchResult{std::move(sc),
+                        SearchTerminationCause::kFullyExplored};
+  };
+
+  DecomposeAndScheduleOptions opts{
+      /*formation=*/SubgraphFormationPolicy::BottomUpDefault(),
+      /*mode=*/SubgraphScheduleMode::kSerialized,
+      /*inner_search=*/inner_search,
+      /*outer_search=*/outer_search};
+
+  SearchResult result = DecomposeAndSchedule(*graph, st, mf, opts);
+
+  check("DecomposeAndSchedule returned a schedule",
+        result.schedule.has_value());
+  if (!result.schedule.has_value()) {
+    return;
+  }
+  const ScheduleConstructor &sc = *result.schedule;
+  check("schedule is complete (IsDone)", sc.IsDone());
+
+  // At least one subgraph was formed — sanity that the pipeline
+  // actually exercised the form-and-lock path.
+  check("at least one subgraph was formed",
+        !graph->GetSubgraphInfos().empty());
+
+  // For each formed subgraph: members appear in step 3's schedule in
+  // exactly schedule_result.order — proving the chain locked them.
+  ArrayRef<const ScheduleNode *> scheduled_order = sc.GetScheduleOrder();
+  for (SubgraphInfo *info : graph->GetSubgraphInfos()) {
+    if (!info->schedule_result.has_value()) {
+      continue;
+    }
+    ArrayRef<ScheduleNode *> locked = info->schedule_result->order;
+    std::set<const ScheduleNode *> member_set;
+    for (ScheduleNode *m : locked) {
+      member_set.insert(m);
+    }
+    std::vector<const ScheduleNode *> members_in_schedule;
+    for (const ScheduleNode *n : scheduled_order) {
+      if (member_set.count(n)) {
+        members_in_schedule.push_back(n);
+      }
+    }
+    bool order_matches =
+        members_in_schedule.size() == locked.size();
+    if (order_matches) {
+      int n = static_cast<int>(members_in_schedule.size());
+      for (int i = 0; i < n; ++i) {
+        if (members_in_schedule[i] != locked[i]) {
+          order_matches = false;
+          break;
+        }
+      }
+    }
+    std::string desc = "subgraph \"" + info->debug_name +
+                       "\": members in schedule match locked order";
+    check(desc, order_matches);
+  }
+}
+
 } // namespace
 
 // The only class-member shakedown entry point. All the per-shakedown
@@ -4864,6 +4967,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunBuildFromNodeSubsetShakedown(st, MF);
   RunScheduleSubgraphShakedown(st, MF);
   RunAddSubgraphOrderEdgesShakedown(st, MF);
+  RunDecomposeAndScheduleShakedown(st, MF);
   RunLengthLowerBoundShakedown(st);
   RunScheduledSetTrackerShakedown(st);
   RunLengthHistoryTrackerShakedown(st);

@@ -401,6 +401,14 @@ void ScheduleGraph::InsertSubgraphProxies(
     EmplaceProxyAndWireEdges(std::move(info_ptr));
   }
 
+  // Keep the per-node register-info table aligned with the new graph
+  // size: the proxies just emplaced have graph_local_ids past the
+  // original table bounds. New entries are default-constructed (no
+  // defs, no uses) — proxies have no register effect.
+  if (node_reg_info_table_) {
+    node_reg_info_table_->EnsureSize(GetNumGraphLocalIds());
+  }
+
   // Sort by member count descending so consumers (telemetry, debug
   // dumps) see the largest subgraphs first.
   std::sort(subgraph_infos_.begin(), subgraph_infos_.end(),

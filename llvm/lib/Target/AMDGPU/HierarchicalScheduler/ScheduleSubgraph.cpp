@@ -18,7 +18,7 @@ namespace hierarchical_scheduler {
 const SubgraphScheduleResult &ScheduleSubgraph(
     SubgraphInfo &info, const ScheduleGraph &parent_graph,
     const GCNSubtarget &st, const MachineFunction &mf,
-    function_ref<SearchResult(const ScheduleGraph &)> schedule) {
+    function_ref<SearchResult(ScheduleGraph &)> schedule) {
   // Extract the subgraph's members into a standalone graph.
   DenseMap<const ScheduleNode *, ScheduleNode *>
       subgraph_node_to_parent_member;
