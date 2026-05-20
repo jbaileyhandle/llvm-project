@@ -470,19 +470,69 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
                << "\n";
 }
 
+// Per-region BFS-DP occupancy search. Uses BfsDpSettings::ForOccupancyPass
+// (integer-occupancy metric plus per-region timeout). The score-bound
+// prune is seeded with the region's original register-only occupancy,
+// so BfsDpSearch only materializes schedules that strictly beat the
+// input. May return a SearchResult whose schedule is empty (no
+// schedule beat the seed, or the budget fired before a complete
+// schedule was found); the dispatcher's common tail handles that.
+static SearchResult RunOccupancyRegionWithBfsDp(
+    ScheduleGraph &graph, const RegionInfo &region,
+    const GCNSubtarget &st, const MachineFunction &mf) {
+  BfsDpSearch search(&graph, &st, &mf, BfsDpSettings::ForOccupancyPass());
+  search.SetInitialBestScore(region.GetOriginalRegisterOnlyOccupancy());
+  SearchResult result = search.Run();
+  llvm::outs() << "\t\toutput: (BFS-DP) found_improvement="
+               << result.schedule.has_value() << "\n";
+  if (result.termination_cause == SearchTerminationCause::kTimedOut) {
+    // The BFS expands one partition-dag layer per graph node, so the
+    // all-scheduled sink sits at depth graph.Size(). Layers completed
+    // before the budget fired, over that depth, is the approximate
+    // fraction of the search that was explored. Floating-point on
+    // purpose: a timeout typically fires only a few layers into a
+    // large graph, where integer division would round to 0.
+    int levels_explored = search.GetLevelsExplored();
+    int total_levels = graph.Size();
+    double percent_explored =
+        total_levels > 0
+            ? (100.0 * levels_explored) / total_levels
+            : 0.0;
+    // Fixed-point: raw_ostream's operator<<(double) prints %e
+    // (scientific), unreadable for a percentage.
+    llvm::outs() << "\t\t\ttimed out: explored ~"
+                 << llvm::format("%.2f", percent_explored)
+                 << "% of levels (" << levels_explored << "/"
+                 << total_levels << ")\n";
+  }
+  return result;
+}
+
+// Per-region DFS occupancy search. Uses DfsSearch<DfsMaximizeOccupancyPolicy>
+// seeded with the graph's input schedule (so best is never empty).
+// Honors SkipSubgraphFormation via the ctor's form_subgraphs flag.
+// Emits the standard PostScheduleInfo block.
+static SearchResult RunOccupancyRegionWithDfs(
+    ScheduleGraph &graph, const GCNSubtarget &st,
+    const MachineFunction &mf, const LiveIntervals &lis,
+    const ScheduleConstructor &input_schedule_constructor) {
+  DfsSearch<DfsMaximizeOccupancyPolicy> search(
+      graph, st, mf, lis,
+      /*form_subgraphs=*/!ShouldSkipSubgraphFormation());
+  SearchResult result = search.Run();
+  // DFS always populates schedule (best is seeded with input).
+  bool changed = input_schedule_constructor.GetScheduleOrder() !=
+                 result.schedule->GetScheduleOrder();
+  PrintPostScheduleInfo(graph, *result.schedule, search, st, changed, "\t\t");
+  return result;
+}
+
 // Schedules the region for maximum occupancy and applies the result.
-// One of two search strategies, selected by the BfsDpForOccupancy
-// misched.txt option (see ShouldUseBfsDpForOccupancy):
-//
-//   DFS (default): DfsSearch<DfsMaximizeOccupancyPolicy>, seeded
-//     with the graph's input ScheduleConstructor.
-//   BFS-DP: BfsDpSearch, score-bound prune seeded with the region's
-//     original register-only occupancy.
-//
-// Either search returns a SearchResult; when its `schedule` is
-// empty (only BFS-DP, when no schedule strictly beats the seed) the
-// input order is kept. Applying a schedule equal to the input is a
-// no-op move-wise — every MI is already at its CurrentTop position.
+// Dispatches to one of the per-strategy helpers (BFS-DP / DFS) based
+// on the misched.txt configuration, then applies the chosen schedule.
+// When the strategy returns no schedule (only BFS-DP can — when no
+// schedule beats the seed) the input order is kept; applying it is a
+// no-op move-wise since every MI is already at its CurrentTop position.
 ScheduleDAGHierarchicalScheduler::MaxOccupancyRegionResult
 ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     RegionInfo &region) {
@@ -500,55 +550,11 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     // region[N] at indent level 2 (\t\t).
     PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
 
-    // Run the selected search; each branch fills `search_result`.
-    SearchResult search_result;
-    if (ShouldUseBfsDpForOccupancy()) {
-      // Occupancy-pass preset: integer-occupancy metric plus a
-      // per-region timeout (see BfsDpSettings::ForOccupancyPass).
-      // Score-bound prune seeded with the region's original
-      // register-only occupancy — BfsDpSearch only materializes
-      // schedules that strictly beat the input.
-      BfsDpSearch search(&graph, &st, &MF,
-                         BfsDpSettings::ForOccupancyPass());
-      search.SetInitialBestScore(region.GetOriginalRegisterOnlyOccupancy());
-      search_result = search.Run();
-      llvm::outs() << "\t\toutput: (BFS-DP) found_improvement="
-                   << search_result.schedule.has_value() << "\n";
-      if (search_result.termination_cause ==
-          SearchTerminationCause::kTimedOut) {
-        // The BFS expands one partition-dag layer per graph node, so
-        // the all-scheduled sink sits at depth graph.Size(). Layers
-        // completed before the budget fired, over that depth, is the
-        // approximate fraction of the search that was explored.
-        // Floating-point on purpose: a timeout typically fires only a
-        // few layers into a large graph, where integer division would
-        // round the percentage to 0.
-        int levels_explored = search.GetLevelsExplored();
-        int total_levels = graph.Size();
-        double percent_explored =
-            total_levels > 0
-                ? (100.0 * levels_explored) / total_levels
-                : 0.0;
-        // Fixed-point: raw_ostream's operator<<(double) prints %e
-        // (scientific), unreadable for a percentage. A timeout that
-        // fires a few layers into a large graph yields a sub-1%
-        // value, so keep two decimals.
-        llvm::outs() << "\t\t\ttimed out: explored ~"
-                     << llvm::format("%.2f", percent_explored)
-                     << "% of levels (" << levels_explored << "/"
-                     << total_levels << ")\n";
-      }
-    } else {
-      DfsSearch<DfsMaximizeOccupancyPolicy> search(
-          graph, st, MF, *LIS,
-          /*form_subgraphs=*/!ShouldSkipSubgraphFormation());
-      search_result = search.Run();
-      // DFS always populates schedule (best is seeded with input).
-      bool changed = input_schedule_constructor.GetScheduleOrder() !=
-                     search_result.schedule->GetScheduleOrder();
-      PrintPostScheduleInfo(graph, *search_result.schedule, search, st,
-                            changed, "\t\t");
-    }
+    SearchResult search_result =
+        ShouldUseBfsDpForOccupancy()
+            ? RunOccupancyRegionWithBfsDp(graph, region, st, MF)
+            : RunOccupancyRegionWithDfs(graph, st, MF, *LIS,
+                                        input_schedule_constructor);
 
     // Common tail. Apply the search's schedule, or keep the input
     // order when the search produced none (only BFS-DP can).
