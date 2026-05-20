@@ -156,6 +156,7 @@ MachineInstrSchedulerConfig::SchedulerOption MachineInstrSchedulerConfig::GetSch
               SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy)
         .Case("MaximizeLength", SchedulerOption::MaximizeLength)
         .Case("BfsDpForOccupancy", SchedulerOption::BfsDpForOccupancy)
+        .Case("DecomposeForOccupancy", SchedulerOption::DecomposeForOccupancy)
         .Default(SchedulerOption::InvalidOption);
 
     if (option == SchedulerOption::InvalidOption) {
@@ -184,6 +185,7 @@ bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption opti
     case SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy:
     case SchedulerOption::MaximizeLength:
     case SchedulerOption::BfsDpForOccupancy:
+    case SchedulerOption::DecomposeForOccupancy:
         return (scheduler == Scheduler::HierarchicalScheduler);
     default:
         return false;
@@ -198,6 +200,28 @@ void MachineInstrSchedulerConfig::InitSchedulerOptions(const std::vector<std::st
                 "' is not valid for scheduler '" + llvm::StringRef(GetSchedulerAsString()) + "'");
         }
         options_.insert(option);
+    }
+
+    // Cross-option mutex checks. DecomposeForOccupancy is the new
+    // factory-driven occupancy-pass path; it conflicts with the other
+    // options that also configure that pass (BfsDpForOccupancy, which
+    // picks a different occupancy strategy; SkipSubgraphFormation,
+    // which would degenerate the factory's pipeline by killing its
+    // formation step).
+    bool decompose = options_.count(SchedulerOption::DecomposeForOccupancy);
+    bool bfs = options_.count(SchedulerOption::BfsDpForOccupancy);
+    bool skip_form = options_.count(SchedulerOption::SkipSubgraphFormation);
+    if (decompose && bfs) {
+        llvm::report_fatal_error(
+            "Options 'DecomposeForOccupancy' and 'BfsDpForOccupancy' "
+            "are mutually exclusive: both configure the occupancy "
+            "pass's search strategy");
+    }
+    if (decompose && skip_form) {
+        llvm::report_fatal_error(
+            "Options 'DecomposeForOccupancy' and 'SkipSubgraphFormation' "
+            "are mutually exclusive: the factory pipeline relies on "
+            "subgraph formation");
     }
 }
 

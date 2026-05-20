@@ -11,6 +11,7 @@
 #include "BfsDpSearch.h"
 #include "BfsDpSettings.h"
 #include "BranchAndBoundSearch.h"
+#include "DecomposeAndSchedule.h"
 #include "DfsSearch.h"
 #include "GCNRegisterTracker.h"
 #include "MaliciousScheduler.h"
@@ -65,6 +66,18 @@ static bool ShouldSkipSubgraphFormation() {
 static bool ShouldUseBfsDpForOccupancy() {
   return MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
       MachineInstrSchedulerConfig::SchedulerOption::BfsDpForOccupancy);
+}
+
+// True iff misched.txt sets `DecomposeForOccupancy`. When true, the
+// occupancy-maximization pass runs the DecomposeAndSchedule pipeline
+// with the BfsDpWithDfsFallback factory preset (formation + per-
+// subgraph search + order-edge chain + outer search) instead of the
+// default DfsSearch<DfsMaximizeOccupancyPolicy>. The length pass is
+// unchanged. Mutex with BfsDpForOccupancy and SkipSubgraphFormation
+// is enforced at config-parse time.
+static bool ShouldUseDecomposeForOccupancy() {
+  return MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
+      MachineInstrSchedulerConfig::SchedulerOption::DecomposeForOccupancy);
 }
 
 ScheduleDAGHierarchicalScheduler::ScheduleDAGHierarchicalScheduler(
@@ -508,6 +521,31 @@ static SearchResult RunOccupancyRegionWithBfsDp(
   return result;
 }
 
+// Per-region DecomposeAndSchedule occupancy search. Runs the full
+// form-schedule-lock-search pipeline via the BfsDpWithDfsFallback
+// factory preset:
+//   - formation: TopDownSingleSplitterOnly
+//   - inner_search: BFS-DP continuous → DFS continuous fallback
+//   - outer_search: BFS-DP integer (seeded with the region's original
+//                   register-only occupancy) → DFS integer fallback
+// See DecomposeAndScheduleOptions::BfsDpWithDfsFallback for budgets,
+// metrics, and the factory's contract. May return a SearchResult
+// whose schedule is empty (only the outer BFS-DP can; its DFS
+// fallback always populates one); the dispatcher's common tail keeps
+// the input order in that case.
+static SearchResult RunOccupancyRegionWithDecompose(
+    ScheduleGraph &graph, const RegionInfo &region,
+    const GCNSubtarget &st, const MachineFunction &mf,
+    const LiveIntervals &lis) {
+  DecomposeAndScheduleOptions opts =
+      DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
+          st, mf, lis, region.GetOriginalRegisterOnlyOccupancy());
+  SearchResult result = DecomposeAndSchedule(graph, st, mf, opts);
+  llvm::outs() << "\t\toutput: (Decompose) found_improvement="
+               << result.schedule.has_value() << "\n";
+  return result;
+}
+
 // Per-region DFS occupancy search. Uses DfsSearch<DfsMaximizeOccupancyPolicy>
 // seeded with the graph's input schedule (so best is never empty).
 // Honors SkipSubgraphFormation via the ctor's form_subgraphs flag.
@@ -528,11 +566,12 @@ static SearchResult RunOccupancyRegionWithDfs(
 }
 
 // Schedules the region for maximum occupancy and applies the result.
-// Dispatches to one of the per-strategy helpers (BFS-DP / DFS) based
-// on the misched.txt configuration, then applies the chosen schedule.
-// When the strategy returns no schedule (only BFS-DP can — when no
-// schedule beats the seed) the input order is kept; applying it is a
-// no-op move-wise since every MI is already at its CurrentTop position.
+// Dispatches to one of the per-strategy helpers (Decompose / BFS-DP /
+// DFS) based on the misched.txt configuration, then applies the
+// chosen schedule. When the strategy returns no schedule (BFS-DP and
+// Decompose's outer BFS-DP can — when nothing beats the seed) the
+// input order is kept; applying it is a no-op move-wise since every
+// MI is already at its CurrentTop position.
 ScheduleDAGHierarchicalScheduler::MaxOccupancyRegionResult
 ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     RegionInfo &region) {
@@ -550,11 +589,16 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     // region[N] at indent level 2 (\t\t).
     PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
 
-    SearchResult search_result =
-        ShouldUseBfsDpForOccupancy()
-            ? RunOccupancyRegionWithBfsDp(graph, region, st, MF)
-            : RunOccupancyRegionWithDfs(graph, st, MF, *LIS,
-                                        input_schedule_constructor);
+    SearchResult search_result;
+    if (ShouldUseDecomposeForOccupancy()) {
+      search_result =
+          RunOccupancyRegionWithDecompose(graph, region, st, MF, *LIS);
+    } else if (ShouldUseBfsDpForOccupancy()) {
+      search_result = RunOccupancyRegionWithBfsDp(graph, region, st, MF);
+    } else {
+      search_result = RunOccupancyRegionWithDfs(graph, st, MF, *LIS,
+                                                input_schedule_constructor);
+    }
 
     // Common tail. Apply the search's schedule, or keep the input
     // order when the search produced none (only BFS-DP can).

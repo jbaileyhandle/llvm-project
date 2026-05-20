@@ -74,6 +74,18 @@ class MachineInstrSchedulerConfig {
             // programming partition search (BfsDpSearch) instead of
             // the default DFS occupancy search.
             BfsDpForOccupancy,
+            // HierarchicalScheduler: in the occupancy-maximization
+            // pass, run the full DecomposeAndSchedule pipeline with
+            // the BfsDpWithDfsFallback preset — form subgraphs,
+            // schedule each in isolation (BFS-DP continuous, DFS
+            // fallback at matching metric), lock with order edges,
+            // then run the outer search (BFS-DP integer seeded with
+            // the region's original occupancy, DFS fallback at the
+            // matching integer-metric policy). Only affects the
+            // occupancy pass; the length pass is unchanged. Mutually
+            // exclusive with BfsDpForOccupancy and
+            // SkipSubgraphFormation.
+            DecomposeForOccupancy,
             // Sentinel
             InvalidOption
         };
@@ -201,7 +213,8 @@ class MachineInstrSchedulerConfig {
             {SchedulerOption::SkipSubgraphFormation, "SkipSubgraphFormation"},
             {SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy,
              "ScaleEdgeLatenciesByTargetOccupancy"},
-            {SchedulerOption::BfsDpForOccupancy, "BfsDpForOccupancy"}
+            {SchedulerOption::BfsDpForOccupancy, "BfsDpForOccupancy"},
+            {SchedulerOption::DecomposeForOccupancy, "DecomposeForOccupancy"}
         };
 
 
