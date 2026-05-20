@@ -25,11 +25,12 @@
 
 #include "SearchResult.h"
 #include "SubgraphFormation.h"
-#include "llvm/ADT/STLFunctionalExtras.h"
+#include <functional>
 
 namespace llvm {
 
 class GCNSubtarget;
+class LiveIntervals;
 class MachineFunction;
 
 namespace hierarchical_scheduler {
@@ -57,8 +58,16 @@ enum class SubgraphScheduleMode {
 /// formation config (`formation`, `mode`) followed by the two search
 /// callables in pipeline order (`inner_search` runs in step 2,
 /// `outer_search` in step 4). The two searches share the same
-/// `function_ref<SearchResult(ScheduleGraph &)>` signature on
+/// `std::function<SearchResult(ScheduleGraph &)>` signature on
 /// purpose — they run at different stages of the pipeline.
+///
+/// Searches are stored as owning `std::function` rather than
+/// non-owning `function_ref` so factory methods (see
+/// BfsDpWithDfsFallback below) can build closures that outlive the
+/// factory call. Captures should still be by reference (st, mf, lis,
+/// settings) — those are expected to outlive the options anyway, and
+/// reference captures keep the closure small enough for std::function's
+/// small-buffer optimization.
 struct DecomposeAndScheduleOptions {
   /// Formation policy: which passes run, splitter/size thresholds.
   /// Consumed by FormSubgraphs in step 1.
@@ -74,14 +83,51 @@ struct DecomposeAndScheduleOptions {
   /// subgraph. For a recursive use it is a lambda that calls
   /// DecomposeAndSchedule on the extracted subgraph; the lambda's
   /// captures hold whatever inner options that call needs.
-  function_ref<SearchResult(ScheduleGraph &)> inner_search;
+  std::function<SearchResult(ScheduleGraph &)> inner_search;
 
   /// The step-4 outer search — runs over the proxied + chained graph
-  /// after all subgraph interiors are locked. The caller wraps
-  /// whichever search algorithm it wants. BFS-DP only runs on
-  /// proxy-free graphs and is NOT appropriate here; this should be
-  /// DFS or branch-and-bound.
-  function_ref<SearchResult(ScheduleGraph &)> outer_search;
+  /// after all subgraph interiors are locked. The chain leaves no
+  /// choice inside subgraphs; the outer search is choosing among
+  /// orderings of subgraph proxies and non-subgraph nodes. Both
+  /// BFS-DP (PartitionDag handles proxies via GetInputOrderIndex)
+  /// and DFS are valid choices here.
+  std::function<SearchResult(ScheduleGraph &)> outer_search;
+
+  /// Standard preset: BFS-DP first, DFS fallback if BFS-DP times out
+  /// or returns no result. Both stages get a 5s wall-clock budget;
+  /// they differ in metric, and each stage's DFS fallback uses the
+  /// same metric as its BFS-DP:
+  ///   - inner_search: BFS-DP and DFS fallback both run on the
+  ///                   continuous occupancy score. No seed.
+  ///   - outer_search: BFS-DP and DFS fallback both run on the
+  ///                   integer occupancy score; BFS-DP is seeded
+  ///                   with `seed_occupancy`.
+  ///
+  /// `seed_occupancy` is the function-wide register-only occupancy
+  /// floor — typically `RegionInfo::GetOriginalRegisterOnlyOccupancy()`
+  /// or the function's occupancy target. The outer BFS-DP's score-
+  /// bound prune uses it so any partition path that can't strictly
+  /// beat the floor is dropped. Inner BFS-DP doesn't apply this seed
+  /// (the inner metric is continuous, which uses a different scale
+  /// from the integer occupancy value); it explores exhaustively
+  /// within the 5s budget.
+  ///
+  /// Both DFS fallbacks pass `form_subgraphs=false` because
+  /// formation has already happened (inner is on a leaf subgraph
+  /// extracted by ScheduleSubgraph; outer is on the proxied graph).
+  /// A formation pass at either stage would either no-op or
+  /// double-form.
+  ///
+  /// The returned options own their closures; `st`, `mf`, and `lis`
+  /// are captured by reference and must outlive the options.
+  /// `formation` defaults to TopDownSingleSplitterOnly (matches
+  /// DfsMaximizeOccupancyPolicy::MakeFormationPolicy()); mutate the
+  /// returned struct's `formation` field to override.
+  static DecomposeAndScheduleOptions BfsDpWithDfsFallback(
+      const GCNSubtarget &st,
+      const MachineFunction &mf,
+      const LiveIntervals &lis,
+      int seed_occupancy);
 };
 
 /// Form subgraphs in `graph`, schedule each in isolation, lock the

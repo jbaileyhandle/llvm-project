@@ -71,6 +71,8 @@ an options bundle and returns a `SearchResult`:
 ```
 SearchResult DecomposeAndSchedule(
         ScheduleGraph &graph,
+        const GCNSubtarget &st,
+        const MachineFunction &mf,
         const DecomposeAndScheduleOptions &opts):
 
     // 1. FORM — partition `graph`, insert start/end proxy pairs.
@@ -79,16 +81,17 @@ SearchResult DecomposeAndSchedule(
     //    call behaves as a leaf.
     FormSubgraphs(graph, opts.formation)
 
-    // 2. SCHEDULE SUBGRAPHS — each in isolation. opts.subgraph_functor
+    // 2. SCHEDULE SUBGRAPHS — each in isolation. opts.inner_search
     //    decides what to do with each: run a leaf search directly,
     //    or recurse via DecomposeAndSchedule with chosen inner options.
     for (SubgraphInfo *info : graph.GetSubgraphInfos()):
-        ScheduleSubgraph(*info, graph, st, mf, opts.subgraph_functor)
+        ScheduleSubgraph(*info, graph, st, mf, opts.inner_search)
 
-    // 3. LOCK + SCHEDULE — pin the chosen interiors into `graph`,
-    //    then run the top-level search over it.
+    // 3. LOCK — pin the chosen interiors into `graph`.
     AddSubgraphOrderEdges(graph)
-    return RunSearch(graph, opts.search)
+
+    // 4. OUTER SEARCH over the proxied + chained graph.
+    return opts.outer_search(graph)
 ```
 
 **Step 1 — Form.** `FormSubgraphs` (see
@@ -201,36 +204,40 @@ is emitted.)
 Take a region graph **G** that forms one subgraph **A**, whose
 interior in turn forms one sub-subgraph **A1**; **A1** is small
 enough that formation declines to subdivide it. At each level the
-caller supplies a `subgraph_functor` that recurses into
+caller supplies an `inner_search` that recurses into
 `DecomposeAndSchedule` with that level's inner options:
 
 ```
 DecomposeAndSchedule(G, outer_opts)
   1. FormSubgraphs(G)              → subgraph A; proxies inserted into G
-  2. ScheduleSubgraph(A, G, …, outer_opts.subgraph_functor)
+  2. ScheduleSubgraph(A, G, …, outer_opts.inner_search)
        BuildFromNodeSubset(A.members, G)        → standalone graph G_A
-       functor → DecomposeAndSchedule(G_A, level_1_opts)
+       inner_search → DecomposeAndSchedule(G_A, level_1_opts)
          1. FormSubgraphs(G_A)     → sub-subgraph A1; proxies into G_A
-         2. ScheduleSubgraph(A1, G_A, …, level_1_opts.subgraph_functor)
+         2. ScheduleSubgraph(A1, G_A, …, level_1_opts.inner_search)
               BuildFromNodeSubset(A1.members, G_A) → standalone G_A1
-              functor → DecomposeAndSchedule(G_A1, level_2_opts)
+              inner_search → DecomposeAndSchedule(G_A1, level_2_opts)
                 1. FormSubgraphs(G_A1) → declines (small) — leaf
                 2. (no subgraphs)
-                3. RunSearch(G_A1)     → order over G_A1 nodes
+                3. AddSubgraphOrderEdges(G_A1) (no-op)
+                4. level_2_opts.outer_search(G_A1) → order over G_A1 nodes
               translate G_A1 order → G_A nodes; record A1.schedule_result
-         3. AddSubgraphOrderEdges(G_A); RunSearch(G_A) → order over G_A nodes
+         3. AddSubgraphOrderEdges(G_A)
+         4. level_1_opts.outer_search(G_A) → order over G_A nodes
        translate G_A order → G nodes; record A.schedule_result
-  3. AddSubgraphOrderEdges(G); RunSearch(G)     → final order over G nodes
+  3. AddSubgraphOrderEdges(G)
+  4. outer_opts.outer_search(G) → final order over G nodes
 ```
 
 Formation fires on the way **down** (G, then G_A, then G_A1);
-scheduling completes on the way **up** (G_A1's `RunSearch` first,
+scheduling completes on the way **up** (G_A1's `outer_search` first,
 then G_A's, then G's). `DecomposeAndSchedule(G_A1)` is the leaf —
-`FormSubgraphs` declined, so steps 2–3 collapse to a single
-`RunSearch`. Each `ScheduleSubgraph` translates the order it received
-into *its own* graph's node terms before recording it (G_A1→G_A,
-then G_A→G), so `A.schedule_result.order` is already a flat sequence
-of **G** nodes when step 3 of the outermost call consumes it (§3.3).
+`FormSubgraphs` declined, so step 2 has nothing to do and step 4 runs
+`outer_search` directly. Each `ScheduleSubgraph` translates the order
+it received into *its own* graph's node terms before recording it
+(G_A1→G_A, then G_A→G), so `A.schedule_result.order` is already a
+flat sequence of **G** nodes when step 3 of the outermost call
+consumes it (§3.3).
 
 ---
 
@@ -258,18 +265,38 @@ The driver's configuration is one bundle:
 ```cpp
 struct DecomposeAndScheduleOptions {
   SubgraphFormationPolicy                     formation;
-  SearchSelection                             search;   // algo + metric + budget + seed
   SubgraphScheduleMode                        mode;     // serialized | interleaved
-  function_ref<SearchResult(ScheduleGraph &)> subgraph_functor;
+  std::function<SearchResult(ScheduleGraph &)> inner_search;
+  std::function<SearchResult(ScheduleGraph &)> outer_search;
+
+  static DecomposeAndScheduleOptions BfsDpWithDfsFallback(
+      const GCNSubtarget &, const MachineFunction &,
+      const LiveIntervals &, int seed_occupancy);
 };
 ```
 
-It *holds* the existing focused config objects rather than replacing
-them. `subgraph_functor` is the per-subgraph behavior — a leaf search
-for flat use, a closure around `DecomposeAndSchedule(sub, inner_opts)`
-for recursive use. Per-level differences (outer vs. inner) are
-handled at the closure boundary; the driver itself does not consult
-depth or a provider.
+Fields ordered by pipeline stage (formation/mode first, then the
+two searches `DecomposeAndSchedule` invokes in step 2 and step 4).
+
+`inner_search` is the per-subgraph behavior — a leaf search for flat
+use, a closure around `DecomposeAndSchedule(sub, inner_opts)` for
+recursive use. Per-level differences (outer vs. inner) are handled at
+the closure boundary; the driver itself does not consult depth or a
+provider. `outer_search` runs over the proxied + chained graph after
+all subgraph interiors are locked.
+
+Both searches are owning `std::function` rather than non-owning
+`function_ref` so factory methods can build closures that outlive the
+factory call. The closures still capture by reference — the captured
+`st`, `mf`, `lis` outlive the options anyway, and reference captures
+keep the closure inside std::function's small-buffer optimization.
+
+`BfsDpWithDfsFallback` is the standard preset: BFS-DP first, DFS
+fallback if BFS-DP returns no schedule. Both stages share a 5s budget;
+inner uses the continuous occupancy score, outer uses the integer
+occupancy score with `seed_occupancy` as the score-bound seed. DFS
+fallbacks use a metric-matched policy (`DfsMaximizeOccupancyPolicy`
+inner / `DfsMaximizeIntegerOccupancyPolicy` outer).
 
 ### 4.2 Compile-time policy is scoped to one place
 
@@ -283,11 +310,13 @@ the calls are millions per region and the dead-stripping is real.
 
 Everywhere else is runtime. The driver, the per-subgraph search
 choice, `DecomposeAndScheduleOptions` — all runtime structs and
-`function_ref`s. The seam is `ScheduleSubgraph`'s functor parameter,
-`function_ref<SearchResult(ScheduleGraph &)>`: above it, runtime; the
-factory that builds a leaf functor from `SearchSelection` does the
-one `switch` over `DfsSearch<…>` instantiations needed to cross into
-the compile-time world. `LengthPolicyChoice` in
+function objects (`std::function` for the options' searches,
+`function_ref` for the lower-level `ScheduleSubgraph` parameter).
+The seam is `ScheduleSubgraph`'s functor parameter
+`function_ref<SearchResult(ScheduleGraph &)>`: above it, runtime;
+factory methods like `DecomposeAndScheduleOptions::BfsDpWithDfsFallback`
+build closures that internally pick `DfsSearch<…>` instantiations to
+cross into the compile-time world. `LengthPolicyChoice` in
 `ScheduleDAGHierarchicalScheduler.cpp` is the established precedent
 for that runtime→compile-time switch.
 
@@ -298,12 +327,15 @@ So new knobs follow a simple placement rule:
 - Anything else (new mode, new threshold, new budget, new flag the
   driver reads): a runtime field on the relevant struct.
 
-### 4.3 Note: BFS-DP runs only on proxy-free graphs
+### 4.3 BFS-DP and proxies
 
-BFS-DP is an inner/leaf strategy: it schedules extracted subgraphs,
-which contain no subgraph proxies. The proxied-graph search in step 3
-is always DFS or branch-and-bound. The enforcement machinery (§5–§7)
-therefore never has to interact with BFS-DP.
+BFS-DP works on graphs with subgraph proxies: `PartitionDag` treats a
+proxy as a single node, and `GetInputOrderIndex` collapses a proxy to
+the smallest input-order index among its members (so the input-order
+tiebreak still sorts correctly). It can therefore run as either the
+inner search (extracted subgraphs, no proxies) or the outer search
+(proxied + chained graph). The standard preset `BfsDpWithDfsFallback`
+exercises both placements.
 
 ---
 
@@ -544,16 +576,12 @@ relaxation plus scopes-or-not.**
 - Scope push/pop in `ScheduleConstructor` (contiguity).
 - `ScheduleGraph::AddSubgraphOrderEdges()` — enforcement approach A
   (§6), with shakedown.
-
-**Immediate next:**
-
-- The `DecomposeAndSchedule` driver and `DecomposeAndScheduleOptions`
-  bundle (flat, no recursion yet), plus a shakedown that exercises
-  the whole pipeline end-to-end on a test DAG.
+- `DecomposeAndSchedule` driver and `DecomposeAndScheduleOptions`
+  bundle (flat, no recursion yet), with end-to-end shakedowns for
+  both hand-wired and factory-wired (`BfsDpWithDfsFallback`) options.
 
 **Later:**
 
-- Recursion (swap the leaf `subgraph_functor` for one that recurses
-  into `DecomposeAndSchedule`; non-const functor argument on
-  `ScheduleSubgraph`, per §2.1).
+- Recursion (swap the leaf `inner_search` for one that recurses into
+  `DecomposeAndSchedule`).
 - Interleaving mode (§8).

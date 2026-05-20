@@ -16,7 +16,6 @@
 #include "ScheduleConstructor.h"
 #include "SubgraphFormation.h"
 #include "llvm/ADT/SmallVector.h"
-#include <optional>
 
 namespace llvm {
 namespace hierarchical_scheduler {
@@ -98,19 +97,6 @@ class SearchPolicyBase {
   // See AMDGPUHistoryDominationDesign.md §8.1.
   static constexpr bool kUseLengthHistoryPruning = false;
   static constexpr bool kUsePressureHistoryPruning = false;
-
-  // Per-region wall-clock budget for the search, in milliseconds.
-  // DfsSearch checks elapsed time against this on every Recurse()
-  // entry and ends the search globally (returning the best schedule
-  // found so far) once the budget is exhausted. The seeded baseline
-  // (the input MF-order schedule) guarantees we always have at least
-  // the input to fall back on, so a timeout never produces a
-  // worse-than-input result. Concrete policies may override to give
-  // one pass more budget than another (e.g. a longer length pass
-  // once an occupancy ceiling has been pinned), or set std::nullopt
-  // to disable the timeout entirely (shakedown oracles, where any
-  // early exit would give a suboptimal reference answer).
-  static constexpr std::optional<int64_t> kTimeoutMsPerRegion = 10000;
 };
 
 // Policy for DFS when the objective is to minimize schedule length for
@@ -343,16 +329,6 @@ class DfsMaximizeLengthPolicy : public SearchPolicyBase {
   // Enable length history-domination pruning, with the axis
   // direction flipped via kLengthMaxMode.
   static constexpr bool kUseLengthHistoryPruning = true;
-
-  // Shorter per-region budget than the SearchPolicyBase default
-  // (10s). Length-max is a control / baseline experiment, not a
-  // production-quality pass — capping it tightly keeps compile
-  // time reasonable when this policy is exercised across many
-  // regions. The big-region case (e.g., hip_stencil region[0]
-  // 639 instrs) hits the budget at 10s and produces a
-  // 721 → 3951 stretch; 2s typically still produces useful
-  // stretch on that region while costing 5x less wall time.
-  static constexpr std::optional<int64_t> kTimeoutMsPerRegion = 2000;
 
   // Bound the current subtree if any of:
   //   (a) the working schedule's register-only occupancy has dropped

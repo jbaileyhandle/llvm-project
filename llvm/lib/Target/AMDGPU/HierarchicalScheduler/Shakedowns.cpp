@@ -3115,7 +3115,6 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
 // score-bound prune is sound and accelerates the search.
 class BfsDpVsDfsShakedownOraclePolicy : public DfsMaximizeOccupancyPolicy {
  public:
-  static constexpr std::optional<int64_t> kTimeoutMsPerRegion = std::nullopt;
   static bool ShouldEndSearch(const ScheduleConstructor &,
                               const ScheduleConstructor &) {
     return false;
@@ -3130,7 +3129,6 @@ class BfsDpVsDfsShakedownOraclePolicy : public DfsMaximizeOccupancyPolicy {
 class BfsDpVsDfsShakedownOracleNoHistoryPolicy
     : public DfsMaximizeOccupancyPolicy {
  public:
-  static constexpr std::optional<int64_t> kTimeoutMsPerRegion = std::nullopt;
   static constexpr bool kUsePressureHistoryPruning = false;
   static bool ShouldEndSearch(const ScheduleConstructor &,
                               const ScheduleConstructor &) {
@@ -3193,7 +3191,8 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   // (see BfsDpVsDfsShakedownOraclePolicy). Pruning stays on; it's
   // sound, so this finds the global optimum.
   DfsSearch<BfsDpVsDfsShakedownOraclePolicy> dfs_search(
-      graph, st, mf, lis, /*form_subgraphs=*/false);
+      graph, st, mf, lis, /*form_subgraphs=*/false,
+      /*timeout_ms=*/std::nullopt);
   dfs_search.EnableTestModeForTest(vgpr_deltas);
   ScheduleConstructor dfs_best = std::move(*dfs_search.Run().schedule);
   int dfs_continuous =
@@ -3213,7 +3212,8 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
 
   // DFS variant with history pruning off — isolates score-bound prune.
   DfsSearch<BfsDpVsDfsShakedownOracleNoHistoryPolicy> dfs_no_history(
-      graph, st, mf, lis, /*form_subgraphs=*/false);
+      graph, st, mf, lis, /*form_subgraphs=*/false,
+      /*timeout_ms=*/std::nullopt);
   dfs_no_history.EnableTestModeForTest(vgpr_deltas);
   dfs_no_history.Run();
   llvm::outs() << "    DFS oracle (no history pruning): schedule_calls="
@@ -4950,6 +4950,97 @@ void RunDecomposeAndScheduleShakedown(const GCNSubtarget &st,
   }
 }
 
+// Exercises the DecomposeAndScheduleOptions::BfsDpWithDfsFallback
+// factory end-to-end: builds the formation-test DAG, asks the factory
+// for a fully-wired options bundle (formation +
+// BFS-DP-with-DFS-fallback inner_search + BFS-DP-with-DFS-fallback
+// outer_search), and runs DecomposeAndSchedule with it. Verifies the
+// pipeline returns a complete schedule and that each formed
+// subgraph's locked-order property holds. The factory drives the
+// production wiring path (vs. the hand-wired one in
+// RunDecomposeAndScheduleShakedown above, which tests the pipeline
+// mechanics in isolation).
+//
+// `seed_occupancy` is 1 — permissive: any non-spilling schedule
+// beats it, so the outer BFS-DP's score-bound prune doesn't squeeze
+// the test DAG into the no-schedule path.
+void RunDecomposeAndScheduleFactoryShakedown(const GCNSubtarget &st,
+                                             const MachineFunction &mf,
+                                             const LiveIntervals &lis) {
+  llvm::outs() << "  RunDecomposeAndScheduleFactoryShakedown:\n";
+
+  auto check = [](StringRef desc, bool ok) {
+    llvm::outs() << "    " << desc << ": " << (ok ? "PASS" : "FAIL")
+                 << "\n";
+  };
+
+  auto graph = ScheduleGraph::BuildSubgraphFormationTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPaths();
+  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+
+  DecomposeAndScheduleOptions opts =
+      DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
+          st, mf, lis, /*seed_occupancy=*/1);
+
+  SearchResult result = DecomposeAndSchedule(*graph, st, mf, opts);
+
+  check("DecomposeAndSchedule returned a schedule",
+        result.schedule.has_value());
+  if (!result.schedule.has_value()) {
+    return;
+  }
+  const ScheduleConstructor &sc = *result.schedule;
+  check("schedule is complete (IsDone)", sc.IsDone());
+
+  // The test DAG is purpose-built for subgraph formation, and the
+  // factory's default formation (TopDownSingleSplitterOnly) emits
+  // at least one subgraph on it — verified by the earlier
+  // formation shakedown. If this check ever fails, either the DAG
+  // or the factory's default formation has drifted.
+  check("at least one subgraph was formed",
+        !graph->GetSubgraphInfos().empty());
+
+  // ScheduleSubgraph's contract is to always populate
+  // schedule_result (BFS-DP success, DFS fallback, or input-order
+  // fallback). The chain installed by AddSubgraphOrderEdges then
+  // forces those members into the outer schedule in exactly the
+  // recorded order.
+  ArrayRef<const ScheduleNode *> scheduled_order = sc.GetScheduleOrder();
+  for (SubgraphInfo *info : graph->GetSubgraphInfos()) {
+    if (!info->schedule_result.has_value()) {
+      report_fatal_error("RunDecomposeAndScheduleFactoryShakedown: "
+                         "ScheduleSubgraph failed to populate "
+                         "schedule_result — contract violation");
+    }
+    ArrayRef<ScheduleNode *> locked = info->schedule_result->order;
+    std::set<const ScheduleNode *> member_set;
+    for (ScheduleNode *m : locked) {
+      member_set.insert(m);
+    }
+    std::vector<const ScheduleNode *> members_in_schedule;
+    for (const ScheduleNode *n : scheduled_order) {
+      if (member_set.count(n)) {
+        members_in_schedule.push_back(n);
+      }
+    }
+    bool order_matches =
+        members_in_schedule.size() == locked.size();
+    if (order_matches) {
+      int n = static_cast<int>(members_in_schedule.size());
+      for (int i = 0; i < n; ++i) {
+        if (members_in_schedule[i] != locked[i]) {
+          order_matches = false;
+          break;
+        }
+      }
+    }
+    std::string desc = "subgraph \"" + info->debug_name +
+                       "\": members in schedule match locked order";
+    check(desc, order_matches);
+  }
+}
+
 } // namespace
 
 // The only class-member shakedown entry point. All the per-shakedown
@@ -4968,6 +5059,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunScheduleSubgraphShakedown(st, MF);
   RunAddSubgraphOrderEdgesShakedown(st, MF);
   RunDecomposeAndScheduleShakedown(st, MF);
+  RunDecomposeAndScheduleFactoryShakedown(st, MF, *LIS);
   RunLengthLowerBoundShakedown(st);
   RunScheduledSetTrackerShakedown(st);
   RunLengthHistoryTrackerShakedown(st);

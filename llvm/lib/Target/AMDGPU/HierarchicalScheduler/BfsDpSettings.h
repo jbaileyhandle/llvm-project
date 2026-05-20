@@ -42,12 +42,10 @@ struct BfsDpSettings {
 
   /// Preset for the occupancy-maximization pass: the integer-
   /// occupancy metric with a 10s per-region budget. The budget
-  /// matches the DFS occupancy policy (SearchPolicyBase::
-  /// kTimeoutMsPerRegion) so the BfsDpForOccupancy misched.txt
-  /// toggle compares the two search strategies under the same
-  /// wall-clock budget. Kept as its own literal rather than
-  /// referencing that constant: BFS-DP's budget is an independent
-  /// knob and may diverge.
+  /// matches the production DFS occupancy pass's default
+  /// (DfsSearch's ctor `timeout_ms` default of 10000) so the
+  /// BfsDpForOccupancy misched.txt toggle compares the two search
+  /// strategies under the same wall-clock budget.
   static constexpr BfsDpSettings ForOccupancyPass() {
     return BfsDpSettings{ScheduleMetric::kMaximizeRegisterOccupancy,
                          /*timeout_ms=*/10000};
