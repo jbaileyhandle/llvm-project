@@ -103,6 +103,10 @@ class ScheduleGraph;
 class ScheduleNode;
 struct ReducedGraph;
 
+/// Returns a process-unique id and increments the shared counter.
+/// Backs ScheduleNode's and ScheduleGraph's ids, and SubgraphInfo::id.
+int64_t GetAndIncrementScheduleId();
+
 /// A register paired with the lane mask indicating which sub-register
 /// lanes are relevant. Used on entry/exit nodes where LiveIntervals
 /// tells us exactly which lanes are live-in or live-out.

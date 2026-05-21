@@ -62,6 +62,13 @@ struct SubgraphScheduleResult {
 };
 
 struct SubgraphInfo {
+  /// Process-unique id, assigned at construction from the shared
+  /// scheduler id counter (GetAndIncrementScheduleId) — the same space
+  /// ScheduleNode and ScheduleGraph draw from, so a subgraph id never
+  /// collides with a node or graph id. Stable identity independent of
+  /// position in any list.
+  int64_t id;
+
   /// Members of this subgraph. Stable set; used as the membership
   /// predicate when computing ext_predecessors / ext_successors.
   SmallVector<ScheduleNode *, 32> members;

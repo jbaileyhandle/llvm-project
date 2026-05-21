@@ -14,7 +14,8 @@ using namespace llvm::hierarchical_scheduler;
 
 SubgraphInfo::SubgraphInfo(ArrayRef<ScheduleNode *> members_in,
                            StringRef debug_name_in)
-    : members(members_in.begin(), members_in.end()),
+    : id(GetAndIncrementScheduleId()),
+      members(members_in.begin(), members_in.end()),
       debug_name(debug_name_in.str()) {
   // Membership set for fast O(1) lookup during the boundary walk.
   // SmallPtrSet is LLVM's pointer-specialized hash set: N inline

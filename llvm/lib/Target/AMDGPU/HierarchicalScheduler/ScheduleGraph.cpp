@@ -29,6 +29,14 @@
 using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
 
+// Process-unique id counter shared by ScheduleNode, ScheduleGraph, and
+// SubgraphInfo (declared in ScheduleGraph.h). Not atomic: codegen runs
+// single-threaded per function here.
+int64_t llvm::hierarchical_scheduler::GetAndIncrementScheduleId() {
+  static int64_t next_id = 0;
+  return next_id++;
+}
+
 namespace {
 
 /// Map an SDep edge to our ScheduleEdge::Kind. Preserves the full
@@ -75,13 +83,6 @@ ScheduleEdge::Kind MapSDepToEdgeKind(const SDep &dep) {
     llvm_unreachable("Unknown SDep::OrderKind");
   }
   llvm_unreachable("Unknown SDep::Kind");
-}
-
-// Returns a unique ID and increments the counter. Used by both ScheduleNode
-// and ScheduleGraph constructors.
-int64_t GetAndIncrementScheduleId() {
-  static int64_t next_id = 0;
-  return next_id++;
 }
 
 // Verify a structural invariant of the graph: under the given edge
