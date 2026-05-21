@@ -17,6 +17,7 @@
 #include "MaliciousScheduler.h"
 #include "ScheduleConstructor.h"
 #include "SearchPolicies.h"
+#include "SubgraphDagDump.h"
 #include "SubgraphFormation.h"
 #include "GCNSubtarget.h"
 #include "SIMachineFunctionInfo.h"
@@ -257,6 +258,10 @@ void ScheduleDAGHierarchicalScheduler::RunTopoPass() {
 
 // Maximize-occupancy outer loop. See header for detail.
 void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
+  // Tag any DumpSubgraphDag output from this pass into the
+  // "occupancy" subdir (no-op unless the option is set).
+  SubgraphDagDumpPassScope dump_scope("occupancy");
+
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
 
@@ -668,6 +673,10 @@ static LengthPolicyChoice ResolveLengthPolicyChoice() {
 
 // Outer loop of the length pass. See header.
 void ScheduleDAGHierarchicalScheduler::RunLengthPass() {
+  // Tag any DumpSubgraphDag output from this pass into the "length"
+  // subdir (no-op unless the option is set).
+  SubgraphDagDumpPassScope dump_scope("length");
+
   // Resolve direction once at the top. The per-region dispatch
   // resolves it again from misched.txt for its own switch — that's
   // a redundant cheap config read; both calls produce the same

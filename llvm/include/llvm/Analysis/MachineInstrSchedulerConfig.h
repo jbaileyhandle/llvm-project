@@ -86,6 +86,13 @@ class MachineInstrSchedulerConfig {
             // exclusive with BfsDpForOccupancy and
             // SkipSubgraphFormation.
             DecomposeForOccupancy,
+            // HierarchicalScheduler: after subgraph formation, dump
+            // each region's DAG (nodes, edges, subgraph membership) to
+            // a Cytoscape.js JSON file under ./subgraph_dags/ for
+            // offline visualization. Observational only — does not
+            // change scheduling. See
+            // HierarchicalScheduler/viz/subgraph_dag_viewer.html.
+            DumpSubgraphDag,
             // Sentinel
             InvalidOption
         };
@@ -214,7 +221,8 @@ class MachineInstrSchedulerConfig {
             {SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy,
              "ScaleEdgeLatenciesByTargetOccupancy"},
             {SchedulerOption::BfsDpForOccupancy, "BfsDpForOccupancy"},
-            {SchedulerOption::DecomposeForOccupancy, "DecomposeForOccupancy"}
+            {SchedulerOption::DecomposeForOccupancy, "DecomposeForOccupancy"},
+            {SchedulerOption::DumpSubgraphDag, "DumpSubgraphDag"}
         };
 
 

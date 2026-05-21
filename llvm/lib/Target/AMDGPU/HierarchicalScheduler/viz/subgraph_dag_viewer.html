@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<!--
+  subgraph_dag_viewer.html - offline viewer for HierarchicalScheduler
+  subgraph-formation dumps.
+
+  Open this file in a browser, click "Load dump..." and pick a
+  subgraph_dags/<pass>/<func>_g<id>_occ<score>.json file produced by
+  the misched.txt DumpSubgraphDag option. Renders the region's flat
+  dependency DAG with a layered (dagre) layout; nodes are colored by
+  subgraph, hovering a node highlights its whole subgraph and shows
+  the instruction detail.
+
+  Self-contained: cytoscape + dagre are vendored under lib/, so this
+  works with no network access. The JSON is loaded via a file picker
+  (no fetch), so it also works straight off the filesystem.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Subgraph DAG Viewer</title>
+<script src="lib/cytoscape.min.js"></script>
+<script src="lib/dagre.min.js"></script>
+<script src="lib/cytoscape-dagre.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+  #top {
+    padding: 8px 12px; border-bottom: 1px solid #ccc; background: #fafafa;
+    display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+  }
+  #meta { font-size: 13px; color: #333; }
+  #meta b { color: #000; }
+  #controls { font-size: 13px; color: #333; display: flex; gap: 12px; }
+  #cy { width: 100%; height: calc(100% - 52px); display: block; }
+  #tooltip {
+    position: absolute; z-index: 10; pointer-events: none; display: none;
+    max-width: 600px; padding: 6px 8px; font: 12px/1.4 monospace;
+    background: rgba(20,20,20,0.92); color: #eee; border-radius: 4px;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .hint { color: #888; }
+</style>
+</head>
+<body>
+<div id="top">
+  <label><b>Load dump...</b> <input type="file" id="file" accept=".json"></label>
+  <span id="meta" class="hint">No dump loaded.</span>
+  <span id="controls">
+    <label><input type="checkbox" id="showWeak"> weak edges</label>
+    <label><input type="checkbox" id="showSentinels" checked> entry/exit</label>
+    <button id="relayout" title="Recompute the layered layout over the
+currently-visible nodes/edges. Use after toggling visibility, or to
+reset positions after dragging nodes.">Re-layout</button>
+    <button id="fit">Fit</button>
+  </span>
+</div>
+<div id="cy"></div>
+<div id="tooltip"></div>
+
+<script>
+"use strict";
+
+cytoscape.use(window.cytoscapeDagre);
+
+const cyDiv = document.getElementById("cy");
+const tooltip = document.getElementById("tooltip");
+const metaSpan = document.getElementById("meta");
+
+let cy = null;
+
+// Map a color slot (small integer) to a well-separated hue via
+// golden-angle rotation.
+function subgraphColor(slot) {
+  const hue = (slot * 137.508) % 360;
+  return `hsl(${hue}, 70%, 78%)`;
+}
+
+// Assign each subgraph a color slot so that no two subgraphs connected
+// by an edge (i.e. adjacent in the DAG) share a slot — greedy graph
+// coloring, highest-degree-first to keep the slot count low. Returns
+// { subgraphId: slot }; slots map to hues via subgraphColor, so
+// touching subgraphs never look alike.
+function assignColorSlots(dump) {
+  // node id -> its subgraph id (only for nodes that have one).
+  const nodeSubgraph = {};
+  for (const n of dump.elements.nodes) {
+    if (n.data.subgraph) { nodeSubgraph[n.data.id] = n.data.subgraph; }
+  }
+  // subgraph id -> set of neighbor subgraph ids (an edge crosses them).
+  const adj = {};
+  for (const sg of (dump.subgraphs || [])) { adj[sg.id] = new Set(); }
+  for (const e of dump.elements.edges) {
+    const a = nodeSubgraph[e.data.source];
+    const b = nodeSubgraph[e.data.target];
+    if (a && b && a !== b) { adj[a].add(b); adj[b].add(a); }
+  }
+  // Greedy color, most-constrained (highest degree) first.
+  const order = (dump.subgraphs || []).map(sg => sg.id)
+      .sort((x, y) => adj[y].size - adj[x].size);
+  const slot = {};
+  for (const id of order) {
+    const used = new Set();
+    for (const nb of adj[id]) { if (nb in slot) { used.add(slot[nb]); } }
+    let s = 0;
+    while (used.has(s)) { s++; }
+    slot[id] = s;
+  }
+  return slot;
+}
+
+function buildStyle(subgraphSlotById) {
+  return [
+    {
+      selector: "node",
+      style: {
+        "label": "data(label)",
+        "font-size": 9,
+        "text-valign": "center",
+        "text-halign": "center",
+        "width": "label",
+        "height": 18,
+        "padding": "4px",
+        "shape": "round-rectangle",
+        "background-color": "#e8e8e8",
+        "border-width": 1,
+        "border-color": "#999",
+        "text-wrap": "none",
+      },
+    },
+    // Sentinel (Entry/Exit) nodes: distinct shape + color.
+    {
+      selector: 'node[kind = "sentinel"]',
+      style: {
+        "shape": "diamond",
+        "background-color": "#cfd8dc",
+        "border-color": "#607d8b",
+        "height": 22,
+      },
+    },
+    // Per-subgraph fill, applied by a class set at load time.
+    ...Object.entries(subgraphSlotById).map(([sgId, slot]) => ({
+      selector: `node.sg_${cssSafe(sgId)}`,
+      style: { "background-color": subgraphColor(slot), "border-color": "#666" },
+    })),
+    {
+      selector: "edge",
+      style: {
+        "width": 1,
+        "line-color": "#777",
+        "target-arrow-color": "#777",
+        "target-arrow-shape": "triangle",
+        "arrow-scale": 0.7,
+        "curve-style": "bezier",
+      },
+    },
+    {
+      selector: 'edge[?weak]',
+      style: { "line-style": "dashed", "line-color": "#c0c0c0",
+               "target-arrow-color": "#c0c0c0" },
+    },
+    { selector: ".highlighted", style: { "border-width": 3,
+        "border-color": "#d32f2f", "z-index": 20 } },
+    { selector: ".dimmed", style: { "opacity": 0.18 } },
+    { selector: "edge.dimmed", style: { "opacity": 0.06 } },
+  ];
+}
+
+// Class names can't contain arbitrary chars; sg ids are like "sg21".
+function cssSafe(s) { return s.replace(/[^A-Za-z0-9_-]/g, "_"); }
+
+function renderMeta(meta) {
+  metaSpan.classList.remove("hint");
+  metaSpan.innerHTML =
+    `<b>${escapeHtml(meta.function)}</b> ${escapeHtml(meta.block)} ` +
+    `&middot; pass <b>${escapeHtml(meta.pass)}</b> ` +
+    `&middot; graph ${meta.graph_id} ` +
+    `&middot; occ ${meta.occ_score} ` +
+    `&middot; ${meta.num_instr_nodes} instrs, ${meta.num_subgraphs} subgraphs`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function layoutOptions() {
+  return {
+    name: "dagre",
+    rankDir: "TB",        // predecessors above successors
+    nodeSep: 14,
+    rankSep: 36,
+    edgeSep: 6,
+    animate: false,
+  };
+}
+
+function loadDump(dump) {
+  if (cy) { cy.destroy(); cy = null; }
+  renderMeta(dump.meta);
+
+  // Adjacency-aware color slots, so touching subgraphs never share a
+  // color.
+  const subgraphSlotById = assignColorSlots(dump);
+
+  const elements = [];
+  for (const n of dump.elements.nodes) {
+    elements.push({ data: n.data });
+  }
+  for (const e of dump.elements.edges) {
+    elements.push({ data: e.data });
+  }
+
+  cy = cytoscape({
+    container: cyDiv,
+    elements: elements,
+    style: buildStyle(subgraphSlotById),
+    layout: { name: "preset" },  // real layout runs below, on visible only
+    wheelSensitivity: 0.2,
+  });
+
+  // Tag each node with a class for its subgraph so the per-subgraph
+  // style rule applies.
+  cy.nodes().forEach(n => {
+    const sg = n.data("subgraph");
+    if (sg) { n.addClass("sg_" + cssSafe(sg)); }
+  });
+
+  // Hide what the toggles say to hide BEFORE laying out, so hidden
+  // weak edges don't distort the layered positions, then lay out the
+  // visible set.
+  applyVisibilityToggles();
+  runLayout();
+  cy.fit();
+  installInteractions();
+}
+
+// Run the layered (dagre) layout over the currently-visible elements
+// only. The `:visible` filter drops display:none nodes/edges (hidden
+// weak edges, sentinels) so they neither show nor pull on positions.
+function runLayout() {
+  if (cy) { cy.elements(":visible").layout(layoutOptions()).run(); }
+}
+
+function installInteractions() {
+  cy.on("mouseover", "node", evt => {
+    const node = evt.target;
+    const sg = node.data("subgraph");
+    showTooltip(evt, node.data("detail") || node.data("label"));
+    if (!sg) { node.addClass("highlighted"); return; }
+    const inSg = cy.nodes().filter(n => n.data("subgraph") === sg);
+    cy.elements().addClass("dimmed");
+    inSg.removeClass("dimmed").addClass("highlighted");
+    inSg.connectedEdges().removeClass("dimmed");
+  });
+  cy.on("mouseout", "node", () => {
+    cy.elements().removeClass("dimmed").removeClass("highlighted");
+    hideTooltip();
+  });
+  cy.on("mousemove", evt => moveTooltip(evt));
+}
+
+function showTooltip(evt, text) {
+  tooltip.textContent = text;
+  tooltip.style.display = "block";
+  moveTooltip(evt);
+}
+function moveTooltip(evt) {
+  const e = evt.originalEvent;
+  if (!e) return;
+  tooltip.style.left = (e.pageX + 14) + "px";
+  tooltip.style.top = (e.pageY + 14) + "px";
+}
+function hideTooltip() { tooltip.style.display = "none"; }
+
+function applyVisibilityToggles() {
+  if (!cy) return;
+  const showWeak = document.getElementById("showWeak").checked;
+  const showSentinels = document.getElementById("showSentinels").checked;
+  cy.batch(() => {
+    cy.edges().forEach(e =>
+      e.style("display", (!showWeak && e.data("weak")) ? "none" : "element"));
+    cy.nodes('[kind = "sentinel"]').forEach(n =>
+      n.style("display", showSentinels ? "element" : "none"));
+  });
+}
+
+document.getElementById("file").addEventListener("change", evt => {
+  const f = evt.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      loadDump(JSON.parse(reader.result));
+    } catch (err) {
+      alert("Failed to parse dump: " + err);
+    }
+  };
+  reader.readAsText(f);
+});
+document.getElementById("showWeak").addEventListener("change",
+    applyVisibilityToggles);
+document.getElementById("showSentinels").addEventListener("change",
+    applyVisibilityToggles);
+document.getElementById("relayout").addEventListener("click", () => {
+  runLayout();
+  if (cy) cy.fit();
+});
+document.getElementById("fit").addEventListener("click", () => {
+  if (cy) cy.fit();
+});
+</script>
+</body>
+</html>

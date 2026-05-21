@@ -157,6 +157,7 @@ MachineInstrSchedulerConfig::SchedulerOption MachineInstrSchedulerConfig::GetSch
         .Case("MaximizeLength", SchedulerOption::MaximizeLength)
         .Case("BfsDpForOccupancy", SchedulerOption::BfsDpForOccupancy)
         .Case("DecomposeForOccupancy", SchedulerOption::DecomposeForOccupancy)
+        .Case("DumpSubgraphDag", SchedulerOption::DumpSubgraphDag)
         .Default(SchedulerOption::InvalidOption);
 
     if (option == SchedulerOption::InvalidOption) {
@@ -186,6 +187,7 @@ bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption opti
     case SchedulerOption::MaximizeLength:
     case SchedulerOption::BfsDpForOccupancy:
     case SchedulerOption::DecomposeForOccupancy:
+    case SchedulerOption::DumpSubgraphDag:
         return (scheduler == Scheduler::HierarchicalScheduler);
     default:
         return false;

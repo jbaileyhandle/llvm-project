@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "SubgraphFormation.h"
+#include "SubgraphDagDump.h"
 #include "llvm/Support/ErrorHandling.h"
 
 namespace llvm {
@@ -443,13 +444,19 @@ void FormSubgraphs(ScheduleGraph &graph,
       BuildSubgraphInfos(tree.EmitPoints(), graph,
                          policy.splitter_partition);
 
-  // 5. Mutate. InsertSubgraphProxies takes the vector by value and
+  // 5. Instrumentation hook: with the graph still flat and
+  // membership in hand, dump the DAG when DumpSubgraphDag is set
+  // (no-op otherwise). Must be before InsertSubgraphProxies so the
+  // dumped edges are the real dependencies, not the proxied wiring.
+  MaybeDumpSubgraphDag(graph, infos);
+
+  // 6. Mutate. InsertSubgraphProxies takes the vector by value and
   // moves each unique_ptr into its start proxy node. No-op if
   // `infos` is empty (and in that case the graph isn't mutated, so
   // the re-derive below short-circuits).
   graph.InsertSubgraphProxies(std::move(infos));
 
-  // 6. Re-derive topo + critical-paths so downstream consumers see
+  // 7. Re-derive topo + critical-paths so downstream consumers see
   // the post-mutation graph (proxies + artificial edges). Both
   // calls early-return if no mutation happened above.
   graph.ValidateAndComputeTopologicalOrder();

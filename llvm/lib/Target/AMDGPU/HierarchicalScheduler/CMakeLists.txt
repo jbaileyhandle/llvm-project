@@ -28,6 +28,7 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/SubgraphFormation.cpp
   HierarchicalScheduler/ScheduleSubgraph.cpp
   HierarchicalScheduler/DecomposeAndSchedule.cpp
+  HierarchicalScheduler/SubgraphDagDump.cpp
   HierarchicalScheduler/ScheduledSetTracker.cpp
   HierarchicalScheduler/LengthHistoryTracker.cpp
   HierarchicalScheduler/PressureHistoryTracker.cpp
