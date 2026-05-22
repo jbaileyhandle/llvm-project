@@ -4798,7 +4798,7 @@ void RunAddSubgraphOrderEdgesShakedown(const GCNSubtarget &st,
 
     // Record the non-trivial interior order C, E, D, F on subgraph S
     // (the lone subgraph, so GetSubgraphInfos()[0]).
-    SubgraphInfo *info = graph->GetSubgraphInfos()[0];
+    SubgraphInfo *info = graph->GetSubgraphInfos()[0].get();
     info->schedule_result = SubgraphScheduleResult{
         /*order=*/{c, e, d, f},
         /*peak_pressure=*/GCNRegPressure{},
@@ -4918,7 +4918,8 @@ void RunDecomposeAndScheduleShakedown(const GCNSubtarget &st,
   // For each formed subgraph: members appear in step 3's schedule in
   // exactly schedule_result.order — proving the chain locked them.
   ArrayRef<const ScheduleNode *> scheduled_order = sc.GetScheduleOrder();
-  for (SubgraphInfo *info : graph->GetSubgraphInfos()) {
+  for (const std::unique_ptr<SubgraphInfo> &info_ptr : graph->GetSubgraphInfos()) {
+    SubgraphInfo *info = info_ptr.get();
     if (!info->schedule_result.has_value()) {
       continue;
     }
@@ -5007,7 +5008,8 @@ void RunDecomposeAndScheduleFactoryShakedown(const GCNSubtarget &st,
   // forces those members into the outer schedule in exactly the
   // recorded order.
   ArrayRef<const ScheduleNode *> scheduled_order = sc.GetScheduleOrder();
-  for (SubgraphInfo *info : graph->GetSubgraphInfos()) {
+  for (const std::unique_ptr<SubgraphInfo> &info_ptr : graph->GetSubgraphInfos()) {
+    SubgraphInfo *info = info_ptr.get();
     if (!info->schedule_result.has_value()) {
       report_fatal_error("RunDecomposeAndScheduleFactoryShakedown: "
                          "ScheduleSubgraph failed to populate "

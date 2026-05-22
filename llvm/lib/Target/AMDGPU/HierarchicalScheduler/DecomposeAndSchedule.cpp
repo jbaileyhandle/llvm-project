@@ -38,7 +38,7 @@ SearchResult DecomposeAndSchedule(
 
   // Step 2: schedule each formed subgraph in isolation. The functor
   // decides whether to run a leaf search or recurse.
-  for (SubgraphInfo *info : graph.GetSubgraphInfos()) {
+  for (const std::unique_ptr<SubgraphInfo> &info : graph.GetSubgraphInfos()) {
     ScheduleSubgraph(*info, graph, st, mf, opts.inner_search);
   }
 

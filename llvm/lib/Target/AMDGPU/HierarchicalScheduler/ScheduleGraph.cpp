@@ -149,12 +149,6 @@ ScheduleNode::ScheduleNode(SUnit *su, std::string debug_name,
   ExtractRegInfo();
 }
 
-ScheduleNode::ScheduleNode(std::unique_ptr<SubgraphInfo> info,
-                           ScheduleGraph *top_level_graph)
-    : id_(GetAndIncrementScheduleId()),
-      graph_local_id_(top_level_graph->GetAndIncrementGraphLocalId()),
-      content_(std::move(info)) {}
-
 ScheduleNode::ScheduleNode(SubgraphInfo *info,
                            ScheduleGraph *top_level_graph)
     : id_(GetAndIncrementScheduleId()),
@@ -162,15 +156,13 @@ ScheduleNode::ScheduleNode(SubgraphInfo *info,
       content_(info) {}
 
 SubgraphInfo *ScheduleNode::GetSubgraphInfo() const {
-  if (IsSubgraphStartProxy()) {
-    return std::get<std::unique_ptr<SubgraphInfo>>(content_).get();
+  if (!IsSubgraphProxy()) {
+    report_fatal_error(
+        "GetSubgraphInfo called on scheduling-unit node " +
+        Twine(id_));
   }
-  if (IsSubgraphEndProxy()) {
-    return std::get<SubgraphInfo *>(content_);
-  }
-  report_fatal_error(
-      "GetSubgraphInfo called on scheduling-unit node " +
-      Twine(id_));
+  // Both start and end proxies carry the same raw back-reference.
+  return std::get<SubgraphInfo *>(content_);
 }
 
 void ScheduleNode::ExtractRegInfo() {
@@ -347,14 +339,10 @@ void CheckMembersDisjoint(
 // parent_subgraph_proxy if the start proxy appears as one of its
 // members. The flat case never produces that situation
 // (CheckNoNestedMembers rules it out).
-void ScheduleGraph::EmplaceProxyAndWireEdges(
-    std::unique_ptr<SubgraphInfo> info_ptr) {
-  // Capture the raw pointer before std::move null-s out info_ptr.
-  // The SubgraphInfo object stays at the same heap address; only
-  // the unique_ptr's ownership transfers into the start-proxy ctor.
-  SubgraphInfo *info = info_ptr.get();
-
-  ScheduleNode &start_proxy = EmplaceNode(std::move(info_ptr), this);
+void ScheduleGraph::EmplaceProxyAndWireEdges(SubgraphInfo *info) {
+  // `info` is already owned by subgraph_infos_; both proxies hold a raw
+  // back-reference to it (the object stays at a stable heap address).
+  ScheduleNode &start_proxy = EmplaceNode(info, this);
   info->subgraph_proxy = &start_proxy;
   for (ScheduleNode *m : info->members) {
     m->SetParentSubgraphProxy(&start_proxy);
@@ -395,11 +383,12 @@ void ScheduleGraph::InsertSubgraphProxies(
 
   subgraph_infos_.reserve(subgraph_infos_.size() + infos.size());
   for (auto &info_ptr : infos) {
-    // Snapshot the raw pointer before ownership moves into the
-    // start-proxy node; the proxy keeps the unique_ptr alive for
-    // the graph's lifetime, so this raw pointer stays valid.
-    subgraph_infos_.push_back(info_ptr.get());
-    EmplaceProxyAndWireEdges(std::move(info_ptr));
+    // Ownership moves into subgraph_infos_; the proxies (and members'
+    // parent pointers) back-reference the now-vector-owned info by raw
+    // pointer, which stays valid for the graph's lifetime.
+    SubgraphInfo *info = info_ptr.get();
+    subgraph_infos_.push_back(std::move(info_ptr));
+    EmplaceProxyAndWireEdges(info);
   }
 
   // Keep the per-node register-info table aligned with the new graph
@@ -413,7 +402,8 @@ void ScheduleGraph::InsertSubgraphProxies(
   // Sort by member count descending so consumers (telemetry, debug
   // dumps) see the largest subgraphs first.
   std::sort(subgraph_infos_.begin(), subgraph_infos_.end(),
-            [](const SubgraphInfo *a, const SubgraphInfo *b) {
+            [](const std::unique_ptr<SubgraphInfo> &a,
+               const std::unique_ptr<SubgraphInfo> &b) {
               return a->members.size() > b->members.size();
             });
 
@@ -424,7 +414,8 @@ void ScheduleGraph::InsertSubgraphProxies(
 }
 
 void ScheduleGraph::AddSubgraphOrderEdges() {
-  for (SubgraphInfo *info : subgraph_infos_) {
+  for (const std::unique_ptr<SubgraphInfo> &info_ptr : subgraph_infos_) {
+    SubgraphInfo *info = info_ptr.get();
     // A subgraph with no recorded schedule is left free — its members
     // keep whatever ordering freedom the real edges allow.
     if (!info->schedule_result.has_value()) {
@@ -457,14 +448,14 @@ void ScheduleGraph::AddSubgraphOrderEdges() {
 void ScheduleGraph::PrintSubgraphInfos(raw_ostream &os,
                                        StringRef indent) const {
   int total_members_covered = 0;
-  for (const SubgraphInfo *info : subgraph_infos_) {
+  for (const std::unique_ptr<SubgraphInfo> &info : subgraph_infos_) {
     total_members_covered += static_cast<int>(info->members.size());
   }
   os << indent << "subgraphs: count=" << subgraph_infos_.size()
      << " covered=" << total_members_covered
      << "/" << NumSchedulingUnits() << "\n";
   for (size_t i = 0; i < subgraph_infos_.size(); ++i) {
-    const SubgraphInfo *info = subgraph_infos_[i];
+    const SubgraphInfo *info = subgraph_infos_[i].get();
     os << indent << "\t[" << i << "] members=" << info->members.size()
        << " name=" << info->debug_name << "\n";
   }

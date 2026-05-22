@@ -256,23 +256,13 @@ public:
   ScheduleNode(SUnit *su, std::string debug_name,
                ScheduleGraph *top_level_graph);
 
-  /// Create the START subgraph-proxy node owning a SubgraphInfo.
-  /// The SubgraphInfo holds the subgraph's members, debug name, and
-  /// external predecessors/successors; the start proxy is the
-  /// boundary marker on the predecessor side (it pushes a scope
-  /// when scheduled). Ownership of `info` transfers into this node;
-  /// the info's lifetime then equals this node's lifetime, which
-  /// equals the graph's lifetime. Both `info` and `top_level_graph`
-  /// must be non-null.
-  ScheduleNode(std::unique_ptr<SubgraphInfo> info,
-               ScheduleGraph *top_level_graph);
-
-  /// Create the END subgraph-proxy node that back-references an
-  /// already-existing SubgraphInfo. The end proxy is the boundary
-  /// marker on the successor side (it pops the scope when
-  /// scheduled). It does NOT own `info` — the START proxy does;
-  /// the end proxy holds only a raw back-pointer. Both `info` and
-  /// `top_level_graph` must be non-null.
+  /// Create a subgraph-proxy node (start OR end) that back-references
+  /// `info` by raw pointer. `info` is owned by the graph's
+  /// subgraph_infos_ vector, so its lifetime equals the graph's; this
+  /// node holds only a back-pointer. Which boundary this proxy marks is
+  /// recorded in the info (subgraph_proxy = start, end_proxy = end) by
+  /// InsertSubgraphProxies. Both `info` and `top_level_graph` must be
+  /// non-null.
   ScheduleNode(SubgraphInfo *info, ScheduleGraph *top_level_graph);
 
   /// True if this node represents a single scheduling unit (wraps
@@ -302,17 +292,19 @@ public:
   /// any proxy regardless of which boundary it marks.
   bool IsSubgraphProxy() const { return !IsSchedulingUnit(); }
 
-  /// True if this node is the START proxy of a subgraph (owns the
-  /// SubgraphInfo, gates entry into the subgraph scope).
+  /// True if this node is the START proxy of a subgraph (gates entry
+  /// into the subgraph scope). Both proxies share the SubgraphInfo*
+  /// payload, so start vs end is resolved against the info's recorded
+  /// start proxy.
   bool IsSubgraphStartProxy() const {
-    return std::holds_alternative<std::unique_ptr<SubgraphInfo>>(content_);
+    return IsSubgraphProxy() && GetSubgraphInfo()->subgraph_proxy == this;
   }
 
-  /// True if this node is the END proxy of a subgraph (raw
-  /// back-pointer to the SubgraphInfo, gates exit from the
-  /// subgraph scope).
+  /// True if this node is the END proxy of a subgraph (gates exit from
+  /// the subgraph scope). Resolved against the info's recorded end
+  /// proxy.
   bool IsSubgraphEndProxy() const {
-    return std::holds_alternative<SubgraphInfo *>(content_);
+    return IsSubgraphProxy() && GetSubgraphInfo()->end_proxy == this;
   }
 
   /// Issue slots this node consumes when scheduled. 1 for
@@ -447,13 +439,16 @@ private:
 
   int64_t id_;
   int graph_local_id_;
-  // Three alternatives, one per node kind:
-  //   index 0 (SUnit *):                   scheduling-unit node
-  //   index 1 (unique_ptr<SubgraphInfo>):  start proxy (owns info)
-  //   index 2 (SubgraphInfo *):            end proxy (back-references info)
-  // The variant index IS the discriminator — see IsSchedulingUnit /
-  // IsSubgraphStartProxy / IsSubgraphEndProxy.
-  std::variant<SUnit *, std::unique_ptr<SubgraphInfo>, SubgraphInfo *> content_;
+  // Two alternatives:
+  //   index 0 (SUnit *):        scheduling-unit node (real instruction
+  //                             or entry/exit sentinel)
+  //   index 1 (SubgraphInfo *): subgraph proxy (start OR end), a raw
+  //                             back-reference; the SubgraphInfo is owned
+  //                             by the graph's subgraph_infos_ vector.
+  // The variant index discriminates unit vs proxy (IsSchedulingUnit);
+  // start vs end is resolved against the info's subgraph_proxy/end_proxy
+  // (IsSubgraphStartProxy / IsSubgraphEndProxy).
+  std::variant<SUnit *, SubgraphInfo *> content_;
   SmallVector<ScheduleEdge> successors_;
   SmallVector<ScheduleEdge> predecessors_;
   SmallVector<RegWithLaneMask> reg_defs_;
@@ -1005,10 +1000,9 @@ public:
   /// Read-only access to the SubgraphInfos held by this graph (one
   /// per subgraph that InsertSubgraphProxies has installed). Sorted
   /// by member count descending — largest subgraphs first.
-  /// Lifetime matches the graph: each SubgraphInfo is owned by its
-  /// start-proxy node's unique_ptr; this list holds parallel raw
-  /// pointers. Empty if no subgraphs have been formed.
-  ArrayRef<SubgraphInfo *> GetSubgraphInfos() const {
+  /// This vector owns the SubgraphInfos; their lifetime matches the
+  /// graph. Empty if no subgraphs have been formed.
+  ArrayRef<std::unique_ptr<SubgraphInfo>> GetSubgraphInfos() const {
     return subgraph_infos_;
   }
 
@@ -1364,12 +1358,12 @@ private:
   std::unique_ptr<DominatorTree> dom_tree_;
   std::unique_ptr<ScheduleConstructor> input_schedule_constructor_;
 
-  /// Parallel raw pointers to the SubgraphInfos installed by
-  /// InsertSubgraphProxies. The unique_ptrs themselves live on each
-  /// subgraph's start-proxy node; this list is a stable handle for
-  /// consumers that want to enumerate the formed subgraphs without
-  /// walking proxy nodes (per-region telemetry, debug dumps, etc.).
-  std::vector<SubgraphInfo *> subgraph_infos_;
+  /// SubgraphInfos installed by InsertSubgraphProxies, owned here.
+  /// This vector holds the unique_ptrs (lifetime = the graph); proxy
+  /// nodes back-reference these by raw pointer. A stable handle for
+  /// consumers that enumerate the formed subgraphs without walking
+  /// proxy nodes (per-region telemetry, debug dumps, etc.).
+  std::vector<std::unique_ptr<SubgraphInfo>> subgraph_infos_;
 
   /// Clear all derived caches. Called by every graph-mutating op
   /// (AddEdge, EmplaceNode, future EmplaceSubgraphProxyNode, ...)
@@ -1409,11 +1403,12 @@ private:
   }
 
   /// Mutation step for one SubgraphInfo, called by
-  /// InsertSubgraphProxies. Emplaces a proxy node owning the
-  /// SubgraphInfo, sets backpointer + parent_subgraph_proxy, adds
-  /// the kSubgraphOrderEdge artificial edges. See implementation
-  /// for the full step list.
-  void EmplaceProxyAndWireEdges(std::unique_ptr<SubgraphInfo> info);
+  /// InsertSubgraphProxies. Emplaces start + end proxy nodes that
+  /// back-reference `info` (owned by subgraph_infos_), sets the info's
+  /// proxy backpointers + members' parent_subgraph_proxy, and adds the
+  /// kSubgraphOrderEdge artificial edges. See implementation for the
+  /// full step list.
+  void EmplaceProxyAndWireEdges(SubgraphInfo *info);
 
   // --- Construction helpers (used by BuildFromSUnits) ---
 
