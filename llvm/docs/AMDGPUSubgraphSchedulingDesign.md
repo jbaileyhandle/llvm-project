@@ -527,39 +527,64 @@ for interleaving (§8).
 ## 8. Interleaving Mode (Future)
 
 The default mode requires a subgraph to be scheduled **contiguously**:
-once entered, nothing else is scheduled until it is drained.
+once entered, nothing else is scheduled until it is drained. A future
+**interleaving mode** would let pre-scheduled subgraphs interleave their
+members with each other and with non-subgraph nodes — only each
+subgraph's *internal order* stays fixed.
 
-A future **interleaving mode** would let pre-scheduled subgraphs
-interleave their members with each other and with non-subgraph nodes —
-only each subgraph's *internal order* stays fixed. Two changes:
+**The mechanism is order edges with no proxies.** Form the subgraph and
+lock its chosen order with the `AddSubgraphOrderEdges` chain
+(`order[i] → order[i+1]`, §6), but do **not** insert proxies for it at
+all. The members stay as ordinary nodes in the flat graph, keeping their
+own real external edges; the chain forces the internal sequence while
+nothing forces contiguity, so non-members fall between members freely.
+That is the whole behavior — no scope push/pop (there is no proxy to push
+a scope for), no edge rerouting.
 
-1. **No scope push/pop.** All nodes live in the base scope, so the
-   step-3 search can move between subgraphs freely.
-2. **Relaxed proxy edges.** Today the start proxy waits for *every*
-   external predecessor of the subgraph, and *every* external
-   successor waits for the end proxy. That is too strict for
-   interleaving: the start proxy need only wait for the predecessors
-   of the *first scheduled member*, and only the *last scheduled
-   member*'s successors need wait for the end proxy — the per-member
-   predecessor/successor edges carry the rest. This relaxed wiring
-   depends on `schedule_result.order`, so like the order edges it is
-   applied after isolated scheduling.
+This supersedes an earlier sketch (keep the proxies but relax their edges
+and drop scopes). The proxies were doing two jobs: making the subgraph
+*atomic/contiguous* — not wanted here — and serving as the attach point
+for rerouted external edges — unnecessary, since the members already
+carry their own. For interleaving they are pure overhead, so drop them
+entirely rather than relax them.
 
-Enforcement is **mode-independent under §6**: the order edges work
-unchanged. A member's predecessor count naturally ANDs its order edge
-with its real data-dependency edges, so a member becomes ready only
-when both its locked-order predecessor and its real predecessors are
-scheduled — exactly the gating interleaving needs.
+**Soundness (acyclicity).** A chain edge `u → v` (u before v in the
+isolated order) can only close a cycle through a path `v → … → u`. It
+cannot stay inside the subgraph — the isolated order is a topological
+order of the internal edges and the chain edges are forward — so it would
+have to leave and re-enter: `v → external → … → external → u`. That means
+some external chain is *both* a successor of member v and a predecessor of
+member u, i.e. an external round-trip through the subgraph, which an
+**acyclic quotient forbids**. Min-cut formation produces an acyclic
+quotient by construction, so no chain edge can create a cycle.
+`AddSubgraphOrderEdges` re-runs cycle detection after adding the chain, so
+a violated assumption surfaces as a fatal graph cycle rather than
+silently. (In the default mode the equivalent check rides inside
+`InsertSubgraphProxies`, which interleaving skips; the order-edge cycle
+check covers the same ground.)
 
-Under §7 the cursor would need a "conjunction" upgrade for this: a
-member becomes ready when cursor-reached **and** its real predecessor
-count is zero, whichever happens second. (In the default mode the
-count is always already zero when the cursor arrives, so the cursor's
-simple form suffices.) That extra logic is one more reason §6 was
-chosen.
+**One structural prerequisite: ownership off the proxy.** A subgraph must
+be able to exist without a proxy node. Today the start proxy *owns* its
+`SubgraphInfo` (a `unique_ptr` in the node payload) and `subgraph_infos_`
+holds raw pointers. Make `subgraph_infos_` itself the owner
+(`vector<unique_ptr<SubgraphInfo>>`); both proxies then back-reference the
+vector-owned info by raw pointer, and the owning payload alternative goes
+away. The info's lifetime becomes graph-scoped and independent of any
+proxy. This decouples ownership from proxies in the *default* path too,
+and makes interleaving fall out: register the infos into the owning
+vector (with the same `CheckNoNestedMembers` / `CheckMembersDisjoint`
+checks), run `AddSubgraphOrderEdges`, and skip proxy emplacement.
 
-So: **enforcement is mode-independent; the mode is proxy-edge
-relaxation plus scopes-or-not.**
+**Enforcement is mode-independent (§6).** The order edges work unchanged:
+a member's predecessor count ANDs its order edge with its real
+data-dependency edges, so a member readies only when both its
+locked-order predecessor and its real predecessors are scheduled —
+exactly the gating interleaving needs. (The §7 cursor alternative would
+have needed a "conjunction" upgrade — ready when cursor-reached **and**
+real predecessor count zero — one more reason §6 was chosen.)
+
+So: **interleaving is the default formation minus proxies — order edges on
+the members, ownership on the `subgraph_infos_` vector.**
 
 ---
 
