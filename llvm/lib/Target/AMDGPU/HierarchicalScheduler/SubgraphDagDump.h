@@ -8,7 +8,7 @@
 // When the misched.txt DumpSubgraphDag option is set, it writes the
 // region's flat dependency DAG with subgraph membership overlaid to a
 // Cytoscape.js-shaped JSON file under
-// ./subgraph_dags/<pass>/<func>_g<graphId>_occ<score>.json, for
+// ./subgraph_dags/<pass>/<func>_r<region>_g<graphId>_occ<score>.json, for
 // viewing in HierarchicalScheduler/viz/subgraph_dag_viewer.html.
 //
 //===----------------------------------------------------------------------===//
@@ -43,6 +43,25 @@ class SubgraphDagDumpPassScope {
 
  private:
   std::string previous_;
+};
+
+/// RAII marker for the sorted region[i] currently being scheduled.
+/// Like SubgraphDagDumpPassScope, the dump hook fires deep inside
+/// FormSubgraphs and can't see which region it belongs to, so the
+/// scheduler wraps each region's scheduling in one of these and
+/// MaybeDumpSubgraphDag tags the output (filename + JSON meta) with the
+/// index. -1 (the default when no scope is active) means the dump fired
+/// outside a pass's per-region loop.
+class SubgraphDagDumpRegionScope {
+ public:
+  explicit SubgraphDagDumpRegionScope(int region_index);
+  ~SubgraphDagDumpRegionScope();
+  SubgraphDagDumpRegionScope(const SubgraphDagDumpRegionScope &) = delete;
+  SubgraphDagDumpRegionScope &operator=(const SubgraphDagDumpRegionScope &) =
+      delete;
+
+ private:
+  int previous_;
 };
 
 /// Called by FormSubgraphs after membership is computed and before

@@ -18,6 +18,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SUBGRAPHFORMATION_H
 
 #include "DominatorTree.h"
+#include "MinCutFormation.h"
 #include "ScheduleGraph.h"
 #include "SubgraphInfo.h"
 #include "llvm/ADT/STLExtras.h"
@@ -441,6 +442,19 @@ struct SubgraphFormationPipeline {
 /// TopDownAggressive) build the canonical configurations; callers
 /// can mutate the returned struct to tweak.
 struct SubgraphFormationPolicy {
+  /// Which formation mechanism this policy selects. kDominatorPipeline
+  /// (the default) runs the dom-tree `pipeline` below. kMinCut instead
+  /// partitions the data-dependency DAG by acyclic min-cut (see
+  /// MinCutFormation.{h,cpp}) and ignores every dom-tree field below
+  /// (latency_threshold, large_subtree_threshold, sibling_rescue_min_size,
+  /// splitter_partition, pipeline).
+  enum class Method { kDominatorPipeline, kMinCut };
+  Method method = Method::kDominatorPipeline;
+
+  /// Settings for the kMinCut method (ignored when method is
+  /// kDominatorPipeline). Populated by MinCut().
+  MinCutSettings min_cut;
+
   /// Latency threshold for IsSubgraphSplitter. Default 32 cycles
   /// catches memory loads on AMDGPU gfx906.
   int latency_threshold = 32;
@@ -478,6 +492,11 @@ struct SubgraphFormationPolicy {
   /// built-in pipeline. Useful as a minimal first deployment target
   /// for production wiring.
   static SubgraphFormationPolicy TopDownSingleSplitterOnly();
+
+  /// MinCut: form subgraphs by acyclic min-cut of the data-dependency
+  /// DAG via the external dagP partitioner. Sets method = kMinCut; the
+  /// dom-tree fields and pipeline are unused. See MinCutFormation.{h,cpp}.
+  static SubgraphFormationPolicy MinCut();
 };
 
 /// Top-level entry point for subgraph formation. Runs on a freshly

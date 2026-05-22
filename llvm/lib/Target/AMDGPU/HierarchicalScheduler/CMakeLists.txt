@@ -34,8 +34,13 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/PressureHistoryTracker.cpp
   HierarchicalScheduler/PartitionDag.cpp
   HierarchicalScheduler/BfsDpSearch.cpp
+  HierarchicalScheduler/MinCutFormation.cpp
   PARENT_SCOPE
 )
+
+# Build the dagP partitioner (used by MinCutFormation) as a static library,
+# so the `dagp` target exists before AMDGPUCodeGen links it.
+add_subdirectory(dagp)
 
 # NOTE: We would like to keep asserts enabled in our code even in release
 # builds (-UNDEBUG), but this causes ABI incompatibility with the rest of LLVM.

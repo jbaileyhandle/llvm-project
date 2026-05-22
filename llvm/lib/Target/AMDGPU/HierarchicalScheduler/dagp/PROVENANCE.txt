@@ -1,0 +1,11 @@
+Copy of dagP (acyclic DAG partitioner) source.
+Upstream: https://github.com/GT-TDAlab/dagP
+Commit: 38d4dd179a5999a288ce865cef636efe12df3b76
+Built without METIS/Scotch (dagP_METIS / dagP_SCOTCH left undefined).
+
+Only the libdagp library sources are included. dagP's three standalone
+programs (each its own main(), not part of the library) are omitted, since
+we call the library in-process rather than running its tools:
+  - recBisection/rMLGP.c - command-line partitioner driver (exe/rMLGP)
+  - common/ginfo.c       - graph-stats/info tool (exe/ginfo)
+  - src/useapi.cpp       - example program demonstrating the dagP API

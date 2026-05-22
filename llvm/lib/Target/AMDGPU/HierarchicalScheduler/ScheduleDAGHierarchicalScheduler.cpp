@@ -328,6 +328,10 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
                  << " orig_reg_occ=" << original_register_only_occupancy
                  << "\n";
 
+    // Tag any DumpSubgraphDag output from this region with its sorted
+    // region[i] index, so dump files join back to this heading.
+    SubgraphDagDumpRegionScope region_scope(static_cast<int>(i));
+
     // Determine highest occupancy achievable for region.
     MaxOccupancyRegionResult region_result =
         ScheduleRegionForMaximumOccupancy(region);
@@ -698,6 +702,7 @@ void ScheduleDAGHierarchicalScheduler::RunLengthPass() {
     // phase blocks below nest under it visually.
     llvm::outs() << "\n\tregion[" << i
                  << "]: instrs=" << regions_[i].GetNumInstrs() << "\n";
+    SubgraphDagDumpRegionScope region_scope(static_cast<int>(i));
     LengthRegionStats stats = ScheduleRegionForLengthPass(regions_[i]);
 
     // Direction-aware "improved": min wants shorter, max wants longer.

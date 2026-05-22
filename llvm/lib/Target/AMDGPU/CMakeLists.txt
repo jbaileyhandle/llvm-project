@@ -235,6 +235,16 @@ add_llvm_target(AMDGPUCodeGen
   AMDGPU
   )
 
+#========================================================================================
+# jbaile
+#========================================================================================
+# Link the dagP partitioner (HierarchicalScheduler/dagp) for MinCutFormation.
+# The `dagp` target is defined by add_subdirectory(dagp) in
+# HierarchicalScheduler/CMakeLists.txt; a PRIVATE link also propagates dagP's
+# include directories here so MinCutFormation.cpp can #include "dagP.h".
+target_link_libraries(LLVMAMDGPUCodeGen PRIVATE dagp)
+#========================================================================================
+
 add_subdirectory(AsmParser)
 add_subdirectory(Disassembler)
 add_subdirectory(MCA)

@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "SubgraphFormation.h"
+#include "MinCutFormation.h"
 #include "SubgraphDagDump.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -405,60 +406,75 @@ SubgraphFormationPolicy SubgraphFormationPolicy::TopDownSingleSplitterOnly() {
   return p;
 }
 
+SubgraphFormationPolicy SubgraphFormationPolicy::MinCut() {
+  SubgraphFormationPolicy p;
+  p.method = Method::kMinCut;
+  // The dom-tree fields and pipeline are unused.
+  return p;
+}
+
 // --- End-to-end driver (§7) ----------------------------------------------
 
 void FormSubgraphs(ScheduleGraph &graph,
                    const SubgraphFormationPolicy &policy) {
-  // Empty pipeline → nothing to do, and we skip the prereq
-  // analyses (TR / dom) so callers that pass an empty policy as a
-  // "no formation" sentinel pay nothing beyond this check.
-  if (policy.pipeline.passes.empty()) {
-    return;
+  std::vector<std::unique_ptr<SubgraphInfo>> infos;
+  if (policy.method == SubgraphFormationPolicy::Method::kMinCut) {
+    // Acyclic min-cut of the data-dependency DAG (dagP). Needs none of the
+    // dom-tree prerequisites/passes; returns an empty vector for regions
+    // too small to partition.
+    infos = BuildSubgraphInfosByMinCut(graph, policy.min_cut);
+  } else {
+    // Empty pipeline → nothing to do, and we skip the prereq analyses
+    // (TR / dom) so callers that pass an empty policy as a "no formation"
+    // sentinel pay nothing beyond this check.
+    if (policy.pipeline.passes.empty()) {
+      return;
+    }
+
+    // 1. Prerequisite analyses. Each ScheduleGraph::Compute* call is
+    // cache-aware (early-returns if its result is already current), so
+    // re-running on a freshly built graph that hasn't seen them yet pays
+    // the full cost; re-running on a graph that already has them costs
+    // O(1) per check.
+    graph.ValidateAndComputeTopologicalOrder();
+    graph.ComputeTransitiveReductionAndReachability();
+    graph.ComputeDominatorTree();
+
+    // 2. Formation tree.
+    auto is_splitter = [&policy](const ScheduleNode *n) {
+      return IsSubgraphSplitter(n, policy.latency_threshold);
+    };
+    SubgraphFormationTree tree =
+        SubgraphFormationTree::BuildFromDominatorTree(
+            graph, graph.GetDominatorTree(), is_splitter);
+
+    // 3. Pipeline.
+    for (auto &pass : policy.pipeline.passes) {
+      pass(tree);
+    }
+
+    // 4. Materialize. Single-splitter emit points get partitioned here;
+    // multi/zero-splitter emit as-is; singletons are dropped.
+    infos = BuildSubgraphInfos(tree.EmitPoints(), graph,
+                               policy.splitter_partition);
   }
 
-  // 1. Prerequisite analyses. Each ScheduleGraph::Compute* call is
-  // cache-aware (early-returns if its result is already current),
-  // so re-running on a freshly built graph that hasn't seen them
-  // yet pays the full cost; re-running on a graph that already has
-  // them costs O(1) per check.
-  graph.ValidateAndComputeTopologicalOrder();
-  graph.ComputeTransitiveReductionAndReachability();
-  graph.ComputeDominatorTree();
-
-  // 2. Formation tree.
-  auto is_splitter = [&policy](const ScheduleNode *n) {
-    return IsSubgraphSplitter(n, policy.latency_threshold);
-  };
-  SubgraphFormationTree tree =
-      SubgraphFormationTree::BuildFromDominatorTree(
-          graph, graph.GetDominatorTree(), is_splitter);
-
-  // 3. Pipeline.
-  for (auto &pass : policy.pipeline.passes) {
-    pass(tree);
-  }
-
-  // 4. Materialize. Single-splitter emit points get partitioned
-  // here; multi/zero-splitter emit as-is; singletons are dropped.
-  std::vector<std::unique_ptr<SubgraphInfo>> infos =
-      BuildSubgraphInfos(tree.EmitPoints(), graph,
-                         policy.splitter_partition);
-
-  // 5. Instrumentation hook: with the graph still flat and
-  // membership in hand, dump the DAG when DumpSubgraphDag is set
-  // (no-op otherwise). Must be before InsertSubgraphProxies so the
-  // dumped edges are the real dependencies, not the proxied wiring.
+  // Shared tail for both formation paths.
+  // 5. Instrumentation hook: with the graph still flat and membership in
+  // hand, dump the DAG when DumpSubgraphDag is set (no-op otherwise). Must
+  // be before InsertSubgraphProxies so the dumped edges are the real
+  // dependencies, not the proxied wiring.
   MaybeDumpSubgraphDag(graph, infos);
 
-  // 6. Mutate. InsertSubgraphProxies takes the vector by value and
-  // moves each unique_ptr into its start proxy node. No-op if
-  // `infos` is empty (and in that case the graph isn't mutated, so
-  // the re-derive below short-circuits).
+  // 6. Mutate. InsertSubgraphProxies takes the vector by value and moves
+  // each unique_ptr into its start proxy node. No-op if `infos` is empty
+  // (and in that case the graph isn't mutated, so the re-derive below
+  // short-circuits).
   graph.InsertSubgraphProxies(std::move(infos));
 
-  // 7. Re-derive topo + critical-paths so downstream consumers see
-  // the post-mutation graph (proxies + artificial edges). Both
-  // calls early-return if no mutation happened above.
+  // 7. Re-derive topo + critical-paths so downstream consumers see the
+  // post-mutation graph (proxies + artificial edges). Both calls
+  // early-return if no mutation happened above.
   graph.ValidateAndComputeTopologicalOrder();
   graph.ComputeCriticalPaths();
 }

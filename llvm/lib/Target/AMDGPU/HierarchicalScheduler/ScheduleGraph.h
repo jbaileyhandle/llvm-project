@@ -287,6 +287,15 @@ public:
     return std::holds_alternative<SUnit *>(content_);
   }
 
+  /// True iff this node is a real instruction: a scheduling unit backed
+  /// by an actual SUnit, as opposed to a synthetic entry/exit sentinel
+  /// (a scheduling unit with a null SUnit) or a subgraph proxy. For
+  /// formation/partitioning that should act only on the region's real
+  /// instructions.
+  bool IsRealInstruction() const {
+    return IsSchedulingUnit() && GetSUnit() != nullptr;
+  }
+
   /// True if this node is a subgraph proxy of either flavor
   /// (start or end). Inverse of IsSchedulingUnit. Useful for
   /// trackers / pressure / length code that should self-skip on

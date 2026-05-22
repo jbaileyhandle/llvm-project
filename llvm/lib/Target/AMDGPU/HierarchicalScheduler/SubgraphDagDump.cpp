@@ -36,6 +36,12 @@ constexpr const char *kRootDir = "subgraph_dags";
 // length passes), in which case dumps land in the "unknown" subdir.
 std::string g_current_pass;
 
+// Active region index, set by SubgraphDagDumpRegionScope to the sorted
+// region[i] the pass is currently scheduling, so a dump ties back to the
+// region heading in the scheduler log. -1 when no region scope is active
+// (a dump fired outside a pass's per-region loop).
+int g_current_region = -1;
+
 bool DumpEnabled() {
   return MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
       MachineInstrSchedulerConfig::SchedulerOption::DumpSubgraphDag);
@@ -43,12 +49,14 @@ bool DumpEnabled() {
 
 // Human-meaningful identity of a dumped region, derived from the
 // graph at the dump point. graph_id is the universal unique key
-// (every ScheduleGraph has one); function/block locate it in the
-// source; occ_score (continuous occupancy of the input order) shows
-// how pressured it is.
+// (every ScheduleGraph has one); region_index ties the dump back to
+// the scheduler log's sorted region[i]; function/block locate it in
+// the source; occ_score (continuous occupancy of the input order)
+// shows how pressured it is.
 struct DumpIdentity {
   std::string function;
   std::string block;
+  int region_index;
   int64_t graph_id;
   int occ_score;
 };
@@ -56,6 +64,7 @@ struct DumpIdentity {
 DumpIdentity DeriveIdentity(const ScheduleGraph &graph) {
   DumpIdentity id;
   id.graph_id = graph.GetId();
+  id.region_index = g_current_region;
   id.occ_score = graph.GetInputScheduleConstructor()
                      .GetPressureTracker()
                      .GetContinuousOccupancyScore();
@@ -172,6 +181,7 @@ void AppendMeta(std::string &out, const DumpIdentity &id, StringRef pass,
                 int num_nodes, int num_instr_nodes, int num_subgraphs) {
   out += "  \"meta\": {\n";
   out += "    \"graph_id\": " + std::to_string(id.graph_id) + ",\n";
+  out += "    \"region_index\": " + std::to_string(id.region_index) + ",\n";
   out += "    \"function\": \"";
   AppendJsonEscaped(out, id.function);
   out += "\",\n    \"block\": \"";
@@ -268,7 +278,7 @@ std::string BuildJson(const ScheduleGraph &graph,
   return json;
 }
 
-// Write `json` to subgraph_dags/<pass>/<func>_g<graphId>_occ<score>.json.
+// Write `json` to subgraph_dags/<pass>/<func>_r<region>_g<graphId>_occ<score>.json.
 // Fatal on any failure — a requested dump that silently goes missing
 // would mislead.
 void WriteDumpFile(const DumpIdentity &id, StringRef pass, StringRef json) {
@@ -277,7 +287,8 @@ void WriteDumpFile(const DumpIdentity &id, StringRef pass, StringRef json) {
     report_fatal_error(Twine("MaybeDumpSubgraphDag: cannot create '") + dir +
                        "': " + ec.message());
   }
-  std::string path = dir + "/" + SanitizeForFilename(id.function) + "_g" +
+  std::string path = dir + "/" + SanitizeForFilename(id.function) + "_r" +
+                     std::to_string(id.region_index) + "_g" +
                      std::to_string(id.graph_id) + "_occ" +
                      std::to_string(id.occ_score) + ".json";
   std::error_code ec;
@@ -298,6 +309,15 @@ SubgraphDagDumpPassScope::SubgraphDagDumpPassScope(StringRef pass_name)
 
 SubgraphDagDumpPassScope::~SubgraphDagDumpPassScope() {
   g_current_pass = previous_;
+}
+
+SubgraphDagDumpRegionScope::SubgraphDagDumpRegionScope(int region_index)
+    : previous_(g_current_region) {
+  g_current_region = region_index;
+}
+
+SubgraphDagDumpRegionScope::~SubgraphDagDumpRegionScope() {
+  g_current_region = previous_;
 }
 
 void MaybeDumpSubgraphDag(

@@ -15,6 +15,7 @@
 #include "SearchPolicies.h"
 #include "SubgraphFormation.h"
 #include "SubgraphInfo.h"
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -81,11 +82,16 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     const LiveIntervals &lis,
     int seed_occupancy) {
   DecomposeAndScheduleOptions opts;
-  // Match DfsMaximizeOccupancyPolicy::MakeFormationPolicy(): the
-  // single-splitter top-down pipeline brackets consumer-side pressure
-  // peaks within each subgraph rather than letting unrelated work
-  // spread peaks across the region.
-  opts.formation = SubgraphFormationPolicy::TopDownSingleSplitterOnly();
+  // Formation: min-cut (dagP) when the MinCutFormation option is set,
+  // otherwise the single-splitter top-down pipeline (matching
+  // DfsMaximizeOccupancyPolicy::MakeFormationPolicy()), which brackets
+  // consumer-side pressure peaks within each subgraph rather than letting
+  // unrelated work spread peaks across the region.
+  opts.formation =
+      MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
+          MachineInstrSchedulerConfig::SchedulerOption::MinCutFormation)
+          ? SubgraphFormationPolicy::MinCut()
+          : SubgraphFormationPolicy::TopDownSingleSplitterOnly();
   opts.mode = SubgraphScheduleMode::kSerialized;
 
   // Inner: continuous occupancy score, no seed. DFS fallback uses

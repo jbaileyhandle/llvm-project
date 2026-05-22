@@ -93,6 +93,13 @@ class MachineInstrSchedulerConfig {
             // change scheduling. See
             // HierarchicalScheduler/viz/subgraph_dag_viewer.html.
             DumpSubgraphDag,
+            // HierarchicalScheduler: in the DecomposeAndSchedule path (i.e.
+            // with DecomposeForOccupancy), form subgraphs by acyclic min-cut
+            // of the data-dependency DAG (via the dagP partitioner) instead of
+            // the dom-tree pipeline. No effect unless that path runs. Mutually
+            // exclusive with SkipSubgraphFormation. See
+            // HierarchicalScheduler/MinCutFormation.{h,cpp}.
+            MinCutFormation,
             // Sentinel
             InvalidOption
         };
@@ -222,7 +229,8 @@ class MachineInstrSchedulerConfig {
              "ScaleEdgeLatenciesByTargetOccupancy"},
             {SchedulerOption::BfsDpForOccupancy, "BfsDpForOccupancy"},
             {SchedulerOption::DecomposeForOccupancy, "DecomposeForOccupancy"},
-            {SchedulerOption::DumpSubgraphDag, "DumpSubgraphDag"}
+            {SchedulerOption::DumpSubgraphDag, "DumpSubgraphDag"},
+            {SchedulerOption::MinCutFormation, "MinCutFormation"}
         };
 
 

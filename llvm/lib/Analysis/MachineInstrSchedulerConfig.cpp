@@ -158,6 +158,7 @@ MachineInstrSchedulerConfig::SchedulerOption MachineInstrSchedulerConfig::GetSch
         .Case("BfsDpForOccupancy", SchedulerOption::BfsDpForOccupancy)
         .Case("DecomposeForOccupancy", SchedulerOption::DecomposeForOccupancy)
         .Case("DumpSubgraphDag", SchedulerOption::DumpSubgraphDag)
+        .Case("MinCutFormation", SchedulerOption::MinCutFormation)
         .Default(SchedulerOption::InvalidOption);
 
     if (option == SchedulerOption::InvalidOption) {
@@ -188,6 +189,7 @@ bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption opti
     case SchedulerOption::BfsDpForOccupancy:
     case SchedulerOption::DecomposeForOccupancy:
     case SchedulerOption::DumpSubgraphDag:
+    case SchedulerOption::MinCutFormation:
         return (scheduler == Scheduler::HierarchicalScheduler);
     default:
         return false;
@@ -224,6 +226,16 @@ void MachineInstrSchedulerConfig::InitSchedulerOptions(const std::vector<std::st
             "Options 'DecomposeForOccupancy' and 'SkipSubgraphFormation' "
             "are mutually exclusive: the factory pipeline relies on "
             "subgraph formation");
+    }
+
+    // MinCutFormation selects min-cut subgraph formation for the
+    // DecomposeAndSchedule path; it can't coexist with skipping formation.
+    bool min_cut = options_.count(SchedulerOption::MinCutFormation);
+    if (min_cut && skip_form) {
+        llvm::report_fatal_error(
+            "Options 'MinCutFormation' and 'SkipSubgraphFormation' are "
+            "mutually exclusive: one forms subgraphs by min-cut, the other "
+            "skips formation");
     }
 }
 
