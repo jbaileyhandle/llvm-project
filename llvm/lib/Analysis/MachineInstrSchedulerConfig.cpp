@@ -129,6 +129,18 @@ bool MachineInstrSchedulerConfig::HasSchedulingOption(MachineInstrSchedulerConfi
     return (options_.find(option) != options_.end());
 }
 
+std::optional<llvm::StringRef> MachineInstrSchedulerConfig::GetScopedSetting(llvm::StringRef scope, llvm::StringRef key) const {
+    auto scope_it = scoped_.find(scope.str());
+    if (scope_it == scoped_.end()) {
+        return std::nullopt;
+    }
+    auto key_it = scope_it->second.find(key.str());
+    if (key_it == scope_it->second.end()) {
+        return std::nullopt;
+    }
+    return llvm::StringRef(key_it->second);
+}
+
 bool MachineInstrSchedulerConfig::IsPostRASchedulingDisabled() const {
     return HasSchedulingOption(SchedulerOption::DisablePostRAScheduling);
 }
@@ -198,6 +210,13 @@ bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption opti
 
 void MachineInstrSchedulerConfig::InitSchedulerOptions(const std::vector<std::string> &option_strings) {
     for (const auto &str : option_strings) {
+        // A token containing '=' is a scoped "<scope>.<key>=<value>" setting:
+        // route it to the dumb scoped_ store and leave it uninterpreted here.
+        // A bare token is a boolean SchedulerOption (the existing path).
+        if (str.find('=') != std::string::npos) {
+            ParseScopedSetting(str);
+            continue;
+        }
         SchedulerOption option = GetSchedulerOptionFromString(str);
         if (!IsValidOptionForScheduler(option, mi_scheduler_)) {
             llvm::report_fatal_error("Option '" + llvm::StringRef(str) +
@@ -237,6 +256,28 @@ void MachineInstrSchedulerConfig::InitSchedulerOptions(const std::vector<std::st
             "mutually exclusive: one forms subgraphs by min-cut, the other "
             "skips formation");
     }
+}
+
+void MachineInstrSchedulerConfig::ParseScopedSetting(const std::string &token) {
+    size_t eq = token.find('=');
+    std::string lhs = token.substr(0, eq);
+    std::string value = token.substr(eq + 1);
+
+    // Split the left-hand side into "<scope>.<key>" on the first dot. The key
+    // may itself contain dots (e.g. "search.timeout"); only the first segment
+    // is the scope. A dotless left-hand side is a top-level setting, stored
+    // under the empty scope.
+    size_t dot = lhs.find('.');
+    std::string scope;
+    std::string key;
+    if (dot == std::string::npos) {
+        scope = "";
+        key = lhs;
+    } else {
+        scope = lhs.substr(0, dot);
+        key = lhs.substr(dot + 1);
+    }
+    scoped_[scope][key] = value;
 }
 
 
@@ -410,6 +451,18 @@ std::string MachineInstrSchedulerConfig::ToString() const {
         result += "\tOptions:\n";
         for (const auto option : options_) {
             result += "\t\t" + GetSchedulerOptionAsString(option) + "\n";
+        }
+    }
+
+    // Scoped settings
+    if (!scoped_.empty()) {
+        result += "\tScoped settings:\n";
+        for (const auto &scope_entry : scoped_) {
+            for (const auto &kv : scope_entry.second) {
+                std::string scope_prefix =
+                    scope_entry.first.empty() ? "" : scope_entry.first + ".";
+                result += "\t\t" + scope_prefix + kv.first + " = " + kv.second + "\n";
+            }
         }
     }
 

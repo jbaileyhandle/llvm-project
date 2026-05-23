@@ -6,6 +6,8 @@
 #include <unordered_set>
 #include <set>
 #include <vector>
+#include <map>
+#include <optional>
 
 #include "llvm/IR/Function.h"
 
@@ -157,6 +159,15 @@ class MachineInstrSchedulerConfig {
         // Return true if option is set
         bool HasSchedulingOption(SchedulerOption option) const;
 
+        // Look up a scoped "<scope>.<key> = <value>" setting parsed from
+        // misched.txt. Returns the raw value string if present, std::nullopt
+        // otherwise. The generic config stores these uninterpreted; the
+        // per-scheduler layer (e.g. AMDGPU HierarchicalConfig) maps them to
+        // typed fields and validates them. A dotless top-level setting is
+        // stored under the empty scope.
+        std::optional<llvm::StringRef> GetScopedSetting(llvm::StringRef scope,
+                                                        llvm::StringRef key) const;
+
         // Convenience: return true if post-RA scheduling is disabled
         bool IsPostRASchedulingDisabled() const;
 
@@ -195,6 +206,13 @@ class MachineInstrSchedulerConfig {
         // Parse and validate options from misched.txt tokens
         void InitSchedulerOptions(const std::vector<std::string> &option_strings);
 
+        // Parse a single "<scope>.<key>=<value>" (or dotless "<key>=<value>")
+        // token into the scoped_ store. The left-hand side is split on its
+        // first dot: the first segment is the scope, the remainder (which may
+        // itself contain dots, e.g. "search.timeout") is the key. A dotless
+        // left-hand side lands under the empty scope.
+        void ParseScopedSetting(const std::string &token);
+
         // Convert a string to the corresponding SchedulerOption
         SchedulerOption GetSchedulerOptionFromString(const std::string &str);
 
@@ -202,6 +220,10 @@ class MachineInstrSchedulerConfig {
         Scheduler mi_scheduler_ = Scheduler::Default;
         std::unordered_map<std::string, FunctionConfig> demangled_func_signature_to_config_;
         std::set<SchedulerOption> options_;
+        // Dumb scope -> key -> value store for "<scope>.<key> = <value>"
+        // settings. Uninterpreted here; read via GetScopedSetting and given
+        // meaning by the per-scheduler config layer.
+        std::map<std::string, std::map<std::string, std::string>> scoped_;
         inline static const std::unordered_map<Scheduler, std::string> scheduler_to_str_ {
             {Scheduler::Default, "Default"},
             {Scheduler::MaxOccupancy, "MaxOccupancy"},
