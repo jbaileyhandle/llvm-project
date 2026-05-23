@@ -5099,7 +5099,8 @@ void RunDecomposeAndScheduleFactoryShakedown(const GCNSubtarget &st,
 
   DecomposeAndScheduleOptions opts =
       DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
-          st, mf, lis, /*seed_occupancy=*/1);
+          st, mf, lis, /*seed_occupancy=*/1,
+          FormationConfig{SubgraphFormationStrategy::kDomTree});
 
   SearchResult result = DecomposeAndSchedule(*graph, st, mf, opts);
 
@@ -5112,10 +5113,10 @@ void RunDecomposeAndScheduleFactoryShakedown(const GCNSubtarget &st,
   check("schedule is complete (IsDone)", sc.IsDone());
 
   // The test DAG is purpose-built for subgraph formation, and the
-  // factory's default formation (TopDownSingleSplitterOnly) emits
-  // at least one subgraph on it — verified by the earlier
-  // formation shakedown. If this check ever fails, either the DAG
-  // or the factory's default formation has drifted.
+  // kDomTree strategy passed above (realized as
+  // TopDownSingleSplitterOnly) emits at least one subgraph on it —
+  // verified by the earlier formation shakedown. If this check ever
+  // fails, either the DAG or the dom-tree formation has drifted.
   check("at least one subgraph was formed",
         !graph->GetSubgraphInfos().empty());
 

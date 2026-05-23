@@ -427,6 +427,17 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
     }
   }
 
+  // Cross-global invariant: the subgraph-DAG dump targets real region
+  // graphs (it derives identity and target info from real instructions),
+  // while shakedowns exercise synthetic test graphs that have none.
+  // Dumping during shakedowns is meaningless and unsupported, so the two
+  // toggles are mutually exclusive.
+  if (hs.dump_subgraph_dag && hs.run_shakedowns) {
+    report_fatal_error("HierarchicalConfig: dump_subgraph_dag and "
+                       "run_shakedowns cannot both be enabled; shakedowns "
+                       "operate on synthetic graphs that are not dumpable");
+  }
+
   return hs;
 }
 

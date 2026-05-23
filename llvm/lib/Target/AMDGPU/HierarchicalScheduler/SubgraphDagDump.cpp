@@ -7,6 +7,7 @@
 #include "SubgraphDagDump.h"
 
 #include "GCNRegisterTracker.h"
+#include "HierarchicalConfig.h"
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
 #include "llvm/ADT/DenseMap.h"
@@ -43,8 +44,7 @@ std::string g_current_pass;
 int g_current_region = -1;
 
 bool DumpEnabled() {
-  return MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
-      MachineInstrSchedulerConfig::SchedulerOption::DumpSubgraphDag);
+  return HierarchicalConfig::Get().dump_subgraph_dag;
 }
 
 // Human-meaningful identity of a dumped region, derived from the

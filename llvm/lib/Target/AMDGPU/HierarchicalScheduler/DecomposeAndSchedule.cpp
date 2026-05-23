@@ -9,7 +9,6 @@
 #include "BfsDpSearch.h"
 #include "BfsDpSettings.h"
 #include "DfsSearch.h"
-#include "HierarchicalConfig.h"
 #include "ScheduleGraph.h"
 #include "ScheduleMetric.h"
 #include "ScheduleSubgraph.h"
@@ -76,13 +75,12 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     const GCNSubtarget &st,
     const MachineFunction &mf,
     const LiveIntervals &lis,
-    int seed_occupancy) {
+    int seed_occupancy,
+    const FormationConfig &subgraph_formation) {
   DecomposeAndScheduleOptions opts;
-  // Formation: realized from the occupancy pass's configured formation.
-  // Decompose requires a real formation (validated), so this is dom-tree
-  // or min-cut, never none. Strategy and install mode come from the config.
-  const FormationConfig &subgraph_formation =
-      HierarchicalConfig::Get().occupancy.formation;
+  // Formation: realized from the caller-supplied config. Decompose
+  // requires a real formation (validated upstream), so the strategy is
+  // dom-tree or min-cut, never none.
   opts.formation = SubgraphFormationPolicy::FromStrategy(
       subgraph_formation.strategy, subgraph_formation.min_cut);
   opts.mode = subgraph_formation.mode;

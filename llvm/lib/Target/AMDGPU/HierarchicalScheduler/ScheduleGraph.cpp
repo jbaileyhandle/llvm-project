@@ -7,6 +7,7 @@
 #include "ScheduleGraph.h"
 #include "DominatorTree.h"
 #include "GCNRegPressure.h"
+#include "HierarchicalConfig.h"
 #include "NodeRegInfo.h"
 #include "RegionInfo.h"
 #include "ScheduleConstructor.h"
@@ -808,9 +809,7 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
   // actually matters, and by then MFI->getOccupancy() has
   // stabilized at the final kernel-wide ceiling.
   int latency_divisor = 1;
-  if (MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
-          MachineInstrSchedulerConfig::SchedulerOption::
-              ScaleEdgeLatenciesByTargetOccupancy)) {
+  if (HierarchicalConfig::Get().scale_edge_latencies) {
     latency_divisor = static_cast<int>(
         mf.getInfo<SIMachineFunctionInfo>()->getOccupancy());
   }

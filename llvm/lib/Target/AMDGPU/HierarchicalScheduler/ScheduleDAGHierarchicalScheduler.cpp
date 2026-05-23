@@ -113,12 +113,7 @@ void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
                  << r.GetOriginalRegisterOnlyOccupancy() << "\n";
   }
 
-  const MachineInstrSchedulerConfig &config =
-      MachineInstrSchedulerConfig::GetConfig();
-
-  if (config.HasSchedulingOption(
-          MachineInstrSchedulerConfig::SchedulerOption::
-              MaliciousScheduler)) {
+  if (HierarchicalConfig::Get().malicious) {
     RunMaliciousScheduler();
   } else {
     RunHierarchicalScheduler();
@@ -502,7 +497,8 @@ static SearchResult RunOccupancyRegionWithBfsDp(
 // Per-region DecomposeAndSchedule occupancy search. Runs the full
 // form-schedule-lock-search pipeline via the BfsDpWithDfsFallback
 // factory preset:
-//   - formation: TopDownSingleSplitterOnly
+//   - formation: the occupancy pass's configured strategy + install
+//                mode (validated to be a real strategy, never none)
 //   - inner_search: BFS-DP continuous → DFS continuous fallback
 //   - outer_search: BFS-DP integer (seeded with the region's original
 //                   register-only occupancy) → DFS integer fallback
@@ -517,7 +513,8 @@ static SearchResult RunOccupancyRegionWithDecompose(
     const LiveIntervals &lis) {
   DecomposeAndScheduleOptions opts =
       DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
-          st, mf, lis, region.GetOriginalRegisterOnlyOccupancy());
+          st, mf, lis, region.GetOriginalRegisterOnlyOccupancy(),
+          HierarchicalConfig::Get().occupancy.formation);
   SearchResult result = DecomposeAndSchedule(graph, st, mf, opts);
   llvm::outs() << "\t\toutput: (Decompose) found_improvement="
                << result.schedule.has_value() << "\n";
@@ -1095,9 +1092,8 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   HierarchicalConfig::Get().DebugPrint();
 
   // Shakedowns are validation harnesses: noisy and slow. Off by default;
-  // opt in via the `RunShakedowns` option in misched.txt.
-  if (MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
-          MachineInstrSchedulerConfig::SchedulerOption::RunShakedowns)) {
+  // opt in via `run_shakedowns = true` in misched.txt.
+  if (HierarchicalConfig::Get().run_shakedowns) {
     RunAllShakedowns();
   }
 

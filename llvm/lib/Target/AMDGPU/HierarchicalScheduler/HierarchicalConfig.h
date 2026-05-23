@@ -97,7 +97,7 @@ struct HierarchicalConfig {
   // when the setting is absent.
   bool malicious = false;            // run the malicious variant instead
   bool run_shakedowns = false;       // run validation harnesses
-  bool dump_subgraph_dag = true;     // dump region DAGs for the viewer
+  bool dump_subgraph_dag = false;    // dump region DAGs for the viewer
   bool scale_edge_latencies = false; // scale edge latency by target occupancy
 
   /// Build the typed config from the generic config's scoped settings.

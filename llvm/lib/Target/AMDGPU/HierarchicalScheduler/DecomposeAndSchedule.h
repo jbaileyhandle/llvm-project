@@ -100,16 +100,21 @@ struct DecomposeAndScheduleOptions {
   /// on a leaf subgraph extracted by ScheduleSubgraph; outer on the
   /// proxied graph).
   ///
+  /// `subgraph_formation` selects the formation strategy, install mode,
+  /// and min-cut settings; the factory realizes it into
+  /// `opts.formation`/`opts.mode` via
+  /// SubgraphFormationPolicy::FromStrategy. Decompose needs a real
+  /// strategy (kDomTree or kMinCut) — passing kNone forms no subgraphs
+  /// and makes the pipeline a no-op.
+  ///
   /// The returned options own their closures; `st`, `mf`, and `lis`
   /// are captured by reference and must outlive the options.
-  /// `formation` defaults to TopDownSingleSplitterOnly (matches
-  /// DfsMaximizeOccupancyPolicy::MakeFormationPolicy()); mutate the
-  /// returned struct's `formation` field to override.
   static DecomposeAndScheduleOptions BfsDpWithDfsFallback(
       const GCNSubtarget &st,
       const MachineFunction &mf,
       const LiveIntervals &lis,
-      int seed_occupancy);
+      int seed_occupancy,
+      const FormationConfig &subgraph_formation);
 };
 
 /// Form subgraphs in `graph`, schedule each in isolation, lock the

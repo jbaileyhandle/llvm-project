@@ -64,7 +64,7 @@ enum class SubgraphFormationStrategy { kNone, kDomTree, kMinCut };
 struct FormationConfig {
   SubgraphFormationStrategy strategy = SubgraphFormationStrategy::kNone;
   SubgraphScheduleMode mode = SubgraphScheduleMode::kSerialized;
-  MinCutSettings min_cut; // ratio + target_size; used only by kMinCut
+  MinCutSettings min_cut{}; // ratio + target_size; used only by kMinCut
 };
 
 /// True if `node` has at least one outgoing latency-contributing
