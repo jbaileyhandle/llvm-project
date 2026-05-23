@@ -269,17 +269,18 @@ int ScheduleGraph::NumSchedulingUnits() const {
 
 namespace {
 
-/// Precondition check for InsertSubgraphProxies: every member of
-/// every SubgraphInfo is a scheduling unit. Nested subgraphs are
-/// deferred to a future phase; until then a subgraph proxy
-/// appearing as a member is treated as a malformed input.
+/// Precondition for installing subgraphs (run by registerSubgraphs, so
+/// it guards both InsertSubgraphProxies and InstallSubgraphsFlat): every
+/// member of every SubgraphInfo is a scheduling unit. Nested subgraphs
+/// are deferred to a future phase; until then a subgraph proxy appearing
+/// as a member is treated as a malformed input.
 void CheckNoNestedMembers(
     ArrayRef<std::unique_ptr<SubgraphInfo>> infos) {
   for (const auto &info : infos) {
     for (ScheduleNode *m : info->members) {
       if (!m->IsSchedulingUnit()) {
         report_fatal_error(
-            "InsertSubgraphProxies: SubgraphInfo \"" +
+            "registerSubgraphs: SubgraphInfo \"" +
             Twine(info->debug_name) +
             "\" has a member that is itself a subgraph proxy "
             "(node " +
@@ -290,8 +291,9 @@ void CheckNoNestedMembers(
   }
 }
 
-/// Precondition check for InsertSubgraphProxies: each node appears
-/// as a member of at most one SubgraphInfo.
+/// Precondition for installing subgraphs (run by registerSubgraphs, so
+/// it guards both installs): each node appears as a member of at most
+/// one SubgraphInfo.
 void CheckMembersDisjoint(
     ArrayRef<std::unique_ptr<SubgraphInfo>> infos) {
   SmallPtrSet<ScheduleNode *, 32> seen;
@@ -299,7 +301,7 @@ void CheckMembersDisjoint(
     for (ScheduleNode *m : info->members) {
       if (!seen.insert(m).second) {
         report_fatal_error(
-            "InsertSubgraphProxies: node " + Twine(m->GetId()) +
+            "registerSubgraphs: node " + Twine(m->GetId()) +
             " appears as a member of more than one SubgraphInfo");
       }
     }
@@ -309,9 +311,9 @@ void CheckMembersDisjoint(
 } // anonymous namespace
 
 // Mutation step for one SubgraphInfo: emplace BOTH its start and
-// end proxy nodes, transfer SubgraphInfo ownership into the start
-// proxy (the end proxy holds a raw back-pointer), set
-// parent_subgraph_proxy on members and on the end proxy itself,
+// end proxy nodes (each holds a raw back-pointer to `info`, which is
+// owned by subgraph_infos_), set parent_subgraph_proxy on members and
+// on the end proxy itself,
 // and add four families of kSubgraphOrderEdge artificials:
 //   - ext_predecessor → start_proxy  (gates start on external preds)
 //   - start_proxy → member           (gates members on start being scheduled)
@@ -372,22 +374,48 @@ void ScheduleGraph::EmplaceProxyAndWireEdges(SubgraphInfo *info) {
   }
 }
 
+SmallVector<SubgraphInfo *> ScheduleGraph::registerSubgraphs(
+    std::vector<std::unique_ptr<SubgraphInfo>> infos) {
+  // Preconditions, shared by both installs and independent of proxies:
+  // members are scheduling units, not nested subgraphs
+  // (CheckNoNestedMembers), and disjoint across subgraphs
+  // (CheckMembersDisjoint).
+  CheckNoNestedMembers(infos);
+  CheckMembersDisjoint(infos);
+
+  subgraph_infos_.reserve(subgraph_infos_.size() + infos.size());
+  SmallVector<SubgraphInfo *> added;
+  added.reserve(infos.size());
+  for (auto &info_ptr : infos) {
+    // The subgraph_infos_ vector owns the info; everything else (proxies,
+    // members' parent pointers) back-references it by raw pointer, which
+    // stays valid for the graph's lifetime.
+    added.push_back(info_ptr.get());
+    subgraph_infos_.push_back(std::move(info_ptr));
+  }
+
+  // Sort by member count descending so consumers (telemetry, debug
+  // dumps) see the largest subgraphs first. The returned raw pointers
+  // stay valid across the sort — the SubgraphInfo objects don't move.
+  std::sort(subgraph_infos_.begin(), subgraph_infos_.end(),
+            [](const std::unique_ptr<SubgraphInfo> &a,
+               const std::unique_ptr<SubgraphInfo> &b) {
+              return a->members.size() > b->members.size();
+            });
+  return added;
+}
+
 void ScheduleGraph::InsertSubgraphProxies(
     std::vector<std::unique_ptr<SubgraphInfo>> infos) {
   if (infos.empty()) {
     return;
   }
 
-  CheckNoNestedMembers(infos);
-  CheckMembersDisjoint(infos);
-
-  subgraph_infos_.reserve(subgraph_infos_.size() + infos.size());
-  for (auto &info_ptr : infos) {
-    // Ownership moves into subgraph_infos_; the proxies (and members'
-    // parent pointers) back-reference the now-vector-owned info by raw
-    // pointer, which stays valid for the graph's lifetime.
-    SubgraphInfo *info = info_ptr.get();
-    subgraph_infos_.push_back(std::move(info_ptr));
+  // Register the subgraphs (ownership + preconditions; see
+  // registerSubgraphs), then emplace a start/end proxy pair per
+  // newly-added subgraph.
+  SmallVector<SubgraphInfo *> added = registerSubgraphs(std::move(infos));
+  for (SubgraphInfo *info : added) {
     EmplaceProxyAndWireEdges(info);
   }
 
@@ -399,18 +427,26 @@ void ScheduleGraph::InsertSubgraphProxies(
     node_reg_info_table_->EnsureSize(GetNumGraphLocalIds());
   }
 
-  // Sort by member count descending so consumers (telemetry, debug
-  // dumps) see the largest subgraphs first.
-  std::sort(subgraph_infos_.begin(), subgraph_infos_.end(),
-            [](const std::unique_ptr<SubgraphInfo> &a,
-               const std::unique_ptr<SubgraphInfo> &b) {
-              return a->members.size() > b->members.size();
-            });
-
-  // Topo recompute also re-runs cycle detection, our re-entrancy
-  // catch for the just-inserted subgraphs.
+  // Proxies added nodes + edges; re-derive topo order and critical
+  // paths. The topo recompute also re-runs cycle detection, our
+  // re-entrancy catch for the just-inserted subgraphs.
   ValidateAndComputeTopologicalOrder();
   ComputeCriticalPaths();
+}
+
+void ScheduleGraph::InstallSubgraphsFlat(
+    std::vector<std::unique_ptr<SubgraphInfo>> infos) {
+  if (infos.empty()) {
+    return;
+  }
+  // Register the subgraphs (ownership + preconditions, see
+  // registerSubgraphs) without emplacing proxies. Members stay ordinary
+  // nodes, so the graph's nodes and edges are unchanged — no
+  // topo/critical-path recompute is needed here. The chosen interiors
+  // are locked later by AddSubgraphOrderEdges (which does its own
+  // re-derive). Interleaving mode; see §8 of
+  // AMDGPUSubgraphSchedulingDesign.md.
+  registerSubgraphs(std::move(infos));
 }
 
 void ScheduleGraph::AddSubgraphOrderEdges() {

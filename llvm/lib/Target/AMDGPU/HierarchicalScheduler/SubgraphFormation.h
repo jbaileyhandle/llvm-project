@@ -30,6 +30,25 @@
 namespace llvm {
 namespace hierarchical_scheduler {
 
+/// How a formed subgraph's members relate to the surrounding schedule.
+/// Consumed by FormSubgraphs, which installs the formed subgraphs
+/// accordingly.
+///
+/// kSerialized: install proxies (InsertSubgraphProxies). The proxy
+/// scope push/pop in ScheduleConstructor forces the subgraph to be
+/// scheduled contiguously — once entered, nothing else runs until it is
+/// drained. With the AddSubgraphOrderEdges chain, the result is
+/// "members appear in schedule_result.order, contiguously."
+///
+/// kInterleaved: install without proxies (InstallSubgraphsFlat).
+/// Members stay as ordinary nodes; only the AddSubgraphOrderEdges chain
+/// fixes their internal order, so they may interleave with non-subgraph
+/// nodes. See §8 of AMDGPUSubgraphSchedulingDesign.md.
+enum class SubgraphScheduleMode {
+  kSerialized,
+  kInterleaved,
+};
+
 /// True if `node` has at least one outgoing latency-contributing
 /// edge whose latency exceeds `latency_threshold`. Such a node
 /// forces a multi-cycle bubble after it, so it acts as a natural
@@ -512,23 +531,23 @@ struct SubgraphFormationPolicy {
 ///      (single-splitter emit points are split per
 ///      policy.splitter_partition; multi/zero-splitter emit as-is;
 ///      singletons filtered).
-///   5. Hand ownership to the graph via InsertSubgraphProxies; the
-///      vector is moved and emptied.
+///   5. Install the subgraphs into the graph: InsertSubgraphProxies
+///      (kSerialized) or InstallSubgraphsFlat (kInterleaved). Either
+///      way the vector is moved and emptied.
 ///   6. Re-derive topo + critical-path so downstream consumers see
 ///      the post-mutation graph.
 ///
-/// Returns nothing: ownership of every SubgraphInfo transfers into
-/// the graph (specifically into each subgraph's start proxy node).
-/// The graph maintains a parallel raw-pointer list accessible via
-/// `ScheduleGraph::GetSubgraphInfos()` — use that for per-region
-/// telemetry or any consumer that needs to enumerate the formed
-/// subgraphs without walking proxy nodes.
+/// Returns nothing: ownership of every SubgraphInfo transfers into the
+/// graph's subgraph_infos_ vector, accessible via
+/// `ScheduleGraph::GetSubgraphInfos()` — use that to enumerate the
+/// formed subgraphs.
 ///
-/// No-op behavior if the pipeline doesn't emit any subgraphs:
-/// InsertSubgraphProxies short-circuits on an empty vector and the
-/// final re-derive runs to keep behavior uniform regardless.
+/// No-op behavior if the pipeline doesn't emit any subgraphs: the
+/// install short-circuits on an empty vector and the final re-derive
+/// runs to keep behavior uniform regardless.
 void FormSubgraphs(ScheduleGraph &graph,
-                   const SubgraphFormationPolicy &policy);
+                   const SubgraphFormationPolicy &policy,
+                   SubgraphScheduleMode mode = SubgraphScheduleMode::kSerialized);
 
 } // namespace hierarchical_scheduler
 } // namespace llvm

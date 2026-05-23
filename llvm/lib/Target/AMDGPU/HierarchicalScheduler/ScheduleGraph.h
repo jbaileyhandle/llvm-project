@@ -967,6 +967,18 @@ public:
   void InsertSubgraphProxies(
       std::vector<std::unique_ptr<SubgraphInfo>> infos);
 
+  /// Install subgraphs WITHOUT proxies (interleaving mode): take
+  /// ownership of `infos` into subgraph_infos_ and run the same
+  /// precondition checks (CheckNoNestedMembers, CheckMembersDisjoint) as
+  /// InsertSubgraphProxies, but emplace no proxy nodes and
+  /// reroute no edges. Members stay ordinary nodes, so the graph's
+  /// nodes/edges are unchanged and no topo/critical-path recompute is
+  /// needed here; their internal order is locked later by
+  /// AddSubgraphOrderEdges. No-op if `infos` is empty. See §8 of
+  /// AMDGPUSubgraphSchedulingDesign.md.
+  void InstallSubgraphsFlat(
+      std::vector<std::unique_ptr<SubgraphInfo>> infos);
+
   /// Lock each formed subgraph's chosen interior order into the graph
   /// structure. For every SubgraphInfo carrying a `schedule_result`
   /// (populated by ScheduleSubgraph), add a chain of kSubgraphOrderEdge
@@ -1409,6 +1421,15 @@ private:
   /// kSubgraphOrderEdge artificial edges. See implementation for the
   /// full step list.
   void EmplaceProxyAndWireEdges(SubgraphInfo *info);
+
+  /// Shared core of the two installs (InsertSubgraphProxies /
+  /// InstallSubgraphsFlat): run the precondition checks
+  /// (CheckNoNestedMembers, CheckMembersDisjoint), move each
+  /// SubgraphInfo into the owning subgraph_infos_ vector, and sort that
+  /// vector (largest first). Returns raw pointers to the newly-added
+  /// infos, in input order, so the proxy install can wire only those.
+  SmallVector<SubgraphInfo *> registerSubgraphs(
+      std::vector<std::unique_ptr<SubgraphInfo>> infos);
 
   // --- Construction helpers (used by BuildFromSUnits) ---
 

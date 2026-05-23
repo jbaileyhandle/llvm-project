@@ -4848,6 +4848,123 @@ void RunAddSubgraphOrderEdgesShakedown(const GCNSubtarget &st,
   }
 }
 
+// Exercises the interleaving install path (ScheduleGraph::InstallSubgraphsFlat
+// + AddSubgraphOrderEdges) — the SubgraphScheduleMode::kInterleaved
+// counterpart to RunAddSubgraphOrderEdgesShakedown. Same subgraph
+// S = {C, D, E, F} on BuildTestDAG with recorded interior order C, E, D, F,
+// but installed WITHOUT proxies. H (A→H→G) runs parallel to S.
+//
+// Drives the ScheduleConstructor *adversarially* (always the last ready
+// node), so the order-edge chain — not the picker — is what shapes the
+// result. Checks that:
+//   - members still emerge as C, E, D, F and never more than one member is
+//     ready at a time: the chain enforces the interior order even without
+//     proxies (drop the chain and the adversarial picker could reorder the
+//     independent D/E);
+//   - the free non-member H is ready *while the subgraph is mid-flight* (a
+//     member scheduled, not all drained): the interleaving signature, which
+//     the serialized proxy scope would forbid. H is deferred by the picker
+//     so it stays available to observe — its readiness is the constructor's
+//     doing, not ours.
+void RunInterleavedSubgraphShakedown(const GCNSubtarget &st,
+                                     const MachineFunction &mf) {
+  llvm::outs() << "  RunInterleavedSubgraphShakedown:\n";
+
+  auto check = [](StringRef desc, bool ok) {
+    llvm::outs() << "    " << desc << ": " << (ok ? "PASS" : "FAIL") << "\n";
+  };
+
+  // BuildTestDAG emplaces [A, C, D, E, F, G, H].
+  auto graph = ScheduleGraph::BuildTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  ScheduleNode *c = &graph->Nodes()[1];
+  ScheduleNode *d = &graph->Nodes()[2];
+  ScheduleNode *e = &graph->Nodes()[3];
+  ScheduleNode *f = &graph->Nodes()[4];
+  ScheduleNode *h = &graph->Nodes()[6];
+
+  // Install S = {C, D, E, F} WITHOUT proxies (interleaving mode), then lock
+  // the interior order C, E, D, F.
+  {
+    SmallVector<ScheduleNode *, 4> members = {c, d, e, f};
+    std::vector<std::unique_ptr<SubgraphInfo>> infos;
+    infos.push_back(std::make_unique<SubgraphInfo>(members, "S"));
+    graph->InstallSubgraphsFlat(std::move(infos));
+  }
+  SubgraphInfo *info = graph->GetSubgraphInfos()[0].get();
+  info->schedule_result = SubgraphScheduleResult{
+      /*order=*/{c, e, d, f},
+      /*peak_pressure=*/GCNRegPressure{},
+      /*termination_cause=*/SearchTerminationCause::kFullyExplored};
+  graph->AddSubgraphOrderEdges();
+
+  auto is_member = [&](const ScheduleNode *n) {
+    return n == c || n == d || n == e || n == f;
+  };
+
+  ScheduleConstructor sc(*graph, st, mf);
+  bool at_most_one_member_ready = true;
+  bool ready_always_nonempty = true;
+  bool nonmember_ready_mid_subgraph = false;
+  int members_scheduled = 0;
+  while (!sc.IsDone()) {
+    ArrayRef<const ScheduleNode *> ready = sc.GetReadyList();
+    if (ready.empty()) {
+      ready_always_nonempty = false;
+      break;
+    }
+    int members_ready = 0;
+    bool h_ready = false;
+    for (const ScheduleNode *n : ready) {
+      if (is_member(n)) {
+        ++members_ready;
+      } else if (n == h) {
+        h_ready = true;
+      }
+    }
+    if (members_ready > 1) {
+      at_most_one_member_ready = false;
+    }
+    // Mid-subgraph: a member scheduled, subgraph not yet drained. H offered
+    // here is the interleaving the serialized scope would forbid.
+    if (members_scheduled >= 1 && members_scheduled < 4 && h_ready) {
+      nonmember_ready_mid_subgraph = true;
+    }
+    // Adversarial pick: last ready node, but defer H so it stays available
+    // to observe mid-subgraph.
+    const ScheduleNode *pick = nullptr;
+    for (int i = static_cast<int>(ready.size()) - 1; i >= 0; --i) {
+      if (ready[i] != h) {
+        pick = ready[i];
+        break;
+      }
+    }
+    if (!pick) {
+      pick = h; // only H left (e.g. G still waits on H→G)
+    }
+    if (is_member(pick)) {
+      ++members_scheduled;
+    }
+    sc.Schedule(pick);
+  }
+
+  std::vector<const ScheduleNode *> member_order;
+  for (const ScheduleNode *n : sc.GetScheduleOrder()) {
+    if (is_member(n)) {
+      member_order.push_back(n);
+    }
+  }
+
+  check("order-edge chain forces members out as C, E, D, F (adversarial drive)",
+        member_order == std::vector<const ScheduleNode *>{c, e, d, f});
+  check("at most one member of S ready at any step",
+        at_most_one_member_ready);
+  check("free non-member H is ready mid-subgraph (interleaving permitted)",
+        nonmember_ready_mid_subgraph);
+  check("ready list never empty before the schedule completes",
+        ready_always_nonempty);
+}
+
 // Exercises the end-to-end DecomposeAndSchedule pipeline on the
 // subgraph-formation test DAG: drives FormSubgraphs through
 // AddSubgraphOrderEdges and the outer search in one call.
@@ -5060,6 +5177,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunBuildFromNodeSubsetShakedown(st, MF);
   RunScheduleSubgraphShakedown(st, MF);
   RunAddSubgraphOrderEdgesShakedown(st, MF);
+  RunInterleavedSubgraphShakedown(st, MF);
   RunDecomposeAndScheduleShakedown(st, MF);
   RunDecomposeAndScheduleFactoryShakedown(st, MF, *LIS);
   RunLengthLowerBoundShakedown(st);

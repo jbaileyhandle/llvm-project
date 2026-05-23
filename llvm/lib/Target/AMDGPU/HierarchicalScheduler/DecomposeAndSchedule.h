@@ -37,23 +37,6 @@ namespace hierarchical_scheduler {
 
 class ScheduleGraph;
 
-/// How a subgraph's members relate to the surrounding schedule.
-///
-/// kSerialized (the only supported value today): scope push/pop in
-/// ScheduleConstructor forces the subgraph to be scheduled
-/// contiguously — once entered, nothing else is scheduled until the
-/// subgraph is drained. Combined with the order-edge chain installed
-/// by AddSubgraphOrderEdges, the result is "members appear in
-/// schedule_result.order, contiguously."
-///
-/// kInterleaved (future, §8 of AMDGPUSubgraphSchedulingDesign.md):
-/// pre-scheduled subgraphs may interleave their members with other
-/// work; only the internal order is fixed. Requires dropping scope
-/// push/pop and relaxing proxy edges; not yet wired.
-enum class SubgraphScheduleMode {
-  kSerialized,
-};
-
 /// Options for one DecomposeAndSchedule invocation. Grouped as
 /// formation config (`formation`, `mode`) followed by the two search
 /// callables in pipeline order (`inner_search` runs in step 2,
@@ -73,8 +56,9 @@ struct DecomposeAndScheduleOptions {
   /// Consumed by FormSubgraphs in step 1.
   SubgraphFormationPolicy formation;
 
-  /// Subgraph scheduling mode. Must be kSerialized today; the driver
-  /// report_fatal_errors on any other value.
+  /// Subgraph scheduling mode (kSerialized or kInterleaved, defined in
+  /// SubgraphFormation.h). Passed to FormSubgraphs in step 1, which
+  /// installs the subgraphs accordingly.
   SubgraphScheduleMode mode;
 
   /// The step-2 inner search — handed straight to ScheduleSubgraph

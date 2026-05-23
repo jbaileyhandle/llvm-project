@@ -416,7 +416,8 @@ SubgraphFormationPolicy SubgraphFormationPolicy::MinCut() {
 // --- End-to-end driver (§7) ----------------------------------------------
 
 void FormSubgraphs(ScheduleGraph &graph,
-                   const SubgraphFormationPolicy &policy) {
+                   const SubgraphFormationPolicy &policy,
+                   SubgraphScheduleMode mode) {
   std::vector<std::unique_ptr<SubgraphInfo>> infos;
   if (policy.method == SubgraphFormationPolicy::Method::kMinCut) {
     // Acyclic min-cut of the data-dependency DAG (dagP). Needs none of the
@@ -466,11 +467,16 @@ void FormSubgraphs(ScheduleGraph &graph,
   // dependencies, not the proxied wiring.
   MaybeDumpSubgraphDag(graph, infos);
 
-  // 6. Mutate. InsertSubgraphProxies takes the vector by value and moves
-  // each unique_ptr into its start proxy node. No-op if `infos` is empty
-  // (and in that case the graph isn't mutated, so the re-derive below
-  // short-circuits).
-  graph.InsertSubgraphProxies(std::move(infos));
+  // 6. Install per mode. kSerialized inserts proxies (atomic/contiguous
+  // scheduling); kInterleaved registers the subgraphs without proxies so
+  // their members can interleave (their order is locked later by
+  // AddSubgraphOrderEdges). Both move `infos` and no-op on empty; for the
+  // flat install nothing is mutated, so the re-derive below short-circuits.
+  if (mode == SubgraphScheduleMode::kInterleaved) {
+    graph.InstallSubgraphsFlat(std::move(infos));
+  } else {
+    graph.InsertSubgraphProxies(std::move(infos));
+  }
 
   // 7. Re-derive topo + critical-paths so downstream consumers see the
   // post-mutation graph (proxies + artificial edges). Both calls

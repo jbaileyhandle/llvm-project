@@ -27,14 +27,9 @@ SearchResult DecomposeAndSchedule(
     const GCNSubtarget &st,
     const MachineFunction &mf,
     const DecomposeAndScheduleOptions &opts) {
-  if (opts.mode != SubgraphScheduleMode::kSerialized) {
-    report_fatal_error(
-        "DecomposeAndSchedule: only kSerialized mode is currently "
-        "supported");
-  }
-
-  // Step 1: form subgraphs (and insert their proxies).
-  FormSubgraphs(graph, opts.formation);
+  // Step 1: form subgraphs and install them per opts.mode (proxies for
+  // kSerialized, flat for kInterleaved).
+  FormSubgraphs(graph, opts.formation, opts.mode);
 
   // Step 2: schedule each formed subgraph in isolation. The functor
   // decides whether to run a leaf search or recurse.
