@@ -96,11 +96,9 @@ struct DecomposeAndScheduleOptions {
   /// from the integer occupancy value); it explores exhaustively
   /// within the 5s budget.
   ///
-  /// Both DFS fallbacks pass `form_subgraphs=false` because
-  /// formation has already happened (inner is on a leaf subgraph
-  /// extracted by ScheduleSubgraph; outer is on the proxied graph).
-  /// A formation pass at either stage would either no-op or
-  /// double-form.
+  /// Both DFS fallbacks run after formation has already happened (inner
+  /// on a leaf subgraph extracted by ScheduleSubgraph; outer on the
+  /// proxied graph).
   ///
   /// The returned options own their closures; `st`, `mf`, and `lis`
   /// are captured by reference and must outlive the options.

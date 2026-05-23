@@ -44,11 +44,9 @@ namespace hierarchical_scheduler {
 //   static bool ShouldEndSearch(
 //       const ScheduleConstructor &schedule_constructor,
 //       const ScheduleConstructor &best_schedule_constructor);
-//   static SubgraphFormationPolicy MakeFormationPolicy();
 //
-// MakeFormationPolicy and FilterAndSortReadyList are provided with
-// defaults by SearchPolicyBase (see SearchPolicies.h); concrete
-// policies override as needed.
+// FilterAndSortReadyList is provided with a default by SearchPolicyBase
+// (see SearchPolicies.h); concrete policies override as needed.
 //
 // FilterAndSortReadyList produces a per-Recurse snapshot in the
 // policy's iteration order. DfsSearch iterates that snapshot via
@@ -66,37 +64,26 @@ namespace hierarchical_scheduler {
 template <typename Policy>
 class DfsSearch {
  public:
-  // form_subgraphs gates whether Policy::MakeFormationPolicy() is
-  // invoked at construction. Default true (run formation when the
-  // policy declares one). Pass false to suppress formation per-call
-  // even when the policy supports it — useful for diagnostics that
-  // want to compare with-vs-without on the same region.
-  //
   // timeout_ms is the per-region wall-clock budget; nullopt disables
   // the timeout entirely (used by shakedown oracles that need
   // exhaustive search). Default 10000 (10s). Pass explicitly when a
   // different budget is wanted (DecomposeAndScheduleOptions::
   // BfsDpWithDfsFallback uses 1s for the inner DFS fallback to
   // match the inner BFS-DP budget).
+  //
+  // Subgraph formation is not the search's concern: the pass forms (per
+  // its configured strategy) before constructing the search, which then
+  // runs over the already-formed graph.
   DfsSearch(ScheduleGraph &graph, const GCNSubtarget &st,
             const MachineFunction &mf, const LiveIntervals &lis,
-            bool form_subgraphs = true,
             std::optional<int64_t> timeout_ms = std::optional<int64_t>(10000))
-      // MaybeFormSubgraphs runs formation as a side effect (when
-      // form_subgraphs is true and Policy declares a non-empty
-      // formation policy) and returns the same graph reference. C++
-      // initializer-list ordering is by member declaration order:
-      // working_schedule_constructor_ is initialized first (its
-      // initializer below runs the side-effecting helper), then
       // best_schedule_constructor_ reads graph.GetInputScheduleConstructor()
-      // — which is the PRE-formation input snapshot captured in
-      // BuildFromSUnits Phase 4 and never re-derived, so it remains
-      // a valid (unconstrained) baseline for the search to beat.
+      // — the input snapshot captured in BuildFromSUnits Phase 4 and never
+      // re-derived, so it stays a valid (unconstrained) baseline to beat.
       : mf_(&mf),
         lis_(&lis),
         timeout_ms_(timeout_ms),
-        working_schedule_constructor_(
-            MaybeFormSubgraphs(graph, form_subgraphs), st, mf),
+        working_schedule_constructor_(graph, st, mf),
         best_schedule_constructor_(graph.GetInputScheduleConstructor()),
         // length_history_ binds to working_'s trackers. Constructed
         // unconditionally; queried only when Policy::
@@ -345,30 +332,6 @@ class DfsSearch {
   }
 
  private:
-  // Helper called from the member initializer list. Runs subgraph
-  // formation as a side effect (when form_subgraphs is true and
-  // Policy declares a non-empty formation policy), then returns the
-  // same graph reference passed in.
-  //
-  // The return is a sequencing tool, not a value carrier. Putting
-  // the call in the initializer expression for
-  // working_schedule_constructor_ guarantees the side effect
-  // completes BEFORE working_schedule_constructor_'s ctor reads
-  // the graph — which is what we need for working to see the
-  // post-formation graph state. Running formation in the ctor body
-  // would be too late (member init runs first).
-  //
-  // FormSubgraphs early-returns on an empty pipeline, so the
-  // SearchPolicyBase default (no formation) costs one bool check
-  // and one function call per construction.
-  static ScheduleGraph &MaybeFormSubgraphs(ScheduleGraph &graph,
-                                           bool form_subgraphs) {
-    if (form_subgraphs) {
-      FormSubgraphs(graph, Policy::MakeFormationPolicy());
-    }
-    return graph;
-  }
-
   // Re-derive working's per-node max-schedule-cycle table from
   // the current iteration target and best-schedule length. The
   // effective bound is min(requested_target_length_,

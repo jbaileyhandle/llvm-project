@@ -89,9 +89,8 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
 
   // Inner: continuous occupancy score, no seed. DFS fallback uses
   // the same continuous-metric policy (DfsMaximizeOccupancyPolicy).
-  // Both pass form_subgraphs=false: we're already inside a subgraph
-  // extracted by ScheduleSubgraph, and nested formation isn't wired
-  // yet (see §3.4 of AMDGPUSubgraphSchedulingDesign.md).
+  // Both run on the already-extracted subgraph: we're inside a subgraph
+  // extracted by ScheduleSubgraph, and nested formation isn't wired yet.
   opts.inner_search = [&st, &mf, &lis](ScheduleGraph &sub) -> SearchResult {
     BfsDpSettings settings;
     settings.metric = ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
@@ -104,7 +103,7 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     // BFS-DP returned no schedule — fall back to DFS at the same
     // budget and metric.
     DfsSearch<DfsMaximizeOccupancyPolicy> dfs(
-        sub, st, mf, lis, /*form_subgraphs=*/false,
+        sub, st, mf, lis,
         /*timeout_ms=*/kBfsDpWithDfsFallbackTimeoutMs);
     return dfs.Run();
   };
@@ -125,12 +124,10 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     if (result.schedule.has_value()) {
       return result;
     }
-    // BFS-DP returned no schedule — fall back to DFS. See inner's
-    // comment for the form_subgraphs=false rationale; here the graph
-    // is the proxied + chained one DecomposeAndSchedule has already
-    // formed, so re-forming would double-form.
+    // BFS-DP returned no schedule — fall back to DFS over the proxied +
+    // chained graph DecomposeAndSchedule has already formed.
     DfsSearch<DfsMaximizeIntegerOccupancyPolicy> dfs(
-        g, st, mf, lis, /*form_subgraphs=*/false,
+        g, st, mf, lis,
         /*timeout_ms=*/kBfsDpWithDfsFallbackTimeoutMs);
     return dfs.Run();
   };

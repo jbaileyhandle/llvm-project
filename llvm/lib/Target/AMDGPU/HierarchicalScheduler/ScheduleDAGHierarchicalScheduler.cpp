@@ -533,9 +533,7 @@ static SearchResult RunOccupancyRegionWithDfs(
     ScheduleGraph &graph, const GCNSubtarget &st,
     const MachineFunction &mf, const LiveIntervals &lis,
     const ScheduleConstructor &input_schedule_constructor) {
-  DfsSearch<DfsMaximizeOccupancyPolicy> search(
-      graph, st, mf, lis,
-      /*form_subgraphs=*/false);
+  DfsSearch<DfsMaximizeOccupancyPolicy> search(graph, st, mf, lis);
   SearchResult result = search.Run();
   // DFS always populates schedule (best is seeded with input).
   bool changed = input_schedule_constructor.GetScheduleOrder() !=
@@ -820,13 +818,10 @@ static void RunIterativeLengthMinPhase(
   const int input_length =
       input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
 
-  // form_subgraphs=false: the orchestrator
-  // (RunMinimizeLengthForRegionWithPolicy) ran formation once for
-  // the whole region before either phase started. Re-running here
-  // would treat the existing subgraph proxies as nested-subgraph
-  // candidates and fatal.
-  DfsSearch<Policy> iter_search(graph, st, mf, lis,
-                                /*form_subgraphs=*/false);
+  // Runs over the already-formed graph: formation happened once for the
+  // whole region (in ScheduleRegionForLengthPass) before either phase
+  // started; the searches never form.
+  DfsSearch<Policy> iter_search(graph, st, mf, lis);
 
   // Default outcome before any iteration runs:
   //   - "input_optimal" when the loop range is empty (input_length
@@ -905,10 +900,9 @@ static void RunPlainLengthMinPhase(
     const ScheduleConstructor &input_schedule_constructor,
     ScheduleConstructor &best_schedule_constructor,
     bool &any_timed_out) {
-  // form_subgraphs=false: see RunIterativeLengthMinPhase comment.
-  // Formation is a once-per-region mutation done by the orchestrator.
-  DfsSearch<Policy> plain_search(graph, st, mf, lis,
-                                 /*form_subgraphs=*/false);
+  // Runs over the already-formed graph (formation done once per region
+  // by ScheduleRegionForLengthPass).
+  DfsSearch<Policy> plain_search(graph, st, mf, lis);
   int plain_target =
       best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
   plain_search.ResetForReuse(plain_target);
@@ -950,8 +944,7 @@ static void RunMinimizeLengthForRegionWithPolicy(
     bool &any_timed_out) {
   // Subgraph formation already happened once for this region in
   // ScheduleRegionForLengthPass (per the configured strategy); both
-  // phases below construct their DfsSearches with form_subgraphs=false
-  // and run over that formed graph.
+  // phases below run over that formed graph.
 
   // input: block shared by both phases — printed once per region
   // at indent level 2 (\t\t), directly under the region heading.
@@ -976,8 +969,8 @@ static void RunMinimizeLengthForRegionWithPolicy(
 // only (ShouldEndSearch is unconditionally false for length-max).
 //
 // Subgraph formation already happened once for this region in
-// ScheduleRegionForLengthPass; this worker runs over the formed graph
-// with form_subgraphs=false, like the length-min worker.
+// ScheduleRegionForLengthPass; this worker runs over the formed graph,
+// like the length-min worker.
 static void RunMaximizeLengthForRegion(
     ScheduleGraph &graph, const GCNSubtarget &st,
     const MachineFunction &mf, const LiveIntervals &lis,
@@ -986,10 +979,9 @@ static void RunMaximizeLengthForRegion(
     bool &any_timed_out) {
   PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
 
-  // form_subgraphs=false: see comment in RunIterativeLengthMinPhase
-  // — formation, if any, is a once-per-region mutation done above.
-  DfsSearch<DfsMaximizeLengthPolicy> plain_search(graph, st, mf, lis,
-                                                  /*form_subgraphs=*/false);
+  // Runs over the already-formed graph (formation done once per region
+  // above).
+  DfsSearch<DfsMaximizeLengthPolicy> plain_search(graph, st, mf, lis);
   // Don't call ResetForReuse — the default requested_target_length_
   // (INT_MAX) is the right value for length-max (no upper bound on
   // achievable length, beyond what dominance + timeout enforce).
@@ -1042,8 +1034,8 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForLengthPass(
 
     // Form per the length pass's configured strategy (a no-op for kNone),
     // once per region before the policy search. The DfsSearches in the
-    // workers below run over this formed graph (form_subgraphs=false).
-    // Length is DFS-only (BFS-DP is occupancy-only).
+    // workers below run over this formed graph. Length is DFS-only
+    // (BFS-DP is occupancy-only).
     const FormationConfig &subgraph_formation =
         HierarchicalConfig::Get().length.formation;
     FormSubgraphs(

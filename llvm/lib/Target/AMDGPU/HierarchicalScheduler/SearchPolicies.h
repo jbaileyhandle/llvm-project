@@ -22,19 +22,11 @@ namespace hierarchical_scheduler {
 
 class ScheduleNode;
 
-// Common defaults for all search policies. Currently just provides a
-// "no formation" default that derived policies can override when they
-// want subgraph formation applied to the graph before search. Static
-// methods are inherited (not virtual): if a derived class doesn't
-// declare its own MakeFormationPolicy, lookup finds the base's
-// version and DfsSearch sees an empty SubgraphFormationPolicy → the
-// formation step is a one-call no-op (FormSubgraphs early-returns on
-// an empty pipeline).
+// Common defaults for all search policies (e.g. FilterAndSortReadyList).
+// Static methods are inherited (not virtual): a derived policy that
+// doesn't override one gets the base's version.
 class SearchPolicyBase {
  public:
-  // Default: no formation. Override in a derived policy to opt in.
-  static SubgraphFormationPolicy MakeFormationPolicy() { return {}; }
-
   // Per-Recurse iteration shape and order. DfsSearch calls this
   // once at each Recurse() entry and iterates the resulting vector
   // via ScheduleConstructor::Schedule(node) — so a policy can:
@@ -193,15 +185,6 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);
 
-  // Override SearchPolicyBase: length-min wants top-down
-  // single-splitter formation with descendants + independents
-  // bundled. The bracketing tightens the length-LB bound (subgraph
-  // members can't drift apart to fill unrelated bubbles), reducing
-  // branching during DFS.
-  static SubgraphFormationPolicy MakeFormationPolicy() {
-    return SubgraphFormationPolicy::TopDownSingleSplitterOnly();
-  }
-
   // Override SearchPolicyBase: enable length history-domination
   // pruning. DFS records each visited prefix's (end_cycle,
   // frontier-LBs) in a per-partition Pareto frontier; on a later
@@ -298,12 +281,6 @@ class DfsMinimizeLengthRefineIlpPolicy
 //     maintain a length upper bound (see above), so there's no
 //     cheap "we hit the optimum" early-exit. Termination is wall-
 //     clock budget only.
-//   - No MakeFormationPolicy override — subgraph formation is
-//     skipped for this policy (the base class default returns an
-//     empty SubgraphFormationPolicy, which makes FormSubgraphs
-//     early-return). Length-max isn't trying to keep consumer-
-//     side pressure local; it benefits from the flat DAG so the
-//     search can spread instructions out arbitrarily.
 //   - FilterAndSortReadyList overridden: primary key is the
 //     largest effective_min_schedule_cycle (= earliest_issue_cycle)
 //     among ready candidates. Picking that one advances
@@ -421,16 +398,6 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
   static bool ShouldEndSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);
-
-  // Override SearchPolicyBase: occupancy-max also takes the
-  // TopDownSingleSplitterOnly minimal pipeline. The bracketing
-  // groups the splitter's downstream slice into a contiguous
-  // schedule region, which keeps consumer-side pressure peaks
-  // local instead of letting unrelated work spread peaks across
-  // the region.
-  static SubgraphFormationPolicy MakeFormationPolicy() {
-    return SubgraphFormationPolicy::TopDownSingleSplitterOnly();
-  }
 
   // Override SearchPolicyBase: enable pressure history-domination
   // pruning. See PressureHistoryTracker.

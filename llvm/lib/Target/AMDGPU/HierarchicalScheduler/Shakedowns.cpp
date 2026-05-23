@@ -2908,8 +2908,8 @@ class TestLengthPolicyNoBoundsWithHistory : public DfsMinimizeLengthPolicy {
 //     skips at least one child Schedule call that the no-history
 //     version takes).
 //
-// Skips subgraph formation on both runs (form_subgraphs=false) so
-// the comparison stays stable across formation-policy changes.
+// Neither run forms subgraphs, so the comparison stays stable across
+// formation-policy changes.
 void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
                                             const MachineFunction &mf,
                                             const LiveIntervals &lis) {
@@ -2921,7 +2921,7 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
 
   DfsSearch<TestLengthPolicyNoBoundsNoHistory> no_hist_search(
-      *graph, st, mf, lis, /*form_subgraphs=*/false);
+      *graph, st, mf, lis);
   ScheduleConstructor no_hist_best =
       std::move(*no_hist_search.Run().schedule);
   int no_hist_length =
@@ -2929,7 +2929,7 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   int64_t no_hist_calls = no_hist_search.ScheduleCallCount().lifetime;
 
   DfsSearch<TestLengthPolicyNoBoundsWithHistory> hist_search(
-      *graph, st, mf, lis, /*form_subgraphs=*/false);
+      *graph, st, mf, lis);
   ScheduleConstructor hist_best = std::move(*hist_search.Run().schedule);
   int hist_length = hist_best.GetLengthTracker().GetCurrentCycle();
   int64_t hist_calls = hist_search.ScheduleCallCount().lifetime;
@@ -3060,7 +3060,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   std::vector<int> vgpr_deltas = {+1, +1, +1, -1, -1, -1};
 
   DfsSearch<TestPressurePolicyNoBoundsNoHistory> no_hist_search(
-      *graph, st, mf, lis, /*form_subgraphs=*/false);
+      *graph, st, mf, lis);
   no_hist_search.EnableTestModeForTest(vgpr_deltas);
   ScheduleConstructor no_hist_best =
       std::move(*no_hist_search.Run().schedule);
@@ -3069,7 +3069,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
       no_hist_best.GetPressureTracker().GetMetricScore(kPolicyMetric);
 
   DfsSearch<TestPressurePolicyNoBoundsWithHistory> hist_search(
-      *graph, st, mf, lis, /*form_subgraphs=*/false);
+      *graph, st, mf, lis);
   hist_search.EnableTestModeForTest(vgpr_deltas);
   ScheduleConstructor hist_best = std::move(*hist_search.Run().schedule);
   int64_t hist_calls = hist_search.ScheduleCallCount().lifetime;
@@ -3191,7 +3191,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   // (see BfsDpVsDfsShakedownOraclePolicy). Pruning stays on; it's
   // sound, so this finds the global optimum.
   DfsSearch<BfsDpVsDfsShakedownOraclePolicy> dfs_search(
-      graph, st, mf, lis, /*form_subgraphs=*/false,
+      graph, st, mf, lis,
       /*timeout_ms=*/std::nullopt);
   dfs_search.EnableTestModeForTest(vgpr_deltas);
   ScheduleConstructor dfs_best = std::move(*dfs_search.Run().schedule);
@@ -3212,7 +3212,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
 
   // DFS variant with history pruning off — isolates score-bound prune.
   DfsSearch<BfsDpVsDfsShakedownOracleNoHistoryPolicy> dfs_no_history(
-      graph, st, mf, lis, /*form_subgraphs=*/false,
+      graph, st, mf, lis,
       /*timeout_ms=*/std::nullopt);
   dfs_no_history.EnableTestModeForTest(vgpr_deltas);
   dfs_no_history.Run();
