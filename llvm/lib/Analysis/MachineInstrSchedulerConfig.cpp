@@ -223,6 +223,21 @@ void MachineInstrSchedulerConfig::ParseScopedSetting(const std::string &token) {
 
 
 MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
+    // TODO(jbaile): rewrite this parser to the §6 line grammar in
+    // docs/AMDGPUSchedulerConfigDesign.md (deferred). Today the whole
+    // scheduler config is crammed on line 1 ("<Scheduler> tok tok ...")
+    // with kernel lines after. Target: fully line-oriented and
+    // order-independent —
+    //   scheduler = <name>            (replaces the bare line-1 name)
+    //   <scope>.<key> = <value>       (scoped; allow spaces around '=')
+    //   <flag>                        (bare global boolean)
+    //   <key> = <value>               (dotless top-level, e.g. preset)
+    //   kernel m|d/<sig>/ key=val ... (per-kernel; keyword-prefixed,
+    //                                  waves_per_eu as a key)
+    //   # comments + blank lines anywhere.
+    // Clean cutover (no back-compat). Regression set to keep passing:
+    // MaxOccupancy; AcoOptSched + RunOnAllFunctions; BnbOptSched +
+    // UseContinuousOccupancyScore; HierarchicalScheduler + scoped keys.
     std::ifstream misched_config_file("misched.txt");
     if(misched_config_file) {
         has_config_ = true;
