@@ -155,22 +155,8 @@ MachineInstrSchedulerConfig::SchedulerOption MachineInstrSchedulerConfig::GetSch
         .Case("RunOnAllFunctions", SchedulerOption::RunOnAllFunctions)
         .Case("RunRegardlessOfHeurisitcOutcome", SchedulerOption::RunRegardlessOfHeurisitcOutcome)
         .Case("UseContinuousOccupancyScore", SchedulerOption::UseContinuousOccupancyScore)
-        .Case("MaliciousScheduler", SchedulerOption::MaliciousScheduler)
-        .Case("RunShakedowns", SchedulerOption::RunShakedowns)
-        .Case("LengthMinRefineIlp", SchedulerOption::LengthMinRefineIlp)
-        .Case("LengthMinRefineOccupancy",
-              SchedulerOption::LengthMinRefineOccupancy)
         .Case("UseJbaileCustomTimingModel",
               SchedulerOption::UseJbaileCustomTimingModel)
-        .Case("SkipSubgraphFormation",
-              SchedulerOption::SkipSubgraphFormation)
-        .Case("ScaleEdgeLatenciesByTargetOccupancy",
-              SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy)
-        .Case("MaximizeLength", SchedulerOption::MaximizeLength)
-        .Case("BfsDpForOccupancy", SchedulerOption::BfsDpForOccupancy)
-        .Case("DecomposeForOccupancy", SchedulerOption::DecomposeForOccupancy)
-        .Case("DumpSubgraphDag", SchedulerOption::DumpSubgraphDag)
-        .Case("MinCutFormation", SchedulerOption::MinCutFormation)
         .Default(SchedulerOption::InvalidOption);
 
     if (option == SchedulerOption::InvalidOption) {
@@ -190,19 +176,6 @@ bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption opti
     case SchedulerOption::RunRegardlessOfHeurisitcOutcome:
     case SchedulerOption::UseContinuousOccupancyScore:
         return (scheduler == Scheduler::AcoOptSched || scheduler == Scheduler::BnbOptSched);
-    // HierarchicalScheduler-specific
-    case SchedulerOption::MaliciousScheduler:
-    case SchedulerOption::RunShakedowns:
-    case SchedulerOption::LengthMinRefineIlp:
-    case SchedulerOption::LengthMinRefineOccupancy:
-    case SchedulerOption::SkipSubgraphFormation:
-    case SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy:
-    case SchedulerOption::MaximizeLength:
-    case SchedulerOption::BfsDpForOccupancy:
-    case SchedulerOption::DecomposeForOccupancy:
-    case SchedulerOption::DumpSubgraphDag:
-    case SchedulerOption::MinCutFormation:
-        return (scheduler == Scheduler::HierarchicalScheduler);
     default:
         return false;
     }
@@ -223,38 +196,6 @@ void MachineInstrSchedulerConfig::InitSchedulerOptions(const std::vector<std::st
                 "' is not valid for scheduler '" + llvm::StringRef(GetSchedulerAsString()) + "'");
         }
         options_.insert(option);
-    }
-
-    // Cross-option mutex checks. DecomposeForOccupancy is the new
-    // factory-driven occupancy-pass path; it conflicts with the other
-    // options that also configure that pass (BfsDpForOccupancy, which
-    // picks a different occupancy strategy; SkipSubgraphFormation,
-    // which would degenerate the factory's pipeline by killing its
-    // formation step).
-    bool decompose = options_.count(SchedulerOption::DecomposeForOccupancy);
-    bool bfs = options_.count(SchedulerOption::BfsDpForOccupancy);
-    bool skip_form = options_.count(SchedulerOption::SkipSubgraphFormation);
-    if (decompose && bfs) {
-        llvm::report_fatal_error(
-            "Options 'DecomposeForOccupancy' and 'BfsDpForOccupancy' "
-            "are mutually exclusive: both configure the occupancy "
-            "pass's search strategy");
-    }
-    if (decompose && skip_form) {
-        llvm::report_fatal_error(
-            "Options 'DecomposeForOccupancy' and 'SkipSubgraphFormation' "
-            "are mutually exclusive: the factory pipeline relies on "
-            "subgraph formation");
-    }
-
-    // MinCutFormation selects min-cut subgraph formation for the
-    // DecomposeAndSchedule path; it can't coexist with skipping formation.
-    bool min_cut = options_.count(SchedulerOption::MinCutFormation);
-    if (min_cut && skip_form) {
-        llvm::report_fatal_error(
-            "Options 'MinCutFormation' and 'SkipSubgraphFormation' are "
-            "mutually exclusive: one forms subgraphs by min-cut, the other "
-            "skips formation");
     }
 }
 

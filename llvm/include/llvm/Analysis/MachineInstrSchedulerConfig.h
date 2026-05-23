@@ -33,75 +33,12 @@ class MachineInstrSchedulerConfig {
             RunOnAllFunctions,
             RunRegardlessOfHeurisitcOutcome,
             UseContinuousOccupancyScore,
-            // HierarchicalScheduler-specific
-            MaliciousScheduler,
-            RunShakedowns,
-            // Length-min policy selectors for HierarchicalScheduler.
-            // When neither is set, length-min runs with the plain
-            // DfsMinimizeLengthPolicy (kNone).
-            LengthMinRefineIlp,
-            LengthMinRefineOccupancy,
-            // HierarchicalScheduler: replace the length-min pass
-            // with a length-MAX pass (DfsMaximizeLengthPolicy).
-            // Useful as a control / worst-legal-schedule baseline
-            // for comparing against the length-min objective. Still
-            // subject to the occupancy floor enforced by the
-            // earlier occupancy pass. Mutually exclusive with the
-            // LengthMin* refine options.
-            MaximizeLength,
             // Generic: swap the AMDGPU subtarget's MCSchedModel to
             // jbaile's custom gfx906 model. Affects every consumer of
             // sched-model latency (LLVM's MachineScheduler,
             // OptSched, HierarchicalScheduler, register-pressure
             // analyses, etc.). Valid for any scheduler.
             UseJbaileCustomTimingModel,
-            // HierarchicalScheduler: skip subgraph formation in both
-            // the occupancy and length passes. DFS searches operate
-            // on the flat (un-formed) graph. Useful for isolating
-            // the cost/effect of formation when iterating on policy
-            // changes or comparing schedulers.
-            SkipSubgraphFormation,
-            // HierarchicalScheduler: divide every SDep latency by the
-            // function's current target occupancy (MFI->getOccupancy)
-            // when building the schedule graph, using
-            // ceil(latency/divisor) with a floor of 1. Models the
-            // fact that other waves on the same SIMD cover most of
-            // the memory latency at runtime, so the wave-visible
-            // latency of a long-latency op is ~ raw / occupancy.
-            // Quick first-pass approximation of the occupancy-aware
-            // latency idea — applies to ALL edges, not just memory.
-            ScaleEdgeLatenciesByTargetOccupancy,
-            // HierarchicalScheduler: in the occupancy-maximization
-            // pass, schedule every region with the BFS / dynamic-
-            // programming partition search (BfsDpSearch) instead of
-            // the default DFS occupancy search.
-            BfsDpForOccupancy,
-            // HierarchicalScheduler: in the occupancy-maximization
-            // pass, run the full DecomposeAndSchedule pipeline with
-            // the BfsDpWithDfsFallback preset — form subgraphs,
-            // schedule each in isolation (BFS-DP continuous, DFS
-            // fallback at matching metric), lock with order edges,
-            // then run the outer search (BFS-DP integer seeded with
-            // the region's original occupancy, DFS fallback at the
-            // matching integer-metric policy). Only affects the
-            // occupancy pass; the length pass is unchanged. Mutually
-            // exclusive with BfsDpForOccupancy and
-            // SkipSubgraphFormation.
-            DecomposeForOccupancy,
-            // HierarchicalScheduler: after subgraph formation, dump
-            // each region's DAG (nodes, edges, subgraph membership) to
-            // a Cytoscape.js JSON file under ./subgraph_dags/ for
-            // offline visualization. Observational only — does not
-            // change scheduling. See
-            // HierarchicalScheduler/viz/subgraph_dag_viewer.html.
-            DumpSubgraphDag,
-            // HierarchicalScheduler: in the DecomposeAndSchedule path (i.e.
-            // with DecomposeForOccupancy), form subgraphs by acyclic min-cut
-            // of the data-dependency DAG (via the dagP partitioner) instead of
-            // the dom-tree pipeline. No effect unless that path runs. Mutually
-            // exclusive with SkipSubgraphFormation. See
-            // HierarchicalScheduler/MinCutFormation.{h,cpp}.
-            MinCutFormation,
             // Sentinel
             InvalidOption
         };
@@ -247,19 +184,7 @@ class MachineInstrSchedulerConfig {
             {SchedulerOption::RunOnAllFunctions, "RunOnAllFunctions"},
             {SchedulerOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"},
             {SchedulerOption::UseContinuousOccupancyScore, "UseContinuousOccupancyScore"},
-            {SchedulerOption::MaliciousScheduler, "MaliciousScheduler"},
-            {SchedulerOption::RunShakedowns, "RunShakedowns"},
-            {SchedulerOption::LengthMinRefineIlp, "LengthMinRefineIlp"},
-            {SchedulerOption::LengthMinRefineOccupancy, "LengthMinRefineOccupancy"},
-            {SchedulerOption::MaximizeLength, "MaximizeLength"},
-            {SchedulerOption::UseJbaileCustomTimingModel, "UseJbaileCustomTimingModel"},
-            {SchedulerOption::SkipSubgraphFormation, "SkipSubgraphFormation"},
-            {SchedulerOption::ScaleEdgeLatenciesByTargetOccupancy,
-             "ScaleEdgeLatenciesByTargetOccupancy"},
-            {SchedulerOption::BfsDpForOccupancy, "BfsDpForOccupancy"},
-            {SchedulerOption::DecomposeForOccupancy, "DecomposeForOccupancy"},
-            {SchedulerOption::DumpSubgraphDag, "DumpSubgraphDag"},
-            {SchedulerOption::MinCutFormation, "MinCutFormation"}
+            {SchedulerOption::UseJbaileCustomTimingModel, "UseJbaileCustomTimingModel"}
         };
 
 

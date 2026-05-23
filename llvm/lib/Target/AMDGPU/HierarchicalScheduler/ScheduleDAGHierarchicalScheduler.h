@@ -123,8 +123,8 @@ public:
   // so MFI->getOccupancy() already reflects the kernel-wide ceiling
   // — the per-region DFS's occupancy-drop bound prevents the length
   // search from degrading occupancy. Direction (minimize vs maximize
-  // length) is resolved from misched.txt: default is minimize;
-  // SchedulerOption::MaximizeLength flips to maximize.
+  // length) is resolved from the typed config: default is minimize;
+  // length.policy = max (LengthPolicy::kMax) flips to maximize.
   void RunLengthPass();
 
   // Aggregate stats returned by ScheduleRegionForLengthPass. Used by
