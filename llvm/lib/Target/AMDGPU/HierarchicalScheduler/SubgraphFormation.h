@@ -49,6 +49,24 @@ enum class SubgraphScheduleMode {
   kInterleaved,
 };
 
+/// Which strategy carves a region into subgraphs. The single formation
+/// enum, shared by both the per-pass config (HierarchicalConfig) and the
+/// `strategy` selector of SubgraphFormationPolicy below.
+///   kNone    - don't form; a single flat search over the region.
+///   kDomTree - the dominator-tree formation pipeline.
+///   kMinCut  - acyclic min-cut of the data-dependency DAG (dagP).
+enum class SubgraphFormationStrategy { kNone, kDomTree, kMinCut };
+
+/// The inputs to subgraph formation, bundled: which strategy, how the
+/// formed subgraphs install (mode), and the min-cut settings (used only by
+/// kMinCut). Each pass's config (HierarchicalConfig) embeds one; form with
+/// FormSubgraphs(graph, FromStrategy(fc.strategy, fc.min_cut), fc.mode).
+struct FormationConfig {
+  SubgraphFormationStrategy strategy = SubgraphFormationStrategy::kNone;
+  SubgraphScheduleMode mode = SubgraphScheduleMode::kSerialized;
+  MinCutSettings min_cut; // ratio + target_size; used only by kMinCut
+};
+
 /// True if `node` has at least one outgoing latency-contributing
 /// edge whose latency exceeds `latency_threshold`. Such a node
 /// forces a multi-cycle bubble after it, so it acts as a natural
@@ -461,17 +479,17 @@ struct SubgraphFormationPipeline {
 /// TopDownAggressive) build the canonical configurations; callers
 /// can mutate the returned struct to tweak.
 struct SubgraphFormationPolicy {
-  /// Which formation mechanism this policy selects. kDominatorPipeline
-  /// (the default) runs the dom-tree `pipeline` below. kMinCut instead
+  /// Which strategy this policy selects (the shared SubgraphFormationStrategy
+  /// enum). kDomTree runs the dom-tree `pipeline` below. kMinCut instead
   /// partitions the data-dependency DAG by acyclic min-cut (see
   /// MinCutFormation.{h,cpp}) and ignores every dom-tree field below
   /// (latency_threshold, large_subtree_threshold, sibling_rescue_min_size,
-  /// splitter_partition, pipeline).
-  enum class Method { kDominatorPipeline, kMinCut };
-  Method method = Method::kDominatorPipeline;
+  /// splitter_partition, pipeline). kNone forms nothing (the default, a
+  /// no-op policy). Build one for a given strategy with For() below.
+  SubgraphFormationStrategy strategy = SubgraphFormationStrategy::kNone;
 
-  /// Settings for the kMinCut method (ignored when method is
-  /// kDominatorPipeline). Populated by MinCut().
+  /// Settings for the kMinCut strategy (ignored unless strategy ==
+  /// kMinCut). Populated by MinCut() / FromStrategy().
   MinCutSettings min_cut;
 
   /// Latency threshold for IsSubgraphSplitter. Default 32 cycles
@@ -513,9 +531,17 @@ struct SubgraphFormationPolicy {
   static SubgraphFormationPolicy TopDownSingleSplitterOnly();
 
   /// MinCut: form subgraphs by acyclic min-cut of the data-dependency
-  /// DAG via the external dagP partitioner. Sets method = kMinCut; the
+  /// DAG via the external dagP partitioner. Sets strategy = kMinCut; the
   /// dom-tree fields and pipeline are unused. See MinCutFormation.{h,cpp}.
   static SubgraphFormationPolicy MinCut();
+
+  /// Realize the canonical policy for a strategy: kNone -> the empty no-op
+  /// policy, kDomTree -> TopDownSingleSplitterOnly, kMinCut -> MinCut() with
+  /// `min_cut`. The single place that turns the strategy enum (+ params)
+  /// into a full policy; `min_cut` is ignored for kNone/kDomTree.
+  static SubgraphFormationPolicy
+  FromStrategy(SubgraphFormationStrategy strategy,
+               const MinCutSettings &min_cut = {});
 };
 
 /// Top-level entry point for subgraph formation. Runs on a freshly

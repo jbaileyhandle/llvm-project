@@ -28,7 +28,7 @@ struct MinCutSettings {
   /// imbalance_ratio * (total_weight / k), i.e. how far a part may exceed the
   /// even share. 1.0 forces even sizes; higher lets dagP trade balance for a
   /// smaller data-edge cut. 1.5 is a middle ground.
-  double imbalance_ratio = 1.5;
+  float imbalance_ratio = 1.5f;
   /// dagP RNG seed. A fixed nonzero value gives reproducible partitions
   /// (dagP treats seed 0 as "seed from time()").
   int seed = 1;

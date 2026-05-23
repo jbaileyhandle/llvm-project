@@ -50,38 +50,6 @@ NextIfDebug(MachineBasicBlock::iterator I,
   return I;
 }
 
-// True iff misched.txt sets `SkipSubgraphFormation`. When true, both
-// the occupancy and length passes run DFS on the flat (un-formed)
-// graph: the occupancy pass constructs DfsSearch with
-// `form_subgraphs=false`, and the length-pass orchestrator skips
-// its explicit `FormSubgraphs` call. DfsSearches inside the length
-// phases already pass `form_subgraphs=false` regardless.
-static bool ShouldSkipSubgraphFormation() {
-  return MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
-      MachineInstrSchedulerConfig::SchedulerOption::SkipSubgraphFormation);
-}
-
-// True iff misched.txt sets `BfsDpForOccupancy`. When true, the
-// occupancy-maximization pass schedules each region with BfsDpSearch
-// (the BFS / dynamic-programming partition search) instead of the
-// default DfsSearch<DfsMaximizeOccupancyPolicy>.
-static bool ShouldUseBfsDpForOccupancy() {
-  return MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
-      MachineInstrSchedulerConfig::SchedulerOption::BfsDpForOccupancy);
-}
-
-// True iff misched.txt sets `DecomposeForOccupancy`. When true, the
-// occupancy-maximization pass runs the DecomposeAndSchedule pipeline
-// with the BfsDpWithDfsFallback factory preset (formation + per-
-// subgraph search + order-edge chain + outer search) instead of the
-// default DfsSearch<DfsMaximizeOccupancyPolicy>. The length pass is
-// unchanged. Mutex with BfsDpForOccupancy and SkipSubgraphFormation
-// is enforced at config-parse time.
-static bool ShouldUseDecomposeForOccupancy() {
-  return MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
-      MachineInstrSchedulerConfig::SchedulerOption::DecomposeForOccupancy);
-}
-
 ScheduleDAGHierarchicalScheduler::ScheduleDAGHierarchicalScheduler(
     MachineSchedContext *C, std::unique_ptr<MachineSchedStrategy> S)
     : ScheduleDAGMILive(C, std::move(S)) {}
@@ -558,7 +526,8 @@ static SearchResult RunOccupancyRegionWithDecompose(
 
 // Per-region DFS occupancy search. Uses DfsSearch<DfsMaximizeOccupancyPolicy>
 // seeded with the graph's input schedule (so best is never empty).
-// Honors SkipSubgraphFormation via the ctor's form_subgraphs flag.
+// Runs over the already-formed graph: the occupancy dispatcher forms
+// subgraphs (per the configured strategy) before invoking any search.
 // Emits the standard PostScheduleInfo block.
 static SearchResult RunOccupancyRegionWithDfs(
     ScheduleGraph &graph, const GCNSubtarget &st,
@@ -566,13 +535,29 @@ static SearchResult RunOccupancyRegionWithDfs(
     const ScheduleConstructor &input_schedule_constructor) {
   DfsSearch<DfsMaximizeOccupancyPolicy> search(
       graph, st, mf, lis,
-      /*form_subgraphs=*/!ShouldSkipSubgraphFormation());
+      /*form_subgraphs=*/false);
   SearchResult result = search.Run();
   // DFS always populates schedule (best is seeded with input).
   bool changed = input_schedule_constructor.GetScheduleOrder() !=
                  result.schedule->GetScheduleOrder();
   PrintPostScheduleInfo(graph, *result.schedule, search, st, changed, "\t\t");
   return result;
+}
+
+// Per-region "BFS-DP then DFS" occupancy search: the bfsdp+dfs search,
+// which wraps the other two. Run BFS-DP; if it bails (timeout /
+// score-bound) without a schedule, fall back to DFS so a schedule is
+// always produced. Both run over the already-formed graph.
+static SearchResult RunOccupancyRegionWithBfsDpThenDfs(
+    ScheduleGraph &graph, const RegionInfo &region, const GCNSubtarget &st,
+    const MachineFunction &mf, const LiveIntervals &lis,
+    const ScheduleConstructor &input_schedule_constructor) {
+  SearchResult result = RunOccupancyRegionWithBfsDp(graph, region, st, mf);
+  if (result.schedule.has_value()) {
+    return result;
+  }
+  return RunOccupancyRegionWithDfs(graph, st, mf, lis,
+                                   input_schedule_constructor);
 }
 
 // Schedules the region for maximum occupancy and applies the result.
@@ -600,14 +585,42 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
 
     SearchResult search_result;
-    if (ShouldUseDecomposeForOccupancy()) {
+    const OccupancyConfig &occupancy_config =
+        HierarchicalConfig::Get().occupancy;
+    if (occupancy_config.decompose) {
+      // Decompose is the higher-order strategy: it forms (per the configured
+      // strategy) internally, schedules each subgraph in isolation, combines.
       search_result =
           RunOccupancyRegionWithDecompose(graph, region, st, MF, *LIS);
-    } else if (ShouldUseBfsDpForOccupancy()) {
-      search_result = RunOccupancyRegionWithBfsDp(graph, region, st, MF);
     } else {
-      search_result = RunOccupancyRegionWithDfs(graph, st, MF, *LIS,
-                                                input_schedule_constructor);
+      // Form per the configured strategy (a no-op for kNone), then run the
+      // chosen flat search over the formed graph. Formation is uniform
+      // across searches, so dfs / bfsdp / bfsdp+dfs all run over whatever
+      // carving was chosen.
+      //
+      // BFS-DP (and bfsdp+dfs) are occupancy-only: their soundness rests on
+      // scheduling each DAG partition independently for register pressure,
+      // which does not hold for schedule length (length depends on
+      // cross-partition critical-path timing). The length pass is DFS-only.
+      const FormationConfig &subgraph_formation = occupancy_config.formation;
+      FormSubgraphs(
+          graph,
+          SubgraphFormationPolicy::FromStrategy(subgraph_formation.strategy,
+                                                subgraph_formation.min_cut),
+          subgraph_formation.mode);
+      switch (occupancy_config.search) {
+      case Search::kDfs:
+        search_result = RunOccupancyRegionWithDfs(graph, st, MF, *LIS,
+                                                  input_schedule_constructor);
+        break;
+      case Search::kBfsDp:
+        search_result = RunOccupancyRegionWithBfsDp(graph, region, st, MF);
+        break;
+      case Search::kBfsDpDfs:
+        search_result = RunOccupancyRegionWithBfsDpThenDfs(
+            graph, region, st, MF, *LIS, input_schedule_constructor);
+        break;
+      }
     }
 
     // Common tail. Apply the search's schedule, or keep the input
@@ -623,71 +636,17 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
   return result;
 }
 
-// Runtime selector for which length-pass policy to use, resolved from
-// misched.txt at the start of each region in ScheduleRegionForLengthPass,
-// and once at the top of RunLengthPass for the banner / direction-aware
-// stats. Four choices:
-//   kMinimize:                pure length-min, no refinement (base
-//                             policy). Default when no option is set.
-//   kMinimizeRefineOccupancy: after length floor, continue exploring
-//                             same-length completions to refine
-//                             occupancy. Enabled by
-//                             SchedulerOption::LengthMinRefineOccupancy.
-//   kMinimizeRefineIlp:       after length floor, continue exploring
-//                             same-length completions to refine ILP.
-//                             Enabled by
-//                             SchedulerOption::LengthMinRefineIlp.
-//   kMaximize:                run a length-MAX search instead (control
-//                             / worst-legal-schedule baseline). Enabled
-//                             by SchedulerOption::MaximizeLength.
-// The four options are mutually exclusive at runtime — if more than
-// one is set, the resolver fatals.
-enum class LengthPolicyChoice {
-  kMinimize,
-  kMinimizeRefineOccupancy,
-  kMinimizeRefineIlp,
-  kMaximize,
-};
-
-static LengthPolicyChoice ResolveLengthPolicyChoice() {
-  const auto &cfg = MachineInstrSchedulerConfig::GetConfig();
-  bool ilp = cfg.HasSchedulingOption(
-      MachineInstrSchedulerConfig::SchedulerOption::LengthMinRefineIlp);
-  bool occ = cfg.HasSchedulingOption(
-      MachineInstrSchedulerConfig::SchedulerOption::LengthMinRefineOccupancy);
-  bool maxlen = cfg.HasSchedulingOption(
-      MachineInstrSchedulerConfig::SchedulerOption::MaximizeLength);
-  int count = (ilp ? 1 : 0) + (occ ? 1 : 0) + (maxlen ? 1 : 0);
-  if (count > 1) {
-    report_fatal_error(
-        "HierarchicalScheduler: LengthMinRefineIlp, "
-        "LengthMinRefineOccupancy, and MaximizeLength are mutually "
-        "exclusive");
-  }
-  if (ilp) {
-    return LengthPolicyChoice::kMinimizeRefineIlp;
-  }
-  if (occ) {
-    return LengthPolicyChoice::kMinimizeRefineOccupancy;
-  }
-  if (maxlen) {
-    return LengthPolicyChoice::kMaximize;
-  }
-  return LengthPolicyChoice::kMinimize;
-}
-
 // Outer loop of the length pass. See header.
 void ScheduleDAGHierarchicalScheduler::RunLengthPass() {
   // Tag any DumpSubgraphDag output from this pass into the "length"
   // subdir (no-op unless the option is set).
   SubgraphDagDumpPassScope dump_scope("length");
 
-  // Resolve direction once at the top. The per-region dispatch
-  // resolves it again from misched.txt for its own switch — that's
-  // a redundant cheap config read; both calls produce the same
-  // value because the config is static for the run.
-  const bool is_max = ResolveLengthPolicyChoice() ==
-                      LengthPolicyChoice::kMaximize;
+  // Resolve direction once at the top. The per-region dispatch reads
+  // the same config policy again for its own switch — a redundant cheap
+  // read; both see the same value (the config is static for the run).
+  const bool is_max =
+      HierarchicalConfig::Get().length.policy == LengthPolicy::kMax;
   StringRef pass_name = is_max ? "MaximizeLength" : "MinimizeLength";
 
   llvm::outs() << "\n=== Pass: " << pass_name << " === (" << regions_.size()
@@ -975,7 +934,7 @@ static void RunPlainLengthMinPhase(
 }
 
 // Per-region per-policy worker. Templated on the length-min policy
-// so we can instantiate one copy per length-min LengthPolicyChoice
+// so we can instantiate one copy per length-min LengthPolicy
 // variant and dispatch at runtime from ScheduleRegionForLengthPass.
 // Runs DFS in two phases — gated target-feasibility iteration, then
 // always-on plain min-search — and writes the chosen schedule into
@@ -989,18 +948,10 @@ static void RunMinimizeLengthForRegionWithPolicy(
     const ScheduleConstructor &input_schedule_constructor,
     ScheduleConstructor &best_schedule_constructor,
     bool &any_timed_out) {
-  // Formation is a once-per-region mutation: it materializes
-  // subgraph proxies into the graph. Both phases below construct
-  // their DfsSearches with form_subgraphs=false and rely on this
-  // call's side effect. Running formation twice on the same graph
-  // would fatal in CheckNoNestedMembers (the existing proxies
-  // would be treated as members of a new subgraph).
-  //
-  // misched.txt's SkipSubgraphFormation suppresses this call so
-  // DFS operates on the flat graph.
-  if (!ShouldSkipSubgraphFormation()) {
-    FormSubgraphs(graph, Policy::MakeFormationPolicy());
-  }
+  // Subgraph formation already happened once for this region in
+  // ScheduleRegionForLengthPass (per the configured strategy); both
+  // phases below construct their DfsSearches with form_subgraphs=false
+  // and run over that formed graph.
 
   // input: block shared by both phases — printed once per region
   // at indent level 2 (\t\t), directly under the region heading.
@@ -1024,22 +975,15 @@ static void RunMinimizeLengthForRegionWithPolicy(
 // LONGER schedule than the input. Termination is wall-clock budget
 // only (ShouldEndSearch is unconditionally false for length-max).
 //
-// Formation gating mirrors RunMinimizeLengthForRegionWithPolicy.
-// DfsMaximizeLengthPolicy::MakeFormationPolicy returns the empty
-// SubgraphFormationPolicy, so FormSubgraphs early-returns on an
-// empty pipeline — meaning formation is effectively skipped for
-// this policy regardless of the SkipSubgraphFormation option. The
-// gate is still consulted for symmetry / future flexibility.
+// Subgraph formation already happened once for this region in
+// ScheduleRegionForLengthPass; this worker runs over the formed graph
+// with form_subgraphs=false, like the length-min worker.
 static void RunMaximizeLengthForRegion(
     ScheduleGraph &graph, const GCNSubtarget &st,
     const MachineFunction &mf, const LiveIntervals &lis,
     const ScheduleConstructor &input_schedule_constructor,
     ScheduleConstructor &best_schedule_constructor,
     bool &any_timed_out) {
-  if (!ShouldSkipSubgraphFormation()) {
-    FormSubgraphs(graph, DfsMaximizeLengthPolicy::MakeFormationPolicy());
-  }
-
   PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
 
   // form_subgraphs=false: see comment in RunIterativeLengthMinPhase
@@ -1096,25 +1040,37 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForLengthPass(
         input_schedule_constructor;
     bool any_timed_out = false;
 
-    switch (ResolveLengthPolicyChoice()) {
-    case LengthPolicyChoice::kMinimize:
+    // Form per the length pass's configured strategy (a no-op for kNone),
+    // once per region before the policy search. The DfsSearches in the
+    // workers below run over this formed graph (form_subgraphs=false).
+    // Length is DFS-only (BFS-DP is occupancy-only).
+    const FormationConfig &subgraph_formation =
+        HierarchicalConfig::Get().length.formation;
+    FormSubgraphs(
+        graph,
+        SubgraphFormationPolicy::FromStrategy(subgraph_formation.strategy,
+                                              subgraph_formation.min_cut),
+        subgraph_formation.mode);
+
+    switch (HierarchicalConfig::Get().length.policy) {
+    case LengthPolicy::kMin:
       RunMinimizeLengthForRegionWithPolicy<DfsMinimizeLengthPolicy>(
           graph, st, MF, *LIS, input_schedule_constructor,
           best_schedule_constructor, any_timed_out);
       break;
-    case LengthPolicyChoice::kMinimizeRefineIlp:
+    case LengthPolicy::kMinRefineIlp:
       RunMinimizeLengthForRegionWithPolicy<
           DfsMinimizeLengthRefineIlpPolicy>(
           graph, st, MF, *LIS, input_schedule_constructor,
           best_schedule_constructor, any_timed_out);
       break;
-    case LengthPolicyChoice::kMinimizeRefineOccupancy:
+    case LengthPolicy::kMinRefineOccupancy:
       RunMinimizeLengthForRegionWithPolicy<
           DfsMinimizeLengthRefineOccupancyPolicy>(
           graph, st, MF, *LIS, input_schedule_constructor,
           best_schedule_constructor, any_timed_out);
       break;
-    case LengthPolicyChoice::kMaximize:
+    case LengthPolicy::kMax:
       RunMaximizeLengthForRegion(graph, st, MF, *LIS,
                                  input_schedule_constructor,
                                  best_schedule_constructor, any_timed_out);
@@ -1142,12 +1098,9 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
                << regions_.size() << " target_occupancy="
                << mfi_->getOccupancy() << ")\n";
 
-  // Build the typed HierarchicalConfig once from misched.txt's scoped
-  // settings and print it. (Step 2: nothing reads it yet; the call
-  // sites migrate from HasSchedulingOption to this in step 3.)
-  HierarchicalConfig hs_config =
-      HierarchicalConfig::Build(MachineInstrSchedulerConfig::GetConfig());
-  hs_config.DebugPrint();
+  // The HierarchicalScheduler's typed config (built once, cached). Call
+  // sites below read HierarchicalConfig::Get(); print it for visibility.
+  HierarchicalConfig::Get().DebugPrint();
 
   // Shakedowns are validation harnesses: noisy and slow. Off by default;
   // opt in via the `RunShakedowns` option in misched.txt.

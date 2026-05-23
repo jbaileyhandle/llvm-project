@@ -47,15 +47,15 @@ std::string ScopedKeyName(StringRef scope, StringRef key) {
 
 // --- value parsers (each fatals on an unrecognized value) ---
 
-Formation ParseFormation(StringRef scope, StringRef key, StringRef v) {
+SubgraphFormationStrategy ParseFormation(StringRef scope, StringRef key, StringRef v) {
   if (v == "none") {
-    return Formation::kNone;
+    return SubgraphFormationStrategy::kNone;
   }
   if (v == "domtree") {
-    return Formation::kDomTree;
+    return SubgraphFormationStrategy::kDomTree;
   }
   if (v == "mincut") {
-    return Formation::kMinCut;
+    return SubgraphFormationStrategy::kMinCut;
   }
   BadValue(scope, key, v, "none|domtree|mincut");
 }
@@ -135,22 +135,21 @@ float ParseFloat(StringRef scope, StringRef key, StringRef v) {
 // (handled), false otherwise (so the caller can try its pass-specific
 // keys, then fatal on a genuine unknown).
 bool ApplyFormationKey(StringRef scope, StringRef key, StringRef val,
-                       Formation &formation, SubgraphScheduleMode &mode,
-                       float &ratio, int &target_size) {
+                       FormationConfig &fc) {
   if (key == "formation") {
-    formation = ParseFormation(scope, key, val);
+    fc.strategy = ParseFormation(scope, key, val);
     return true;
   }
   if (key == "mode") {
-    mode = ParseMode(scope, key, val);
+    fc.mode = ParseMode(scope, key, val);
     return true;
   }
   if (key == "formation.ratio") {
-    ratio = ParseFloat(scope, key, val);
+    fc.min_cut.imbalance_ratio = ParseFloat(scope, key, val);
     return true;
   }
   if (key == "formation.target_size") {
-    target_size = ParseInt(scope, key, val);
+    fc.min_cut.target_subgraph_size = ParseInt(scope, key, val);
     return true;
   }
   return false;
@@ -158,8 +157,7 @@ bool ApplyFormationKey(StringRef scope, StringRef key, StringRef val,
 
 void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
   StringRef scope = "occupancy";
-  if (ApplyFormationKey(scope, key, val, c.formation, c.mode, c.ratio,
-                        c.target_size)) {
+  if (ApplyFormationKey(scope, key, val, c.formation)) {
     return;
   }
   if (key == "search") {
@@ -183,8 +181,7 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
 
 void ApplyLengthKey(StringRef key, StringRef val, LengthConfig &c) {
   StringRef scope = "length";
-  if (ApplyFormationKey(scope, key, val, c.formation, c.mode, c.ratio,
-                        c.target_size)) {
+  if (ApplyFormationKey(scope, key, val, c.formation)) {
     return;
   }
   if (key == "policy") {
@@ -306,12 +303,12 @@ void BuildLength(const std::map<std::string, std::string> *kv, LengthConfig &c) 
 // --- constraint validation (axis constraints, design doc §4.3) ---
 
 void ValidateOccupancy(const OccupancyConfig &c) {
-  if (c.decompose && c.formation == Formation::kNone) {
+  if (c.decompose && c.formation.strategy == SubgraphFormationStrategy::kNone) {
     report_fatal_error(
         "HierarchicalConfig: occupancy.decompose requires formation != none");
   }
-  if (c.mode == SubgraphScheduleMode::kInterleaved &&
-      c.formation == Formation::kNone) {
+  if (c.formation.mode == SubgraphScheduleMode::kInterleaved &&
+      c.formation.strategy == SubgraphFormationStrategy::kNone) {
     report_fatal_error("HierarchicalConfig: occupancy.mode=interleaved "
                        "requires formation != none");
   }
@@ -322,8 +319,8 @@ void ValidateOccupancy(const OccupancyConfig &c) {
 }
 
 void ValidateLength(const LengthConfig &c) {
-  if (c.mode == SubgraphScheduleMode::kInterleaved &&
-      c.formation == Formation::kNone) {
+  if (c.formation.mode == SubgraphScheduleMode::kInterleaved &&
+      c.formation.strategy == SubgraphFormationStrategy::kNone) {
     report_fatal_error("HierarchicalConfig: length.mode=interleaved requires "
                        "formation != none");
   }
@@ -331,13 +328,13 @@ void ValidateLength(const LengthConfig &c) {
 
 // --- enum -> string (for ToString) ---
 
-StringRef FormationName(Formation f) {
+StringRef FormationName(SubgraphFormationStrategy f) {
   switch (f) {
-  case Formation::kNone:
+  case SubgraphFormationStrategy::kNone:
     return "none";
-  case Formation::kDomTree:
+  case SubgraphFormationStrategy::kDomTree:
     return "domtree";
-  case Formation::kMinCut:
+  case SubgraphFormationStrategy::kMinCut:
     return "mincut";
   }
   return "?";
@@ -433,22 +430,30 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   return hs;
 }
 
+const HierarchicalConfig &HierarchicalConfig::Get() {
+  static const HierarchicalConfig cfg =
+      Build(MachineInstrSchedulerConfig::GetConfig());
+  return cfg;
+}
+
 std::string HierarchicalConfig::ToString() const {
   std::string out;
   raw_string_ostream os(out);
   os << "HierarchicalConfig:\n";
-  os << "\toccupancy: formation=" << FormationName(occupancy.formation)
+  os << "\toccupancy: formation=" << FormationName(occupancy.formation.strategy)
      << " search=" << SearchName(occupancy.search)
      << " decompose=" << (occupancy.decompose ? "on" : "off")
-     << " mode=" << ModeName(occupancy.mode) << " ratio=" << occupancy.ratio
-     << " target_size=" << occupancy.target_size
+     << " mode=" << ModeName(occupancy.formation.mode)
+     << " ratio=" << occupancy.formation.min_cut.imbalance_ratio
+     << " target_size=" << occupancy.formation.min_cut.target_subgraph_size
      << " timeout_ms=" << occupancy.timeout_ms
      << " fallback_timeout_ms=" << occupancy.GetFallbackTimeoutMs()
      << (occupancy.fallback_timeout_ms.has_value() ? "" : " (=timeout)")
      << "\n";
-  os << "\tlength: formation=" << FormationName(length.formation)
-     << " mode=" << ModeName(length.mode) << " ratio=" << length.ratio
-     << " target_size=" << length.target_size
+  os << "\tlength: formation=" << FormationName(length.formation.strategy)
+     << " mode=" << ModeName(length.formation.mode)
+     << " ratio=" << length.formation.min_cut.imbalance_ratio
+     << " target_size=" << length.formation.min_cut.target_subgraph_size
      << " policy=" << LengthPolicyName(length.policy) << "\n";
   os << "\tglobals: malicious=" << (malicious ? "on" : "off")
      << " run_shakedowns=" << (run_shakedowns ? "on" : "off")

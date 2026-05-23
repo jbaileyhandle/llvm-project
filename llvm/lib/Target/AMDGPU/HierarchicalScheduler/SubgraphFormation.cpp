@@ -366,6 +366,7 @@ std::vector<std::unique_ptr<SubgraphInfo>> BuildSubgraphInfos(
 
 SubgraphFormationPolicy SubgraphFormationPolicy::BottomUpDefault() {
   SubgraphFormationPolicy p;
+  p.strategy = SubgraphFormationStrategy::kDomTree;
   int t = p.large_subtree_threshold;
   p.pipeline.passes = {
       BottomUpSingleSplitterPass,
@@ -380,6 +381,7 @@ SubgraphFormationPolicy SubgraphFormationPolicy::BottomUpDefault() {
 
 SubgraphFormationPolicy SubgraphFormationPolicy::TopDownAggressive() {
   SubgraphFormationPolicy p;
+  p.strategy = SubgraphFormationStrategy::kDomTree;
   int t = p.large_subtree_threshold;
   p.pipeline.passes = {
       TopDownSingleSplitterPass,    // <-- only difference vs BottomUpDefault
@@ -394,6 +396,7 @@ SubgraphFormationPolicy SubgraphFormationPolicy::TopDownAggressive() {
 
 SubgraphFormationPolicy SubgraphFormationPolicy::TopDownSingleSplitterOnly() {
   SubgraphFormationPolicy p;
+  p.strategy = SubgraphFormationStrategy::kDomTree;
   p.pipeline.passes = {
       TopDownSingleSplitterPass,
   };
@@ -408,9 +411,27 @@ SubgraphFormationPolicy SubgraphFormationPolicy::TopDownSingleSplitterOnly() {
 
 SubgraphFormationPolicy SubgraphFormationPolicy::MinCut() {
   SubgraphFormationPolicy p;
-  p.method = Method::kMinCut;
+  p.strategy = SubgraphFormationStrategy::kMinCut;
   // The dom-tree fields and pipeline are unused.
   return p;
+}
+
+SubgraphFormationPolicy
+SubgraphFormationPolicy::FromStrategy(SubgraphFormationStrategy strategy,
+                                     const MinCutSettings &min_cut) {
+  switch (strategy) {
+  case SubgraphFormationStrategy::kNone:
+    // Empty no-op policy; FormSubgraphs forms nothing.
+    return SubgraphFormationPolicy{};
+  case SubgraphFormationStrategy::kDomTree:
+    return TopDownSingleSplitterOnly();
+  case SubgraphFormationStrategy::kMinCut: {
+    SubgraphFormationPolicy p = MinCut();
+    p.min_cut = min_cut;
+    return p;
+  }
+  }
+  return SubgraphFormationPolicy{};
 }
 
 // --- End-to-end driver (§7) ----------------------------------------------
@@ -419,7 +440,7 @@ void FormSubgraphs(ScheduleGraph &graph,
                    const SubgraphFormationPolicy &policy,
                    SubgraphScheduleMode mode) {
   std::vector<std::unique_ptr<SubgraphInfo>> infos;
-  if (policy.method == SubgraphFormationPolicy::Method::kMinCut) {
+  if (policy.strategy == SubgraphFormationStrategy::kMinCut) {
     // Acyclic min-cut of the data-dependency DAG (dagP). Needs none of the
     // dom-tree prerequisites/passes; returns an empty vector for regions
     // too small to partition.

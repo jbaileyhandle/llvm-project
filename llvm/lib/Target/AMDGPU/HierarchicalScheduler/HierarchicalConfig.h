@@ -25,7 +25,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_HIERARCHICALCONFIG_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_HIERARCHICALCONFIG_H
 
-#include "SubgraphFormation.h" // SubgraphScheduleMode
+#include "SubgraphFormation.h" // SubgraphScheduleMode, SubgraphFormationStrategy
 #include <optional>
 #include <string>
 
@@ -34,12 +34,6 @@ namespace llvm {
 class MachineInstrSchedulerConfig;
 
 namespace hierarchical_scheduler {
-
-/// `formation` axis: how a pass carves its region into subgraphs.
-///   kNone    - no formation; a single flat search over the region.
-///   kDomTree - the dominator-tree formation pipeline.
-///   kMinCut  - acyclic min-cut of the data-dependency DAG (dagP).
-enum class Formation { kNone, kDomTree, kMinCut };
 
 /// `search` axis (occupancy pass only): the base scheduling algorithm.
 ///   kDfs      - depth-first occupancy search.
@@ -60,18 +54,13 @@ enum class LengthPolicy { kMin, kMinRefineIlp, kMinRefineOccupancy, kMax };
 
 /// Occupancy-pass configuration. Fixed objective (maximize occupancy),
 /// so no `policy`; varies on the search algorithm and (when a formation
-/// is chosen) the decompose/mode install. Defaults reproduce today's
-/// behavior with no scoped keys: a flat DFS occupancy search.
+/// is chosen) the decompose/mode install. Default (no scoped keys) is a
+/// flat DFS search, formation off -- deliberately flat; note the
+/// historical default instead formed dom-tree subgraphs.
 struct OccupancyConfig {
-  Formation formation = Formation::kNone;
+  FormationConfig formation; // strategy + mode + min-cut settings
   Search search = Search::kDfs;
   bool decompose = false;
-  SubgraphScheduleMode mode = SubgraphScheduleMode::kSerialized;
-
-  // Min-cut formation params (ignored unless formation == kMinCut);
-  // defaults mirror MinCutSettings.
-  float ratio = 1.5f;
-  int target_size = 24;
 
   // BFS-DP search params (ignored unless search uses BFS-DP).
   int timeout_ms = 5000;
@@ -87,15 +76,11 @@ struct OccupancyConfig {
 
 /// Length-pass configuration. Fixed algorithm (DFS), so no `search` /
 /// `decompose`; varies on the objective `policy`. Shares the formation
-/// axis + params with the occupancy pass. Defaults reproduce today's
-/// behavior with no scoped keys: flat length-min.
+/// axis + params with the occupancy pass. Default (no scoped keys) is
+/// flat length-min, formation off -- deliberately flat; note the
+/// historical default instead formed dom-tree subgraphs.
 struct LengthConfig {
-  Formation formation = Formation::kNone;
-  SubgraphScheduleMode mode = SubgraphScheduleMode::kSerialized;
-
-  float ratio = 1.5f;
-  int target_size = 24;
-
+  FormationConfig formation; // strategy + mode + min-cut settings
   LengthPolicy policy = LengthPolicy::kMin;
 };
 
@@ -121,6 +106,12 @@ struct HierarchicalConfig {
   /// enforced; an unknown scope, key, or value is a fatal error. Only
   /// call for the HierarchicalScheduler.
   static HierarchicalConfig Build(const MachineInstrSchedulerConfig &cfg);
+
+  /// Cached singleton: Build(MachineInstrSchedulerConfig::GetConfig())
+  /// once, then return that instance on every call. The config is static
+  /// for the run, so HS call sites read this rather than rebuilding or
+  /// threading a reference. Only meaningful for the HierarchicalScheduler.
+  static const HierarchicalConfig &Get();
 
   std::string ToString() const;
   void DebugPrint() const;
