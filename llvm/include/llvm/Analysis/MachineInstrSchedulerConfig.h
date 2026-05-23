@@ -168,6 +168,13 @@ class MachineInstrSchedulerConfig {
         std::optional<llvm::StringRef> GetScopedSetting(llvm::StringRef scope,
                                                         llvm::StringRef key) const;
 
+        // Return the entire scope -> key -> value store. The per-scheduler
+        // layer iterates this to validate (fatal on an unknown scope or key)
+        // and to read every setting; GetScopedSetting is the point-read
+        // counterpart. Still uninterpreted at this layer.
+        const std::map<std::string, std::map<std::string, std::string>> &
+        GetAllScopedSettings() const { return scoped_; }
+
         // Convenience: return true if post-RA scheduling is disabled
         bool IsPostRASchedulingDisabled() const;
 

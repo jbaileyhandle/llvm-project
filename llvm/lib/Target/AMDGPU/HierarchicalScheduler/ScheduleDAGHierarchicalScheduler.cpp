@@ -14,6 +14,7 @@
 #include "DecomposeAndSchedule.h"
 #include "DfsSearch.h"
 #include "GCNRegisterTracker.h"
+#include "HierarchicalConfig.h"
 #include "MaliciousScheduler.h"
 #include "ScheduleConstructor.h"
 #include "SearchPolicies.h"
@@ -1140,6 +1141,13 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   llvm::outs() << "\n=== HierarchicalScheduler === (regions="
                << regions_.size() << " target_occupancy="
                << mfi_->getOccupancy() << ")\n";
+
+  // Build the typed HierarchicalConfig once from misched.txt's scoped
+  // settings and print it. (Step 2: nothing reads it yet; the call
+  // sites migrate from HasSchedulingOption to this in step 3.)
+  HierarchicalConfig hs_config =
+      HierarchicalConfig::Build(MachineInstrSchedulerConfig::GetConfig());
+  hs_config.DebugPrint();
 
   // Shakedowns are validation harnesses: noisy and slow. Off by default;
   // opt in via the `RunShakedowns` option in misched.txt.
