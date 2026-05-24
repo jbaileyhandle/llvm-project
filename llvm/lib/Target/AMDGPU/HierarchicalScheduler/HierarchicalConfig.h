@@ -65,6 +65,17 @@ struct OccupancyConfig {
   // (seeded with the region floor); true = continuous occupancy score
   // (seeded with the input order's continuous score).
   bool decompose_outer_continuous = false;
+  // Recursive decompose: when on (with decompose + mincut formation), split
+  // each level into at most 4 subgraphs and recurse down to
+  // ~target_subgraph_size-node leaves, instead of one flat decomposition.
+  // Composes with the serialized/interleaved subgraph install mode
+  // (formation.mode) and with decompose_outer_continuous; leaves always use
+  // the continuous search.
+  bool decompose_recursive = false;
+  // Max subgraphs per level when decompose_recursive is on (the mincut part
+  // cap). Default 4 ("at most 4"); e.g. 2 gives a binary recursion. Ignored
+  // unless decompose_recursive is on.
+  int decompose_max_parts = 4;
 
   // BFS-DP search params (ignored unless search uses BFS-DP).
   int timeout_ms = 5000;

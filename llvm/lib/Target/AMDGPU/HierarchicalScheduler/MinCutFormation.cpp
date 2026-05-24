@@ -221,9 +221,13 @@ BuildSubgraphInfosByMinCut(ScheduleGraph &graph,
   SmallVector<ScheduleNode *, 64> real_nodes = CollectRealNodes(graph);
   const int n = static_cast<int>(real_nodes.size());
 
-  // k = ceil(n / target). Skip regions too small to yield 2+ subgraphs.
-  const int k = (n + settings.target_subgraph_size - 1) /
-                settings.target_subgraph_size;
+  // k = ceil(n / target), clamped to max_parts when set. Skip regions too
+  // small to yield 2+ subgraphs.
+  int k = (n + settings.target_subgraph_size - 1) /
+          settings.target_subgraph_size;
+  if (settings.max_parts > 0 && k > settings.max_parts) {
+    k = settings.max_parts;
+  }
   if (k < 2) {
     return {};
   }

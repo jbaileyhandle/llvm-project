@@ -189,5 +189,38 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
   return opts;
 }
 
+SearchResult RecursiveDecomposeAndSchedule(
+    ScheduleGraph &graph, const GCNSubtarget &st, const MachineFunction &mf,
+    const LiveIntervals &lis, int seed_occupancy,
+    const FormationConfig &subgraph_formation, bool outer_continuous) {
+  // Per-level options: continuous leaf inner search + the composable outer
+  // search + the (max_parts-capped) mincut formation. BfsDpWithDfsFallback
+  // builds all three; we reuse its inner as the leaf search and override it
+  // below for the non-leaf case.
+  DecomposeAndScheduleOptions opts =
+      DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
+          st, mf, lis, seed_occupancy, subgraph_formation, outer_continuous);
+
+  // Leaf: a (sub)graph with at most target_subgraph_size scheduling units is
+  // exactly what mincut would refuse to split (k < 2), so schedule it
+  // directly with the continuous leaf search rather than decomposing.
+  const int leaf_size = subgraph_formation.min_cut.target_subgraph_size;
+  if (graph.NumSchedulingUnits() <= leaf_size) {
+    return opts.inner_search(graph);
+  }
+
+  // Non-leaf: recurse on each subgraph instead of leaf-searching it. Each
+  // subgraph is strictly smaller than `graph` (mincut yields k >= 2 parts),
+  // so the recursion terminates at the leaf size. ScheduleSubgraph runs this
+  // inner search on each extracted subgraph before the level's outer search,
+  // so the schedule is built bottom-up.
+  opts.inner_search = [&st, &mf, &lis, seed_occupancy, subgraph_formation,
+                       outer_continuous](ScheduleGraph &sub) -> SearchResult {
+    return RecursiveDecomposeAndSchedule(sub, st, mf, lis, seed_occupancy,
+                                         subgraph_formation, outer_continuous);
+  };
+  return DecomposeAndSchedule(graph, st, mf, opts);
+}
+
 }  // namespace hierarchical_scheduler
 }  // namespace llvm

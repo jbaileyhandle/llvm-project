@@ -135,6 +135,25 @@ SearchResult DecomposeAndSchedule(
     const MachineFunction &mf,
     const DecomposeAndScheduleOptions &opts);
 
+/// Recursive multi-level decompose. Schedules `graph` by repeatedly
+/// decomposing (mincut, capped at `subgraph_formation.min_cut.max_parts`
+/// parts per level) and recursing, until a subgraph has at most
+/// `min_cut.target_subgraph_size` scheduling units — a leaf, scheduled
+/// directly by the continuous BfsDp+Dfs search. Each non-leaf level's inner
+/// search recurses; its outer search (integer level, or continuous score
+/// when `outer_continuous`) orders that level's subgraphs. Because
+/// DecomposeAndSchedule schedules each subgraph's interior before the level's
+/// outer runs, the schedule is built bottom-up. Leaves are always continuous;
+/// the install mode and outer metric compose exactly as in the flat form.
+SearchResult RecursiveDecomposeAndSchedule(
+    ScheduleGraph &graph,
+    const GCNSubtarget &st,
+    const MachineFunction &mf,
+    const LiveIntervals &lis,
+    int seed_occupancy,
+    const FormationConfig &subgraph_formation,
+    bool outer_continuous);
+
 }  // namespace hierarchical_scheduler
 }  // namespace llvm
 

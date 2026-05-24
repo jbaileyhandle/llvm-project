@@ -172,6 +172,14 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
     c.decompose_outer_continuous = ParseBool(scope, key, val);
     return;
   }
+  if (key == "decompose_recursive") {
+    c.decompose_recursive = ParseBool(scope, key, val);
+    return;
+  }
+  if (key == "decompose_max_parts") {
+    c.decompose_max_parts = ParseInt(scope, key, val);
+    return;
+  }
   if (key == "search.timeout") {
     c.timeout_ms = ParseInt(scope, key, val);
     return;
@@ -462,6 +470,9 @@ std::string HierarchicalConfig::ToString() const {
      << " decompose=" << (occupancy.decompose ? "on" : "off")
      << " decompose_outer_continuous="
      << (occupancy.decompose_outer_continuous ? "on" : "off")
+     << " decompose_recursive="
+     << (occupancy.decompose_recursive ? "on" : "off")
+     << " decompose_max_parts=" << occupancy.decompose_max_parts
      << " mode=" << ModeName(occupancy.formation.mode)
      << " ratio=" << occupancy.formation.min_cut.imbalance_ratio
      << " target_size=" << occupancy.formation.min_cut.target_subgraph_size

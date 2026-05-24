@@ -24,6 +24,10 @@ struct MinCutSettings {
   /// Number of parts requested from dagP is k = ceil(N / target_subgraph_size),
   /// where N is the count of real instruction nodes in the region.
   int target_subgraph_size = 24;
+  /// Upper bound on k. 0 means uncapped (k is purely ceil(N/target_size)).
+  /// A positive value clamps k = min(max_parts, ceil(N/target_size)) — used by
+  /// the recursive variant to keep each level to at most this many subgraphs.
+  int max_parts = 0;
   /// dagP imbalance ratio (--ratio): the cap on any single part's weight is
   /// imbalance_ratio * (total_weight / k), i.e. how far a part may exceed the
   /// even share. 1.0 forces even sizes; higher lets dagP trade balance for a

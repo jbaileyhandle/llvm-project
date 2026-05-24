@@ -562,11 +562,23 @@ static SearchResult RunOccupancyRegionWithDecompose(
     ScheduleGraph &graph, const RegionInfo &region,
     const GCNSubtarget &st, const MachineFunction &mf,
     const LiveIntervals &lis) {
+  const OccupancyConfig &occ = HierarchicalConfig::Get().occupancy;
+  const int seed = region.GetOriginalRegisterOnlyOccupancy();
+  if (occ.decompose_recursive) {
+    // Recursive: cap each level at 4 subgraphs and recurse to leaves. The
+    // install mode and outer metric come from the configured formation /
+    // decompose_outer_continuous.
+    FormationConfig formation = occ.formation;
+    formation.min_cut.max_parts = occ.decompose_max_parts; // subgraphs/level cap
+    SearchResult result = RecursiveDecomposeAndSchedule(
+        graph, st, mf, lis, seed, formation, occ.decompose_outer_continuous);
+    llvm::outs() << "\t\toutput: (Decompose-recursive) found_improvement="
+                 << result.schedule.has_value() << "\n";
+    return result;
+  }
   DecomposeAndScheduleOptions opts =
       DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
-          st, mf, lis, region.GetOriginalRegisterOnlyOccupancy(),
-          HierarchicalConfig::Get().occupancy.formation,
-          HierarchicalConfig::Get().occupancy.decompose_outer_continuous);
+          st, mf, lis, seed, occ.formation, occ.decompose_outer_continuous);
   SearchResult result = DecomposeAndSchedule(graph, st, mf, opts);
   llvm::outs() << "\t\toutput: (Decompose) found_improvement="
                << result.schedule.has_value() << "\n";
