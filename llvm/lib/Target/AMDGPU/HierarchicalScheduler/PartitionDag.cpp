@@ -116,16 +116,25 @@ PartitionNode *PartitionDag::CreateSourceNode() {
 
 void PartitionDag::ExpandSource(PartitionNode *source_partition,
                                 std::vector<PartitionNode *> &next_layer) {
-  // VisitSuccessor probes by Schedule/Unschedule directly on
-  // source_partition's state (no per-probe clone); the round-trip
-  // restores its ready list to identical contents and order, so
-  // the ArrayRef stays valid across iterations.
-  ArrayRef<const ScheduleNode *> ready =
-      source_partition->schedule_state->GetReadyList();
-  for (const ScheduleNode *scheduled_node : ready) {
-    VisitSuccessor(source_partition, scheduled_node, next_layer);
+  // Iterate the ready list by index, re-reading it each step rather
+  // than holding a view across the loop body. VisitSuccessor
+  // Schedule/Unschedules source_partition's state, and Schedule can
+  // reallocate the ready list's buffer out from under a live ArrayRef:
+  // the ready SmallVector grows inline->heap, and scheduling a
+  // subgraph start proxy push_backs onto scopes_, moving every scope's
+  // inline ready buffer to a new address. GetReadyList() is a
+  // zero-copy view, so re-reading it is cheap; and because
+  // Schedule/Unschedule reverse each other exactly, after
+  // VisitSuccessor's round-trip the list's contents AND indices are
+  // restored, so GetReadyList()[i] is the same successor it was before.
+  // This is the index-stable iteration the ScheduleConstructor header
+  // documents; the element is read before the call, so no snapshot is
+  // needed.
+  ScheduleConstructor &state = *source_partition->schedule_state;
+  for (int i = 0; i < static_cast<int>(state.GetReadyList().size()); ++i) {
+    VisitSuccessor(source_partition, state.GetReadyList()[i], next_layer);
   }
-  // source_partition has been fully expanded; drop the snapshot.
+  // source_partition has been fully expanded; drop its state.
   // Reconstruction walks best_incoming_edge, not schedule_state.
   source_partition->schedule_state.reset();
 }

@@ -229,6 +229,9 @@ GCNRegPressure ScheduleConstructor::Schedule(const ScheduleNode *node) {
   // DFS invariant: the picked node lives in the current scope. Look
   // it up in scopes_.back().ready rather than GetReadyListForNode(node),
   // to make that invariant explicit at the call site.
+  if (scopes_.empty()) {
+    report_fatal_error("ScheduleConstructor::Schedule: no scope on stack");
+  }
   int index = GetReadyListIndexOf(scopes_.back().ready, node);
   if (index < 0) {
     report_fatal_error("ScheduleConstructor: scheduling node " +
@@ -283,6 +286,10 @@ GCNRegPressure ScheduleConstructor::ScheduleByIndex(int index) {
     scopes_.push_back(
         SubgraphScheduleScope{/*subgraph_proxy=*/node, /*ready=*/{}});
   } else if (node->IsSubgraphEndProxy()) {
+    if (scopes_.size() <= 1) {
+      report_fatal_error("ScheduleConstructor: end proxy node " +
+                         Twine(node->GetId()) + " pops the base scope");
+    }
     scopes_.pop_back();
   }
 
