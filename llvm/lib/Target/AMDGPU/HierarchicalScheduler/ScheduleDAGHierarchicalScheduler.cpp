@@ -601,7 +601,16 @@ static SearchResult RunOccupancyRegionWithBfsDpThenDfs(
   if (result.schedule.has_value()) {
     return result;
   }
-  // BFS-DP bailed; DFS rescues. Keep BFS's depth-reached and
+  // BFS-DP produced no schedule. Only DFS-rescue a timeout: BFS-DP is
+  // seeded with the region's original occupancy and its score-bound
+  // prune is sound, so a fully-explored empty result proves nothing
+  // beats the seed — DFS over the same objective can't either and would
+  // just re-derive the input. Keep the input order (winner already
+  // "input").
+  if (result.termination_cause != SearchTerminationCause::kTimedOut) {
+    return result;
+  }
+  // Timed out; DFS rescues. Keep BFS's depth-reached and
   // throughput on the row alongside the DFS that took over.
   std::optional<float> bfs_pct = result.bfs_pct;
   std::optional<int> bfs_ms = result.bfs_ms;

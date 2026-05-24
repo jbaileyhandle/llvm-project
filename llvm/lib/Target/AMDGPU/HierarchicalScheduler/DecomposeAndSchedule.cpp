@@ -105,8 +105,10 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
       result.bfs_pct = bfs_pct;
       return result;
     }
-    // BFS-DP returned no schedule — fall back to DFS at the same
-    // budget and metric.
+    // BFS-DP returned no schedule. The inner search is unseeded
+    // (initial best INT_MIN), so the score-bound prune never empties the
+    // frontier — an empty result here means the timeout fired, so DFS
+    // rescues unconditionally. Same budget and metric.
     DfsSearch<DfsMaximizeOccupancyPolicy> dfs(
         sub, st, mf, lis,
         /*timeout_ms=*/kBfsDpWithDfsFallbackTimeoutMs);
@@ -142,7 +144,16 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
       result.bfs_pct = bfs_pct;
       return result;
     }
-    // BFS-DP returned no schedule — fall back to DFS over the proxied +
+    result.bfs_pct = bfs_pct;
+    // Only DFS-rescue a timeout. A fully-explored empty result proves
+    // (the score-bound prune is sound) that nothing beats the seed
+    // occupancy, so DFS over the same objective can't either — keep the
+    // input order.
+    if (result.termination_cause != SearchTerminationCause::kTimedOut) {
+      result.winner = "input";
+      return result;
+    }
+    // BFS-DP timed out — fall back to DFS over the proxied +
     // chained graph DecomposeAndSchedule has already formed.
     DfsSearch<DfsMaximizeIntegerOccupancyPolicy> dfs(
         g, st, mf, lis,
