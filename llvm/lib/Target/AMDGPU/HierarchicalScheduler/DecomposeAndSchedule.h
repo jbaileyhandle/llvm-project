@@ -109,12 +109,19 @@ struct DecomposeAndScheduleOptions {
   ///
   /// The returned options own their closures; `st`, `mf`, and `lis`
   /// are captured by reference and must outlive the options.
+  /// `outer_continuous` switches the outer search's objective from the
+  /// integer register-occupancy level (default) to the continuous
+  /// register-occupancy score. The integer outer is seeded with
+  /// `seed_occupancy`; the continuous outer is instead seeded with the
+  /// input order's continuous score (the integer seed is a different
+  /// scale). The inner search is always continuous.
   static DecomposeAndScheduleOptions BfsDpWithDfsFallback(
       const GCNSubtarget &st,
       const MachineFunction &mf,
       const LiveIntervals &lis,
       int seed_occupancy,
-      const FormationConfig &subgraph_formation);
+      const FormationConfig &subgraph_formation,
+      bool outer_continuous = false);
 };
 
 /// Form subgraphs in `graph`, schedule each in isolation, lock the

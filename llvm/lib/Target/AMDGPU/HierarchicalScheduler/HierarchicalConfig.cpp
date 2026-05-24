@@ -168,6 +168,10 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
     c.decompose = ParseBool(scope, key, val);
     return;
   }
+  if (key == "decompose_outer_continuous") {
+    c.decompose_outer_continuous = ParseBool(scope, key, val);
+    return;
+  }
   if (key == "search.timeout") {
     c.timeout_ms = ParseInt(scope, key, val);
     return;
@@ -456,6 +460,8 @@ std::string HierarchicalConfig::ToString() const {
   os << "\toccupancy: formation=" << FormationName(occupancy.formation.strategy)
      << " search=" << SearchName(occupancy.search)
      << " decompose=" << (occupancy.decompose ? "on" : "off")
+     << " decompose_outer_continuous="
+     << (occupancy.decompose_outer_continuous ? "on" : "off")
      << " mode=" << ModeName(occupancy.formation.mode)
      << " ratio=" << occupancy.formation.min_cut.imbalance_ratio
      << " target_size=" << occupancy.formation.min_cut.target_subgraph_size

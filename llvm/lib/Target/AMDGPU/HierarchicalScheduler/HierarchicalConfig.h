@@ -61,6 +61,10 @@ struct OccupancyConfig {
   FormationConfig formation; // strategy + mode + min-cut settings
   Search search = Search::kDfs;
   bool decompose = false;
+  // Decompose outer search objective: false = integer occupancy level
+  // (seeded with the region floor); true = continuous occupancy score
+  // (seeded with the input order's continuous score).
+  bool decompose_outer_continuous = false;
 
   // BFS-DP search params (ignored unless search uses BFS-DP).
   int timeout_ms = 5000;

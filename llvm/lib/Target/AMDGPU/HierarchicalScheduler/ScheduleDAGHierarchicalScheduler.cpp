@@ -565,7 +565,8 @@ static SearchResult RunOccupancyRegionWithDecompose(
   DecomposeAndScheduleOptions opts =
       DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
           st, mf, lis, region.GetOriginalRegisterOnlyOccupancy(),
-          HierarchicalConfig::Get().occupancy.formation);
+          HierarchicalConfig::Get().occupancy.formation,
+          HierarchicalConfig::Get().occupancy.decompose_outer_continuous);
   SearchResult result = DecomposeAndSchedule(graph, st, mf, opts);
   llvm::outs() << "\t\toutput: (Decompose) found_improvement="
                << result.schedule.has_value() << "\n";

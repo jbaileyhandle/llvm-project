@@ -76,7 +76,8 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     const MachineFunction &mf,
     const LiveIntervals &lis,
     int seed_occupancy,
-    const FormationConfig &subgraph_formation) {
+    const FormationConfig &subgraph_formation,
+    bool outer_continuous) {
   DecomposeAndScheduleOptions opts;
   // Formation: realized from the caller-supplied config. Decompose
   // requires a real formation (validated upstream), so the strategy is
@@ -121,18 +122,31 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     return dfs_result;
   };
 
-  // Outer: integer occupancy score, seeded with the function-wide
-  // occupancy floor. BFS-DP's score-bound prune drops any partition
-  // path that can't strictly beat the floor. DFS fallback uses the
-  // integer-metric variant so the search's "better" judgement
-  // matches the BFS-DP it's replacing.
-  opts.outer_search = [&st, &mf, &lis, seed_occupancy](
+  // Outer: by default the integer register-occupancy level, seeded with
+  // the region's occupancy floor (seed_occupancy) so the score-bound
+  // prune drops any path that can't strictly beat it. When
+  // outer_continuous is set, the outer instead maximizes the continuous
+  // register-occupancy score, seeded with the input order's continuous
+  // score (the integer floor is a different scale, so we score the input
+  // constructor under the continuous metric). Each DFS fallback uses the
+  // policy matching its metric so the fallback's "better" judgement
+  // agrees with the BFS-DP it replaces.
+  opts.outer_search = [&st, &mf, &lis, seed_occupancy, outer_continuous](
                           ScheduleGraph &g) -> SearchResult {
     BfsDpSettings settings;
-    settings.metric = ScheduleMetric::kMaximizeRegisterOccupancy;
+    settings.metric =
+        outer_continuous
+            ? ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore
+            : ScheduleMetric::kMaximizeRegisterOccupancy;
     settings.timeout_ms = kBfsDpWithDfsFallbackTimeoutMs;
     BfsDpSearch bfs(&g, &st, &mf, settings);
-    bfs.SetInitialBestScore(seed_occupancy);
+    if (outer_continuous) {
+      // Score the input order under the continuous metric and use it as
+      // the prune floor (SetInitialBestScore extracts the metric score).
+      bfs.SetInitialBestScore(g.GetInputScheduleConstructor());
+    } else {
+      bfs.SetInitialBestScore(seed_occupancy);
+    }
     SearchResult result = bfs.Run();
     // Fraction of the proxied graph's layers BFS-DP reached; kept on
     // the row even when DFS rescues, to show how far the outer BFS-DP
@@ -146,19 +160,24 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     }
     result.bfs_pct = bfs_pct;
     // Only DFS-rescue a timeout. A fully-explored empty result proves
-    // (the score-bound prune is sound) that nothing beats the seed
-    // occupancy, so DFS over the same objective can't either — keep the
-    // input order.
+    // (the score-bound prune is sound) that nothing beats the seed, so
+    // DFS over the same objective can't either — keep the input order.
     if (result.termination_cause != SearchTerminationCause::kTimedOut) {
       result.winner = "input";
       return result;
     }
-    // BFS-DP timed out — fall back to DFS over the proxied +
-    // chained graph DecomposeAndSchedule has already formed.
-    DfsSearch<DfsMaximizeIntegerOccupancyPolicy> dfs(
-        g, st, mf, lis,
-        /*timeout_ms=*/kBfsDpWithDfsFallbackTimeoutMs);
-    SearchResult dfs_result = dfs.Run();
+    // BFS-DP timed out — fall back to DFS over the proxied + chained
+    // graph, with the policy matching the chosen outer metric.
+    SearchResult dfs_result;
+    if (outer_continuous) {
+      DfsSearch<DfsMaximizeOccupancyPolicy> dfs(
+          g, st, mf, lis, /*timeout_ms=*/kBfsDpWithDfsFallbackTimeoutMs);
+      dfs_result = dfs.Run();
+    } else {
+      DfsSearch<DfsMaximizeIntegerOccupancyPolicy> dfs(
+          g, st, mf, lis, /*timeout_ms=*/kBfsDpWithDfsFallbackTimeoutMs);
+      dfs_result = dfs.Run();
+    }
     dfs_result.winner = "dfs";
     dfs_result.bfs_pct = bfs_pct;
     // Keep the outer BFS-DP throughput on the row even though DFS won.
