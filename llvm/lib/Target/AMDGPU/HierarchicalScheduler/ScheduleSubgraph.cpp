@@ -53,7 +53,12 @@ const SubgraphScheduleResult &ScheduleSubgraph(
   info.schedule_result = SubgraphScheduleResult{
       std::move(order),
       recorded_schedule.GetPressureTracker().GetPeakPressure(),
-      result.termination_cause};
+      result.termination_cause,
+      // When the search produced no schedule we recorded the input
+      // order above, so the winner is "input"; otherwise carry the
+      // search's own winner/bfs_pct.
+      result.schedule ? result.winner : std::string("input"),
+      result.schedule ? result.bfs_pct : std::nullopt};
   return *info.schedule_result;
 }
 

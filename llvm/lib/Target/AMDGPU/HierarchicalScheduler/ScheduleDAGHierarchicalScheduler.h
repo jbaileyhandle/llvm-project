@@ -117,6 +117,19 @@ public:
     std::string winner;
     std::optional<float> bfs_pct;
     int orig_vgpr = 0, orig_sgpr = 0, fin_vgpr = 0, fin_sgpr = 0;
+
+    // Per-subgraph search outcome for the search_outcomes.csv "sub{n}"
+    // rows. Only the per-search fields are recorded; region-level
+    // pressure/improved totals live on the region/outer row, not here.
+    struct SubgraphOutcome {
+      int nodes;
+      SearchTerminationCause termination_cause;
+      std::string winner;
+      std::optional<float> bfs_pct;
+    };
+    // Non-empty only for decompose regions: one entry per scheduled
+    // subgraph, in formation order (sub0, sub1, ...).
+    std::vector<SubgraphOutcome> subgraph_rows;
   };
   MaxOccupancyRegionResult ScheduleRegionForMaximumOccupancy(
       RegionInfo &region);

@@ -317,7 +317,9 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     SearchOutcome occ_row;
     occ_row.pass = "occ";
     occ_row.region = static_cast<int>(i);
-    occ_row.slot = "region";
+    // A decompose region emits an "outer" summary row plus one "sub{n}"
+    // row per subgraph; a plain region emits a single "region" row.
+    occ_row.slot = region_result.subgraph_rows.empty() ? "region" : "outer";
     occ_row.nodes = region.GetNumInstrs();
     occ_row.term_cause = region_result.termination_cause;
     occ_row.winner = region_result.winner;
@@ -329,6 +331,23 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     occ_row.improved =
         region_result.all_factors_occupancy > original_register_only_occupancy;
     RecordSearchOutcome(occ_row);
+
+    // Per-subgraph rows (decompose only; empty otherwise). Per-search
+    // outcome only — region-level pressure/improved totals stay on the
+    // "outer" row above.
+    for (size_t s = 0; s < region_result.subgraph_rows.size(); ++s) {
+      const MaxOccupancyRegionResult::SubgraphOutcome &subgraph_row =
+          region_result.subgraph_rows[s];
+      SearchOutcome sub_row;
+      sub_row.pass = "occ";
+      sub_row.region = static_cast<int>(i);
+      sub_row.slot = "sub" + std::to_string(s);
+      sub_row.nodes = subgraph_row.nodes;
+      sub_row.term_cause = subgraph_row.termination_cause;
+      sub_row.winner = subgraph_row.winner;
+      sub_row.bfs_pct = subgraph_row.bfs_pct;
+      RecordSearchOutcome(sub_row);
+    }
 
     // Update kernel_occupancy_so_far.
     int kernel_occupancy_after_region = std::min(
@@ -663,6 +682,24 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     result.orig_sgpr = in.getSGPRNum();
     result.fin_vgpr = out.getVGPRNum(st.hasGFX90AInsts());
     result.fin_sgpr = out.getSGPRNum();
+
+    // Capture per-subgraph outcomes for the search_outcomes.csv
+    // "sub{n}" rows. Only decompose populates schedule_result (via
+    // ScheduleSubgraph); a flat search over formed subgraphs leaves it
+    // unset, so this stays empty and the region records a single
+    // "region" row. Subgraphs are in GetSubgraphInfos() (formation)
+    // order.
+    for (const std::unique_ptr<SubgraphInfo> &info :
+         graph.GetSubgraphInfos()) {
+      if (!info->schedule_result.has_value()) {
+        continue;
+      }
+      const SubgraphScheduleResult &subgraph_result = *info->schedule_result;
+      result.subgraph_rows.push_back(
+          {/*nodes=*/static_cast<int>(info->members.size()),
+           subgraph_result.termination_cause, subgraph_result.winner,
+           subgraph_result.bfs_pct});
+    }
   });
   return result;
 }

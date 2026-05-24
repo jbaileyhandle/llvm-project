@@ -95,7 +95,14 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     settings.timeout_ms = kBfsDpWithDfsFallbackTimeoutMs;
     BfsDpSearch bfs(&sub, &st, &mf, settings);
     SearchResult result = bfs.Run();
+    // Fraction of the subgraph's layers BFS-DP reached before it
+    // finished or bailed — reported on the row whether or not BFS-DP
+    // won, so a DFS-fallback row still shows how far BFS-DP got.
+    std::optional<float> bfs_pct =
+        (100.0f * bfs.GetLevelsExplored()) / sub.Size();
     if (result.schedule.has_value()) {
+      result.winner = "bfs";
+      result.bfs_pct = bfs_pct;
       return result;
     }
     // BFS-DP returned no schedule — fall back to DFS at the same
@@ -103,7 +110,10 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     DfsSearch<DfsMaximizeOccupancyPolicy> dfs(
         sub, st, mf, lis,
         /*timeout_ms=*/kBfsDpWithDfsFallbackTimeoutMs);
-    return dfs.Run();
+    SearchResult dfs_result = dfs.Run();
+    dfs_result.winner = "dfs";
+    dfs_result.bfs_pct = bfs_pct;
+    return dfs_result;
   };
 
   // Outer: integer occupancy score, seeded with the function-wide
@@ -119,7 +129,14 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     BfsDpSearch bfs(&g, &st, &mf, settings);
     bfs.SetInitialBestScore(seed_occupancy);
     SearchResult result = bfs.Run();
+    // Fraction of the proxied graph's layers BFS-DP reached; kept on
+    // the row even when DFS rescues, to show how far the outer BFS-DP
+    // got before bailing.
+    std::optional<float> bfs_pct =
+        (100.0f * bfs.GetLevelsExplored()) / g.Size();
     if (result.schedule.has_value()) {
+      result.winner = "bfs";
+      result.bfs_pct = bfs_pct;
       return result;
     }
     // BFS-DP returned no schedule — fall back to DFS over the proxied +
@@ -127,7 +144,10 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     DfsSearch<DfsMaximizeIntegerOccupancyPolicy> dfs(
         g, st, mf, lis,
         /*timeout_ms=*/kBfsDpWithDfsFallbackTimeoutMs);
-    return dfs.Run();
+    SearchResult dfs_result = dfs.Run();
+    dfs_result.winner = "dfs";
+    dfs_result.bfs_pct = bfs_pct;
+    return dfs_result;
   };
 
   return opts;

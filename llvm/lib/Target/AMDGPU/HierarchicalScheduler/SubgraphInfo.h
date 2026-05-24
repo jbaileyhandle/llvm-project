@@ -59,6 +59,16 @@ struct SubgraphScheduleResult {
 
   /// How the search that produced `order` ended.
   SearchTerminationCause termination_cause;
+
+  /// Which backend produced `order`: "bfs" | "dfs" | "input". Mirrors
+  /// SearchResult::winner for the subgraph's isolated search, so the
+  /// per-subgraph search-outcome row can report it.
+  std::string winner;
+
+  /// Fraction of the subgraph's layers the inner BFS-DP reached before
+  /// finishing or bailing (kept even when DFS rescued). Unset when not
+  /// applicable. Mirrors SearchResult::bfs_pct.
+  std::optional<float> bfs_pct;
 };
 
 struct SubgraphInfo {
