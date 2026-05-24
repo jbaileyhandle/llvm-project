@@ -69,6 +69,11 @@ struct SubgraphScheduleResult {
   /// finishing or bailing (kept even when DFS rescued). Unset when not
   /// applicable. Mirrors SearchResult::bfs_pct.
   std::optional<float> bfs_pct;
+
+  /// Per-backend throughput of the subgraph's isolated search: wall-clock
+  /// ms and Schedule-step count. Mirror SearchResult::{bfs,dfs}_{ms,steps}.
+  std::optional<int> bfs_ms, dfs_ms;
+  std::optional<int> bfs_steps, dfs_steps;
 };
 
 struct SubgraphInfo {

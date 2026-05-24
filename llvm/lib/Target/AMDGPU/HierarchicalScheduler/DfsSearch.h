@@ -157,8 +157,18 @@ class DfsSearch {
   // genuinely produce nothing (BFS-DP).
   SearchResult Run() {
     timing_.Start();
+    int64_t steps_before =
+        working_schedule_constructor_.ScheduleCallCount().lifetime;
     Recurse();
-    return SearchResult{best_schedule_constructor_, GetTerminationCause()};
+    SearchResult result{best_schedule_constructor_, GetTerminationCause()};
+    // Throughput telemetry: wall-clock and Schedule calls for this
+    // Run(). Lifetime delta (not current_run) so it is correct even
+    // if Run() is called more than once on this search.
+    result.dfs_ms = static_cast<int>(timing_.CurrentRunElapsedMs());
+    result.dfs_steps = static_cast<int>(
+        working_schedule_constructor_.ScheduleCallCount().lifetime -
+        steps_before);
+    return result;
   }
 
   // Wall-clock elapsed (milliseconds) for the most recent Run().

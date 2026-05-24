@@ -6,6 +6,8 @@
 
 #include "BfsDpSearch.h"
 
+#include <chrono>
+
 namespace llvm {
 namespace hierarchical_scheduler {
 
@@ -15,6 +17,7 @@ BfsDpSearch::BfsDpSearch(const ScheduleGraph *graph, const GCNSubtarget *st,
     : dag_(graph, st, mf, settings) {}
 
 SearchResult BfsDpSearch::Run() {
+  auto start = std::chrono::steady_clock::now();
   bool built = dag_.Build();
   std::optional<ScheduleConstructor> schedule;
   if (built) {
@@ -34,7 +37,15 @@ SearchResult BfsDpSearch::Run() {
   SearchTerminationCause cause =
       dag_.TimedOut() ? SearchTerminationCause::kTimedOut
                       : SearchTerminationCause::kFullyExplored;
-  return SearchResult{std::move(schedule), cause};
+  SearchResult result{std::move(schedule), cause};
+  // Throughput telemetry: wall-clock and the dag's Schedule-probe
+  // count for this Build (Unschedule not counted; one Build per dag).
+  result.bfs_ms = static_cast<int>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count());
+  result.bfs_steps = dag_.GetScheduleCallCount();
+  return result;
 }
 
 }  // namespace hierarchical_scheduler

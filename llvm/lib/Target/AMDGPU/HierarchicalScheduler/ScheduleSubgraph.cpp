@@ -58,7 +58,8 @@ const SubgraphScheduleResult &ScheduleSubgraph(
       // order above, so the winner is "input"; otherwise carry the
       // search's own winner/bfs_pct.
       result.schedule ? result.winner : std::string("input"),
-      result.schedule ? result.bfs_pct : std::nullopt};
+      result.schedule ? result.bfs_pct : std::nullopt,
+      result.bfs_ms, result.dfs_ms, result.bfs_steps, result.dfs_steps};
   return *info.schedule_result;
 }
 

@@ -113,6 +113,9 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     SearchResult dfs_result = dfs.Run();
     dfs_result.winner = "dfs";
     dfs_result.bfs_pct = bfs_pct;
+    // Keep the BFS-DP throughput on the row even though DFS won.
+    dfs_result.bfs_ms = result.bfs_ms;
+    dfs_result.bfs_steps = result.bfs_steps;
     return dfs_result;
   };
 
@@ -147,6 +150,9 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     SearchResult dfs_result = dfs.Run();
     dfs_result.winner = "dfs";
     dfs_result.bfs_pct = bfs_pct;
+    // Keep the outer BFS-DP throughput on the row even though DFS won.
+    dfs_result.bfs_ms = result.bfs_ms;
+    dfs_result.bfs_steps = result.bfs_steps;
     return dfs_result;
   };
 

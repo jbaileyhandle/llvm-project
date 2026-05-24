@@ -116,6 +116,10 @@ public:
     SearchTerminationCause termination_cause;
     std::string winner;
     std::optional<float> bfs_pct;
+    // Per-backend throughput of the region's search (ms + Schedule
+    // steps); both present on a DFS-fallback. See SearchResult.
+    std::optional<int> bfs_ms, dfs_ms;
+    std::optional<int> bfs_steps, dfs_steps;
     int orig_vgpr = 0, orig_sgpr = 0, fin_vgpr = 0, fin_sgpr = 0;
 
     // Per-subgraph search outcome for the search_outcomes.csv "sub{n}"
@@ -126,6 +130,8 @@ public:
       SearchTerminationCause termination_cause;
       std::string winner;
       std::optional<float> bfs_pct;
+      std::optional<int> bfs_ms, dfs_ms;
+      std::optional<int> bfs_steps, dfs_steps;
     };
     // Non-empty only for decompose regions: one entry per scheduled
     // subgraph, in formation order (sub0, sub1, ...).
@@ -154,6 +160,8 @@ public:
     bool timed_out = false;
     int nodes = 0;
     int orig_vgpr = 0, orig_sgpr = 0, fin_vgpr = 0, fin_sgpr = 0;
+    // Length pass is DFS-only; bfs_* stay blank on len rows.
+    std::optional<int> dfs_ms, dfs_steps;
   };
 
   // Per-region worker for RunLengthPass. Resolves the length-pass

@@ -324,6 +324,10 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     occ_row.term_cause = region_result.termination_cause;
     occ_row.winner = region_result.winner;
     occ_row.bfs_pct = region_result.bfs_pct;
+    occ_row.bfs_ms = region_result.bfs_ms;
+    occ_row.dfs_ms = region_result.dfs_ms;
+    occ_row.bfs_steps = region_result.bfs_steps;
+    occ_row.dfs_steps = region_result.dfs_steps;
     occ_row.orig_vgpr = region_result.orig_vgpr;
     occ_row.orig_sgpr = region_result.orig_sgpr;
     occ_row.fin_vgpr = region_result.fin_vgpr;
@@ -346,6 +350,10 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
       sub_row.term_cause = subgraph_row.termination_cause;
       sub_row.winner = subgraph_row.winner;
       sub_row.bfs_pct = subgraph_row.bfs_pct;
+      sub_row.bfs_ms = subgraph_row.bfs_ms;
+      sub_row.dfs_ms = subgraph_row.dfs_ms;
+      sub_row.bfs_steps = subgraph_row.bfs_steps;
+      sub_row.dfs_steps = subgraph_row.dfs_steps;
       RecordSearchOutcome(sub_row);
     }
 
@@ -593,11 +601,16 @@ static SearchResult RunOccupancyRegionWithBfsDpThenDfs(
   if (result.schedule.has_value()) {
     return result;
   }
-  // BFS-DP bailed; DFS rescues. Keep BFS's depth-reached for the row.
+  // BFS-DP bailed; DFS rescues. Keep BFS's depth-reached and
+  // throughput on the row alongside the DFS that took over.
   std::optional<float> bfs_pct = result.bfs_pct;
+  std::optional<int> bfs_ms = result.bfs_ms;
+  std::optional<int> bfs_steps = result.bfs_steps;
   SearchResult dfs = RunOccupancyRegionWithDfs(graph, st, mf, lis,
                                                input_schedule_constructor);
   dfs.bfs_pct = bfs_pct;
+  dfs.bfs_ms = bfs_ms;
+  dfs.bfs_steps = bfs_steps;
   return dfs;
 }
 
@@ -675,6 +688,10 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     result.termination_cause = search_result.termination_cause;
     result.winner = search_result.winner;
     result.bfs_pct = search_result.bfs_pct;
+    result.bfs_ms = search_result.bfs_ms;
+    result.dfs_ms = search_result.dfs_ms;
+    result.bfs_steps = search_result.bfs_steps;
+    result.dfs_steps = search_result.dfs_steps;
     const GCNRegPressure &in = input_schedule_constructor.GetPressureTracker()
                                    .GetPeakPressure();
     const GCNRegPressure &out = applied.GetPressureTracker().GetPeakPressure();
@@ -698,7 +715,9 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
       result.subgraph_rows.push_back(
           {/*nodes=*/static_cast<int>(info->members.size()),
            subgraph_result.termination_cause, subgraph_result.winner,
-           subgraph_result.bfs_pct});
+           subgraph_result.bfs_pct, subgraph_result.bfs_ms,
+           subgraph_result.dfs_ms, subgraph_result.bfs_steps,
+           subgraph_result.dfs_steps});
     }
   });
   return result;
@@ -745,6 +764,8 @@ void ScheduleDAGHierarchicalScheduler::RunLengthPass() {
     len_row.term_cause = stats.timed_out ? SearchTerminationCause::kTimedOut
                                          : SearchTerminationCause::kFullyExplored;
     len_row.winner = "dfs";
+    len_row.dfs_ms = stats.dfs_ms;
+    len_row.dfs_steps = stats.dfs_steps;
     len_row.orig_vgpr = stats.orig_vgpr;
     len_row.orig_sgpr = stats.orig_sgpr;
     len_row.fin_vgpr = stats.fin_vgpr;
@@ -899,7 +920,7 @@ static void RunIterativeLengthMinPhase(
     const MachineFunction &mf, const LiveIntervals &lis,
     const ScheduleConstructor &input_schedule_constructor,
     ScheduleConstructor &best_schedule_constructor,
-    bool &any_timed_out) {
+    bool &any_timed_out, int64_t &dfs_ms, int64_t &dfs_steps) {
   const int floor = graph.GetGraphLengthFloor();
   const int input_length =
       input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
@@ -950,6 +971,14 @@ static void RunIterativeLengthMinPhase(
     }
   }
 
+  // Accumulate this phase's DFS throughput (lifetime totals over all
+  // iterations). Guard on iterations_run: with an empty target range
+  // iter_search never ran, so its stopwatch was never started.
+  if (iterations_run > 0) {
+    dfs_ms += iter_search.GetRegionElapsedMs();
+    dfs_steps += iter_search.ScheduleCallCount().lifetime;
+  }
+
   bool iter_changed =
       input_schedule_constructor.GetScheduleOrder() !=
       best_schedule_constructor.GetScheduleOrder();
@@ -985,7 +1014,7 @@ static void RunPlainLengthMinPhase(
     const MachineFunction &mf, const LiveIntervals &lis,
     const ScheduleConstructor &input_schedule_constructor,
     ScheduleConstructor &best_schedule_constructor,
-    bool &any_timed_out) {
+    bool &any_timed_out, int64_t &dfs_ms, int64_t &dfs_steps) {
   // Runs over the already-formed graph (formation done once per region
   // by ScheduleRegionForLengthPass).
   DfsSearch<Policy> plain_search(graph, st, mf, lis);
@@ -998,6 +1027,8 @@ static void RunPlainLengthMinPhase(
                                  Policy::kMetric)) {
     best_schedule_constructor = plain_result;
   }
+  dfs_ms += plain_search.GetRegionElapsedMs();
+  dfs_steps += plain_search.ScheduleCallCount().lifetime;
 
   bool changed =
       input_schedule_constructor.GetScheduleOrder() !=
@@ -1027,7 +1058,7 @@ static void RunMinimizeLengthForRegionWithPolicy(
     const MachineFunction &mf, const LiveIntervals &lis,
     const ScheduleConstructor &input_schedule_constructor,
     ScheduleConstructor &best_schedule_constructor,
-    bool &any_timed_out) {
+    bool &any_timed_out, int64_t &dfs_ms, int64_t &dfs_steps) {
   // Subgraph formation already happened once for this region in
   // ScheduleRegionForLengthPass (per the configured strategy); both
   // phases below run over that formed graph.
@@ -1039,12 +1070,12 @@ static void RunMinimizeLengthForRegionWithPolicy(
   if constexpr (kUseTargetFeasibilityIteration) {
     RunIterativeLengthMinPhase<Policy>(
         graph, st, mf, lis, input_schedule_constructor,
-        best_schedule_constructor, any_timed_out);
+        best_schedule_constructor, any_timed_out, dfs_ms, dfs_steps);
   }
 
   RunPlainLengthMinPhase<Policy>(
       graph, st, mf, lis, input_schedule_constructor,
-      best_schedule_constructor, any_timed_out);
+      best_schedule_constructor, any_timed_out, dfs_ms, dfs_steps);
 }
 
 // Per-region worker for the length-MAX policy. Single-phase: no
@@ -1062,7 +1093,7 @@ static void RunMaximizeLengthForRegion(
     const MachineFunction &mf, const LiveIntervals &lis,
     const ScheduleConstructor &input_schedule_constructor,
     ScheduleConstructor &best_schedule_constructor,
-    bool &any_timed_out) {
+    bool &any_timed_out, int64_t &dfs_ms, int64_t &dfs_steps) {
   PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
 
   // Runs over the already-formed graph (formation done once per region
@@ -1080,6 +1111,8 @@ static void RunMaximizeLengthForRegion(
                                 DfsMaximizeLengthPolicy::kMetric)) {
     best_schedule_constructor = plain_result;
   }
+  dfs_ms += plain_search.GetRegionElapsedMs();
+  dfs_steps += plain_search.ScheduleCallCount().lifetime;
 
   bool changed = input_schedule_constructor.GetScheduleOrder() !=
                  best_schedule_constructor.GetScheduleOrder();
@@ -1117,6 +1150,10 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForLengthPass(
     ScheduleConstructor best_schedule_constructor =
         input_schedule_constructor;
     bool any_timed_out = false;
+    // Cumulative DFS throughput across this region's length search(es)
+    // (iterative + plain phases, or the single length-max search).
+    int64_t total_dfs_ms = 0;
+    int64_t total_dfs_steps = 0;
 
     // Form per the length pass's configured strategy (a no-op for kNone),
     // once per region before the policy search. The DfsSearches in the
@@ -1134,24 +1171,28 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForLengthPass(
     case LengthPolicy::kMin:
       RunMinimizeLengthForRegionWithPolicy<DfsMinimizeLengthPolicy>(
           graph, st, MF, *LIS, input_schedule_constructor,
-          best_schedule_constructor, any_timed_out);
+          best_schedule_constructor, any_timed_out, total_dfs_ms,
+          total_dfs_steps);
       break;
     case LengthPolicy::kMinRefineIlp:
       RunMinimizeLengthForRegionWithPolicy<
           DfsMinimizeLengthRefineIlpPolicy>(
           graph, st, MF, *LIS, input_schedule_constructor,
-          best_schedule_constructor, any_timed_out);
+          best_schedule_constructor, any_timed_out, total_dfs_ms,
+          total_dfs_steps);
       break;
     case LengthPolicy::kMinRefineOccupancy:
       RunMinimizeLengthForRegionWithPolicy<
           DfsMinimizeLengthRefineOccupancyPolicy>(
           graph, st, MF, *LIS, input_schedule_constructor,
-          best_schedule_constructor, any_timed_out);
+          best_schedule_constructor, any_timed_out, total_dfs_ms,
+          total_dfs_steps);
       break;
     case LengthPolicy::kMax:
       RunMaximizeLengthForRegion(graph, st, MF, *LIS,
                                  input_schedule_constructor,
-                                 best_schedule_constructor, any_timed_out);
+                                 best_schedule_constructor, any_timed_out,
+                                 total_dfs_ms, total_dfs_steps);
       break;
     }
 
@@ -1172,6 +1213,8 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForLengthPass(
     stats.orig_sgpr = in.getSGPRNum();
     stats.fin_vgpr = out.getVGPRNum(st.hasGFX90AInsts());
     stats.fin_sgpr = out.getSGPRNum();
+    stats.dfs_ms = static_cast<int>(total_dfs_ms);
+    stats.dfs_steps = static_cast<int>(total_dfs_steps);
   });
 
   return stats;

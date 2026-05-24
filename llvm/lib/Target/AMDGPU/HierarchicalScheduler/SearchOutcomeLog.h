@@ -29,6 +29,10 @@ struct SearchOutcome {
   SearchTerminationCause term_cause;
   std::string winner;            // "bfs" | "dfs" | "input" | "none"
   std::optional<float> bfs_pct;  // BFS depth reached / nodes; unset if N/A
+  // Per-backend throughput, where each ran (both set on a DFS fallback).
+  // The writer derives bfs_rate/dfs_rate = steps/ms columns from these.
+  std::optional<int> bfs_ms, dfs_ms;
+  std::optional<int> bfs_steps, dfs_steps;
   std::optional<int> orig_vgpr, orig_sgpr, fin_vgpr, fin_sgpr;
   std::optional<int> orig_len, fin_len;
   std::optional<bool> improved;

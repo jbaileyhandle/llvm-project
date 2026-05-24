@@ -46,6 +46,16 @@ void AppendOpt(std::string &out, const std::optional<float> &v) {
   }
 }
 
+// Derived step-rate column: steps / ms. Blank when either input is
+// unset or ms is 0 (a sub-millisecond run — rate not meaningful).
+void AppendRate(std::string &out, const std::optional<int> &steps,
+                const std::optional<int> &ms) {
+  out += ',';
+  if (steps.has_value() && ms.has_value() && *ms > 0) {
+    out += std::to_string(static_cast<float>(*steps) / *ms);
+  }
+}
+
 }  // namespace
 
 void RecordSearchOutcome(const SearchOutcome &row) {
@@ -62,7 +72,8 @@ void FlushSearchOutcomes() {
   std::ofstream f(kFile, std::ios::app);
   if (f.tellp() == 0) {
     f << "pass,region,slot,nodes,term_cause,winner,bfs_pct,"
-         "orig_vgpr,orig_sgpr,fin_vgpr,fin_sgpr,orig_len,fin_len,improved\n";
+         "orig_vgpr,orig_sgpr,fin_vgpr,fin_sgpr,orig_len,fin_len,improved,"
+         "bfs_ms,bfs_steps,bfs_rate,dfs_ms,dfs_steps,dfs_rate\n";
   }
   for (const SearchOutcome &r : g_rows) {
     std::string line = r.pass + "," + std::to_string(r.region) + "," + r.slot +
@@ -79,6 +90,12 @@ void FlushSearchOutcomes() {
     if (r.improved.has_value()) {
       line += *r.improved ? "1" : "0";
     }
+    AppendOpt(line, r.bfs_ms);
+    AppendOpt(line, r.bfs_steps);
+    AppendRate(line, r.bfs_steps, r.bfs_ms);
+    AppendOpt(line, r.dfs_ms);
+    AppendOpt(line, r.dfs_steps);
+    AppendRate(line, r.dfs_steps, r.dfs_ms);
     f << line << "\n";
   }
   g_rows.clear();
