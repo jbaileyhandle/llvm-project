@@ -1518,6 +1518,35 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildPressureHistoryPruneTestDAG()
   return graph;
 }
 
+std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildAreaTiebreakTestDAG() {
+  auto graph = std::make_unique<ScheduleGraph>();
+
+  // 6 nodes A→B→M→{X,Y}→T. The A→B chain raises pressure to the peak;
+  // M gates the frees X,Y, which drop below the peak in either order;
+  // T is the single sink. See header for the rationale. Created in
+  // topo order so creation index == topo index (the test deltas are
+  // indexed by topo index); X before Y so a peak-only DFS explores the
+  // lower-area order first.
+  graph->ReserveNodes(6);
+  ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
+  ScheduleNode &b = graph->EmplaceNode(nullptr, "B", graph.get());
+  ScheduleNode &m = graph->EmplaceNode(nullptr, "M", graph.get());
+  ScheduleNode &x = graph->EmplaceNode(nullptr, "X", graph.get());
+  ScheduleNode &y = graph->EmplaceNode(nullptr, "Y", graph.get());
+  ScheduleNode &t = graph->EmplaceNode(nullptr, "T", graph.get());
+
+  graph->AddEdge(&a, &b, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&b, &m, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&m, &x, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&m, &y, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&x, &t, ScheduleEdge::kData, /*latency=*/1);
+  graph->AddEdge(&y, &t, ScheduleEdge::kData, /*latency=*/1);
+
+  graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
+
+  return graph;
+}
+
 std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildBfsDpWideTestDAG() {
   auto graph = std::make_unique<ScheduleGraph>();
 

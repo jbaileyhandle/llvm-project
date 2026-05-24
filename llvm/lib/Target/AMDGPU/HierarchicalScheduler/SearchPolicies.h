@@ -404,6 +404,52 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
   static constexpr bool kUsePressureHistoryPruning = true;
 };
 
+// Like DfsMaximizeOccupancyPolicy, but among schedules with equal peak
+// occupancy score it prefers the one with the higher occupancy area
+// under the curve (kMaximizeContinuousOccupancyThenArea) — pressure
+// kept low throughout, not just at the peak. Inner-search use only
+// (decompose), enabled by occupancy.decompose_inner_area_tiebreak.
+//
+// Inherits the occupancy policy's ready-list filter/sort, and keeps
+// pressure-history pruning on — that tracker is (peak, area)
+// lexicographic, so it already accounts for the area tiebreak. The two
+// overrides below are the rest of what the tiebreak requires.
+class DfsMaximizeContinuousOccupancyThenAreaPolicy
+    : public DfsMaximizeOccupancyPolicy {
+ public:
+  static constexpr ScheduleMetric kMetric =
+      ScheduleMetric::kMaximizeContinuousOccupancyThenArea;
+
+  // Strict < on the fixed best-bound (base uses <=): working's
+  // current peak score is an upper bound on any completion's peak, so
+  // a completion can still tie best's peak and then win on area.
+  // Pruning the equal-peak case would discard those, so only prune
+  // when strictly below best. The (area-aware) history check still
+  // handles same-partition domination.
+  static bool ShouldBoundSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor,
+      LengthHistoryTracker & /*length_history*/,
+      PressureHistoryTracker &pressure_history) {
+    if (schedule_constructor.GetPressureTracker().GetMetricScore(kMetric) <
+        best_schedule_constructor.GetPressureTracker().GetMetricScore(
+            kMetric)) {
+      return true;
+    }
+    return pressure_history.IsDominatedElseRecord();
+  }
+
+  // Never end early: the base stops once best hits the occupancy
+  // ceiling, but we keep exploring same-peak schedules for a better
+  // area. The strict-< bound and history check confine that to the
+  // max-peak frontier; the inner DFS timeout caps the cost.
+  static bool ShouldEndSearch(
+      const ScheduleConstructor & /*schedule_constructor*/,
+      const ScheduleConstructor & /*best_schedule_constructor*/) {
+    return false;
+  }
+};
+
 } // namespace hierarchical_scheduler
 } // namespace llvm
 

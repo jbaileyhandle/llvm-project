@@ -31,6 +31,12 @@ enum class ScheduleMetric {
   /// progress toward the next higher bracket.
   kMaximizeContinuousRegisterOccupancyScore,
 
+  /// Continuous occupancy (peak) primary, with occupancy-area
+  /// (sum of per-step continuous score) as the same-peak tiebreak;
+  /// higher area = pressure kept lower throughout. See
+  /// GCNRegisterTracker::GetContinuousOccupancyArea.
+  kMaximizeContinuousOccupancyThenArea,
+
   /// Current schedule length in cycles.
   kMinimizeScheduleLength,
 

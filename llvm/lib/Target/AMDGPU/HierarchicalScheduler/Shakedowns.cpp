@@ -2848,6 +2848,104 @@ RunPressureHistoryHashCollisionShakedown(const GCNSubtarget &st) {
                << (ok ? "PASS\n" : "FAIL\n");
 }
 
+// Area test 1: the (peak, area) overload records area on first insert,
+// and the same (peak, area) self-dominates (lexicographic >= prunes on
+// equality).
+static void RunPressureHistoryAreaFirstInsertAndSelfDominanceShakedown(
+    const GCNSubtarget &st) {
+  auto fixture = BuildPressureHistoryTrackerFixture(st);
+  ScheduleNodeOnPressureFixture(fixture, fixture.a);
+
+  bool inserted = !fixture.pressure_history_tracker->IsDominatedElseRecord(
+      /*current_peak_score=*/100, /*current_area=*/500);
+  PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+  const PressureHistoryTracker::Entry *entry =
+      fixture.pressure_history_tracker->GetEntryForTest(key);
+  bool area_recorded = entry != nullptr && entry->best_prefix_score == 100 &&
+                       entry->best_area == 500;
+
+  // Same (peak, area) — prior dominates lexicographically (equality).
+  bool self_pruned = fixture.pressure_history_tracker->IsDominatedElseRecord(
+      100, 500);
+  bool prune_count_one =
+      fixture.pressure_history_tracker->PruneCount().lifetime == 1;
+
+  bool ok = inserted && area_recorded && self_pruned && prune_count_one;
+  llvm::outs() << "    Area first insert + self-dominance: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Area test 2: same-peak ties broken by area. Prior (100, 500). A
+// lower-area query at the same peak is dominated (pruned, entry kept);
+// a higher-area query at the same peak is not dominated and updates the
+// recorded area (peak stays).
+static void RunPressureHistoryAreaTiebreakShakedown(const GCNSubtarget &st) {
+  auto fixture = BuildPressureHistoryTrackerFixture(st);
+  ScheduleNodeOnPressureFixture(fixture, fixture.a);
+  PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+
+  PressureHistoryTracker::Entry prior;
+  prior.best_prefix_score = 100;
+  prior.best_area = 500;
+  fixture.pressure_history_tracker->InsertEntryForTest(key, prior);
+
+  // Same peak, lower area (300): prior area 500 >= 300 → prune.
+  bool lower_area_pruned =
+      fixture.pressure_history_tracker->IsDominatedElseRecord(100, 300);
+  const PressureHistoryTracker::Entry *after_low =
+      fixture.pressure_history_tracker->GetEntryForTest(key);
+  bool unchanged = after_low != nullptr && after_low->best_area == 500;
+
+  // Same peak, higher area (700): not dominated → update area to 700.
+  bool higher_area_not_pruned =
+      !fixture.pressure_history_tracker->IsDominatedElseRecord(100, 700);
+  const PressureHistoryTracker::Entry *after_high =
+      fixture.pressure_history_tracker->GetEntryForTest(key);
+  bool updated = after_high != nullptr && after_high->best_prefix_score == 100 &&
+                 after_high->best_area == 700;
+
+  bool ok = lower_area_pruned && unchanged && higher_area_not_pruned && updated;
+  llvm::outs() << "    Area same-peak tiebreak: "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
+// Area test 3: peak is primary — it dominates regardless of area.
+// Prior (200, 0). A lower-peak query with a much higher area is still
+// pruned. Then a higher-peak query with zero area is not dominated and
+// replaces the entry (peak wins even though area didn't improve).
+static void
+RunPressureHistoryAreaPeakDominatesShakedown(const GCNSubtarget &st) {
+  auto fixture = BuildPressureHistoryTrackerFixture(st);
+  ScheduleNodeOnPressureFixture(fixture, fixture.a);
+  PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+
+  PressureHistoryTracker::Entry prior;
+  prior.best_prefix_score = 200;
+  prior.best_area = 0;
+  fixture.pressure_history_tracker->InsertEntryForTest(key, prior);
+
+  // Lower peak (100), huge area (9999): prior peak 200 > 100 → prune.
+  bool lower_peak_pruned =
+      fixture.pressure_history_tracker->IsDominatedElseRecord(100, 9999);
+  const PressureHistoryTracker::Entry *after_low =
+      fixture.pressure_history_tracker->GetEntryForTest(key);
+  bool unchanged = after_low != nullptr && after_low->best_prefix_score == 200 &&
+                   after_low->best_area == 0;
+
+  // Higher peak (300), zero area: peak wins → not dominated, entry
+  // replaced with (300, 0).
+  bool higher_peak_not_pruned =
+      !fixture.pressure_history_tracker->IsDominatedElseRecord(300, 0);
+  const PressureHistoryTracker::Entry *after_high =
+      fixture.pressure_history_tracker->GetEntryForTest(key);
+  bool replaced = after_high != nullptr && after_high->best_prefix_score == 300 &&
+                  after_high->best_area == 0;
+
+  bool ok = lower_peak_pruned && unchanged && higher_peak_not_pruned && replaced;
+  llvm::outs() << "    Area cross-peak (peak is primary): "
+               << (ok ? "PASS\n" : "FAIL\n");
+}
+
 void RunPressureHistoryTrackerShakedown(const GCNSubtarget &st) {
   llvm::outs() << "  RunPressureHistoryTrackerShakedown:\n";
   RunPressureHistoryEmptyShakedown(st);
@@ -2856,6 +2954,9 @@ void RunPressureHistoryTrackerShakedown(const GCNSubtarget &st) {
   RunPressureHistoryStrictCurrentBetterShakedown(st);
   RunPressureHistoryDistinctPartitionsShakedown(st);
   RunPressureHistoryHashCollisionShakedown(st);
+  RunPressureHistoryAreaFirstInsertAndSelfDominanceShakedown(st);
+  RunPressureHistoryAreaTiebreakShakedown(st);
+  RunPressureHistoryAreaPeakDominatesShakedown(st);
 }
 
 // Test policies for the history-vs-no-history comparison shakedown.
@@ -3430,6 +3531,61 @@ void RunBfsDpVsDfsShakedown(const GCNSubtarget &st,
       st, mf, lis);
 }
 
+// End-to-end check that the occupancy-area tiebreak changes the DFS
+// outcome. Runs two DFS searches on BuildAreaTiebreakTestDAG
+// (A→B→M→{X,Y}→T) with deltas {+1,+2,0,-1,-2,0}:
+//   - a peak-only occupancy policy (oracle variant, fully explored), and
+//   - the area-tiebreak policy.
+// Every order has VGPR peak 3 (both A,B live at M), so the two agree on
+// the primary objective. After M, X-first lingers at 2 and Y-first
+// drops to 1; X is created first, so the peak-only search settles on
+// the lower-area X-first order while the area policy finds the higher-
+// area Y-first order. Verifies same peak (no primary regression) and a
+// strictly higher area from the tiebreak.
+void RunDfsAreaTiebreakShakedown(const GCNSubtarget &st,
+                                 const MachineFunction &mf,
+                                 const LiveIntervals &lis) {
+  llvm::outs() << "  RunDfsAreaTiebreakShakedown:\n";
+
+  auto graph = ScheduleGraph::BuildAreaTiebreakTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPaths();
+  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+
+  std::vector<int> vgpr_deltas = {+1, +2, 0, -1, -2, 0};
+
+  // Peak-only baseline (BfsDpVsDfsShakedownOraclePolicy inherits the
+  // occupancy policy with ShouldEndSearch disabled so it explores fully).
+  DfsSearch<BfsDpVsDfsShakedownOraclePolicy> plain_search(*graph, st, mf, lis);
+  plain_search.EnableTestModeForTest(vgpr_deltas);
+  ScheduleConstructor plain_best = std::move(*plain_search.Run().schedule);
+  int plain_peak =
+      plain_best.GetPressureTracker().GetContinuousOccupancyScore();
+  int64_t plain_area =
+      plain_best.GetPressureTracker().GetContinuousOccupancyArea();
+
+  DfsSearch<DfsMaximizeContinuousOccupancyThenAreaPolicy> area_search(
+      *graph, st, mf, lis);
+  area_search.EnableTestModeForTest(vgpr_deltas);
+  ScheduleConstructor area_best = std::move(*area_search.Run().schedule);
+  int area_peak =
+      area_best.GetPressureTracker().GetContinuousOccupancyScore();
+  int64_t area_area =
+      area_best.GetPressureTracker().GetContinuousOccupancyArea();
+
+  llvm::outs() << "    peak-only: peak_score=" << plain_peak
+               << " area=" << plain_area << "\n";
+  llvm::outs() << "    area:      peak_score=" << area_peak
+               << " area=" << area_area << "\n";
+
+  bool same_peak = plain_peak == area_peak;
+  bool area_strictly_better = area_area > plain_area;
+  llvm::outs() << "    Same optimal peak (no primary regression): "
+               << (same_peak ? "PASS\n" : "FAIL\n");
+  llvm::outs() << "    Area tiebreak strictly improves area at equal peak: "
+               << (area_strictly_better ? "PASS\n" : "FAIL\n");
+}
+
 // Verifies ScheduleLengthTracker::GetLengthLowerBound against hand-
 // computed expected sequences on two synthetic DAGs. Builds both
 // graphs internally — this shakedown is self-contained and does not
@@ -3568,6 +3724,67 @@ void RunGCNRegisterTrackerShakedown(ScheduleGraph &graph,
   if (!pass) {
     report_fatal_error("GCNRegisterTracker round-trip test failed: "
                        "state did not return to zero after full unschedule");
+  }
+}
+
+// Verifies GCNRegisterTracker's occupancy-area accumulation
+// (GetContinuousOccupancyArea): occ_area_ is the running sum, over
+// scheduling steps, of the continuous occupancy score of cur_pressure_,
+// and Unschedule subtracts each step back out exactly (round-trips to
+// 0). Independently recomputes each step's expected contribution from
+// cur_pressure_ via the formula-based ComputeContinuousOccupancyScore,
+// which also cross-checks the tracker's table-backed lookup against the
+// formula (the tables are built from that formula).
+void RunOccupancyAreaTrackingShakedown(ScheduleGraph &graph,
+                                       const MachineFunction &mf) {
+  llvm::outs() << "  Occupancy-area tracking shakedown:\n";
+  const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
+  GCNRegisterTracker tracker(graph, mf);
+
+  SmallVector<ScheduleNode *> nodes(graph.GetTopoOrder().begin(),
+                                    graph.GetTopoOrder().end());
+
+  // Forward: schedule in topo order. After each step the tracker's
+  // area must equal the running sum of per-step continuous scores.
+  // Proxies don't accumulate (no pressure change), so contrib is 0
+  // for them — matching the tracker's real-node-only accumulation.
+  SmallVector<int> contrib;
+  int64_t expected_area = 0;
+  bool forward_ok = true;
+  for (ScheduleNode *node : nodes) {
+    tracker.Schedule(node);
+    int step = 0;
+    if (node->IsSchedulingUnit()) {
+      const GCNRegPressure &cur = tracker.GetCurrentPressure();
+      step = GCNRegisterTracker::ComputeContinuousOccupancyScore(
+          st, cur.getVGPRNum(st.hasGFX90AInsts()), cur.getSGPRNum());
+    }
+    contrib.push_back(step);
+    expected_area += step;
+    if (tracker.GetContinuousOccupancyArea() != expected_area) {
+      forward_ok = false;
+    }
+  }
+  llvm::outs() << "    forward area == sum of per-step score (area="
+               << tracker.GetContinuousOccupancyArea() << "): "
+               << (forward_ok ? "PASS\n" : "FAIL\n");
+
+  // Reverse: unschedule in reverse order. Each Unschedule subtracts
+  // its step's contribution; area must track the prefix sum and reach
+  // 0 once everything is unscheduled.
+  bool reverse_ok = true;
+  for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
+    tracker.Unschedule(nodes[i]);
+    expected_area -= contrib[i];
+    if (tracker.GetContinuousOccupancyArea() != expected_area) {
+      reverse_ok = false;
+    }
+  }
+  bool back_to_zero = tracker.GetContinuousOccupancyArea() == 0;
+  llvm::outs() << "    reverse area round-trips to 0: "
+               << ((reverse_ok && back_to_zero) ? "PASS\n" : "FAIL\n");
+  if (!(forward_ok && reverse_ok && back_to_zero)) {
+    report_fatal_error("Occupancy-area tracking shakedown failed");
   }
 }
 
@@ -4369,6 +4586,7 @@ void RunRegionShakedowns(ScheduleGraph &graph,
   RunRegisterTrackerShakedown(graph, mf);
   RunGCNRegisterTrackerShakedown(graph, mf, lis);
   RunNoHistoryCloneShakedown(graph, mf);
+  RunOccupancyAreaTrackingShakedown(graph, mf);
 
   SmallVector<ScheduleNode *> topo_nodes(graph.GetTopoOrder().begin(),
                                          graph.GetTopoOrder().end());
@@ -5188,6 +5406,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunLengthHistoryDfsComparisonShakedown(st, MF, *LIS);
   RunPressureHistoryDfsComparisonShakedown(st, MF, *LIS);
   RunBfsDpVsDfsShakedown(st, MF, *LIS);
+  RunDfsAreaTiebreakShakedown(st, MF, *LIS);
   RunAllSubgraphFormationShakedowns();
 
   for (auto &region : regions_) {

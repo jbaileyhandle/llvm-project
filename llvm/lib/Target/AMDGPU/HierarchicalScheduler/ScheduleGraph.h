@@ -699,6 +699,31 @@ public:
   /// focus here).
   static std::unique_ptr<ScheduleGraph> BuildPressureHistoryPruneTestDAG();
 
+  /// Build a synthetic test DAG for the occupancy-area tiebreak. Used
+  /// with GCNRegisterTracker's test mode and deltas {+1,+2,0,-1,-2,0}
+  /// (indexed by topo index A,B,M,X,Y,T — matches creation order).
+  ///
+  /// Structure (6 nodes, single source A, single sink T):
+  ///
+  ///     A(+1) → B(+2) → M(0)
+  ///                    /    \
+  ///                  X(-1)  Y(-2)
+  ///                    \    /
+  ///                     T(0)
+  ///
+  /// Why this shape: A then B raise VGPR to 3 (the peak), unavoidable
+  /// since B follows A and nothing frees until after M — so peak 3 is
+  /// the min peak, equal across both orders. After M, X and Y free
+  /// below that peak in either order: X(-1) first lingers at 2, Y(-2)
+  /// first drops to 1 → higher occupancy area at the SAME peak. The
+  /// area tiebreak prefers the drop-to-1 order; a peak-only objective
+  /// is indifferent. X is created before Y so a peak-only DFS explores
+  /// the lower-area order first and keeps it (peak tie), letting the
+  /// area policy show a strict improvement. T is a neutral single sink
+  /// (the graph requires exactly one source and one sink). All edges
+  /// latency 1.
+  static std::unique_ptr<ScheduleGraph> BuildAreaTiebreakTestDAG();
+
   /// Build a wider synthetic test DAG for exercising BFS-DP and DFS
   /// on substantially more reachable partitions and orderings than
   /// BuildPressureHistoryPruneTestDAG. Used with GCNRegisterTracker's

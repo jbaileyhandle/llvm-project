@@ -11,10 +11,15 @@
 // prefixes share a partition iff they scheduled the same set of
 // nodes (regardless of order).
 //
-// Per partition, only ONE entry is needed: the best (highest)
-// running-min score over all prefixes that have reached this
-// partition. A new prefix that ties or loses on this score is
-// dominated by the prior visit and can be pruned.
+// Per partition, only ONE entry is needed: the lexicographic best
+// (peak primary, occupancy area as the same-peak tiebreak) over all
+// prefixes that have reached this partition. A new prefix whose
+// (peak, area) is <= the prior visit's lexicographically is dominated
+// and can be pruned. For pure-peak callers area is 0, so this reduces
+// to scalar peak domination. Single-entry lexicographic domination is
+// exact for the peak objective and for area among equal-peak prefixes;
+// a higher-peak prior can prune a higher-area prefix (a tiebreak-only
+// loss — we keep one entry, not a full (peak, area) Pareto frontier).
 //
 // Memory cap: soft-internal `kMaxEntries`. Insertion past the cap
 // silently no-ops (no insert, no fatal error) and sets a flag
@@ -75,11 +80,12 @@ class PressureHistoryTracker {
   /// One entry per partition. Public so tests can stage entries
   /// directly via InsertEntryForTest.
   struct Entry {
-    /// Best (highest) prefix score for any prefix that has reached
-    /// this partition. Higher = better. Set on first visit; updated
-    /// to `max(prior, current)` when a non-dominating later visit
-    /// arrives.
+    /// Lexicographic (peak, area) best over all prefixes reaching
+    /// this partition; higher = better. best_area is the same-peak
+    /// tiebreak (0 for pure-peak callers). See class comment. Set on
+    /// first visit; replaced by a lexicographically-greater visit.
     int best_prefix_score = 0;
+    int64_t best_area = 0;
   };
 
   /// Bind:
@@ -126,13 +132,24 @@ class PressureHistoryTracker {
   ///     false. (No table growth, so no cap concern.)
   ///
   /// Metric-agnostic: this overload just compares ints (higher =
-  /// better). The caller picks what those ints represent.
+  /// better). The caller picks what those ints represent. Delegates
+  /// to the (peak, area) overload below with current_area = 0, so
+  /// domination is decided on peak alone.
   bool IsDominatedElseRecord(int current_prefix_score);
 
-  /// Production wrapper. Reads the score from the bound working
-  /// register tracker via GCNRegisterTracker::GetMetricScore(metric_),
-  /// then delegates to the explicit-score overload above.
-  /// Fatal-errors if the bound working register tracker is null.
+  /// Lexicographic (peak, area) variant: peak primary, area as the
+  /// same-peak tiebreak. Prunes when a prior visit's (peak, area) is
+  /// >= this one lexicographically; otherwise records this prefix as
+  /// the partition's new lexicographic best. See class comment for
+  /// the soundness tradeoff.
+  bool IsDominatedElseRecord(int current_peak_score, int64_t current_area);
+
+  /// Production wrapper. Reads peak via GetMetricScore(metric_) from
+  /// the bound working register tracker, and area via
+  /// GetContinuousOccupancyArea() only when metric_ is the area-
+  /// tiebreak metric (0 otherwise, so other metrics prune peak-only),
+  /// then delegates to the (peak, area) overload. Fatal-errors if the
+  /// bound working register tracker is null.
   bool IsDominatedElseRecord();
 
   /// Drop all recorded entries and clear the *.current_run

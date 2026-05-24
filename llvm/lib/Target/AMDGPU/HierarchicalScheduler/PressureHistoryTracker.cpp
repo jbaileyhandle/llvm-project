@@ -37,12 +37,23 @@ bool PressureHistoryTracker::IsDominatedElseRecord() {
         "register tracker must be non-null for the no-arg overload; either "
         "bind it at construction or call the explicit-score overload");
   }
+  // The tracker always accumulates occupancy area, but only the
+  // area-tiebreak metric should let it affect domination; pass 0 for
+  // every other metric so their pruning stays peak-only.
+  int64_t area =
+      metric_ == ScheduleMetric::kMaximizeContinuousOccupancyThenArea
+          ? working_register_tracker_->GetContinuousOccupancyArea()
+          : 0;
   return IsDominatedElseRecord(
-      working_register_tracker_->GetMetricScore(metric_));
+      working_register_tracker_->GetMetricScore(metric_), area);
 }
 
-bool PressureHistoryTracker::IsDominatedElseRecord(
-    int current_prefix_score) {
+bool PressureHistoryTracker::IsDominatedElseRecord(int current_prefix_score) {
+  return IsDominatedElseRecord(current_prefix_score, /*current_area=*/0);
+}
+
+bool PressureHistoryTracker::IsDominatedElseRecord(int current_peak_score,
+                                                   int64_t current_area) {
   // Heterogeneous lookup via PartitionKeyView avoids copying the
   // bitset on the existing-entry path. DenseMap dispatches on
   // signature for the hash bucket, then disambiguates with the
@@ -64,26 +75,32 @@ bool PressureHistoryTracker::IsDominatedElseRecord(
     }
     PartitionKey key = scheduled_set_tracker_->GetPartitionKey();
     Entry fresh;
-    fresh.best_prefix_score = current_prefix_score;
+    fresh.best_prefix_score = current_peak_score;
+    fresh.best_area = current_area;
     table_[std::move(key)] = std::move(fresh);
     return false;
   }
 
   Entry &prior = it->second;
-  if (prior.best_prefix_score >= current_prefix_score) {
-    // Prior prefix is no worse on the only prefix-dependent
-    // dimension. By the partition's prefix/postfix decoupling,
-    // anything our subtree could reach is reachable at no worse
-    // score from the prior prefix. Prune.
+  // Lexicographic (peak, area) domination. Prune when the prior
+  // prefix is no worse on peak, or ties peak and is no worse on area.
+  // By the partition's prefix/postfix decoupling the shared postfix
+  // adds the same peak and the same area to both, so the prior prefix
+  // dominates ours on every completion. For pure-peak callers area is
+  // 0 on both sides and this is the old best_prefix_score >= check.
+  bool prior_dominates =
+      prior.best_prefix_score > current_peak_score ||
+      (prior.best_prefix_score == current_peak_score &&
+       prior.best_area >= current_area);
+  if (prior_dominates) {
     prune_count_.Increment();
     return true;
   }
 
-  // Current prefix is strictly better. Update best-prefix score.
-  // (max() is defensive — current is known to be strictly greater
-  // here, but the symmetry makes the intent obvious.)
-  prior.best_prefix_score =
-      std::max(prior.best_prefix_score, current_prefix_score);
+  // Not dominated ⇒ this prefix is lexicographically greater (total
+  // order). Record it as the partition's new best.
+  prior.best_prefix_score = current_peak_score;
+  prior.best_area = current_area;
   return false;
 }
 

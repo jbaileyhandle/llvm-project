@@ -32,8 +32,8 @@ GCNRegisterTracker GCNRegisterTracker::NoHistoryClone() const {
 // Init lists below follow the class's member-declaration order to
 // keep clang's -Wreorder-ctor quiet:
 //   node_reg_info_table_, remaining_uses_, live_regs_, cur_pressure_,
-//   ... (max_pressure_, undo_stack_, pressure_history_ default), ...,
-//   track_pressure_history_, mf_, st_, mfi_, mri_,
+//   ... (max_pressure_, occ_area_, undo_stack_, pressure_history_
+//   default), ..., track_pressure_history_, mf_, st_, mfi_, mri_,
 //   continuous_score_tables_.
 GCNRegisterTracker::GCNRegisterTracker(const GCNRegisterTracker &source,
                                        NoHistoryCloneTag)
@@ -49,6 +49,8 @@ GCNRegisterTracker::GCNRegisterTracker(const GCNRegisterTracker &source,
       // and the undo_stack_ is per-clone (Schedule pushes, Unschedule
       // pops, balanced within each clone's lifetime).
       track_pressure_history_(false),
+      // occ_area_ resets to 0 (default member init) — the clone
+      // accumulates fresh; BFS-DP reads it as a per-edge delta.
       // test_mode_ and test_vgpr_deltas_ ARE live state (they define
       // what Schedule(node) does), so propagate to the clone. Without
       // this, a clone'd tracker silently falls back to RegDefs/RegUses
@@ -178,6 +180,12 @@ GCNRegPressure GCNRegisterTracker::Schedule(const ScheduleNode *node) {
       max_pressure_ = max(max_pressure_, cur_pressure_);
     }
 
+    // Occupancy area under the curve: add this step's continuous
+    // occupancy score (of cur_pressure_ after the step). Cheap table
+    // lookup; consumers read occ_area_ only for the area-tiebreak
+    // metric. Recorded on the step so Unschedule can subtract it.
+    step.area_contribution = ContinuousScoreForPressure(cur_pressure_);
+    occ_area_ += step.area_contribution;
     undo_stack_.push_back(std::move(step));
   } else {
     edge_peak = cur_pressure_;
@@ -269,6 +277,7 @@ void GCNRegisterTracker::Unschedule(const ScheduleNode *node) {
   }
   ScheduleStep step = std::move(undo_stack_.back());
   undo_stack_.pop_back();
+  occ_area_ -= step.area_contribution;
 
   const NodeRegInfo &info =
       node_reg_info_table_->GetForNode(node);
@@ -308,10 +317,11 @@ void GCNRegisterTracker::EnableTestModeForTest(
 void GCNRegisterTracker::TestSchedule(const ScheduleNode *node) {
   // Apply the per-node VGPR delta to cur_pressure_ via the scalar
   // GCNRegPressure constructor. The rest of the production state
-  // tracking (max_pressure_, pressure_history_, undo_stack_)
-  // updates the same way as the production path so consumers
-  // (GetMetricScore, GetContinuousOccupancyScore, etc.) read
-  // synthetic values transparently.
+  // tracking (max_pressure_, occ_area_, pressure_history_,
+  // undo_stack_) updates the same way as the production path so
+  // consumers (GetMetricScore, GetContinuousOccupancyScore,
+  // GetContinuousOccupancyArea, etc.) read synthetic values
+  // transparently.
   ScheduleStep step;
   step.saved_max = max_pressure_;
   int new_vgpr = static_cast<int>(cur_pressure_.getVGPRNum(false)) +
@@ -322,6 +332,8 @@ void GCNRegisterTracker::TestSchedule(const ScheduleNode *node) {
   }
   cur_pressure_ = GCNRegPressure(static_cast<unsigned>(new_vgpr));
   max_pressure_ = max(max_pressure_, cur_pressure_);
+  step.area_contribution = ContinuousScoreForPressure(cur_pressure_);
+  occ_area_ += step.area_contribution;
   undo_stack_.push_back(std::move(step));
   if (track_pressure_history_) {
     pressure_history_.push_back(cur_pressure_);
@@ -338,6 +350,7 @@ void GCNRegisterTracker::TestUnschedule(const ScheduleNode *node) {
   }
   ScheduleStep step = std::move(undo_stack_.back());
   undo_stack_.pop_back();
+  occ_area_ -= step.area_contribution;
   max_pressure_ = step.saved_max;
   int new_vgpr = static_cast<int>(cur_pressure_.getVGPRNum(false)) -
                  test_vgpr_deltas_[node->GetTopoIndex()];
@@ -467,15 +480,20 @@ int GCNRegisterTracker::ComputeContinuousOccupancyScore(
   return std::min(vgpr_score, sgpr_score);
 }
 
-int GCNRegisterTracker::GetContinuousOccupancyScore() const {
+int GCNRegisterTracker::ContinuousScoreForPressure(
+    const GCNRegPressure &rp) const {
   // Hot path: one member-pointer load + two array indexes + one min.
   // No per-call arithmetic — the per-pressure-value scores are
   // precomputed once per subtarget and cached (see
   // GetOrComputeContinuousOccupancyScoreTables).
-  return std::min(continuous_score_tables_->vgpr_score_by_count[
-                      max_pressure_.getVGPRNum(st_->hasGFX90AInsts())],
-                  continuous_score_tables_->sgpr_score_by_count[
-                      max_pressure_.getSGPRNum()]);
+  return std::min(
+      continuous_score_tables_->vgpr_score_by_count[
+          rp.getVGPRNum(st_->hasGFX90AInsts())],
+      continuous_score_tables_->sgpr_score_by_count[rp.getSGPRNum()]);
+}
+
+int GCNRegisterTracker::GetContinuousOccupancyScore() const {
+  return ContinuousScoreForPressure(max_pressure_);
 }
 
 const GCNRegisterTracker::ContinuousOccupancyScoreTables &
@@ -517,6 +535,9 @@ int GCNRegisterTracker::GetMetricScore(ScheduleMetric metric) const {
   case ScheduleMetric::kMaximizeRegisterOccupancy:
     return static_cast<int>(GetRegisterOnlyOccupancy());
   case ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore:
+    return GetContinuousOccupancyScore();
+  case ScheduleMetric::kMaximizeContinuousOccupancyThenArea:
+    // Primary peak score; the area tiebreak is read separately.
     return GetContinuousOccupancyScore();
   case ScheduleMetric::kMinimizeRegisterOccupancy:
     return -static_cast<int>(GetRegisterOnlyOccupancy());

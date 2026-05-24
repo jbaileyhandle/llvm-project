@@ -408,6 +408,16 @@ bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
     return pressure_tracker_.GetContinuousOccupancyScore() >
            other.pressure_tracker_.GetContinuousOccupancyScore();
 
+  case ScheduleMetric::kMaximizeContinuousOccupancyThenArea: {
+    int this_score = pressure_tracker_.GetContinuousOccupancyScore();
+    int other_score = other.pressure_tracker_.GetContinuousOccupancyScore();
+    if (this_score != other_score) {
+      return this_score > other_score;
+    }
+    return pressure_tracker_.GetContinuousOccupancyArea() >
+           other.pressure_tracker_.GetContinuousOccupancyArea();
+  }
+
   case ScheduleMetric::kMinimizeScheduleLength: {
     if (!length_tracker_ || !other.length_tracker_) {
       report_fatal_error(

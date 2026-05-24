@@ -124,12 +124,13 @@ public:
 
   /// Return a fresh tracker with cur_pressure_, live_regs_, and
   /// remaining_uses_ copied from `this`. Does NOT copy
-  /// undo_stack_, pressure_history_, or max_pressure_: the clone
-  /// starts with both vectors empty and max_pressure_ default-
-  /// constructed (zero), intended as a "frozen" starting state
-  /// that future Schedule() calls can extend. test_mode_ /
-  /// test_vgpr_deltas_ are NOT copied — clones come up in
-  /// production mode.
+  /// undo_stack_, pressure_history_, max_pressure_, or occ_area_:
+  /// the clone starts with the vectors empty, max_pressure_ default-
+  /// constructed (zero), and occ_area_ reset to 0, intended as a
+  /// "frozen" starting state that future Schedule() calls can
+  /// extend. (BFS-DP reads occ_area_ as a per-edge delta, so the
+  /// reset is what it wants.) test_mode_ / test_vgpr_deltas_ are NOT
+  /// copied — clones come up in production mode.
   ///
   /// node_reg_info_table_ and the MF/subtarget pointers are
   /// pointer-copied (shared, not duplicated). The clone borrows
@@ -151,6 +152,14 @@ public:
   const GCNRegPressure &GetCurrentPressure() const { return cur_pressure_; }
   const GCNRegPressure &GetPeakPressure() const { return max_pressure_; }
   const LiveRegSet &GetLiveRegs() const { return live_regs_; }
+
+  /// Running "occupancy area under the curve": the sum over
+  /// scheduling steps of the continuous occupancy score of
+  /// cur_pressure_ at each step. Higher = pressure kept low
+  /// throughout, not just at the peak. Always accumulated (cheap
+  /// table lookup per step); consumers read it only for the area-
+  /// tiebreak metric. int64_t to avoid overflow on long schedules.
+  int64_t GetContinuousOccupancyArea() const { return occ_area_; }
 
   /// Per-step record of cur_pressure_ after each Schedule call,
   /// indexed by the scheduling step (the schedule order). Includes
@@ -421,6 +430,10 @@ private:
     GCNRegPressure saved_max;
     SmallVector<std::pair<unsigned, LaneBitmask>, 4> def_prev_masks;
     SmallVector<std::pair<unsigned, LaneBitmask>, 4> kill_masks;
+
+    /// This step's contribution to occ_area_, saved so Unschedule
+    /// can subtract it back. 0 for proxies (no pressure change).
+    int area_contribution = 0;
   };
 
   // --- Core state ---
@@ -443,6 +456,12 @@ private:
   LiveRegSet live_regs_;
   GCNRegPressure cur_pressure_;
   GCNRegPressure max_pressure_;
+
+  /// Running occupancy area under the curve (see
+  /// GetContinuousOccupancyArea). Accumulated in Schedule and
+  /// subtracted back in Unschedule.
+  int64_t occ_area_ = 0;
+
   std::vector<ScheduleStep> undo_stack_;
 
   /// See GetPressureHistory. Populated only when
@@ -518,6 +537,12 @@ private:
   /// fields that the clone won't use.
   GCNRegisterTracker(const GCNRegisterTracker &source,
                      NoHistoryCloneTag);
+
+  /// Cheap continuous occupancy score for an arbitrary pressure via
+  /// the precomputed tables (one min over two array reads). Backs both
+  /// GetContinuousOccupancyScore (peak) and the per-step area
+  /// accumulation (cur pressure).
+  int ContinuousScoreForPressure(const GCNRegPressure &rp) const;
 
   // --- Schedule helpers ---
 
