@@ -98,6 +98,7 @@ struct HierarchicalConfig {
   bool malicious = false;            // run the malicious variant instead
   bool run_shakedowns = false;       // run validation harnesses
   bool dump_subgraph_dag = false;    // dump region DAGs for the viewer
+  bool dump_search_outcomes = false; // per-search outcome CSV
   bool scale_edge_latencies = false; // scale edge latency by target occupancy
 
   /// Build the typed config from the generic config's scoped settings.

@@ -419,6 +419,8 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
         hs.run_shakedowns = ParseBool("", k, v);
       } else if (k == "dump_subgraph_dag") {
         hs.dump_subgraph_dag = ParseBool("", k, v);
+      } else if (k == "dump_search_outcomes") {
+        hs.dump_search_outcomes = ParseBool("", k, v);
       } else if (k == "scale_edge_latencies") {
         hs.scale_edge_latencies = ParseBool("", k, v);
       } else {
@@ -469,6 +471,7 @@ std::string HierarchicalConfig::ToString() const {
   os << "\tglobals: malicious=" << (malicious ? "on" : "off")
      << " run_shakedowns=" << (run_shakedowns ? "on" : "off")
      << " dump_subgraph_dag=" << (dump_subgraph_dag ? "on" : "off")
+     << " dump_search_outcomes=" << (dump_search_outcomes ? "on" : "off")
      << " scale_edge_latencies=" << (scale_edge_latencies ? "on" : "off")
      << "\n";
   return os.str();

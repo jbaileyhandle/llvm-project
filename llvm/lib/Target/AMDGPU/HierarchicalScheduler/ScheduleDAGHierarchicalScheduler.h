@@ -114,6 +114,9 @@ public:
   struct MaxOccupancyRegionResult {
     int all_factors_occupancy;
     SearchTerminationCause termination_cause;
+    std::string winner;
+    std::optional<float> bfs_pct;
+    int orig_vgpr = 0, orig_sgpr = 0, fin_vgpr = 0, fin_sgpr = 0;
   };
   MaxOccupancyRegionResult ScheduleRegionForMaximumOccupancy(
       RegionInfo &region);
@@ -136,6 +139,8 @@ public:
     int output_length = 0;
     int floor = 0;
     bool timed_out = false;
+    int nodes = 0;
+    int orig_vgpr = 0, orig_sgpr = 0, fin_vgpr = 0, fin_sgpr = 0;
   };
 
   // Per-region worker for RunLengthPass. Resolves the length-pass

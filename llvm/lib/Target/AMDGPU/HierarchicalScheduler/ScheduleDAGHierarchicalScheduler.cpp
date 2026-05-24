@@ -19,6 +19,7 @@
 #include "ScheduleConstructor.h"
 #include "SearchPolicies.h"
 #include "SubgraphDagDump.h"
+#include "SearchOutcomeLog.h"
 #include "SubgraphFormation.h"
 #include "GCNSubtarget.h"
 #include "SIMachineFunctionInfo.h"
@@ -119,6 +120,7 @@ void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
     RunHierarchicalScheduler();
   }
 
+  FlushSearchOutcomes();
   ScheduleDAGMILive::finalizeSchedule();
 }
 
@@ -312,6 +314,22 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
         break;
     }
 
+    SearchOutcome occ_row;
+    occ_row.pass = "occ";
+    occ_row.region = static_cast<int>(i);
+    occ_row.slot = "region";
+    occ_row.nodes = region.GetNumInstrs();
+    occ_row.term_cause = region_result.termination_cause;
+    occ_row.winner = region_result.winner;
+    occ_row.bfs_pct = region_result.bfs_pct;
+    occ_row.orig_vgpr = region_result.orig_vgpr;
+    occ_row.orig_sgpr = region_result.orig_sgpr;
+    occ_row.fin_vgpr = region_result.fin_vgpr;
+    occ_row.fin_sgpr = region_result.fin_sgpr;
+    occ_row.improved =
+        region_result.all_factors_occupancy > original_register_only_occupancy;
+    RecordSearchOutcome(occ_row);
+
     // Update kernel_occupancy_so_far.
     int kernel_occupancy_after_region = std::min(
         kernel_occupancy_so_far, region_result.all_factors_occupancy);
@@ -469,6 +487,10 @@ static SearchResult RunOccupancyRegionWithBfsDp(
   BfsDpSearch search(&graph, &st, &mf, BfsDpSettings::ForOccupancyPass());
   search.SetInitialBestScore(region.GetOriginalRegisterOnlyOccupancy());
   SearchResult result = search.Run();
+  result.winner = result.schedule.has_value() ? "bfs" : "input";
+  if (graph.Size() > 0) {
+    result.bfs_pct = (100.0f * search.GetLevelsExplored()) / graph.Size();
+  }
   llvm::outs() << "\t\toutput: (BFS-DP) found_improvement="
                << result.schedule.has_value() << "\n";
   if (result.termination_cause == SearchTerminationCause::kTimedOut) {
@@ -532,6 +554,7 @@ static SearchResult RunOccupancyRegionWithDfs(
     const ScheduleConstructor &input_schedule_constructor) {
   DfsSearch<DfsMaximizeOccupancyPolicy> search(graph, st, mf, lis);
   SearchResult result = search.Run();
+  result.winner = "dfs";
   // DFS always populates schedule (best is seeded with input).
   bool changed = input_schedule_constructor.GetScheduleOrder() !=
                  result.schedule->GetScheduleOrder();
@@ -551,8 +574,12 @@ static SearchResult RunOccupancyRegionWithBfsDpThenDfs(
   if (result.schedule.has_value()) {
     return result;
   }
-  return RunOccupancyRegionWithDfs(graph, st, mf, lis,
-                                   input_schedule_constructor);
+  // BFS-DP bailed; DFS rescues. Keep BFS's depth-reached for the row.
+  std::optional<float> bfs_pct = result.bfs_pct;
+  SearchResult dfs = RunOccupancyRegionWithDfs(graph, st, mf, lis,
+                                               input_schedule_constructor);
+  dfs.bfs_pct = bfs_pct;
+  return dfs;
 }
 
 // Schedules the region for maximum occupancy and applies the result.
@@ -627,6 +654,15 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
     result.all_factors_occupancy =
         applied.GetPressureTracker().GetAllFactorsRegionOnlyOccupancy();
     result.termination_cause = search_result.termination_cause;
+    result.winner = search_result.winner;
+    result.bfs_pct = search_result.bfs_pct;
+    const GCNRegPressure &in = input_schedule_constructor.GetPressureTracker()
+                                   .GetPeakPressure();
+    const GCNRegPressure &out = applied.GetPressureTracker().GetPeakPressure();
+    result.orig_vgpr = in.getVGPRNum(st.hasGFX90AInsts());
+    result.orig_sgpr = in.getSGPRNum();
+    result.fin_vgpr = out.getVGPRNum(st.hasGFX90AInsts());
+    result.fin_sgpr = out.getSGPRNum();
   });
   return result;
 }
@@ -664,6 +700,22 @@ void ScheduleDAGHierarchicalScheduler::RunLengthPass() {
     bool improved = is_max
                         ? (stats.output_length > stats.input_length)
                         : (stats.output_length < stats.input_length);
+    SearchOutcome len_row;
+    len_row.pass = "len";
+    len_row.region = static_cast<int>(i);
+    len_row.slot = "region";
+    len_row.nodes = stats.nodes;
+    len_row.term_cause = stats.timed_out ? SearchTerminationCause::kTimedOut
+                                         : SearchTerminationCause::kFullyExplored;
+    len_row.winner = "dfs";
+    len_row.orig_vgpr = stats.orig_vgpr;
+    len_row.orig_sgpr = stats.orig_sgpr;
+    len_row.fin_vgpr = stats.fin_vgpr;
+    len_row.fin_sgpr = stats.fin_sgpr;
+    len_row.orig_len = stats.input_length;
+    len_row.fin_len = stats.output_length;
+    len_row.improved = improved;
+    RecordSearchOutcome(len_row);
     if (improved) {
       ++regions_improved;
     } else {
@@ -1074,6 +1126,15 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForLengthPass(
         best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
     stats.floor = graph.GetGraphLengthFloor();
     stats.timed_out = any_timed_out;
+    stats.nodes = graph.Size();
+    const GCNRegPressure &in = input_schedule_constructor.GetPressureTracker()
+                                   .GetPeakPressure();
+    const GCNRegPressure &out = best_schedule_constructor.GetPressureTracker()
+                                    .GetPeakPressure();
+    stats.orig_vgpr = in.getVGPRNum(st.hasGFX90AInsts());
+    stats.orig_sgpr = in.getSGPRNum();
+    stats.fin_vgpr = out.getVGPRNum(st.hasGFX90AInsts());
+    stats.fin_sgpr = out.getSGPRNum();
   });
 
   return stats;

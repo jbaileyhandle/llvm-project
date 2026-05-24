@@ -39,6 +39,16 @@ struct SearchResult {
   /// How the search ended. Always meaningful, even when `schedule`
   /// is empty.
   SearchTerminationCause termination_cause;
+
+  /// Which backend produced the applied schedule: "bfs", "dfs",
+  /// "input" (none beat the input), or "" if unset. For a bfsdp+dfs
+  /// wrapper this is "bfs" when BFS-DP delivered, "dfs" when the
+  /// fallback ran.
+  std::string winner;
+
+  /// BFS-DP depth reached as a percent of nodes when it bailed before
+  /// delivering (so DFS took over); unset when BFS delivered or wasn't run.
+  std::optional<float> bfs_pct;
 };
 
 }  // namespace hierarchical_scheduler
