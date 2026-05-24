@@ -69,11 +69,18 @@ void FlushSearchOutcomes() {
   if (!Enabled() || g_rows.empty()) {
     return;
   }
-  std::ofstream f(kFile, std::ios::app);
-  if (f.tellp() == 0) {
+  // Truncate on the first flush of this process so each compilation
+  // produces one clean, single-format file (re-running overwrites rather
+  // than appending); later per-function flushes in the same process
+  // append. Avoids piling up duplicate or mixed-format rows across runs
+  // and binary versions.
+  static bool started = false;
+  std::ofstream f(kFile, started ? std::ios::app : std::ios::trunc);
+  if (!started) {
     f << "function,pass,region,slot,nodes,term_cause,winner,bfs_pct,"
          "orig_vgpr,orig_sgpr,fin_vgpr,fin_sgpr,orig_len,fin_len,improved,"
          "bfs_ms,bfs_steps,bfs_rate,dfs_ms,dfs_steps,dfs_rate\n";
+    started = true;
   }
   for (const SearchOutcome &r : g_rows) {
     std::string line = r.function + "," + r.pass + "," +
