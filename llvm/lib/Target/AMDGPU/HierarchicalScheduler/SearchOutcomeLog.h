@@ -22,6 +22,8 @@ namespace hierarchical_scheduler {
 // the "region"/"outer" slot; subgraph rows carry only the per-search outcome
 // and leave the optionals unset. Length fields stay unset for occupancy rows.
 struct SearchOutcome {
+  std::string function;  // MachineFunction name; region indices reset per
+                         // function, so this separates kernels in the file
   std::string pass;   // "occ" | "len"
   int region;
   std::string slot;   // "region" | "outer" | "sub0" | "sub1" | ...

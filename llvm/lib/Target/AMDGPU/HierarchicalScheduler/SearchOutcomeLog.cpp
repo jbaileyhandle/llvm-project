@@ -71,14 +71,15 @@ void FlushSearchOutcomes() {
   }
   std::ofstream f(kFile, std::ios::app);
   if (f.tellp() == 0) {
-    f << "pass,region,slot,nodes,term_cause,winner,bfs_pct,"
+    f << "function,pass,region,slot,nodes,term_cause,winner,bfs_pct,"
          "orig_vgpr,orig_sgpr,fin_vgpr,fin_sgpr,orig_len,fin_len,improved,"
          "bfs_ms,bfs_steps,bfs_rate,dfs_ms,dfs_steps,dfs_rate\n";
   }
   for (const SearchOutcome &r : g_rows) {
-    std::string line = r.pass + "," + std::to_string(r.region) + "," + r.slot +
-                       "," + std::to_string(r.nodes) + "," +
-                       CauseStr(r.term_cause) + "," + r.winner;
+    std::string line = r.function + "," + r.pass + "," +
+                       std::to_string(r.region) + "," + r.slot + "," +
+                       std::to_string(r.nodes) + "," + CauseStr(r.term_cause) +
+                       "," + r.winner;
     AppendOpt(line, r.bfs_pct);
     AppendOpt(line, r.orig_vgpr);
     AppendOpt(line, r.orig_sgpr);

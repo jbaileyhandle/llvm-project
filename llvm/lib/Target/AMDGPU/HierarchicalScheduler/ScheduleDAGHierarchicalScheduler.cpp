@@ -315,6 +315,7 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     }
 
     SearchOutcome occ_row;
+    occ_row.function = MF.getName().str();
     occ_row.pass = "occ";
     occ_row.region = static_cast<int>(i);
     // A decompose region emits an "outer" summary row plus one "sub{n}"
@@ -343,6 +344,7 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
       const MaxOccupancyRegionResult::SubgraphOutcome &subgraph_row =
           region_result.subgraph_rows[s];
       SearchOutcome sub_row;
+      sub_row.function = occ_row.function;
       sub_row.pass = "occ";
       sub_row.region = static_cast<int>(i);
       sub_row.slot = "sub" + std::to_string(s);
@@ -766,6 +768,7 @@ void ScheduleDAGHierarchicalScheduler::RunLengthPass() {
                         ? (stats.output_length > stats.input_length)
                         : (stats.output_length < stats.input_length);
     SearchOutcome len_row;
+    len_row.function = MF.getName().str();
     len_row.pass = "len";
     len_row.region = static_cast<int>(i);
     len_row.slot = "region";
