@@ -37,6 +37,19 @@ namespace hierarchical_scheduler {
 
 class ScheduleGraph;
 
+/// Outer-search choice for decompose (the step-4 search over the proxied +
+/// chained graph). Three mutually exclusive modes:
+///   kBfsDpInteger    - BFS-DP on integer register occupancy, seeded with
+///                      the region's occupancy floor (default).
+///   kBfsDpContinuous - BFS-DP on the continuous occupancy score, seeded
+///                      with the input order's continuous score.
+///   kDfs             - DFS (DfsMaximizeOccupancyPolicy) over the proxied
+///                      graph, no BFS-DP. Its ShouldEndSearch honors the
+///                      function occupancy target, so it stops once the
+///                      region reaches it — needed when an occupancy cap
+///                      lowers that target (BFS-DP would maximize past it).
+enum class OuterSearch { kBfsDpInteger, kBfsDpContinuous, kDfs };
+
 /// Options for one DecomposeAndSchedule invocation. Grouped as
 /// formation config (`formation`, `mode`) followed by the two search
 /// callables in pipeline order (`inner_search` runs in step 2,
@@ -109,19 +122,20 @@ struct DecomposeAndScheduleOptions {
   ///
   /// The returned options own their closures; `st`, `mf`, and `lis`
   /// are captured by reference and must outlive the options.
-  /// `outer_continuous` switches the outer search's objective from the
-  /// integer register-occupancy level (default) to the continuous
-  /// register-occupancy score. The integer outer is seeded with
-  /// `seed_occupancy`; the continuous outer is instead seeded with the
-  /// input order's continuous score (the integer seed is a different
-  /// scale). The inner search is always continuous.
+  /// `outer` selects the outer search (see OuterSearch). kBfsDpInteger
+  /// (default) seeds BFS-DP with `seed_occupancy`; kBfsDpContinuous seeds it
+  /// with the input order's continuous score (a different scale); kDfs runs
+  /// DFS over the proxied graph instead, whose ShouldEndSearch honors the
+  /// function occupancy target (so an occupancy cap restrains it — BFS-DP
+  /// would not). The inner search is always continuous BFS-DP + DFS
+  /// fallback, regardless of `outer`.
   static DecomposeAndScheduleOptions BfsDpWithDfsFallback(
       const GCNSubtarget &st,
       const MachineFunction &mf,
       const LiveIntervals &lis,
       int seed_occupancy,
       const FormationConfig &subgraph_formation,
-      bool outer_continuous = false);
+      OuterSearch outer = OuterSearch::kBfsDpInteger);
 };
 
 /// Form subgraphs in `graph`, schedule each in isolation, lock the
@@ -140,11 +154,15 @@ SearchResult DecomposeAndSchedule(
 /// parts per level) and recursing, until a subgraph has at most
 /// `min_cut.target_subgraph_size` scheduling units — a leaf, scheduled
 /// directly by the continuous BfsDp+Dfs search. Each non-leaf level's inner
-/// search recurses; its outer search (integer level, or continuous score
-/// when `outer_continuous`) orders that level's subgraphs. Because
-/// DecomposeAndSchedule schedules each subgraph's interior before the level's
-/// outer runs, the schedule is built bottom-up. Leaves are always continuous;
-/// the install mode and outer metric compose exactly as in the flat form.
+/// search recurses. `outer` selects the OUTERMOST level's outer search only
+/// (see OuterSearch); every deeper level orders sub-subgraph interiors, which
+/// — like the inner/leaf search — are region-agnostic, so they always use
+/// kBfsDpContinuous (the integer and DFS modes are region-level concepts: the
+/// integer outer is seeded with the region floor, and the DFS cap targets the
+/// region occupancy). The recursion therefore passes kBfsDpContinuous below
+/// the top regardless of `outer`. Because DecomposeAndSchedule schedules each
+/// subgraph's interior before the level's outer runs, the schedule is built
+/// bottom-up. Leaves are always continuous.
 SearchResult RecursiveDecomposeAndSchedule(
     ScheduleGraph &graph,
     const GCNSubtarget &st,
@@ -152,7 +170,7 @@ SearchResult RecursiveDecomposeAndSchedule(
     const LiveIntervals &lis,
     int seed_occupancy,
     const FormationConfig &subgraph_formation,
-    bool outer_continuous);
+    OuterSearch outer);
 
 }  // namespace hierarchical_scheduler
 }  // namespace llvm

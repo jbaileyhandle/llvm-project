@@ -406,18 +406,18 @@ class DfsSearch {
       ++complete_schedules_count_;
       if (working_schedule_constructor_.IsBetterThan(
               best_schedule_constructor_, Policy::kMetric)) {
-        // Cross-check the candidate's register pressure against
-        // LLVM's GCNUpwardRPTracker before committing to it. If
-        // LLVM's tracker says the candidate's ground-truth
-        // occupancy is below the kernel target, we treat the
-        // candidate as if it didn't beat best — our tracker
-        // under-estimated pressure, and accepting the schedule
-        // would silently drop occupancy. Log the divergence and
-        // keep searching. No fatal error.
+        // Cross-check the candidate's register pressure against LLVM's
+        // GCNUpwardRPTracker before committing to it. If LLVM's
+        // ground-truth occupancy is below what OUR tracker computed,
+        // our tracker over-estimated occupancy (under-counted
+        // pressure); committing would silently drop occupancy, so we
+        // treat the candidate as if it didn't beat best. This is a
+        // tracker-honesty check, not a target/goal gate. Log the
+        // divergence and keep searching. No fatal error.
         auto verification =
             working_schedule_constructor_.VerifyPressureWithLlvmTracker(
                 *mf_, *lis_);
-        if (verification.target_met) {
+        if (verification.tracker_confirmed) {
           ++best_updates_count_;
           best_schedule_constructor_ = working_schedule_constructor_;
           // best.length may have shrunk; re-derive working's
@@ -427,9 +427,9 @@ class DfsSearch {
         } else {
           ++llvm_tracker_rejections_count_;
           llvm::outs()
-              << "\t\t\t\tLLVM verifier rejected candidate: target="
-              << verification.target_occupancy
-              << " ours_occ=" << verification.ours_occupancy
+              << "\t\t\t\tLLVM verifier rejected candidate (our tracker "
+                 "over-estimated occupancy): ours_occ="
+              << verification.ours_occupancy
               << " llvm_occ=" << verification.llvm_occupancy
               << " ours_vgpr="
               << verification.ours_peak.getVGPRNum(

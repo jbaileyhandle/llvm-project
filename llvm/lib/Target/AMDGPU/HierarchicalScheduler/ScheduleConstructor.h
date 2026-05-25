@@ -359,12 +359,12 @@ public:
     GCNRegPressure ours_peak;
     int llvm_occupancy = 0;
     int ours_occupancy = 0;
-    int target_occupancy = 0;
-    /// True iff llvm_occupancy >= target_occupancy — i.e., LLVM's
-    /// ground-truth tracker agrees the candidate meets the kernel
-    /// occupancy ceiling. The accept/reject decision in DfsSearch
-    /// keys on this flag.
-    bool target_met = false;
+    /// True iff llvm_occupancy >= ours_occupancy — LLVM confirms our
+    /// tracker didn't over-estimate occupancy. DfsSearch rejects the
+    /// candidate when false (our tracker over-claimed; committing would
+    /// silently drop occupancy). A tracker-honesty check, not a goal
+    /// check — the occupancy goal is IsBetterThan / ShouldEndSearch.
+    bool tracker_confirmed = false;
   };
 
   /// Run LLVM's GCNUpwardRPTracker over this schedule's order to

@@ -180,6 +180,10 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
     c.decompose_max_parts = ParseInt(scope, key, val);
     return;
   }
+  if (key == "max_occ_above_input") {
+    c.max_occ_above_input = ParseInt(scope, key, val);
+    return;
+  }
   if (key == "search.timeout") {
     c.timeout_ms = ParseInt(scope, key, val);
     return;
@@ -328,6 +332,10 @@ void ValidateOccupancy(const OccupancyConfig &c) {
     report_fatal_error("HierarchicalConfig: occupancy.search.fallback_timeout "
                        "requires search=bfsdp+dfs");
   }
+  if (c.max_occ_above_input.has_value() && *c.max_occ_above_input < 0) {
+    report_fatal_error(
+        "HierarchicalConfig: occupancy.max_occ_above_input must be >= 0");
+  }
 }
 
 void ValidateLength(const LengthConfig &c) {
@@ -473,6 +481,10 @@ std::string HierarchicalConfig::ToString() const {
      << " decompose_recursive="
      << (occupancy.decompose_recursive ? "on" : "off")
      << " decompose_max_parts=" << occupancy.decompose_max_parts
+     << " max_occ_above_input="
+     << (occupancy.max_occ_above_input.has_value()
+             ? std::to_string(*occupancy.max_occ_above_input)
+             : "off")
      << " mode=" << ModeName(occupancy.formation.mode)
      << " ratio=" << occupancy.formation.min_cut.imbalance_ratio
      << " target_size=" << occupancy.formation.min_cut.target_subgraph_size

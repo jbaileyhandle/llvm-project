@@ -77,6 +77,15 @@ struct OccupancyConfig {
   // unless decompose_recursive is on.
   int decompose_max_parts = 4;
 
+  // Occupancy-target cap. When set to X, lower the function occupancy target
+  // to min(structural_max, input_occ + X) before the pass, so the search aims
+  // for at most X notches above the input schedule's occupancy instead of
+  // squeezing maximally (which can over-constrain registers at the cost of
+  // ILP/length). Also switches decompose's OUTER search to DFS — the only
+  // outer search that honors the lowered target (BFS-DP maximizes
+  // regardless). Unset = no cap, BFS-DP outer (default).
+  std::optional<int> max_occ_above_input;
+
   // BFS-DP search params (ignored unless search uses BFS-DP).
   int timeout_ms = 5000;
   /// DFS-fallback budget, ms; only valid for search == kBfsDpDfs.

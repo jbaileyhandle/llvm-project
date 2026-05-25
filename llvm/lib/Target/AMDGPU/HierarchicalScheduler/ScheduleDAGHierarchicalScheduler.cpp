@@ -222,6 +222,35 @@ void ScheduleDAGHierarchicalScheduler::RunTopoPass() {
   }
 }
 
+// Apply the occupancy.max_occ_above_input cap, if set. After
+// resetInitialOccupancy the MFI occupancy is the structural maximum
+// (arch ∩ LDS ∩ launch bounds, ignoring registers). When the cap is set to
+// X this lowers it to min(structural_max, input_occ + X), where input_occ is
+// the min original register-only occupancy over all regions (the function's
+// input occupancy). Returns the effective starting kernel ceiling (the new
+// MFI occupancy). The DFS occupancy policy and decompose's outer DFS honor
+// the lowered target (BFS-DP maximizes regardless), so the cap pairs with
+// DFS. See OccupancyConfig.
+static int ApplyOccupancyTargetCap(SIMachineFunctionInfo &mfi,
+                                   ArrayRef<RegionInfo> regions) {
+  int structural_max = static_cast<int>(mfi.getOccupancy());
+  const OccupancyConfig &occ_cfg = HierarchicalConfig::Get().occupancy;
+  if (!occ_cfg.max_occ_above_input.has_value() || regions.empty()) {
+    return structural_max;
+  }
+  int input_occ = structural_max;
+  for (const RegionInfo &r : regions) {
+    input_occ = std::min(input_occ, r.GetOriginalRegisterOnlyOccupancy());
+  }
+  int capped =
+      std::min(structural_max, input_occ + *occ_cfg.max_occ_above_input);
+  mfi.limitOccupancy(static_cast<unsigned>(capped));
+  llvm::outs() << "\t(occupancy cap: input_occ=" << input_occ << " + "
+               << *occ_cfg.max_occ_above_input << " -> target " << capped
+               << ")\n";
+  return capped;
+}
+
 // Maximize-occupancy outer loop. See header for detail.
 void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
   // Tag any DumpSubgraphDag output from this pass into the
@@ -244,11 +273,13 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
         "without a matching reset");
   }
 
-  int kernel_occupancy_so_far = configured_limit;
-
   // TODO: Remove this temporary print once the pass is wired up.
   llvm::outs() << "\n=== Pass: MaximizeOccupancy === (configured_limit="
                << configured_limit << ")\n";
+
+  // Effective starting ceiling: structural max, or capped to input_occ + X
+  // when occupancy.max_occ_above_input is set.
+  int kernel_occupancy_so_far = ApplyOccupancyTargetCap(*mfi_, regions_);
 
   // Per-pass counters. `attempted` is regions where DFS actually ran
   // (i.e., not short-circuited by the "already at kernel ceiling"
@@ -564,21 +595,30 @@ static SearchResult RunOccupancyRegionWithDecompose(
     const LiveIntervals &lis) {
   const OccupancyConfig &occ = HierarchicalConfig::Get().occupancy;
   const int seed = region.GetOriginalRegisterOnlyOccupancy();
+  // Outermost outer search: DFS when the occupancy cap is active (so its
+  // lowered target restrains the region-level search), else BFS-DP with the
+  // configured integer/continuous metric. In recursive decompose this is the
+  // outermost level only; deeper levels are always continuous (see
+  // RecursiveDecomposeAndSchedule).
+  const OuterSearch outer =
+      occ.max_occ_above_input.has_value()
+          ? OuterSearch::kDfs
+          : (occ.decompose_outer_continuous ? OuterSearch::kBfsDpContinuous
+                                            : OuterSearch::kBfsDpInteger);
   if (occ.decompose_recursive) {
-    // Recursive: cap each level at 4 subgraphs and recurse to leaves. The
-    // install mode and outer metric come from the configured formation /
-    // decompose_outer_continuous.
+    // Recursive: cap each level at decompose_max_parts subgraphs and recurse
+    // to leaves. The install mode comes from the configured formation.
     FormationConfig formation = occ.formation;
     formation.min_cut.max_parts = occ.decompose_max_parts; // subgraphs/level cap
     SearchResult result = RecursiveDecomposeAndSchedule(
-        graph, st, mf, lis, seed, formation, occ.decompose_outer_continuous);
+        graph, st, mf, lis, seed, formation, outer);
     llvm::outs() << "\t\toutput: (Decompose-recursive) found_improvement="
                  << result.schedule.has_value() << "\n";
     return result;
   }
   DecomposeAndScheduleOptions opts =
       DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
-          st, mf, lis, seed, occ.formation, occ.decompose_outer_continuous);
+          st, mf, lis, seed, occ.formation, outer);
   SearchResult result = DecomposeAndSchedule(graph, st, mf, opts);
   llvm::outs() << "\t\toutput: (Decompose) found_improvement="
                << result.schedule.has_value() << "\n";

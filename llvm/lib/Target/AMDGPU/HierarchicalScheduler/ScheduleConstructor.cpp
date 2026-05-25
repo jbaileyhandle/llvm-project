@@ -527,8 +527,6 @@ ScheduleConstructor::VerifyPressureWithLlvmTracker(
   result.ours_peak = pressure_tracker_.GetPeakPressure();
   result.ours_occupancy =
       pressure_tracker_.GetAllFactorsRegionOnlyOccupancy();
-  result.target_occupancy =
-      pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
 
   // Collect MachineInstrs in schedule order, skipping subgraph
   // proxies and entry/exit sentinels (no underlying MI).
@@ -547,7 +545,7 @@ ScheduleConstructor::VerifyPressureWithLlvmTracker(
     // Nothing to verify — treat as agreement with our tracker.
     result.llvm_peak = result.ours_peak;
     result.llvm_occupancy = result.ours_occupancy;
-    result.target_met = result.llvm_occupancy >= result.target_occupancy;
+    result.tracker_confirmed = result.llvm_occupancy >= result.ours_occupancy;
     return result;
   }
 
@@ -579,7 +577,7 @@ ScheduleConstructor::VerifyPressureWithLlvmTracker(
 
   result.llvm_peak = peak;
   result.llvm_occupancy = static_cast<int>(peak.getOccupancy(st));
-  result.target_met = result.llvm_occupancy >= result.target_occupancy;
+  result.tracker_confirmed = result.llvm_occupancy >= result.ours_occupancy;
   return result;
 }
 
