@@ -443,6 +443,10 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
         hs.dump_search_outcomes = ParseBool("", k, v);
       } else if (k == "scale_edge_latencies") {
         hs.scale_edge_latencies = ParseBool("", k, v);
+      } else if (k == "skip_occupancy_pass") {
+        hs.skip_occupancy_pass = ParseBool("", k, v);
+      } else if (k == "skip_length_pass") {
+        hs.skip_length_pass = ParseBool("", k, v);
       } else {
         UnknownKey("", k);
       }
@@ -502,6 +506,8 @@ std::string HierarchicalConfig::ToString() const {
      << " dump_subgraph_dag=" << (dump_subgraph_dag ? "on" : "off")
      << " dump_search_outcomes=" << (dump_search_outcomes ? "on" : "off")
      << " scale_edge_latencies=" << (scale_edge_latencies ? "on" : "off")
+     << " skip_occupancy_pass=" << (skip_occupancy_pass ? "on" : "off")
+     << " skip_length_pass=" << (skip_length_pass ? "on" : "off")
      << "\n";
   return os.str();
 }

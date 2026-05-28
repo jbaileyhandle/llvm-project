@@ -1303,8 +1303,12 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
     RunAllShakedowns();
   }
 
-  RunMaximizeOccupancyPass();
-  RunLengthPass();
+  if (!HierarchicalConfig::Get().skip_occupancy_pass) {
+    RunMaximizeOccupancyPass();
+  }
+  if (!HierarchicalConfig::Get().skip_length_pass) {
+    RunLengthPass();
+  }
 }
 
 // Set up ScheduleDAGMILive state for the given region. Calls startBlock and

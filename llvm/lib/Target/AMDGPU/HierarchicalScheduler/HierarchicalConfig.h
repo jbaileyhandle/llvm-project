@@ -124,6 +124,8 @@ struct HierarchicalConfig {
   bool dump_subgraph_dag = false;    // dump region DAGs for the viewer
   bool dump_search_outcomes = false; // per-search outcome CSV
   bool scale_edge_latencies = false; // scale edge latency by target occupancy
+  bool skip_occupancy_pass = false;  // bypass RunMaximizeOccupancyPass entirely
+  bool skip_length_pass = false;     // bypass RunLengthPass entirely
 
   /// Build the typed config from the generic config's scoped settings.
   /// Per pass: built-in defaults -> named preset (if any) -> explicit
