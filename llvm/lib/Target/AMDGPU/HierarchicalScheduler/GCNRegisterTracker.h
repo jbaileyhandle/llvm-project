@@ -213,6 +213,49 @@ public:
   /// (no-spill-regression search gates, diagnostics).
   bool IsInSpillRegime() const;
 
+  // ----------------------------------------------------------------
+  // Current-pressure helpers, relative to the per-track limit
+  // implied by the function's currently-configured occupancy target
+  // (MFI->getOccupancy()). All read cur_pressure_ rather than
+  // max_pressure_ -- suitable for per-step area accumulators and
+  // gates that reason about the live step. Limits come from
+  // GCNSubtarget::getMaxNum{VGPR,SGPR}s(MFI->getOccupancy(), ...).
+  // Separate VGPR / SGPR so callers needn't fold the two tracks
+  // together (typical metrics in practice care about VGPR; SGPR
+  // helpers are here for the rare SGPR-bound case).
+  // ----------------------------------------------------------------
+
+  /// True when current VGPR count is at or below the VGPR cap for
+  /// the target occupancy (the schedule could sustain the target
+  /// at this step).
+  bool IsCurVGPRCountAtOrBelowTargetLimit() const;
+
+  /// Strict counterpart: true when current VGPR count exceeds the
+  /// VGPR cap for the target occupancy (this step alone would drop
+  /// achievable occupancy below target, or spill if target is
+  /// already at the structural floor).
+  bool IsCurVGPRCountAboveTargetLimit() const;
+
+  /// max(0, target_VGPR_limit - cur_VGPR). The count of VGPRs by
+  /// which we're under the target's cap (effectively, the headroom
+  /// before the next pressure increment would push us over). 0 if
+  /// we're at or above the limit. Suitable for per-step
+  /// "below-limit area" measures.
+  unsigned GetCurVGPRCountBelowTargetLimit() const;
+
+  /// max(0, cur_VGPR - target_VGPR_limit). The count of VGPRs by
+  /// which we're over the target's cap. 0 if at or below the limit.
+  /// Suitable for per-step "above-limit area" measures.
+  unsigned GetCurVGPRCountAboveTargetLimit() const;
+
+  /// SGPR-side parallels of the four VGPR helpers above. Same
+  /// semantics, swapping VGPR for SGPR and using
+  /// getMaxNumSGPRs(target, /*Addressable=*/true) as the cap.
+  bool IsCurSGPRCountAtOrBelowTargetLimit() const;
+  bool IsCurSGPRCountAboveTargetLimit() const;
+  unsigned GetCurSGPRCountBelowTargetLimit() const;
+  unsigned GetCurSGPRCountAboveTargetLimit() const;
+
   /// Occupancy for this region, computed from scratch using
   /// GCNSubtarget::computeOccupancy() with this region's peak
   /// register pressure, the kernel's LDS usage, and the launch

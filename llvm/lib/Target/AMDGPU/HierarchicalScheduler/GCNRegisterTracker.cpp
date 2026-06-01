@@ -538,6 +538,62 @@ bool GCNRegisterTracker::IsInSpillRegime() const {
   return GetRegisterOnlyOccupancy() < mfi_->getMinWavesPerEU();
 }
 
+// ---- Current-pressure helpers, relative to target's per-track limit ----
+//
+// SGPR helpers pass Addressable=true to getMaxNumSGPRs. That matches the
+// SGPR cliff table baked into GCNSubtarget::getOccupancyWithNumSGPRs
+// (the inverse direction used by GetRegisterOnlyOccupancy and the
+// continuous-score table). Addressable=false would use a wider cap (112
+// on GFX8+) that the occupancy computation does not honor, so an above-
+// limit answer here would diverge from "this VGPR/SGPR count actually
+// drops occupancy."
+
+bool GCNRegisterTracker::IsCurVGPRCountAtOrBelowTargetLimit() const {
+  return cur_pressure_.getVGPRNum(st_->hasGFX90AInsts()) <=
+         st_->getMaxNumVGPRs(mfi_->getOccupancy());
+}
+
+bool GCNRegisterTracker::IsCurVGPRCountAboveTargetLimit() const {
+  return cur_pressure_.getVGPRNum(st_->hasGFX90AInsts()) >
+         st_->getMaxNumVGPRs(mfi_->getOccupancy());
+}
+
+unsigned GCNRegisterTracker::GetCurVGPRCountBelowTargetLimit() const {
+  unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
+  unsigned limit = st_->getMaxNumVGPRs(mfi_->getOccupancy());
+  return (cur <= limit) ? (limit - cur) : 0;
+}
+
+unsigned GCNRegisterTracker::GetCurVGPRCountAboveTargetLimit() const {
+  unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
+  unsigned limit = st_->getMaxNumVGPRs(mfi_->getOccupancy());
+  return (cur > limit) ? (cur - limit) : 0;
+}
+
+bool GCNRegisterTracker::IsCurSGPRCountAtOrBelowTargetLimit() const {
+  return cur_pressure_.getSGPRNum() <=
+         st_->getMaxNumSGPRs(mfi_->getOccupancy(), /*Addressable=*/true);
+}
+
+bool GCNRegisterTracker::IsCurSGPRCountAboveTargetLimit() const {
+  return cur_pressure_.getSGPRNum() >
+         st_->getMaxNumSGPRs(mfi_->getOccupancy(), /*Addressable=*/true);
+}
+
+unsigned GCNRegisterTracker::GetCurSGPRCountBelowTargetLimit() const {
+  unsigned cur = cur_pressure_.getSGPRNum();
+  unsigned limit =
+      st_->getMaxNumSGPRs(mfi_->getOccupancy(), /*Addressable=*/true);
+  return (cur <= limit) ? (limit - cur) : 0;
+}
+
+unsigned GCNRegisterTracker::GetCurSGPRCountAboveTargetLimit() const {
+  unsigned cur = cur_pressure_.getSGPRNum();
+  unsigned limit =
+      st_->getMaxNumSGPRs(mfi_->getOccupancy(), /*Addressable=*/true);
+  return (cur > limit) ? (cur - limit) : 0;
+}
+
 int GCNRegisterTracker::GetMetricScore(ScheduleMetric metric) const {
   switch (metric) {
   case ScheduleMetric::kMaximizeRegisterOccupancy:
