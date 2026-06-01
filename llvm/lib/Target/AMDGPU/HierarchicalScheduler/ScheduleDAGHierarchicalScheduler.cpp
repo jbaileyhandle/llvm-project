@@ -22,6 +22,7 @@
 #include "SearchOutcomeLog.h"
 #include "SubgraphFormation.h"
 #include "GCNSubtarget.h"
+#include "OccupancyTargetUtil.h"
 #include "SIMachineFunctionInfo.h"
 #include "ScheduleGraph.h"
 #include "llvm/CodeGen/LiveIntervals.h"
@@ -244,7 +245,7 @@ static int ApplyOccupancyTargetCap(SIMachineFunctionInfo &mfi,
   }
   int capped =
       std::min(structural_max, input_occ + *occ_cfg.max_occ_above_input);
-  mfi.limitOccupancy(static_cast<unsigned>(capped));
+  LimitOccupancyAboveFloor(mfi, capped);
   llvm::outs() << "\t(occupancy cap: input_occ=" << input_occ << " + "
                << *occ_cfg.max_occ_above_input << " -> target " << capped
                << ")\n";
@@ -404,7 +405,7 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     // limitOccupancy only lowers; kernel_occupancy_so_far is
     // monotonically non-increasing, so this is always a no-op or
     // tightening.
-    mfi_->limitOccupancy(static_cast<unsigned>(kernel_occupancy_so_far));
+    LimitOccupancyAboveFloor(*mfi_, kernel_occupancy_so_far);
   }
 
   int total_regions = static_cast<int>(regions_.size());
