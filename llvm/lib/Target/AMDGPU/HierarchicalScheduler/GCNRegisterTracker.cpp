@@ -530,6 +530,14 @@ unsigned GCNRegisterTracker::GetRegisterOnlyOccupancy() const {
   return max_pressure_.getOccupancy(*st_);
 }
 
+unsigned GCNRegisterTracker::GetEffectiveOccupancy() const {
+  return std::max(GetRegisterOnlyOccupancy(), mfi_->getMinWavesPerEU());
+}
+
+bool GCNRegisterTracker::IsInSpillRegime() const {
+  return GetRegisterOnlyOccupancy() < mfi_->getMinWavesPerEU();
+}
+
 int GCNRegisterTracker::GetMetricScore(ScheduleMetric metric) const {
   switch (metric) {
   case ScheduleMetric::kMaximizeRegisterOccupancy:

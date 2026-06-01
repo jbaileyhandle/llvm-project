@@ -290,7 +290,7 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
 
 bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
-    const ScheduleConstructor & /*best_schedule_constructor*/,
+    const ScheduleConstructor &best_schedule_constructor,
     LengthHistoryTracker &length_history,
     PressureHistoryTracker & /*pressure_history*/) {
   // Max acceptable schedule length is read straight from working's
@@ -332,7 +332,25 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
     return true;
   }
 
-  if (!schedule_constructor.RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
+  // Gate 1: effective occupancy (max of register-only and structural
+  // floor) must meet target. Effective rather than raw register-only
+  // so the spill regime (where reg-only is inherently below the
+  // structural floor) doesn't over-prune -- there, this gate stays
+  // silent and Gate 2 / score-based dominance discriminate among
+  // spilling candidates.
+  if (!schedule_constructor.EffectiveOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
+    return true;
+  }
+
+  // Gate 2: no-spill regression. If the best schedule found so far
+  // is not spilling but this candidate has dropped into the spill
+  // regime, prune. Spill regime is monotone (pressure only grows,
+  // reg-only only drops), so this path can only get worse. Catches
+  // the boundary case where target == floor: Gate 1 stays silent
+  // (effective = floor = target), but we still want to keep the
+  // no-spill schedule we already have.
+  if (!best_schedule_constructor.GetPressureTracker().IsInSpillRegime() &&
+      schedule_constructor.GetPressureTracker().IsInSpillRegime()) {
     return true;
   }
 
@@ -443,14 +461,21 @@ void DfsMaximizeLengthPolicy::FilterAndSortReadyList(
 
 bool DfsMaximizeLengthPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
-    const ScheduleConstructor & /*best_schedule_constructor*/,
+    const ScheduleConstructor &best_schedule_constructor,
     LengthHistoryTracker &length_history,
     PressureHistoryTracker & /*pressure_history*/) {
-  // Occupancy floor: same monotonicity argument as length-min —
-  // pressure only grows, so once register-only occupancy drops
-  // below the function target, no completion can recover.
+  // Gate 1: same as DfsMinimizeLengthPolicy -- effective occupancy
+  // must meet target. Effective rather than raw register-only so the
+  // spill regime doesn't over-prune.
   if (!schedule_constructor
-           .RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
+           .EffectiveOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
+    return true;
+  }
+
+  // Gate 2: no-spill regression (see DfsMinimizeLengthPolicy for
+  // rationale).
+  if (!best_schedule_constructor.GetPressureTracker().IsInSpillRegime() &&
+      schedule_constructor.GetPressureTracker().IsInSpillRegime()) {
     return true;
   }
 

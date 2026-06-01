@@ -193,6 +193,26 @@ public:
   /// limits). Does NOT account for LDS or launch bounds.
   unsigned GetRegisterOnlyOccupancy() const;
 
+  /// Effective occupancy: max(register-only, MFI->getMinWavesPerEU()).
+  /// What the kernel will actually run at. The kernel cannot launch
+  /// below the structural floor (set by the function's launch
+  /// attributes) regardless of register pressure, so when
+  /// register-only would drop below the floor the kernel still runs
+  /// at the floor and the excess pressure manifests as spills. Use
+  /// this rather than GetRegisterOnlyOccupancy in search-pruning
+  /// gates that compare against the function's target -- a raw
+  /// register-only gate over-prunes in the spill regime (where
+  /// every path has reg-only < floor).
+  unsigned GetEffectiveOccupancy() const;
+
+  /// True when register pressure has pushed register-only occupancy
+  /// below the structural floor -- i.e., the kernel will spill
+  /// rather than achieve lower occupancy. Equivalent to
+  /// (GetRegisterOnlyOccupancy() < MFI->getMinWavesPerEU()), exposed
+  /// as a predicate for callers that just need the qualitative state
+  /// (no-spill-regression search gates, diagnostics).
+  bool IsInSpillRegime() const;
+
   /// Occupancy for this region, computed from scratch using
   /// GCNSubtarget::computeOccupancy() with this region's peak
   /// register pressure, the kernel's LDS usage, and the launch

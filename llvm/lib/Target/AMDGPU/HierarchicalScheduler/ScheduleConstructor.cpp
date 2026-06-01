@@ -491,6 +491,11 @@ bool ScheduleConstructor::RegisterOnlyOccupancyExceedsFunctionOccupancyTarget() 
          pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
 }
 
+bool ScheduleConstructor::EffectiveOccupancyIsAtOrAboveFunctionOccupancyTarget() const {
+  return pressure_tracker_.GetEffectiveOccupancy() >=
+         pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
+}
+
 ScheduleConstructor::LlvmTrackerVerification
 ScheduleConstructor::VerifyPressureWithLlvmTracker(
     const MachineFunction &mf, const LiveIntervals &lis) const {

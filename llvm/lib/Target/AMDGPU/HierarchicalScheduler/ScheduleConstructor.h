@@ -361,6 +361,17 @@ public:
   /// within the same length.
   bool RegisterOnlyOccupancyExceedsFunctionOccupancyTarget() const;
 
+  /// Same shape as RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget,
+  /// but uses effective occupancy (max of register-only and
+  /// structural floor) instead of raw register-only. Used by the
+  /// length-pass ShouldBoundSearch gates: a raw register-only gate
+  /// over-prunes in the spill regime (where every candidate has
+  /// reg-only < floor); the effective version keeps the search alive
+  /// there, letting the no-spill-regression gate and score-based
+  /// dominance discriminate among spilling candidates. See
+  /// GCNRegisterTracker::GetEffectiveOccupancy for the semantics.
+  bool EffectiveOccupancyIsAtOrAboveFunctionOccupancyTarget() const;
+
   /// Result of cross-checking the candidate schedule's register
   /// pressure with LLVM's tracker. See VerifyPressureWithLlvmTracker.
   struct LlvmTrackerVerification {
