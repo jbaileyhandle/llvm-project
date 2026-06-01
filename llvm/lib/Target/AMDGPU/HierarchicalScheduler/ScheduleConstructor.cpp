@@ -407,7 +407,7 @@ Score ScheduleConstructor::GetScore(ScheduleMetric metric) const {
     return Score::Make(
         Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()});
 
-  case ScheduleMetric::kMaximizeContinuousOccupancyThenArea:
+  case ScheduleMetric::kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea:
     return Score::Make(
         Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()},
         Score::Higher{pressure_tracker_.GetContinuousOccupancyArea()});
@@ -418,24 +418,32 @@ Score ScheduleConstructor::GetScore(ScheduleMetric metric) const {
           "ScheduleConstructor::GetScore: kMinimizeScheduleLength "
           "requires length tracking enabled");
     }
-    // Tiebreak by continuous register occupancy score (higher = better).
-    // The bound check (RecomputeWorkingMaxScheduleCycles) only allows
-    // same-length completions when the search policy opts in via
-    // kRefineOccupancyAtSameLength, so under the default length-only
-    // policy this tiebreak slot is effectively dead.
+    return Score::Make(
+        Score::Lower{length_tracker_->GetCurrentCycle()});
+
+  case ScheduleMetric::kMinimizeScheduleLengthThenMaximizeContinuousOccupancyScore:
+    if (!length_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::GetScore: "
+          "kMinimizeScheduleLengthThenMaximizeContinuousOccupancyScore "
+          "requires length tracking enabled");
+    }
+    // Length primary; tiebreak by continuous register occupancy score.
+    // Same-length completions are produced only when the search policy
+    // opts into the bound relaxation via kRefineOccupancyAtSameLength.
     return Score::Make(
         Score::Lower{length_tracker_->GetCurrentCycle()},
         Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()});
 
-  case ScheduleMetric::kMinimizeScheduleLengthRefineIlp:
+  case ScheduleMetric::kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore:
     if (!length_tracker_) {
       report_fatal_error(
-          "ScheduleConstructor::GetScore: kMinimizeScheduleLengthRefineIlp "
+          "ScheduleConstructor::GetScore: kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore "
           "requires length tracking enabled");
     }
     if (!ilp_tracker_) {
       report_fatal_error(
-          "ScheduleConstructor::GetScore: kMinimizeScheduleLengthRefineIlp "
+          "ScheduleConstructor::GetScore: kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore "
           "requires ILP tracking enabled");
     }
     // Length primary; tiebreak by locked-in ILP score (higher = better);
@@ -454,14 +462,8 @@ Score ScheduleConstructor::GetScore(ScheduleMetric metric) const {
           "ScheduleConstructor::GetScore: kMaximizeScheduleLength "
           "requires length tracking enabled");
     }
-    // Tiebreak by continuous register occupancy score — parallel to the
-    // length-min tiebreak: when length ties, prefer more pressure
-    // headroom. The length-max policy does not relax the bound to allow
-    // same-length completions, so this tiebreak slot is dead under the
-    // default.
     return Score::Make(
-        Score::Higher{length_tracker_->GetCurrentCycle()},
-        Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()});
+        Score::Higher{length_tracker_->GetCurrentCycle()});
 
   case ScheduleMetric::kMinimizeRegisterOccupancy:
     return Score::Make(

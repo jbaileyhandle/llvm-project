@@ -48,7 +48,7 @@ enum class ScheduleMetric {
   /// (sum of per-step continuous score) as the same-peak tiebreak;
   /// higher area = pressure kept lower throughout. See
   /// GCNRegisterTracker::GetContinuousOccupancyArea.
-  kMaximizeContinuousOccupancyThenArea,
+  kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea,
 
   /// Current schedule length in cycles.
   kMinimizeScheduleLength,
@@ -69,7 +69,18 @@ enum class ScheduleMetric {
   /// DfsMinimizeLengthRefineIlpPolicy -- that policy opts into the
   /// bound relaxation that produces same-length completions for
   /// IsBetterThan to choose among.
-  kMinimizeScheduleLengthRefineIlp,
+  kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore,
+
+  /// Length-min with continuous register occupancy score as the
+  /// same-length tiebreaker. Length asc primary; among same-length,
+  /// higher continuous register occupancy wins (more pressure
+  /// headroom). Used by DfsMinimizeLengthRefineOccupancyPolicy --
+  /// that policy opts into the bound relaxation that produces
+  /// same-length completions for GetScore to choose among. Plain
+  /// kMinimizeScheduleLength does not produce same-length
+  /// completions (its policy keeps the strict-improvement bound),
+  /// so it doesn't need this refinement.
+  kMinimizeScheduleLengthThenMaximizeContinuousOccupancyScore,
 
   /// Inverted register occupancy: lower GetRegisterOnlyOccupancy is
   /// "better." TEST-ONLY -- used to drive a search toward worse

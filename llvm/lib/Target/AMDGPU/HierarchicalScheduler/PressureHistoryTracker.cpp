@@ -41,7 +41,7 @@ bool PressureHistoryTracker::IsDominatedElseRecord() {
   // area-tiebreak metric should let it affect domination; pass 0 for
   // every other metric so their pruning stays peak-only.
   int64_t area =
-      metric_ == ScheduleMetric::kMaximizeContinuousOccupancyThenArea
+      metric_ == ScheduleMetric::kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea
           ? working_register_tracker_->GetContinuousOccupancyArea()
           : 0;
   return IsDominatedElseRecord(

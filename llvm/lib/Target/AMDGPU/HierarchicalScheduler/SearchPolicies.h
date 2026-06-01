@@ -198,6 +198,11 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
 // continues exploring same-length completions to refine continuous
 // register-occupancy score. Inherits everything from
 // DfsMinimizeLengthPolicy except:
+//   - kMetric: kMinimizeScheduleLengthThenMaximizeContinuousOccupancyScore
+//     — Score has length asc primary, continuous register occupancy
+//     desc as the same-length tiebreak. (The base
+//     kMinimizeScheduleLength is single-slot; this variant is what
+//     makes the cont_occ tiebreak part of the comparison.)
 //   - kRefineOccupancyAtSameLength flipped to true (DfsSearch uses
 //     this to relax the max_acceptable bound from best.length - 1
 //     to best.length, allowing same-length completions to be
@@ -215,6 +220,8 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
 class DfsMinimizeLengthRefineOccupancyPolicy
     : public DfsMinimizeLengthPolicy {
  public:
+  static constexpr ScheduleMetric kMetric =
+      ScheduleMetric::kMinimizeScheduleLengthThenMaximizeContinuousOccupancyScore;
   static constexpr bool kRefineOccupancyAtSameLength = true;
 
   static bool ShouldEndSearch(
@@ -226,7 +233,7 @@ class DfsMinimizeLengthRefineOccupancyPolicy
 // continues exploring same-length completions to refine ILP score
 // (defer first-uses to grow producer windows). Inherits everything
 // from DfsMinimizeLengthPolicy except:
-//   - kMetric: kMinimizeScheduleLengthRefineIlp — IsBetterThan
+//   - kMetric: kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore — IsBetterThan
 //     tiebreaks length asc, then ILP desc, then occupancy desc.
 //   - kRefineIlpAtSameLength = true — relaxes the bound to allow
 //     same-length completions through, AND gates the
@@ -243,7 +250,7 @@ class DfsMinimizeLengthRefineIlpPolicy
     : public DfsMinimizeLengthPolicy {
  public:
   static constexpr ScheduleMetric kMetric =
-      ScheduleMetric::kMinimizeScheduleLengthRefineIlp;
+      ScheduleMetric::kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore;
   static constexpr bool kRefineIlpAtSameLength = true;
 
   static bool ShouldEndSearch(
@@ -406,7 +413,7 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
 
 // Like DfsMaximizeOccupancyPolicy, but among schedules with equal peak
 // occupancy score it prefers the one with the higher occupancy area
-// under the curve (kMaximizeContinuousOccupancyThenArea) — pressure
+// under the curve (kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea) — pressure
 // kept low throughout, not just at the peak. Inner-search use only
 // (decompose), enabled by occupancy.decompose_inner_area_tiebreak.
 //
@@ -418,7 +425,7 @@ class DfsMaximizeContinuousOccupancyThenAreaPolicy
     : public DfsMaximizeOccupancyPolicy {
  public:
   static constexpr ScheduleMetric kMetric =
-      ScheduleMetric::kMaximizeContinuousOccupancyThenArea;
+      ScheduleMetric::kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea;
 
   // Strict < on the fixed best-bound (base uses <=): working's
   // current peak score is an upper bound on any completion's peak, so

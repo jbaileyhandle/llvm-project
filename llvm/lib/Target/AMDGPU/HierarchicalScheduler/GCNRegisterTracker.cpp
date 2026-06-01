@@ -536,7 +536,7 @@ int GCNRegisterTracker::GetMetricScore(ScheduleMetric metric) const {
     return static_cast<int>(GetRegisterOnlyOccupancy());
   case ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore:
     return GetContinuousOccupancyScore();
-  case ScheduleMetric::kMaximizeContinuousOccupancyThenArea:
+  case ScheduleMetric::kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea:
     // Primary peak score; the area tiebreak is read separately.
     return GetContinuousOccupancyScore();
   case ScheduleMetric::kMinimizeRegisterOccupancy:

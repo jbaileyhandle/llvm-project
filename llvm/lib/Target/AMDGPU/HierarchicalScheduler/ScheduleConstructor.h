@@ -331,7 +331,7 @@ public:
   /// metric on two schedules → Scores are directly comparable by < / >.
   /// IsBetterThan is a thin wrapper over this. Tracker-presence
   /// requirements per metric: length-side metrics require length
-  /// tracking enabled; kMinimizeScheduleLengthRefineIlp additionally
+  /// tracking enabled; kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore additionally
   /// requires ILP tracking enabled. Fatal error otherwise.
   Score GetScore(ScheduleMetric metric) const;
 
