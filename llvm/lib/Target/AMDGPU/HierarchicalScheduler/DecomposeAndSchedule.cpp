@@ -10,7 +10,7 @@
 #include "BfsDpSettings.h"
 #include "DfsSearch.h"
 #include "ScheduleGraph.h"
-#include "ScheduleMetric.h"
+#include "Score.h"
 #include "ScheduleSubgraph.h"
 #include "SearchPolicies.h"
 #include "SubgraphFormation.h"

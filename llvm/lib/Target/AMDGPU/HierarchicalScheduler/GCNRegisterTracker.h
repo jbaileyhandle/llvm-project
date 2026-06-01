@@ -42,7 +42,7 @@
 #include "GCNRegPressure.h"
 #include "NodeRegInfo.h"
 #include "ScheduleGraph.h"
-#include "ScheduleMetric.h"
+#include "Score.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"

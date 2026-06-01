@@ -13,7 +13,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_BFSDPSETTINGS_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_BFSDPSETTINGS_H
 
-#include "ScheduleMetric.h"
+#include "Score.h"
 #include <cstdint>
 #include <optional>
 

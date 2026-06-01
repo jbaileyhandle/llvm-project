@@ -29,7 +29,7 @@
 #include "BfsDpSettings.h"
 #include "GCNRegPressure.h"
 #include "ScheduleConstructor.h"
-#include "ScheduleMetric.h"
+#include "Score.h"
 #include "ScheduledSetTracker.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"

@@ -397,115 +397,86 @@ void ScheduleConstructor::Reset() {
 // Comparison
 // ============================================================================
 
-bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
-                                       ScheduleMetric metric) const {
+Score ScheduleConstructor::GetScore(ScheduleMetric metric) const {
   switch (metric) {
   case ScheduleMetric::kMaximizeRegisterOccupancy:
-    return pressure_tracker_.GetRegisterOnlyOccupancy() >
-           other.pressure_tracker_.GetRegisterOnlyOccupancy();
+    return Score::Make(
+        Score::Higher{pressure_tracker_.GetRegisterOnlyOccupancy()});
 
   case ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore:
-    return pressure_tracker_.GetContinuousOccupancyScore() >
-           other.pressure_tracker_.GetContinuousOccupancyScore();
+    return Score::Make(
+        Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()});
 
-  case ScheduleMetric::kMaximizeContinuousOccupancyThenArea: {
-    int this_score = pressure_tracker_.GetContinuousOccupancyScore();
-    int other_score = other.pressure_tracker_.GetContinuousOccupancyScore();
-    if (this_score != other_score) {
-      return this_score > other_score;
-    }
-    return pressure_tracker_.GetContinuousOccupancyArea() >
-           other.pressure_tracker_.GetContinuousOccupancyArea();
-  }
+  case ScheduleMetric::kMaximizeContinuousOccupancyThenArea:
+    return Score::Make(
+        Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()},
+        Score::Higher{pressure_tracker_.GetContinuousOccupancyArea()});
 
-  case ScheduleMetric::kMinimizeScheduleLength: {
-    if (!length_tracker_ || !other.length_tracker_) {
+  case ScheduleMetric::kMinimizeScheduleLength:
+    if (!length_tracker_) {
       report_fatal_error(
-          "ScheduleConstructor::IsBetterThan: kMinimizeScheduleLength "
-          "requires both constructors to have length tracking enabled");
+          "ScheduleConstructor::GetScore: kMinimizeScheduleLength "
+          "requires length tracking enabled");
     }
-    int my_length = length_tracker_->GetCurrentCycle();
-    int other_length = other.length_tracker_->GetCurrentCycle();
-    if (my_length != other_length) {
-      return my_length < other_length;
-    }
-    // Same length — tiebreak by continuous register occupancy
-    // score (higher = better). The bound check
-    // (RecomputeWorkingMaxScheduleCycles) only allows same-length
-    // completions to be produced when the search policy opts in
-    // via kRefineOccupancyAtSameLength, so under the default
-    // length-only policy this branch is effectively dead code
-    // and does not change behavior.
-    return pressure_tracker_.GetContinuousOccupancyScore() >
-           other.pressure_tracker_.GetContinuousOccupancyScore();
-  }
+    // Tiebreak by continuous register occupancy score (higher = better).
+    // The bound check (RecomputeWorkingMaxScheduleCycles) only allows
+    // same-length completions when the search policy opts in via
+    // kRefineOccupancyAtSameLength, so under the default length-only
+    // policy this tiebreak slot is effectively dead.
+    return Score::Make(
+        Score::Lower{length_tracker_->GetCurrentCycle()},
+        Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()});
 
-  case ScheduleMetric::kMinimizeScheduleLengthRefineIlp: {
-    if (!length_tracker_ || !other.length_tracker_) {
+  case ScheduleMetric::kMinimizeScheduleLengthRefineIlp:
+    if (!length_tracker_) {
       report_fatal_error(
-          "ScheduleConstructor::IsBetterThan: "
-          "kMinimizeScheduleLengthRefineIlp requires both constructors "
-          "to have length tracking enabled");
+          "ScheduleConstructor::GetScore: kMinimizeScheduleLengthRefineIlp "
+          "requires length tracking enabled");
     }
-    if (!ilp_tracker_ || !other.ilp_tracker_) {
+    if (!ilp_tracker_) {
       report_fatal_error(
-          "ScheduleConstructor::IsBetterThan: "
-          "kMinimizeScheduleLengthRefineIlp requires both constructors "
-          "to have ILP tracking enabled");
+          "ScheduleConstructor::GetScore: kMinimizeScheduleLengthRefineIlp "
+          "requires ILP tracking enabled");
     }
-    int my_length = length_tracker_->GetCurrentCycle();
-    int other_length = other.length_tracker_->GetCurrentCycle();
-    if (my_length != other_length) {
-      return my_length < other_length;
-    }
-    // Same length — tiebreak by locked-in ILP score (higher =
-    // better). Tertiary tiebreak on continuous occupancy score
-    // (higher = better) — among same-length-same-ILP, take the
-    // one with more pressure headroom. Same-length-same-ILP-same-
-    // occupancy returns false (treated as tied; best stays the
-    // existing entry). Same-length completions only get produced
-    // when the search policy opts into the bound relaxation via
-    // kRefineIlpAtSameLength, so under any other policy these
-    // tiebreak paths are effectively dead code.
-    int my_ilp = ilp_tracker_->GetIlpScore();
-    int other_ilp = other.ilp_tracker_->GetIlpScore();
-    if (my_ilp != other_ilp) {
-      return my_ilp > other_ilp;
-    }
-    return pressure_tracker_.GetContinuousOccupancyScore() >
-           other.pressure_tracker_.GetContinuousOccupancyScore();
-  }
+    // Length primary; tiebreak by locked-in ILP score (higher = better);
+    // tertiary tiebreak by continuous occupancy score (higher = better) —
+    // among same-length-same-ILP, prefer more pressure headroom. Same-
+    // length completions only get produced when the search policy opts
+    // into the bound relaxation via kRefineIlpAtSameLength.
+    return Score::Make(
+        Score::Lower{length_tracker_->GetCurrentCycle()},
+        Score::Higher{ilp_tracker_->GetIlpScore()},
+        Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()});
 
-  case ScheduleMetric::kMaximizeScheduleLength: {
-    if (!length_tracker_ || !other.length_tracker_) {
+  case ScheduleMetric::kMaximizeScheduleLength:
+    if (!length_tracker_) {
       report_fatal_error(
-          "ScheduleConstructor::IsBetterThan: kMaximizeScheduleLength "
-          "requires both constructors to have length tracking enabled");
+          "ScheduleConstructor::GetScore: kMaximizeScheduleLength "
+          "requires length tracking enabled");
     }
-    int my_length = length_tracker_->GetCurrentCycle();
-    int other_length = other.length_tracker_->GetCurrentCycle();
-    if (my_length != other_length) {
-      return my_length > other_length;
-    }
-    // Same length — tiebreak by continuous register occupancy
-    // score (higher = better). Parallel to the length-min tiebreak:
-    // when the length objective ties, prefer the schedule with
-    // more pressure headroom. The length-max policy does not
-    // relax the bound to allow same-length completions, so under
-    // the default this branch is dead code (same as length-min).
-    return pressure_tracker_.GetContinuousOccupancyScore() >
-           other.pressure_tracker_.GetContinuousOccupancyScore();
-  }
+    // Tiebreak by continuous register occupancy score — parallel to the
+    // length-min tiebreak: when length ties, prefer more pressure
+    // headroom. The length-max policy does not relax the bound to allow
+    // same-length completions, so this tiebreak slot is dead under the
+    // default.
+    return Score::Make(
+        Score::Higher{length_tracker_->GetCurrentCycle()},
+        Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()});
 
   case ScheduleMetric::kMinimizeRegisterOccupancy:
-    return pressure_tracker_.GetRegisterOnlyOccupancy() <
-           other.pressure_tracker_.GetRegisterOnlyOccupancy();
+    return Score::Make(
+        Score::Lower{pressure_tracker_.GetRegisterOnlyOccupancy()});
 
   case ScheduleMetric::kMinimizeContinuousRegisterOccupancyScore:
-    return pressure_tracker_.GetContinuousOccupancyScore() <
-           other.pressure_tracker_.GetContinuousOccupancyScore();
+    return Score::Make(
+        Score::Lower{pressure_tracker_.GetContinuousOccupancyScore()});
   }
   llvm_unreachable("Unknown ScheduleMetric");
+}
+
+bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
+                                       ScheduleMetric metric) const {
+  return GetScore(metric) > other.GetScore(metric);
 }
 
 bool ScheduleConstructor::RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() const {

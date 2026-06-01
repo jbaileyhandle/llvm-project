@@ -53,7 +53,7 @@
 
 #include "GCNRegisterTracker.h"
 #include "ScheduleGraph.h"
-#include "ScheduleMetric.h"
+#include "Score.h"
 #include "ScheduledSetTracker.h"
 #include "SearchStats.h"
 #include "llvm/ADT/DenseMap.h"

@@ -57,7 +57,7 @@
 #include "IlpTracker.h"
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
-#include "ScheduleMetric.h"
+#include "Score.h"
 #include "ScheduledSetTracker.h"
 #include "SearchStats.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -327,9 +327,18 @@ public:
     return schedule_call_count_;
   }
 
+  /// Canonical comparable Score for this schedule under `metric`. Same
+  /// metric on two schedules → Scores are directly comparable by < / >.
+  /// IsBetterThan is a thin wrapper over this. Tracker-presence
+  /// requirements per metric: length-side metrics require length
+  /// tracking enabled; kMinimizeScheduleLengthRefineIlp additionally
+  /// requires ILP tracking enabled. Fatal error otherwise.
+  Score GetScore(ScheduleMetric metric) const;
+
   /// True if this schedule is strictly better than `other` under the
   /// given metric. Ties return false — callers that want "at least as
-  /// good" should negate IsBetterThan with arguments swapped.
+  /// good" should negate IsBetterThan with arguments swapped. Thin
+  /// wrapper over GetScore(metric) > other.GetScore(metric).
   bool IsBetterThan(const ScheduleConstructor &other,
                     ScheduleMetric metric) const;
 
