@@ -349,8 +349,8 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
   // the boundary case where target == floor: Gate 1 stays silent
   // (effective = floor = target), but we still want to keep the
   // no-spill schedule we already have.
-  if (!best_schedule_constructor.GetPressureTracker().IsInSpillRegime() &&
-      schedule_constructor.GetPressureTracker().IsInSpillRegime()) {
+  if (!best_schedule_constructor.GetPressureTracker().IsPeakInSpillRegime() &&
+      schedule_constructor.GetPressureTracker().IsPeakInSpillRegime()) {
     return true;
   }
 
@@ -474,8 +474,8 @@ bool DfsMaximizeLengthPolicy::ShouldBoundSearch(
 
   // Gate 2: no-spill regression (see DfsMinimizeLengthPolicy for
   // rationale).
-  if (!best_schedule_constructor.GetPressureTracker().IsInSpillRegime() &&
-      schedule_constructor.GetPressureTracker().IsInSpillRegime()) {
+  if (!best_schedule_constructor.GetPressureTracker().IsPeakInSpillRegime() &&
+      schedule_constructor.GetPressureTracker().IsPeakInSpillRegime()) {
     return true;
   }
 

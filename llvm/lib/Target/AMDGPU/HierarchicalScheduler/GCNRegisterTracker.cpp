@@ -531,11 +531,35 @@ unsigned GCNRegisterTracker::GetRegisterOnlyOccupancy() const {
 }
 
 unsigned GCNRegisterTracker::GetEffectiveOccupancy() const {
-  return std::max(GetRegisterOnlyOccupancy(), mfi_->getMinWavesPerEU());
+  return std::max(GetRegisterOnlyOccupancy(), GetOccupancyFloor());
 }
 
-bool GCNRegisterTracker::IsInSpillRegime() const {
-  return GetRegisterOnlyOccupancy() < mfi_->getMinWavesPerEU();
+bool GCNRegisterTracker::IsCurVGPRInSpillRegime() const {
+  return cur_pressure_.getVGPRNum(st_->hasGFX90AInsts()) >
+         st_->getMaxNumVGPRs(GetOccupancyFloor());
+}
+
+bool GCNRegisterTracker::IsCurSGPRInSpillRegime() const {
+  return cur_pressure_.getSGPRNum() >
+         st_->getMaxNumSGPRs(GetOccupancyFloor(), /*Addressable=*/true);
+}
+
+bool GCNRegisterTracker::IsCurInSpillRegime() const {
+  return IsCurVGPRInSpillRegime() || IsCurSGPRInSpillRegime();
+}
+
+bool GCNRegisterTracker::IsPeakVGPRInSpillRegime() const {
+  return max_pressure_.getVGPRNum(st_->hasGFX90AInsts()) >
+         st_->getMaxNumVGPRs(GetOccupancyFloor());
+}
+
+bool GCNRegisterTracker::IsPeakSGPRInSpillRegime() const {
+  return max_pressure_.getSGPRNum() >
+         st_->getMaxNumSGPRs(GetOccupancyFloor(), /*Addressable=*/true);
+}
+
+bool GCNRegisterTracker::IsPeakInSpillRegime() const {
+  return IsPeakVGPRInSpillRegime() || IsPeakSGPRInSpillRegime();
 }
 
 // ---- Current-pressure helpers, relative to target's per-track limit ----
@@ -547,50 +571,54 @@ bool GCNRegisterTracker::IsInSpillRegime() const {
 // on GFX8+) that the occupancy computation does not honor, so an above-
 // limit answer here would diverge from "this VGPR/SGPR count actually
 // drops occupancy."
+//
+// Target occupancy comes from GetTargetOccupancy() rather than
+// mfi_->getOccupancy() directly so shakedowns can override it via
+// SetTargetOccupancyForTest. Production always sees the live MFI value.
 
 bool GCNRegisterTracker::IsCurVGPRCountAtOrBelowTargetLimit() const {
   return cur_pressure_.getVGPRNum(st_->hasGFX90AInsts()) <=
-         st_->getMaxNumVGPRs(mfi_->getOccupancy());
+         st_->getMaxNumVGPRs(GetTargetOccupancy());
 }
 
 bool GCNRegisterTracker::IsCurVGPRCountAboveTargetLimit() const {
   return cur_pressure_.getVGPRNum(st_->hasGFX90AInsts()) >
-         st_->getMaxNumVGPRs(mfi_->getOccupancy());
+         st_->getMaxNumVGPRs(GetTargetOccupancy());
 }
 
 unsigned GCNRegisterTracker::GetCurVGPRCountBelowTargetLimit() const {
   unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
-  unsigned limit = st_->getMaxNumVGPRs(mfi_->getOccupancy());
+  unsigned limit = st_->getMaxNumVGPRs(GetTargetOccupancy());
   return (cur <= limit) ? (limit - cur) : 0;
 }
 
 unsigned GCNRegisterTracker::GetCurVGPRCountAboveTargetLimit() const {
   unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
-  unsigned limit = st_->getMaxNumVGPRs(mfi_->getOccupancy());
+  unsigned limit = st_->getMaxNumVGPRs(GetTargetOccupancy());
   return (cur > limit) ? (cur - limit) : 0;
 }
 
 bool GCNRegisterTracker::IsCurSGPRCountAtOrBelowTargetLimit() const {
   return cur_pressure_.getSGPRNum() <=
-         st_->getMaxNumSGPRs(mfi_->getOccupancy(), /*Addressable=*/true);
+         st_->getMaxNumSGPRs(GetTargetOccupancy(), /*Addressable=*/true);
 }
 
 bool GCNRegisterTracker::IsCurSGPRCountAboveTargetLimit() const {
   return cur_pressure_.getSGPRNum() >
-         st_->getMaxNumSGPRs(mfi_->getOccupancy(), /*Addressable=*/true);
+         st_->getMaxNumSGPRs(GetTargetOccupancy(), /*Addressable=*/true);
 }
 
 unsigned GCNRegisterTracker::GetCurSGPRCountBelowTargetLimit() const {
   unsigned cur = cur_pressure_.getSGPRNum();
   unsigned limit =
-      st_->getMaxNumSGPRs(mfi_->getOccupancy(), /*Addressable=*/true);
+      st_->getMaxNumSGPRs(GetTargetOccupancy(), /*Addressable=*/true);
   return (cur <= limit) ? (limit - cur) : 0;
 }
 
 unsigned GCNRegisterTracker::GetCurSGPRCountAboveTargetLimit() const {
   unsigned cur = cur_pressure_.getSGPRNum();
   unsigned limit =
-      st_->getMaxNumSGPRs(mfi_->getOccupancy(), /*Addressable=*/true);
+      st_->getMaxNumSGPRs(GetTargetOccupancy(), /*Addressable=*/true);
   return (cur > limit) ? (cur - limit) : 0;
 }
 

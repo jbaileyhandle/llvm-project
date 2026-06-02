@@ -23,14 +23,17 @@
 #include "IlpTracker.h"
 #include "LengthHistoryTracker.h"
 #include "NodeRegInfo.h"
+#include "OccupancyTargetUtil.h"
 #include "PartitionDag.h"
 #include "PressureHistoryTracker.h"
 #include "RegisterTracker.h"
+#include "SIMachineFunctionInfo.h"
 #include "ScheduleConstructor.h"
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
 #include "ScheduleSubgraph.h"
 #include "ScheduledSetTracker.h"
+#include "Score.h"
 #include "SearchPolicies.h"
 #include "SubgraphFormation.h"
 #include "SubgraphInfo.h"
@@ -4569,6 +4572,13 @@ void RunContinuousScoreTableSweepShakedown(const GCNSubtarget &st) {
   }
 }
 
+// Forward declaration: the body lives at the end of the anonymous
+// namespace alongside the other recent-addition shakedowns
+// (RunScoreShakedown, RunOccupancyTargetUtilShakedown), but
+// RunRegionShakedowns below calls it.
+void RunEffectiveAndTargetLimitHelpersShakedown(
+    ScheduleGraph &graph, const MachineFunction &mf);
+
 // Run all per-region shakedowns on one region's graph. Exercises
 // register trackers, schedule-length tracker, ScheduleConstructor,
 // ScheduleMetric, and prints the region's EntrySU/ExitSU edge info
@@ -4597,6 +4607,7 @@ void RunRegionShakedowns(ScheduleGraph &graph,
   RunScheduleLengthTrackerShakedown(graph, st);
   RunIlpTrackerShakedown(graph, mf, lis);
   RunScheduleConstructorShakedown(graph, mf, lis);
+  RunEffectiveAndTargetLimitHelpersShakedown(graph, mf);
   RunScheduleMetricShakedown(graph, mf, lis);
 
   // Dump EntrySU/ExitSU edges from the LLVM DAG.
@@ -5379,6 +5390,369 @@ void RunDecomposeAndScheduleFactoryShakedown(const GCNSubtarget &st,
   }
 }
 
+// ---- Score type: Higher/Lower wrappers, Make, comparison operators ----
+
+void RunScoreShakedown() {
+  llvm::outs() << "  Score shakedown:\n";
+
+  using H = Score::Higher;
+  using L = Score::Lower;
+
+  auto check = [&](const char *desc, bool ok) {
+    llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
+    if (!ok) {
+      report_fatal_error("Score shakedown: failure");
+    }
+  };
+
+  // Single-slot Higher: larger raw value scores higher.
+  {
+    Score a = Score::Make(H{10});
+    Score b = Score::Make(H{5});
+    check("single Higher{10} > Higher{5}", a > b);
+    check("single Higher{5} < Higher{10}", b < a);
+    check("single Higher{10} != Higher{5}", a != b);
+    check("single Higher{5} <= Higher{10}", b <= a);
+  }
+
+  // Single-slot Lower: smaller raw value scores higher (Lower inverts).
+  {
+    Score a = Score::Make(L{5});   // canonical: -5
+    Score b = Score::Make(L{10});  // canonical: -10
+    check("single Lower{5} > Lower{10} (lower raw is better)", a > b);
+    check("single Lower{10} < Lower{5}", b < a);
+  }
+
+  // Two-slot lex: primary dominates when it differs.
+  {
+    Score occ4 = Score::Make(H{4}, L{80});
+    Score occ3 = Score::Make(H{3}, L{80});
+    check("primary slot wins: (occ=4,len=80) > (occ=3,len=80)",
+          occ4 > occ3);
+  }
+
+  // Two-slot lex: tiebreak by secondary when primary ties.
+  {
+    Score occ4_long = Score::Make(H{4}, L{120});
+    Score occ4_short = Score::Make(H{4}, L{80});
+    check("tiebreak by secondary: same occ, shorter len wins",
+          occ4_short > occ4_long);
+  }
+
+  // Equality on identical slots.
+  {
+    Score a = Score::Make(H{4}, L{80});
+    Score b = Score::Make(H{4}, L{80});
+    check("identical Scores: ==", a == b);
+    check("identical Scores: !(a < b)", !(a < b));
+    check("identical Scores: !(a > b)", !(a > b));
+    check("identical Scores: a <= b", a <= b);
+    check("identical Scores: a >= b", a >= b);
+  }
+
+  // Trailing slots default to 0: Make(H{4}) == Make(H{4}, L{0}).
+  {
+    Score one_slot = Score::Make(H{4});
+    Score with_trailing_zero = Score::Make(H{4}, L{0});
+    check("Make(H{4}) == Make(H{4}, L{0}) (trailing zero canonical)",
+          one_slot == with_trailing_zero);
+  }
+
+  // Three-slot lex: tertiary tiebreak.
+  {
+    Score a = Score::Make(L{100}, H{50}, H{1000});
+    Score b = Score::Make(L{100}, H{50}, H{500});
+    check("same primary + secondary: tertiary tiebreaks", a > b);
+  }
+}
+
+// ---- OccupancyTargetUtil: LimitOccupancyAboveFloor wrapper ----
+
+void RunOccupancyTargetUtilShakedown(const MachineFunction &mf) {
+  llvm::outs() << "  OccupancyTargetUtil shakedown:\n";
+
+  SIMachineFunctionInfo *mfi =
+      const_cast<MachineFunction &>(mf).getInfo<SIMachineFunctionInfo>();
+  const unsigned saved_occ = mfi->getOccupancy();
+  const unsigned floor = mfi->getMinWavesPerEU();
+
+  auto restore = [&]() { mfi->increaseOccupancy(mf, saved_occ); };
+
+  auto check = [&](const char *desc, bool ok) {
+    llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
+    if (!ok) {
+      restore();
+      report_fatal_error("OccupancyTargetUtil shakedown: failure");
+    }
+  };
+
+  llvm::outs() << "    saved_occ=" << saved_occ << " floor=" << floor << "\n";
+
+  // Case 1: limit > current -> no-op.
+  hierarchical_scheduler::LimitOccupancyAboveFloor(
+      *mfi, static_cast<int>(saved_occ) + 100);
+  check("limit > current: target unchanged",
+        mfi->getOccupancy() == saved_occ);
+
+  // Case 2: floor < limit < current -> set to limit. Skip if no room.
+  if (saved_occ > floor + 1) {
+    const unsigned mid = floor + 1;
+    hierarchical_scheduler::LimitOccupancyAboveFloor(
+        *mfi, static_cast<int>(mid));
+    check("floor < limit < current: target == limit",
+          mfi->getOccupancy() == mid);
+  } else {
+    llvm::outs() << "    skipping mid-range case "
+                    "(saved_occ <= floor + 1)\n";
+  }
+
+  // Case 3: limit < floor -> clamped to floor.
+  hierarchical_scheduler::LimitOccupancyAboveFloor(*mfi, 0);
+  check("limit < floor: target clamped to floor",
+        mfi->getOccupancy() == floor);
+
+  // Restore.
+  restore();
+  check("MFI->Occupancy restored to saved value",
+        mfi->getOccupancy() == saved_occ);
+}
+
+// ---- GCNRegisterTracker: effective occupancy + per-track helpers ----
+
+void RunEffectiveAndTargetLimitHelpersShakedown(
+    ScheduleGraph &graph, const MachineFunction &mf) {
+  llvm::outs() << "  EffectiveAndTargetLimitHelpers shakedown:\n";
+
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(mf.getSubtarget());
+  const unsigned sgpr_addressable =
+      AMDGPU::IsaInfo::getAddressableNumSGPRs(&st);
+
+  ScheduleConstructor sc(graph, st, mf);
+  auto &tr = sc.GetPressureTrackerForTest();
+
+  auto check = [&](const char *desc, bool ok) {
+    llvm::outs() << "      " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
+    if (!ok) {
+      tr.ClearTargetAndFloorOverridesForTest();
+      report_fatal_error(
+          "EffectiveAndTargetLimitHelpers shakedown: failure");
+    }
+  };
+
+  // Run all the boundary checks for a given (target, floor) pair,
+  // driven by the tracker's test overrides so we don't depend on the
+  // test MF's actual occupancy or launch-attribute state.
+  auto run_scenario = [&](unsigned target, unsigned floor) {
+    tr.SetTargetOccupancyForTest(target);
+    tr.SetOccupancyFloorForTest(floor);
+
+    const unsigned vgpr_limit_at_target = st.getMaxNumVGPRs(target);
+    const unsigned sgpr_limit_at_target =
+        st.getMaxNumSGPRs(target, /*Addressable=*/true);
+    const unsigned vgpr_limit_at_floor = st.getMaxNumVGPRs(floor);
+    const unsigned sgpr_limit_at_floor =
+        st.getMaxNumSGPRs(floor, /*Addressable=*/true);
+    const bool sgpr_cliff_at_target =
+        sgpr_limit_at_target < sgpr_addressable;
+    const bool sgpr_cliff_at_floor =
+        sgpr_limit_at_floor < sgpr_addressable;
+
+    llvm::outs() << "    scenario target=" << target << " floor=" << floor
+                 << " vgpr@target=" << vgpr_limit_at_target
+                 << " sgpr@target=" << sgpr_limit_at_target
+                 << " vgpr@floor=" << vgpr_limit_at_floor
+                 << " sgpr_cliff_at_{target,floor}={"
+                 << (sgpr_cliff_at_target ? "y" : "n") << ","
+                 << (sgpr_cliff_at_floor ? "y" : "n") << "}\n";
+
+    // -- VGPR cur-pressure target-limit boundary --
+
+    // Well-below limit.
+    {
+      const unsigned vgpr = 4;
+      tr.SetCurPressureForTest(GCNRegPressure(vgpr, /*sgpr32=*/0));
+      check("VGPR well-below: IsAtOrBelow=true",
+            tr.IsCurVGPRCountAtOrBelowTargetLimit());
+      check("VGPR well-below: IsAbove=false",
+            !tr.IsCurVGPRCountAboveTargetLimit());
+      check("VGPR well-below: count_below = limit - cur",
+            tr.GetCurVGPRCountBelowTargetLimit() ==
+                (vgpr_limit_at_target - vgpr));
+      check("VGPR well-below: count_above = 0",
+            tr.GetCurVGPRCountAboveTargetLimit() == 0);
+    }
+    // At limit.
+    {
+      tr.SetCurPressureForTest(
+          GCNRegPressure(vgpr_limit_at_target, /*sgpr32=*/0));
+      check("VGPR at-limit: IsAtOrBelow=true",
+            tr.IsCurVGPRCountAtOrBelowTargetLimit());
+      check("VGPR at-limit: IsAbove=false",
+            !tr.IsCurVGPRCountAboveTargetLimit());
+      check("VGPR at-limit: count_below=0",
+            tr.GetCurVGPRCountBelowTargetLimit() == 0);
+      check("VGPR at-limit: count_above=0",
+            tr.GetCurVGPRCountAboveTargetLimit() == 0);
+    }
+    // Above limit by 7.
+    {
+      const unsigned vgpr = vgpr_limit_at_target + 7;
+      tr.SetCurPressureForTest(GCNRegPressure(vgpr, /*sgpr32=*/0));
+      check("VGPR above-by-7: IsAtOrBelow=false",
+            !tr.IsCurVGPRCountAtOrBelowTargetLimit());
+      check("VGPR above-by-7: IsAbove=true",
+            tr.IsCurVGPRCountAboveTargetLimit());
+      check("VGPR above-by-7: count_below=0",
+            tr.GetCurVGPRCountBelowTargetLimit() == 0);
+      check("VGPR above-by-7: count_above=7",
+            tr.GetCurVGPRCountAboveTargetLimit() == 7);
+    }
+
+    // -- SGPR cur-pressure target-limit boundary (only when a real
+    //    SGPR cliff exists at this target) --
+
+    if (sgpr_cliff_at_target) {
+      // Well-below.
+      {
+        const unsigned sgpr = 4;
+        tr.SetCurPressureForTest(
+            GCNRegPressure(/*vgpr32=*/0, /*sgpr32=*/sgpr));
+        check("SGPR well-below: IsAtOrBelow=true",
+              tr.IsCurSGPRCountAtOrBelowTargetLimit());
+        check("SGPR well-below: IsAbove=false",
+              !tr.IsCurSGPRCountAboveTargetLimit());
+        check("SGPR well-below: count_below = limit - cur",
+              tr.GetCurSGPRCountBelowTargetLimit() ==
+                  (sgpr_limit_at_target - sgpr));
+        check("SGPR well-below: count_above = 0",
+              tr.GetCurSGPRCountAboveTargetLimit() == 0);
+      }
+      // At limit.
+      {
+        tr.SetCurPressureForTest(GCNRegPressure(
+            /*vgpr32=*/0, /*sgpr32=*/sgpr_limit_at_target));
+        check("SGPR at-limit: IsAtOrBelow=true",
+              tr.IsCurSGPRCountAtOrBelowTargetLimit());
+        check("SGPR at-limit: IsAbove=false",
+              !tr.IsCurSGPRCountAboveTargetLimit());
+        check("SGPR at-limit: count_below=0",
+              tr.GetCurSGPRCountBelowTargetLimit() == 0);
+        check("SGPR at-limit: count_above=0",
+              tr.GetCurSGPRCountAboveTargetLimit() == 0);
+      }
+      // Above limit by 5.
+      {
+        const unsigned sgpr = sgpr_limit_at_target + 5;
+        tr.SetCurPressureForTest(
+            GCNRegPressure(/*vgpr32=*/0, /*sgpr32=*/sgpr));
+        check("SGPR above-by-5: IsAtOrBelow=false",
+              !tr.IsCurSGPRCountAtOrBelowTargetLimit());
+        check("SGPR above-by-5: IsAbove=true",
+              tr.IsCurSGPRCountAboveTargetLimit());
+        check("SGPR above-by-5: count_below=0",
+              tr.GetCurSGPRCountBelowTargetLimit() == 0);
+        check("SGPR above-by-5: count_above=5",
+              tr.GetCurSGPRCountAboveTargetLimit() == 5);
+      }
+    } else {
+      llvm::outs() << "      skipping SGPR target-limit tests "
+                      "(no cliff at this target)\n";
+    }
+
+    // -- Cur-pressure spill predicates --
+
+    // VGPR cur spill: cur_pressure_'s VGPR one above the floor's
+    // VGPR cap. Test at any floor (floor=1 -> vgpr@floor=256, test
+    // value is 257).
+    {
+      tr.SetCurPressureForTest(
+          GCNRegPressure(vgpr_limit_at_floor + 1, /*sgpr32=*/0));
+      check("VGPR cur spill: IsCurVGPRInSpillRegime=true",
+            tr.IsCurVGPRInSpillRegime());
+      check("VGPR cur spill: !IsCurSGPRInSpillRegime",
+            !tr.IsCurSGPRInSpillRegime());
+      check("VGPR cur spill: IsCurInSpillRegime=true",
+            tr.IsCurInSpillRegime());
+    }
+    // SGPR cur spill: cur_pressure_'s SGPR one above the floor's
+    // SGPR cap. Skip when there's no SGPR cliff at this floor.
+    if (sgpr_cliff_at_floor) {
+      tr.SetCurPressureForTest(
+          GCNRegPressure(/*vgpr32=*/0, sgpr_limit_at_floor + 1));
+      check("SGPR cur spill: IsCurSGPRInSpillRegime=true",
+            tr.IsCurSGPRInSpillRegime());
+      check("SGPR cur spill: !IsCurVGPRInSpillRegime",
+            !tr.IsCurVGPRInSpillRegime());
+      check("SGPR cur spill: IsCurInSpillRegime=true",
+            tr.IsCurInSpillRegime());
+    } else {
+      llvm::outs() << "      skipping SGPR cur spill (no cliff at floor)\n";
+    }
+
+    // -- Peak-pressure: GetEffectiveOccupancy + spill predicates --
+
+    // Healthy peak: max_pressure_ at target's VGPR limit
+    // -> reg-only = target, effective = reg-only, no spill.
+    {
+      tr.SetMaxPressureForTest(
+          GCNRegPressure(vgpr_limit_at_target, /*sgpr32=*/0));
+      const unsigned reg_only = tr.GetRegisterOnlyOccupancy();
+      const unsigned effective = tr.GetEffectiveOccupancy();
+      check("healthy peak: !IsPeakVGPRInSpillRegime",
+            !tr.IsPeakVGPRInSpillRegime());
+      check("healthy peak: !IsPeakSGPRInSpillRegime",
+            !tr.IsPeakSGPRInSpillRegime());
+      check("healthy peak: !IsPeakInSpillRegime",
+            !tr.IsPeakInSpillRegime());
+      check("healthy peak: reg_only >= floor && effective == reg_only",
+            reg_only >= floor && effective == reg_only);
+    }
+
+    // VGPR peak spill: max_pressure_'s VGPR one above floor's cap.
+    {
+      tr.SetMaxPressureForTest(
+          GCNRegPressure(vgpr_limit_at_floor + 1, /*sgpr32=*/0));
+      check("VGPR peak spill: IsPeakVGPRInSpillRegime=true",
+            tr.IsPeakVGPRInSpillRegime());
+      check("VGPR peak spill: !IsPeakSGPRInSpillRegime",
+            !tr.IsPeakSGPRInSpillRegime());
+      check("VGPR peak spill: IsPeakInSpillRegime=true",
+            tr.IsPeakInSpillRegime());
+      check("VGPR peak spill: effective == floor",
+            tr.GetEffectiveOccupancy() == floor);
+    }
+
+    // SGPR peak spill: max_pressure_'s SGPR one above floor's cap.
+    // Skip if no SGPR cliff at floor.
+    if (sgpr_cliff_at_floor) {
+      tr.SetMaxPressureForTest(
+          GCNRegPressure(/*vgpr32=*/0, sgpr_limit_at_floor + 1));
+      check("SGPR peak spill: IsPeakSGPRInSpillRegime=true",
+            tr.IsPeakSGPRInSpillRegime());
+      check("SGPR peak spill: !IsPeakVGPRInSpillRegime",
+            !tr.IsPeakVGPRInSpillRegime());
+      check("SGPR peak spill: IsPeakInSpillRegime=true",
+            tr.IsPeakInSpillRegime());
+    } else {
+      llvm::outs() << "      skipping SGPR peak spill (no cliff at floor)\n";
+    }
+  };
+
+  // Sweep three (target, floor) scenarios:
+  //   target=10, floor=1 -> VGPR cliff at 24, SGPR cliff at 80,
+  //                          VGPR spill at 257.
+  //   target=8,  floor=4 -> VGPR cliff at 32, SGPR cliff at 100,
+  //                          VGPR spill at 65.
+  //   target=4,  floor=1 -> VGPR cliff at 64, no SGPR cliff at target,
+  //                          VGPR spill at 257.
+  run_scenario(10, 1);
+  run_scenario(8, 4);
+  run_scenario(4, 1);
+
+  tr.ClearTargetAndFloorOverridesForTest();
+}
+
 } // namespace
 
 // The only class-member shakedown entry point. All the per-shakedown
@@ -5408,6 +5782,8 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunBfsDpVsDfsShakedown(st, MF, *LIS);
   RunDfsAreaTiebreakShakedown(st, MF, *LIS);
   RunAllSubgraphFormationShakedowns();
+  RunScoreShakedown();
+  RunOccupancyTargetUtilShakedown(MF);
 
   for (auto &region : regions_) {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {

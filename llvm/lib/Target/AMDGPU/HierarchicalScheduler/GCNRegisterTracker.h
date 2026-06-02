@@ -41,6 +41,7 @@
 
 #include "GCNRegPressure.h"
 #include "NodeRegInfo.h"
+#include "SIMachineFunctionInfo.h"
 #include "ScheduleGraph.h"
 #include "Score.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -48,6 +49,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/MC/LaneBitmask.h"
 #include <array>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -205,13 +207,32 @@ public:
   /// every path has reg-only < floor).
   unsigned GetEffectiveOccupancy() const;
 
-  /// True when register pressure has pushed register-only occupancy
-  /// below the structural floor -- i.e., the kernel will spill
-  /// rather than achieve lower occupancy. Equivalent to
-  /// (GetRegisterOnlyOccupancy() < MFI->getMinWavesPerEU()), exposed
-  /// as a predicate for callers that just need the qualitative state
-  /// (no-spill-regression search gates, diagnostics).
-  bool IsInSpillRegime() const;
+  /// True when current VGPR pressure (cur_pressure_'s VGPR count)
+  /// exceeds the VGPR cap permitted at the occupancy floor
+  /// (getMaxNumVGPRs(GetOccupancyFloor())). Per-step view; useful
+  /// for per-step area accumulators.
+  bool IsCurVGPRInSpillRegime() const;
+
+  /// SGPR-side parallel of IsCurVGPRInSpillRegime.
+  bool IsCurSGPRInSpillRegime() const;
+
+  /// OR of IsCurVGPRInSpillRegime and IsCurSGPRInSpillRegime --
+  /// "is this step's pressure in spill regime on either track."
+  bool IsCurInSpillRegime() const;
+
+  /// True when peak VGPR pressure (max_pressure_'s VGPR count)
+  /// exceeds the VGPR cap permitted at the occupancy floor.
+  /// Cumulative view; the schedule has spilled at some point if
+  /// this is true. Used by the length-pass no-spill-regression gate
+  /// and end-of-schedule diagnostics.
+  bool IsPeakVGPRInSpillRegime() const;
+
+  /// SGPR-side parallel of IsPeakVGPRInSpillRegime.
+  bool IsPeakSGPRInSpillRegime() const;
+
+  /// OR of IsPeakVGPRInSpillRegime and IsPeakSGPRInSpillRegime --
+  /// "this schedule has spilled (on either track) at some point."
+  bool IsPeakInSpillRegime() const;
 
   // ----------------------------------------------------------------
   // Current-pressure helpers, relative to the per-track limit
@@ -395,6 +416,40 @@ public:
     max_pressure_ = new_max;
   }
 
+  /// Test-only: directly set cur_pressure_. Mirrors
+  /// SetMaxPressureForTest for the live-pressure side; used by
+  /// shakedowns that exercise the current-pressure helpers (the
+  /// IsCur* / GetCur* family) at controlled boundary points
+  /// (well-below, at-limit, above-limit, spill regime).
+  void SetCurPressureForTest(GCNRegPressure new_cur) {
+    cur_pressure_ = new_cur;
+  }
+
+  /// Test-only: override what the helpers see for MFI->getOccupancy()
+  /// (the target occupancy). Lets shakedowns drive the per-track
+  /// helpers' limit calculations independent of the test MF's actual
+  /// state -- e.g., sweep target = 10 / 8 / 4 against the same
+  /// tracker. nullopt resets to the live MFI value.
+  void SetTargetOccupancyForTest(std::optional<unsigned> t) {
+    test_target_occupancy_override_ = t;
+  }
+
+  /// Test-only: override what GetEffectiveOccupancy and the
+  /// IsCur/IsPeak spill predicates see for the occupancy floor (the
+  /// MFI->getMinWavesPerEU() value -- the minimum occupancy the
+  /// kernel can be launched at given its attributes). Lets shakedowns
+  /// drive the spill checks at arbitrary floors without needing a
+  /// kernel-attribute setup. nullopt resets to the live MFI value.
+  void SetOccupancyFloorForTest(std::optional<unsigned> f) {
+    test_occupancy_floor_override_ = f;
+  }
+
+  /// Test-only: clear both overrides at once.
+  void ClearTargetAndFloorOverridesForTest() {
+    test_target_occupancy_override_.reset();
+    test_occupancy_floor_override_.reset();
+  }
+
   /// Pressure-side score for `metric`, normalized so higher is
   /// better regardless of the metric's natural direction. Lets
   /// callers (e.g., PressureHistoryTracker's dominance check)
@@ -550,6 +605,30 @@ private:
   /// ignored.
   void TestSchedule(const ScheduleNode *node);
   void TestUnschedule(const ScheduleNode *node);
+
+  /// Test-only overrides for the MFI values the effective-occupancy /
+  /// spill-regime / per-track-limit helpers consult. Set via
+  /// SetTargetOccupancyForTest / SetOccupancyFloorForTest, cleared
+  /// by ClearTargetAndFloorOverridesForTest. nullopt means "use the
+  /// live MFI value."
+  std::optional<unsigned> test_target_occupancy_override_;
+  std::optional<unsigned> test_occupancy_floor_override_;
+
+  /// Wrap MFI->getOccupancy() so the helpers can route through the
+  /// test override when one is set. All non-test paths see the live
+  /// MFI value unchanged.
+  unsigned GetTargetOccupancy() const {
+    return test_target_occupancy_override_.value_or(mfi_->getOccupancy());
+  }
+
+  /// Wrap MFI->getMinWavesPerEU() with the same override semantics.
+  /// "OccupancyFloor" because that's what the value represents in
+  /// HierarchicalScheduler vocabulary -- the minimum occupancy the
+  /// kernel can be launched at given its attributes.
+  unsigned GetOccupancyFloor() const {
+    return test_occupancy_floor_override_.value_or(
+        mfi_->getMinWavesPerEU());
+  }
 
   const MachineFunction *mf_;
   const GCNSubtarget *st_;
