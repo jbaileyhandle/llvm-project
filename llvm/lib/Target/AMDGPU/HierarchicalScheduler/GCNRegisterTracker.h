@@ -277,6 +277,48 @@ public:
   unsigned GetCurSGPRCountBelowTargetLimit() const;
   unsigned GetCurSGPRCountAboveTargetLimit() const;
 
+  // ----------------------------------------------------------------
+  // Current-pressure helpers, relative to the per-track spill cap --
+  // the per-track cap at the occupancy floor (GetOccupancyFloor()).
+  // Cur counts above this cap are the per-step magnitude of actual
+  // spilling: any VGPR/SGPR beyond the cap will be spilled by the
+  // allocator. Bool-predicate parallels exist as
+  // IsCurVGPRInSpillRegime / IsCurSGPRInSpillRegime (above); these
+  // helpers add the magnitude variants used by the per-step
+  // VGPR-spill-area accumulator and by direct count-magnitude
+  // callers.
+  // ----------------------------------------------------------------
+
+  /// max(0, getMaxNumVGPRs(GetOccupancyFloor()) - cur_VGPR). The
+  /// count of VGPRs by which the current step is below the spill
+  /// cap; 0 if at or above. Suitable for per-step "below-spill-cap
+  /// area" measures.
+  unsigned GetCurVGPRCountBelowSpillCap() const;
+
+  /// max(0, cur_VGPR - getMaxNumVGPRs(GetOccupancyFloor())). The
+  /// count of VGPRs by which the current step is over the spill cap;
+  /// 0 if at or below. Backs the per-step VGPR spill-area
+  /// accumulator (see GetVGPRSpillArea) and is suitable for callers
+  /// that want the live "how-much-spill-this-step" count directly.
+  unsigned GetCurVGPRCountAboveSpillCap() const;
+
+  /// SGPR-side parallels of the two VGPR spill-cap helpers above.
+  /// Same semantics, swapping VGPR for SGPR and using
+  /// getMaxNumSGPRs(GetOccupancyFloor(), /*Addressable=*/true) as
+  /// the cap.
+  unsigned GetCurSGPRCountBelowSpillCap() const;
+  unsigned GetCurSGPRCountAboveSpillCap() const;
+
+  /// Running "VGPR spill area under the curve": the sum over
+  /// scheduling steps of GetCurVGPRCountAboveSpillCap at each step.
+  /// Higher = more cumulative spilling across the schedule. Always
+  /// accumulated (cheap subtract per step); consumers read it only
+  /// when they need a spill-area-based metric (e.g., breaking ties
+  /// between two schedules that both peak in the spill regime).
+  /// int64_t to avoid overflow on long schedules. Reset to 0 in
+  /// NoHistoryClone, like occ_area_.
+  int64_t GetVGPRSpillArea() const { return vgpr_spill_area_; }
+
   /// Occupancy for this region, computed from scratch using
   /// GCNSubtarget::computeOccupancy() with this region's peak
   /// register pressure, the kernel's LDS usage, and the launch
@@ -552,6 +594,12 @@ private:
     /// This step's contribution to occ_area_, saved so Unschedule
     /// can subtract it back. 0 for proxies (no pressure change).
     int area_contribution = 0;
+
+    /// This step's contribution to vgpr_spill_area_ (the count of
+    /// VGPRs above the spill cap at this step), saved so Unschedule
+    /// can subtract it back. 0 for proxies and for steps whose
+    /// cur_pressure_ stayed at or below the spill cap.
+    int vgpr_spill_area_contribution = 0;
   };
 
   // --- Core state ---
@@ -579,6 +627,13 @@ private:
   /// GetContinuousOccupancyArea). Accumulated in Schedule and
   /// subtracted back in Unschedule.
   int64_t occ_area_ = 0;
+
+  /// Running VGPR spill area under the curve (see GetVGPRSpillArea).
+  /// Parallel to occ_area_: accumulated in Schedule (production and
+  /// test-mode) by adding GetCurVGPRCountAboveSpillCap after the
+  /// step's pressure update, and subtracted back in Unschedule via
+  /// the saved per-step contribution on ScheduleStep.
+  int64_t vgpr_spill_area_ = 0;
 
   std::vector<ScheduleStep> undo_stack_;
 

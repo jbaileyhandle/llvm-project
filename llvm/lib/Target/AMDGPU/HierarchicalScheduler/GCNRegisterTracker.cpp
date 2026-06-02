@@ -49,8 +49,9 @@ GCNRegisterTracker::GCNRegisterTracker(const GCNRegisterTracker &source,
       // and the undo_stack_ is per-clone (Schedule pushes, Unschedule
       // pops, balanced within each clone's lifetime).
       track_pressure_history_(false),
-      // occ_area_ resets to 0 (default member init) — the clone
-      // accumulates fresh; BFS-DP reads it as a per-edge delta.
+      // occ_area_ and vgpr_spill_area_ reset to 0 (default member
+      // init) — the clone accumulates fresh; BFS-DP reads them as
+      // per-edge deltas.
       // test_mode_ and test_vgpr_deltas_ ARE live state (they define
       // what Schedule(node) does), so propagate to the clone. Without
       // this, a clone'd tracker silently falls back to RegDefs/RegUses
@@ -186,6 +187,13 @@ GCNRegPressure GCNRegisterTracker::Schedule(const ScheduleNode *node) {
     // metric. Recorded on the step so Unschedule can subtract it.
     step.area_contribution = ContinuousScoreForPressure(cur_pressure_);
     occ_area_ += step.area_contribution;
+    // VGPR spill area: add this step's above-spill-cap VGPR count
+    // (cur_pressure_ - getMaxNumVGPRs(floor), or 0 below cap). Cheap
+    // subtract; consumers read vgpr_spill_area_ for spill-area-based
+    // metrics. Recorded on the step so Unschedule can subtract it.
+    step.vgpr_spill_area_contribution =
+        static_cast<int>(GetCurVGPRCountAboveSpillCap());
+    vgpr_spill_area_ += step.vgpr_spill_area_contribution;
     undo_stack_.push_back(std::move(step));
   } else {
     edge_peak = cur_pressure_;
@@ -278,6 +286,7 @@ void GCNRegisterTracker::Unschedule(const ScheduleNode *node) {
   ScheduleStep step = std::move(undo_stack_.back());
   undo_stack_.pop_back();
   occ_area_ -= step.area_contribution;
+  vgpr_spill_area_ -= step.vgpr_spill_area_contribution;
 
   const NodeRegInfo &info =
       node_reg_info_table_->GetForNode(node);
@@ -334,6 +343,9 @@ void GCNRegisterTracker::TestSchedule(const ScheduleNode *node) {
   max_pressure_ = max(max_pressure_, cur_pressure_);
   step.area_contribution = ContinuousScoreForPressure(cur_pressure_);
   occ_area_ += step.area_contribution;
+  step.vgpr_spill_area_contribution =
+      static_cast<int>(GetCurVGPRCountAboveSpillCap());
+  vgpr_spill_area_ += step.vgpr_spill_area_contribution;
   undo_stack_.push_back(std::move(step));
   if (track_pressure_history_) {
     pressure_history_.push_back(cur_pressure_);
@@ -351,6 +363,7 @@ void GCNRegisterTracker::TestUnschedule(const ScheduleNode *node) {
   ScheduleStep step = std::move(undo_stack_.back());
   undo_stack_.pop_back();
   occ_area_ -= step.area_contribution;
+  vgpr_spill_area_ -= step.vgpr_spill_area_contribution;
   max_pressure_ = step.saved_max;
   int new_vgpr = static_cast<int>(cur_pressure_.getVGPRNum(false)) -
                  test_vgpr_deltas_[node->GetTopoIndex()];
@@ -620,6 +633,41 @@ unsigned GCNRegisterTracker::GetCurSGPRCountAboveTargetLimit() const {
   unsigned limit =
       st_->getMaxNumSGPRs(GetTargetOccupancy(), /*Addressable=*/true);
   return (cur > limit) ? (cur - limit) : 0;
+}
+
+// ---- Current-pressure helpers, relative to per-track spill cap ----
+//
+// Spill cap = per-track register limit at the occupancy floor
+// (GetOccupancyFloor()). Counts above this cap are the per-step
+// magnitude of actual spilling. Cap formulas match the floor-cap-
+// based spill predicates above (getMaxNumVGPRs(floor) /
+// getMaxNumSGPRs(floor, /*Addressable=*/true)) so the bool-version /
+// magnitude-version pair stays self-consistent.
+
+unsigned GCNRegisterTracker::GetCurVGPRCountBelowSpillCap() const {
+  unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
+  unsigned cap = st_->getMaxNumVGPRs(GetOccupancyFloor());
+  return (cur <= cap) ? (cap - cur) : 0;
+}
+
+unsigned GCNRegisterTracker::GetCurVGPRCountAboveSpillCap() const {
+  unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
+  unsigned cap = st_->getMaxNumVGPRs(GetOccupancyFloor());
+  return (cur > cap) ? (cur - cap) : 0;
+}
+
+unsigned GCNRegisterTracker::GetCurSGPRCountBelowSpillCap() const {
+  unsigned cur = cur_pressure_.getSGPRNum();
+  unsigned cap =
+      st_->getMaxNumSGPRs(GetOccupancyFloor(), /*Addressable=*/true);
+  return (cur <= cap) ? (cap - cur) : 0;
+}
+
+unsigned GCNRegisterTracker::GetCurSGPRCountAboveSpillCap() const {
+  unsigned cur = cur_pressure_.getSGPRNum();
+  unsigned cap =
+      st_->getMaxNumSGPRs(GetOccupancyFloor(), /*Addressable=*/true);
+  return (cur > cap) ? (cur - cap) : 0;
 }
 
 int GCNRegisterTracker::GetMetricScore(ScheduleMetric metric) const {

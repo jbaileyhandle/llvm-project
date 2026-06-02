@@ -3791,6 +3791,105 @@ void RunOccupancyAreaTrackingShakedown(ScheduleGraph &graph,
   }
 }
 
+// Verifies GCNRegisterTracker's VGPR-spill-area accumulation
+// (GetVGPRSpillArea): vgpr_spill_area_ is the running sum, over
+// scheduling steps, of GetCurVGPRCountAboveSpillCap (count of VGPRs
+// over the floor's VGPR cap), and Unschedule subtracts each step
+// back out exactly (round-trips to 0). Recomputes each step's
+// expected contribution independently from the synthetic delta
+// sequence and the floor-derived spill cap.
+//
+// Self-contained, parameter-independent:
+//   - Builds BuildAreaTiebreakTestDAG (6 nodes, known shape).
+//   - Drives pressure via GCNRegisterTracker's test mode with a
+//     hand-designed delta sequence chosen to push the running VGPR
+//     above the cap on step 2-3 and back below it for steps 4-6.
+//   - Forces the spill cap via SetOccupancyFloorForTest so the
+//     test doesn't depend on the live MF's launch attributes.
+void RunVGPRSpillAreaAccumulatorShakedown(const MachineFunction &mf) {
+  llvm::outs() << "  VGPR-spill-area accumulator shakedown:\n";
+  const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
+
+  auto graph = ScheduleGraph::BuildAreaTiebreakTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+
+  GCNRegisterTracker tracker(*graph, mf);
+
+  // Force floor=8 -> spill_cap=getMaxNumVGPRs(8)=32 on gfx9. The
+  // override decouples this test from the live MF's launch
+  // attributes; without it, floor=1 -> cap=256 and the deltas below
+  // would never cross the cap.
+  constexpr unsigned kTestFloor = 8;
+  tracker.SetOccupancyFloorForTest(kTestFloor);
+  const unsigned spill_cap = st.getMaxNumVGPRs(kTestFloor);
+  llvm::outs() << "    floor=" << kTestFloor
+               << " vgpr spill cap=" << spill_cap << "\n";
+
+  // Deltas indexed by topo index (BuildAreaTiebreakTestDAG topo
+  // matches creation order A,B,M,X,Y,T). Chosen to put the running
+  // VGPR above the cap on steps B/M and back below on X/Y/T, so the
+  // accumulator picks up a non-zero contribution on multiple steps
+  // and then is "fixed" thereafter:
+  //   A(+10):   10 -> above_cap=0,  acc=0
+  //   B(+25):   35 -> above_cap=3,  acc=3
+  //   M(+0):    35 -> above_cap=3,  acc=6
+  //   X(-15):   20 -> above_cap=0,  acc=6
+  //   Y(-10):   10 -> above_cap=0,  acc=6
+  //   T(-10):    0 -> above_cap=0,  acc=6
+  std::vector<int> vgpr_deltas = {+10, +25, 0, -15, -10, -10};
+  tracker.EnableTestModeForTest(vgpr_deltas);
+
+  SmallVector<ScheduleNode *> nodes(graph->GetTopoOrder().begin(),
+                                    graph->GetTopoOrder().end());
+
+  // Forward: Schedule each node in topo order. After each step,
+  // tracker.GetVGPRSpillArea() must equal the running sum of
+  // max(0, running_vgpr - spill_cap) over all steps so far.
+  // running_vgpr is computed directly from the deltas -- independent
+  // of the tracker.
+  SmallVector<int> contrib;
+  int64_t expected_area = 0;
+  int running_vgpr = 0;
+  bool forward_ok = true;
+  for (int i = 0; i < static_cast<int>(nodes.size()); ++i) {
+    ScheduleNode *node = nodes[i];
+    tracker.Schedule(node);
+    running_vgpr += vgpr_deltas[node->GetTopoIndex()];
+    int step =
+        (running_vgpr > static_cast<int>(spill_cap))
+            ? (running_vgpr - static_cast<int>(spill_cap))
+            : 0;
+    contrib.push_back(step);
+    expected_area += step;
+    if (tracker.GetVGPRSpillArea() != expected_area) {
+      forward_ok = false;
+    }
+  }
+  llvm::outs() << "    forward area == sum of per-step above-cap "
+                  "count (area="
+               << tracker.GetVGPRSpillArea() << "): "
+               << (forward_ok ? "PASS\n" : "FAIL\n");
+
+  // Reverse: Unschedule in reverse order. Each Unschedule subtracts
+  // its step's contribution; area must reach 0.
+  bool reverse_ok = true;
+  for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
+    tracker.Unschedule(nodes[i]);
+    expected_area -= contrib[i];
+    if (tracker.GetVGPRSpillArea() != expected_area) {
+      reverse_ok = false;
+    }
+  }
+  bool back_to_zero = tracker.GetVGPRSpillArea() == 0;
+  llvm::outs() << "    reverse area round-trips to 0: "
+               << ((reverse_ok && back_to_zero) ? "PASS\n" : "FAIL\n");
+
+  tracker.ClearTargetAndFloorOverridesForTest();
+  if (!(forward_ok && reverse_ok && back_to_zero)) {
+    report_fatal_error("VGPR-spill-area accumulator shakedown failed");
+  }
+}
+
 // Tests GCNRegisterTracker::NoHistoryClone:
 //   1. Build a parent tracker with track_pressure_history=true,
 //      schedule a prefix of nodes so it has non-trivial
@@ -5690,6 +5789,76 @@ void RunEffectiveAndTargetLimitHelpersShakedown(
       llvm::outs() << "      skipping SGPR cur spill (no cliff at floor)\n";
     }
 
+    // -- VGPR cur-pressure spill-cap count boundary --
+
+    // Well-below the spill cap.
+    {
+      const unsigned vgpr = 4;
+      tr.SetCurPressureForTest(GCNRegPressure(vgpr, /*sgpr32=*/0));
+      check("VGPR well-below-cap: count_below = cap - cur",
+            tr.GetCurVGPRCountBelowSpillCap() ==
+                (vgpr_limit_at_floor - vgpr));
+      check("VGPR well-below-cap: count_above = 0",
+            tr.GetCurVGPRCountAboveSpillCap() == 0);
+    }
+    // At the spill cap.
+    {
+      tr.SetCurPressureForTest(
+          GCNRegPressure(vgpr_limit_at_floor, /*sgpr32=*/0));
+      check("VGPR at-cap: count_below = 0",
+            tr.GetCurVGPRCountBelowSpillCap() == 0);
+      check("VGPR at-cap: count_above = 0",
+            tr.GetCurVGPRCountAboveSpillCap() == 0);
+    }
+    // Above the spill cap by 9.
+    {
+      const unsigned vgpr = vgpr_limit_at_floor + 9;
+      tr.SetCurPressureForTest(GCNRegPressure(vgpr, /*sgpr32=*/0));
+      check("VGPR above-cap-by-9: count_below = 0",
+            tr.GetCurVGPRCountBelowSpillCap() == 0);
+      check("VGPR above-cap-by-9: count_above = 9",
+            tr.GetCurVGPRCountAboveSpillCap() == 9);
+    }
+
+    // -- SGPR cur-pressure spill-cap count boundary (only when a
+    //    real SGPR cliff exists at this floor) --
+
+    if (sgpr_cliff_at_floor) {
+      // Well-below.
+      {
+        const unsigned sgpr = 4;
+        tr.SetCurPressureForTest(
+            GCNRegPressure(/*vgpr32=*/0, /*sgpr32=*/sgpr));
+        check("SGPR well-below-cap: count_below = cap - cur",
+              tr.GetCurSGPRCountBelowSpillCap() ==
+                  (sgpr_limit_at_floor - sgpr));
+        check("SGPR well-below-cap: count_above = 0",
+              tr.GetCurSGPRCountAboveSpillCap() == 0);
+      }
+      // At cap.
+      {
+        tr.SetCurPressureForTest(GCNRegPressure(
+            /*vgpr32=*/0, /*sgpr32=*/sgpr_limit_at_floor));
+        check("SGPR at-cap: count_below = 0",
+              tr.GetCurSGPRCountBelowSpillCap() == 0);
+        check("SGPR at-cap: count_above = 0",
+              tr.GetCurSGPRCountAboveSpillCap() == 0);
+      }
+      // Above cap by 6.
+      {
+        const unsigned sgpr = sgpr_limit_at_floor + 6;
+        tr.SetCurPressureForTest(
+            GCNRegPressure(/*vgpr32=*/0, /*sgpr32=*/sgpr));
+        check("SGPR above-cap-by-6: count_below = 0",
+              tr.GetCurSGPRCountBelowSpillCap() == 0);
+        check("SGPR above-cap-by-6: count_above = 6",
+              tr.GetCurSGPRCountAboveSpillCap() == 6);
+      }
+    } else {
+      llvm::outs() << "      skipping SGPR spill-cap count boundary "
+                      "(no cliff at floor)\n";
+    }
+
     // -- Peak-pressure: GetEffectiveOccupancy + spill predicates --
 
     // Healthy peak: max_pressure_ at target's VGPR limit
@@ -5784,6 +5953,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunAllSubgraphFormationShakedowns();
   RunScoreShakedown();
   RunOccupancyTargetUtilShakedown(MF);
+  RunVGPRSpillAreaAccumulatorShakedown(MF);
 
   for (auto &region : regions_) {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {
