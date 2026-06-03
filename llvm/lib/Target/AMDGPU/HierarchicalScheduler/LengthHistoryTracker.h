@@ -148,6 +148,12 @@ class LengthHistoryTracker {
         open_producer_inst_counts;
   };
 
+  /// One bucket per partition: the Pareto frontier of incomparable
+  /// Entry values. Inline capacity 2 covers small frontiers without
+  /// heap alloc. Type alias so the inline capacity lives in one
+  /// place (matches PressureHistoryTracker::Bucket's intent).
+  using Bucket = SmallVector<Entry, 2>;
+
   /// Construct over the bound trackers. `scheduled_set_tracker`
   /// and `length_tracker` must be non-null and outlive this
   /// tracker. `pressure_tracker` and `ilp_tracker` may be null
@@ -325,7 +331,7 @@ class LengthHistoryTracker {
   /// Flip the direction of length-axis dominance (end_cycle and
   /// per-frontier-node LB). See constructor comment.
   bool length_max_mode_;
-  DenseMap<PartitionKey, SmallVector<Entry, 2>> table_;
+  DenseMap<PartitionKey, Bucket> table_;
   int total_entries_ = 0;
   /// Incremented at every prune event. .current_run is cleared
   /// by Reset; .lifetime persists.

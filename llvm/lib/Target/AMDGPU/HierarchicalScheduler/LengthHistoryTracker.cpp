@@ -221,7 +221,7 @@ bool LengthHistoryTracker::IsDominatedElseInsert() {
 
   // Bucket exists. Mutate it directly via the iterator; no key copy
   // needed.
-  SmallVector<Entry, 2> &bucket = it->second;
+  Bucket &bucket = it->second;
 
   // Single-pass walk: look for an existing dominator while
   // collecting indices of entries the query dominates. If a
