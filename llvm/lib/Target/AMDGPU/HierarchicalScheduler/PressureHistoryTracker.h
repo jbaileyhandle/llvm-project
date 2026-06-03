@@ -2,24 +2,28 @@
 //
 // History table for pressure-side B&B pruning in occupancy DFS.
 // Memoizes previously-visited prefixes by partition; when a new
-// prefix arrives at a partition where a prior prefix was no
-// worse, the new prefix's subtree can be pruned.
+// prefix arrives at a partition where a prior prefix Pareto-
+// dominates it on the bound Score, the new prefix's subtree can be
+// pruned.
 //
 // A "partition" is the bipartition of the graph induced by which
-// nodes are scheduled vs. unscheduled — identified by
+// nodes are scheduled vs. unscheduled -- identified by
 // `ScheduledSetTracker`'s (signature, scheduled_set) pair. Two
 // prefixes share a partition iff they scheduled the same set of
 // nodes (regardless of order).
 //
-// Per partition, only ONE entry is needed: the lexicographic best
-// (peak primary, occupancy area as the same-peak tiebreak) over all
-// prefixes that have reached this partition. A new prefix whose
-// (peak, area) is <= the prior visit's lexicographically is dominated
-// and can be pruned. For pure-peak callers area is 0, so this reduces
-// to scalar peak domination. Single-entry lexicographic domination is
-// exact for the peak objective and for area among equal-peak prefixes;
-// a higher-peak prior can prune a higher-area prefix (a tiebreak-only
-// loss — we keep one entry, not a full (peak, area) Pareto frontier).
+// Per partition: a Pareto frontier of incomparable Score entries
+// (parallel to LengthHistoryTracker's design). Prefix A dominates
+// prefix B iff A.score.Dominates(B.score) -- every slot of A's
+// canonical Score is >= the corresponding slot of B's. Incomparable
+// entries (each better on some slot) both stay in the bucket. A
+// lex-collapse memo (one entry per partition, lex-best) is unsound
+// for multi-slot Scores: when the suffix equalizes a higher-priority
+// slot at completion, a lower-slot tiebreak that was the wrong-side
+// of lex at the prefix can become decisive at completion, so a lex-
+// collapse prune can throw away the prefix that produces the optimal
+// completion. The Pareto frontier preserves every non-dominated
+// entry and prunes only what is provably dominated on every slot.
 //
 // Memory cap: soft-internal `kMaxEntries`. Insertion past the cap
 // silently no-ops (no insert, no fatal error) and sets a flag
@@ -55,7 +59,9 @@
 #include "Score.h"
 #include "ScheduledSetTracker.h"
 #include "SearchStats.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 
 namespace llvm {
 namespace hierarchical_scheduler {
@@ -78,18 +84,26 @@ class PressureHistoryTracker {
   /// length tracker's matching cap.
   static constexpr int kMaxEntries = 10'000'000;
 
-  /// One entry per partition. Public so tests can stage entries
-  /// directly via InsertEntryForTest.
+  /// One entry on a partition's Pareto frontier. Public so tests
+  /// can stage entries directly via InsertEntryForTest.
   struct Entry {
-    /// Lexicographic best Score over all prefixes reaching this
-    /// partition. Slot semantics come from whichever ScheduleMetric
-    /// produced the Score (see ScheduleConstructor::GetScore).
-    /// Set on first visit; replaced by a lexicographically-greater
-    /// visit. Default-constructed Score has all slots zero, so an
-    /// Entry built via DenseMap::operator[] is a valid "no prior
-    /// visit yet" sentinel.
+    /// One Score on this partition's Pareto frontier. Slot
+    /// semantics come from whichever ScheduleMetric produced the
+    /// Score (see ScheduleConstructor::GetScore). The bucket is
+    /// the set of Scores reaching this partition that are not
+    /// Pareto-dominated by any other entry in the bucket.
+    /// Default-constructed Score has all slots zero, so a default
+    /// Entry is a valid "empty" sentinel.
     Score best_score = Score::Make();
   };
+
+  /// One bucket per partition: the Pareto frontier of incomparable
+  /// Score entries. Inline capacity 1 covers the common "single-
+  /// entry frontier" case for peak-only metrics; multi-slot metrics
+  /// with genuinely trade-off-y dims may push past it and heap-
+  /// allocate (revisit if profiling identifies that as a hot spot).
+  /// Type alias so the inline capacity is set in one place.
+  using Bucket = SmallVector<Entry, 1>;
 
   /// Bind:
   ///   - `scheduled_set_tracker` — source of truth for the
@@ -111,21 +125,18 @@ class PressureHistoryTracker {
   /// bound scheduled-set tracker. Returns true if pruning should
   /// fire.
   ///
-  /// Cases (given the partition this prefix has reached, and
-  /// `current_score` from the caller):
-  ///   - No prior entry at this partition: insert with
-  ///     `best_score = current_score`; return false. If inserting
-  ///     would exceed `kMaxEntries`, the insert is silently skipped,
-  ///     `memory_cap_hit_` is set, and the return is still false.
-  ///   - Prior entry's `best_score >= current_score` (lex): the
-  ///     prior visit is no worse on every prefix-dependent
-  ///     dimension. By the partition's prefix/postfix decoupling,
-  ///     anything our subtree could reach is reachable at no worse
-  ///     Score from the prior visit. Increment `prune_count_`;
-  ///     return true.
-  ///   - Prior entry exists and current is strictly better:
-  ///     update `best_score = current_score`; return false. (No
-  ///     table growth, so no cap concern.)
+  /// Walks this partition's Pareto bucket:
+  ///   - If any existing entry Pareto-dominates current_score
+  ///     (entry.score.Dominates(current_score) — every slot >=),
+  ///     increment prune_count_ and return true.
+  ///   - Otherwise, insert current_score into the bucket and remove
+  ///     any existing entries that current_score Pareto-dominates
+  ///     (Pareto trim). Return false. If inserting would push
+  ///     total_entries_ over kMaxEntries, the insert is silently
+  ///     skipped and memory_cap_hit_ is set; the return is still
+  ///     false (a not-recorded prefix isn't dominated by anything
+  ///     in this partition beyond what the dominance walk just
+  ///     determined).
   bool IsDominatedElseRecord(const Score &current_score);
 
   /// Production wrapper. Reads the current Score from the bound
@@ -143,8 +154,8 @@ class PressureHistoryTracker {
   /// consistently).
   void Reset();
 
-  /// Total entries across all partitions.
-  int GetTotalEntries() const { return static_cast<int>(table_.size()); }
+  /// Total entries across all partitions (sum of bucket sizes).
+  int GetTotalEntries() const { return total_entries_; }
 
   /// Read-only access to the prune counter. `.current_run` is
   /// the number of times IsDominatedElseRecord returned true
@@ -165,22 +176,30 @@ class PressureHistoryTracker {
     return memory_cap_hit_;
   }
 
-  /// Test-only: directly insert (or overwrite) an entry for
-  /// `key`. Bypasses the production schedule path so tests can
-  /// stage arbitrary starting states without driving real DAG
-  /// scheduling to produce specific score values.
+  /// Test-only: directly append `entry` to `key`'s bucket without
+  /// any dominance check or Pareto trim. Lets tests stage arbitrary
+  /// starting states without reverse-engineering DAGs through the
+  /// production schedule path. Production code should never call
+  /// this -- it can violate the Pareto-frontier invariant.
   void InsertEntryForTest(const PartitionKey &key, Entry entry);
 
-  /// Test-only: returns a pointer to the entry for `key`, or
-  /// nullptr if absent. Pointer invalidated by any subsequent
-  /// table mutation.
-  const Entry *GetEntryForTest(const PartitionKey &key) const;
+  /// Test-only: returns the bucket for `key`, or empty if no
+  /// bucket exists. The returned ArrayRef is invalidated by any
+  /// subsequent table mutation.
+  ArrayRef<Entry> GetBucketForTest(const PartitionKey &key) const;
 
  private:
   const ScheduledSetTracker *scheduled_set_tracker_;
   const ScheduleConstructor *working_schedule_constructor_;
   ScheduleMetric metric_;
-  DenseMap<PartitionKey, Entry> table_;
+  /// Per-partition Pareto frontier of incomparable Score entries.
+  /// Bucket type alias keeps the inline capacity in one place
+  /// (see the Bucket typedef above).
+  DenseMap<PartitionKey, Bucket> table_;
+  /// Sum of bucket sizes across all partitions. Maintained
+  /// incrementally on every Insert / Pareto trim so GetTotalEntries
+  /// stays O(1) instead of summing on demand.
+  int total_entries_ = 0;
   /// Incremented at every prune event. .current_run is cleared
   /// by Reset; .lifetime persists.
   DualRunAndLifetimeCounter prune_count_;

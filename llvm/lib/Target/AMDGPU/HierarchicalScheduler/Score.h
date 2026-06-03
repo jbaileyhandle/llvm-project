@@ -135,6 +135,28 @@ class Score {
   bool operator==(const Score &o) const { return values_ == o.values_; }
   bool operator!=(const Score &o) const { return values_ != o.values_; }
 
+  /// Per-slot partial-order ("Pareto") dominance: true iff every slot
+  /// of *this is >= the corresponding slot of `o`. Distinct from
+  /// operator>= (lex). Pareto dominance is the correct check for
+  /// multi-objective DP memo tables (PressureHistoryTracker,
+  /// LengthHistoryTracker): a lex-collapse compare can prune a
+  /// prefix that would have won at completion when the suffix
+  /// equalizes a higher-priority slot. Pareto keeps incomparable
+  /// entries instead.
+  bool Dominates(const Score &o) const {
+    for (int i = 0; i < kMaxSlots; ++i) {
+      if (values_[i] < o.values_[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// Inverse of Dominates: true iff `o` dominates `*this`. Provided
+  /// for readability at call sites that naturally phrase the check
+  /// as "am I dominated by this other entry."
+  bool IsDominatedBy(const Score &o) const { return o.Dominates(*this); }
+
  private:
   // Capacity for primary + 2 tiebreakers. Grow if a metric ever needs more.
   static constexpr int kMaxSlots = 3;

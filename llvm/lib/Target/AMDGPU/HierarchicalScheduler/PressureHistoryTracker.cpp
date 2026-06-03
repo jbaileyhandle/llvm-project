@@ -45,67 +45,82 @@ bool PressureHistoryTracker::IsDominatedElseRecord() {
 bool PressureHistoryTracker::IsDominatedElseRecord(
     const Score &current_score) {
   // Heterogeneous lookup via PartitionKeyView avoids copying the
-  // bitset on the existing-entry path. DenseMap dispatches on
+  // bitset on the existing-bucket path. DenseMap dispatches on
   // signature for the hash bucket, then disambiguates with the
   // full bitset via DenseMapInfo<PartitionKey>::isEqual.
   PartitionKeyView view = scheduled_set_tracker_->GetPartitionKeyView();
 
   auto it = table_.find_as(view);
-  if (it == table_.end()) {
-    // First visit to this partition. Build the owning key and
-    // insert a fresh entry. No prior entry, so no dominator
-    // exists.
-    if (static_cast<int>(table_.size()) >= kMaxEntries) {
-      // Soft cap: stop recording, set the sticky flag, let the
-      // search continue. No prior entry exists for this
-      // partition, so "not dominated" is the truthful answer
-      // regardless of whether we recorded.
-      memory_cap_hit_.Set();
-      return false;
+  Bucket *bucket = (it == table_.end()) ? nullptr : &it->second;
+
+  // Pareto dominance walk: if any existing entry dominates
+  // current_score on every slot, prune.
+  if (bucket != nullptr) {
+    for (const Entry &entry : *bucket) {
+      if (entry.best_score.Dominates(current_score)) {
+        prune_count_.Increment();
+        return true;
+      }
     }
-    PartitionKey key = scheduled_set_tracker_->GetPartitionKey();
-    table_[std::move(key)] = Entry{current_score};
+  }
+
+  // Not dominated. If inserting would push past the soft cap, skip
+  // recording but don't claim dominance (we already verified no
+  // recorded entry dominates current).
+  if (total_entries_ >= kMaxEntries) {
+    memory_cap_hit_.Set();
     return false;
   }
 
-  Entry &prior = it->second;
-  // Lexicographic Score domination. Prune when the prior prefix's
-  // Score is >= this one lexicographically. By the partition's
-  // prefix/postfix decoupling, the shared postfix adds the same per-
-  // dim contribution to both, so the prior prefix dominates ours on
-  // every completion.
-  if (prior.best_score >= current_score) {
-    prune_count_.Increment();
-    return true;
+  if (bucket == nullptr) {
+    // First visit to this partition. Build the owning key and seed
+    // a one-element bucket.
+    PartitionKey key = scheduled_set_tracker_->GetPartitionKey();
+    Bucket fresh;
+    fresh.push_back(Entry{current_score});
+    table_[std::move(key)] = std::move(fresh);
+    total_entries_++;
+    return false;
   }
 
-  // Not dominated => this prefix is lexicographically greater (total
-  // order). Record it as the partition's new best.
-  prior.best_score = current_score;
+  // Pareto trim: drop existing entries that current_score now
+  // dominates -- they're obsolete on the new frontier. (The walk
+  // above already confirmed no existing entry dominates current,
+  // so trimming can't remove a dominator of the new entry.) Then
+  // push the new entry.
+  int size_before = static_cast<int>(bucket->size());
+  bucket->erase(std::remove_if(bucket->begin(), bucket->end(),
+                               [&](const Entry &e) {
+                                 return current_score.Dominates(
+                                     e.best_score);
+                               }),
+                bucket->end());
+  int removed = size_before - static_cast<int>(bucket->size());
+  bucket->push_back(Entry{current_score});
+  total_entries_ += 1 - removed;
   return false;
 }
 
 void PressureHistoryTracker::Reset() {
-  // table_.size() IS the entry count for this tracker (one entry
-  // per partition), so clearing the map zeros GetTotalEntries()
-  // implicitly — no separate counter to reset.
   table_.clear();
+  total_entries_ = 0;
   prune_count_.ResetCurrentRun();
   memory_cap_hit_.ResetCurrentRun();
 }
 
 void PressureHistoryTracker::InsertEntryForTest(
     const PartitionKey &key, Entry entry) {
-  table_[key] = std::move(entry);
+  table_[key].push_back(std::move(entry));
+  total_entries_++;
 }
 
-const PressureHistoryTracker::Entry *
-PressureHistoryTracker::GetEntryForTest(const PartitionKey &key) const {
+ArrayRef<PressureHistoryTracker::Entry>
+PressureHistoryTracker::GetBucketForTest(const PartitionKey &key) const {
   auto it = table_.find(key);
   if (it == table_.end()) {
-    return nullptr;
+    return {};
   }
-  return &it->second;
+  return it->second;
 }
 
 } // namespace hierarchical_scheduler
