@@ -2625,12 +2625,21 @@ void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
 // =============================================================================
 //
 // Standalone tests for PressureHistoryTracker's prefix-side logic.
-// The tracker's explicit-score overload of IsDominatedElseRecord
-// is metric-agnostic — it just compares ints — so these tests pass
-// literal ints for current_prefix_score and don't need a real
-// GCNRegisterTracker. The tracker is constructed with nullptr
-// register-tracker pointer; the no-arg overload would fatal-error
-// in this configuration but isn't called here.
+// The tracker's explicit-Score overload of IsDominatedElseRecord
+// is metric-agnostic -- it just compares Scores -- so these tests
+// build Scores via the local helpers below and don't need a real
+// ScheduleConstructor. The tracker is constructed with nullptr SC
+// pointer; the no-arg overload would fatal-error in this
+// configuration but isn't called here.
+
+// Test helpers: build a 1-slot or 2-slot Score from raw ints, with
+// the same Higher orientation production uses for peak / area.
+static Score MakePeakOnlyTestScore(int peak) {
+  return Score::Make(Score::Higher{peak});
+}
+static Score MakePeakAreaTestScore(int peak, int64_t area) {
+  return Score::Make(Score::Higher{peak}, Score::Higher{area});
+}
 
 struct PressureHistoryTrackerFixture {
   std::unique_ptr<ScheduleGraph> graph;
@@ -2662,7 +2671,7 @@ BuildPressureHistoryTrackerFixture(const GCNSubtarget &st) {
       fixture.graph.get(), fixture.length_tracker.get());
   fixture.pressure_history_tracker = std::make_unique<PressureHistoryTracker>(
       fixture.scheduled_set_tracker.get(),
-      /*working_register_tracker=*/nullptr,
+      /*working_schedule_constructor=*/nullptr,
       ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore);
   return fixture;
 }
@@ -2697,15 +2706,14 @@ static void RunPressureHistoryFirstInsertAndSelfDominanceShakedown(
 
   bool first_call_inserted =
       !fixture.pressure_history_tracker->IsDominatedElseRecord(
-          /*current_prefix_score=*/100);
+          MakePeakOnlyTestScore(100));
   bool count_one_after_first =
       fixture.pressure_history_tracker->GetTotalEntries() == 1;
 
-  // Same partition, same current_prefix_score — prior dominates
-  // (equality counts).
+  // Same partition, same Score -- prior dominates (lex equality).
   bool second_call_pruned =
       fixture.pressure_history_tracker->IsDominatedElseRecord(
-          /*current_prefix_score=*/100);
+          MakePeakOnlyTestScore(100));
   bool count_unchanged_after_second =
       fixture.pressure_history_tracker->GetTotalEntries() == 1;
   bool prune_count_one =
@@ -2719,8 +2727,8 @@ static void RunPressureHistoryFirstInsertAndSelfDominanceShakedown(
 }
 
 // Test 3: Strict prior dominator. Stage an entry with a strictly
-// higher best_prefix_score than the query. IsDominatedElseRecord
-// returns true; entry unchanged; prune count incremented.
+// higher peak Score than the query. IsDominatedElseRecord returns
+// true; entry unchanged; prune count incremented.
 static void
 RunPressureHistoryStrictPriorDominatorShakedown(const GCNSubtarget &st) {
   auto fixture = BuildPressureHistoryTrackerFixture(st);
@@ -2728,16 +2736,16 @@ RunPressureHistoryStrictPriorDominatorShakedown(const GCNSubtarget &st) {
   PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
 
   PressureHistoryTracker::Entry strict_dominator;
-  strict_dominator.best_prefix_score = 200;
+  strict_dominator.best_score = MakePeakOnlyTestScore(200);
   fixture.pressure_history_tracker->InsertEntryForTest(key, strict_dominator);
 
-  // Query with strictly lower current_prefix_score. Prior 200 >=
-  // current 100 → prune.
+  // Query with strictly lower peak. Prior 200 >= current 100 -> prune.
   bool pruned = fixture.pressure_history_tracker->IsDominatedElseRecord(
-      /*current_prefix_score=*/100);
+      MakePeakOnlyTestScore(100));
   const PressureHistoryTracker::Entry *after =
       fixture.pressure_history_tracker->GetEntryForTest(key);
-  bool entry_unchanged = after != nullptr && after->best_prefix_score == 200;
+  bool entry_unchanged =
+      after != nullptr && after->best_score == MakePeakOnlyTestScore(200);
   bool count_one =
       fixture.pressure_history_tracker->GetTotalEntries() == 1;
   bool prune_count_one =
@@ -2750,9 +2758,9 @@ RunPressureHistoryStrictPriorDominatorShakedown(const GCNSubtarget &st) {
 }
 
 // Test 4: Strict update when current is better. Stage an entry
-// with a strictly lower best_prefix_score than the query.
-// IsDominatedElseRecord returns false; entry's best_prefix_score
-// is updated to the larger value; prune count unchanged.
+// with a strictly lower peak Score than the query.
+// IsDominatedElseRecord returns false; entry's Score is updated to
+// the larger value; prune count unchanged.
 static void RunPressureHistoryStrictCurrentBetterShakedown(
     const GCNSubtarget &st) {
   auto fixture = BuildPressureHistoryTrackerFixture(st);
@@ -2760,17 +2768,18 @@ static void RunPressureHistoryStrictCurrentBetterShakedown(
   PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
 
   PressureHistoryTracker::Entry strictly_worse_prior;
-  strictly_worse_prior.best_prefix_score = 50;
+  strictly_worse_prior.best_score = MakePeakOnlyTestScore(50);
   fixture.pressure_history_tracker->InsertEntryForTest(
       key, strictly_worse_prior);
 
-  // Query with strictly higher current. Prior 50 < current 200 → no
+  // Query with strictly higher current. Prior 50 < current 200 -> no
   // prune; entry updated to 200.
   bool not_pruned = !fixture.pressure_history_tracker->IsDominatedElseRecord(
-      /*current_prefix_score=*/200);
+      MakePeakOnlyTestScore(200));
   const PressureHistoryTracker::Entry *after =
       fixture.pressure_history_tracker->GetEntryForTest(key);
-  bool entry_updated = after != nullptr && after->best_prefix_score == 200;
+  bool entry_updated =
+      after != nullptr && after->best_score == MakePeakOnlyTestScore(200);
   bool count_one =
       fixture.pressure_history_tracker->GetTotalEntries() == 1;
   bool prune_count_zero =
@@ -2794,13 +2803,13 @@ RunPressureHistoryDistinctPartitionsShakedown(const GCNSubtarget &st) {
   ScheduleNodeOnPressureFixture(fixture, fixture.a);
   bool a_inserted =
       !fixture.pressure_history_tracker->IsDominatedElseRecord(
-          /*current_prefix_score=*/100);
+          MakePeakOnlyTestScore(100));
 
   // Partition 2: {A, H} scheduled.
   ScheduleNodeOnPressureFixture(fixture, fixture.h);
   bool ah_inserted =
       !fixture.pressure_history_tracker->IsDominatedElseRecord(
-          /*current_prefix_score=*/200);
+          MakePeakOnlyTestScore(200));
 
   bool count_two =
       fixture.pressure_history_tracker->GetTotalEntries() == 2;
@@ -2829,9 +2838,9 @@ RunPressureHistoryHashCollisionShakedown(const GCNSubtarget &st) {
   key2.scheduled_set.set(1);
 
   PressureHistoryTracker::Entry entry1;
-  entry1.best_prefix_score = 100;
+  entry1.best_score = MakePeakOnlyTestScore(100);
   PressureHistoryTracker::Entry entry2;
-  entry2.best_prefix_score = 200;
+  entry2.best_score = MakePeakOnlyTestScore(200);
   fixture.pressure_history_tracker->InsertEntryForTest(key1, entry1);
   fixture.pressure_history_tracker->InsertEntryForTest(key2, entry2);
 
@@ -2841,8 +2850,8 @@ RunPressureHistoryHashCollisionShakedown(const GCNSubtarget &st) {
       fixture.pressure_history_tracker->GetEntryForTest(key2);
   bool both_present = got1 != nullptr && got2 != nullptr;
   bool entries_in_correct_slots =
-      both_present && got1->best_prefix_score == 100 &&
-      got2->best_prefix_score == 200;
+      both_present && got1->best_score == MakePeakOnlyTestScore(100) &&
+      got2->best_score == MakePeakOnlyTestScore(200);
   bool count_two =
       fixture.pressure_history_tracker->GetTotalEntries() == 2;
 
@@ -2860,16 +2869,16 @@ static void RunPressureHistoryAreaFirstInsertAndSelfDominanceShakedown(
   ScheduleNodeOnPressureFixture(fixture, fixture.a);
 
   bool inserted = !fixture.pressure_history_tracker->IsDominatedElseRecord(
-      /*current_peak_score=*/100, /*current_area=*/500);
+      MakePeakAreaTestScore(100, 500));
   PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
   const PressureHistoryTracker::Entry *entry =
       fixture.pressure_history_tracker->GetEntryForTest(key);
-  bool area_recorded = entry != nullptr && entry->best_prefix_score == 100 &&
-                       entry->best_area == 500;
+  bool area_recorded =
+      entry != nullptr && entry->best_score == MakePeakAreaTestScore(100, 500);
 
-  // Same (peak, area) — prior dominates lexicographically (equality).
+  // Same (peak, area) -- prior dominates lexicographically (equality).
   bool self_pruned = fixture.pressure_history_tracker->IsDominatedElseRecord(
-      100, 500);
+      MakePeakAreaTestScore(100, 500));
   bool prune_count_one =
       fixture.pressure_history_tracker->PruneCount().lifetime == 1;
 
@@ -2888,24 +2897,28 @@ static void RunPressureHistoryAreaTiebreakShakedown(const GCNSubtarget &st) {
   PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
 
   PressureHistoryTracker::Entry prior;
-  prior.best_prefix_score = 100;
-  prior.best_area = 500;
+  prior.best_score = MakePeakAreaTestScore(100, 500);
   fixture.pressure_history_tracker->InsertEntryForTest(key, prior);
 
-  // Same peak, lower area (300): prior area 500 >= 300 → prune.
+  // Same peak, lower area (300): prior area 500 >= 300 -> prune.
   bool lower_area_pruned =
-      fixture.pressure_history_tracker->IsDominatedElseRecord(100, 300);
+      fixture.pressure_history_tracker->IsDominatedElseRecord(
+          MakePeakAreaTestScore(100, 300));
   const PressureHistoryTracker::Entry *after_low =
       fixture.pressure_history_tracker->GetEntryForTest(key);
-  bool unchanged = after_low != nullptr && after_low->best_area == 500;
+  bool unchanged =
+      after_low != nullptr &&
+      after_low->best_score == MakePeakAreaTestScore(100, 500);
 
-  // Same peak, higher area (700): not dominated → update area to 700.
+  // Same peak, higher area (700): not dominated -> update to (100, 700).
   bool higher_area_not_pruned =
-      !fixture.pressure_history_tracker->IsDominatedElseRecord(100, 700);
+      !fixture.pressure_history_tracker->IsDominatedElseRecord(
+          MakePeakAreaTestScore(100, 700));
   const PressureHistoryTracker::Entry *after_high =
       fixture.pressure_history_tracker->GetEntryForTest(key);
-  bool updated = after_high != nullptr && after_high->best_prefix_score == 100 &&
-                 after_high->best_area == 700;
+  bool updated =
+      after_high != nullptr &&
+      after_high->best_score == MakePeakAreaTestScore(100, 700);
 
   bool ok = lower_area_pruned && unchanged && higher_area_not_pruned && updated;
   llvm::outs() << "    Area same-peak tiebreak: "
@@ -2923,26 +2936,29 @@ RunPressureHistoryAreaPeakDominatesShakedown(const GCNSubtarget &st) {
   PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
 
   PressureHistoryTracker::Entry prior;
-  prior.best_prefix_score = 200;
-  prior.best_area = 0;
+  prior.best_score = MakePeakAreaTestScore(200, 0);
   fixture.pressure_history_tracker->InsertEntryForTest(key, prior);
 
-  // Lower peak (100), huge area (9999): prior peak 200 > 100 → prune.
+  // Lower peak (100), huge area (9999): prior peak 200 > 100 -> prune.
   bool lower_peak_pruned =
-      fixture.pressure_history_tracker->IsDominatedElseRecord(100, 9999);
+      fixture.pressure_history_tracker->IsDominatedElseRecord(
+          MakePeakAreaTestScore(100, 9999));
   const PressureHistoryTracker::Entry *after_low =
       fixture.pressure_history_tracker->GetEntryForTest(key);
-  bool unchanged = after_low != nullptr && after_low->best_prefix_score == 200 &&
-                   after_low->best_area == 0;
+  bool unchanged =
+      after_low != nullptr &&
+      after_low->best_score == MakePeakAreaTestScore(200, 0);
 
-  // Higher peak (300), zero area: peak wins → not dominated, entry
+  // Higher peak (300), zero area: peak wins -> not dominated, entry
   // replaced with (300, 0).
   bool higher_peak_not_pruned =
-      !fixture.pressure_history_tracker->IsDominatedElseRecord(300, 0);
+      !fixture.pressure_history_tracker->IsDominatedElseRecord(
+          MakePeakAreaTestScore(300, 0));
   const PressureHistoryTracker::Entry *after_high =
       fixture.pressure_history_tracker->GetEntryForTest(key);
-  bool replaced = after_high != nullptr && after_high->best_prefix_score == 300 &&
-                  after_high->best_area == 0;
+  bool replaced =
+      after_high != nullptr &&
+      after_high->best_score == MakePeakAreaTestScore(300, 0);
 
   bool ok = lower_peak_pruned && unchanged && higher_peak_not_pruned && replaced;
   llvm::outs() << "    Area cross-peak (peak is primary): "

@@ -102,13 +102,13 @@ class DfsSearch {
             Policy::kRefineIlpAtSameLength,
             Policy::kLengthMaxMode),
         // pressure_history_ binds to working_'s scheduled-set
-        // tracker for partition keys, and to working_'s pressure
-        // tracker for the no-arg score read. The metric matches
-        // Policy::kMetric so the tracker reads values consistent
-        // with what the search optimizes.
+        // tracker for partition keys, and to working_ itself for
+        // the no-arg Score read via ScheduleConstructor::GetScore.
+        // The metric matches Policy::kMetric so the tracker reads
+        // values consistent with what the search optimizes.
         pressure_history_(
             &working_schedule_constructor_.GetScheduledSetTracker(),
-            &working_schedule_constructor_.GetPressureTracker(),
+            &working_schedule_constructor_,
             Policy::kMetric) {
     // Stamp the stopwatch's lifetime_start at construction. (This
     // first Start() also seeds current_run_start, which Run()
@@ -553,8 +553,9 @@ class DfsSearch {
 
   // History-based-domination table for pressure pruning. Bound to
   // working's ScheduledSetTracker for partition keys, and to
-  // working/best GCNRegisterTracker for score reads. Active only
-  // when Policy::kUsePressureHistoryPruning is true; otherwise
+  // working_schedule_constructor_ for Score reads via
+  // ScheduleConstructor::GetScore. Active only when
+  // Policy::kUsePressureHistoryPruning is true; otherwise
   // constructed but never queried.
   PressureHistoryTracker pressure_history_;
 };

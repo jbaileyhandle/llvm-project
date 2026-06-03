@@ -51,7 +51,6 @@
 // jbaile
 //========================================================================================
 
-#include "GCNRegisterTracker.h"
 #include "ScheduleGraph.h"
 #include "Score.h"
 #include "ScheduledSetTracker.h"
@@ -60,6 +59,8 @@
 
 namespace llvm {
 namespace hierarchical_scheduler {
+
+class ScheduleConstructor;
 
 class PressureHistoryTracker {
  public:
@@ -80,34 +81,30 @@ class PressureHistoryTracker {
   /// One entry per partition. Public so tests can stage entries
   /// directly via InsertEntryForTest.
   struct Entry {
-    /// Lexicographic (peak, area) best over all prefixes reaching
-    /// this partition; higher = better. best_area is the same-peak
-    /// tiebreak (0 for pure-peak callers). See class comment. Set on
-    /// first visit; replaced by a lexicographically-greater visit.
-    int best_prefix_score = 0;
-    int64_t best_area = 0;
+    /// Lexicographic best Score over all prefixes reaching this
+    /// partition. Slot semantics come from whichever ScheduleMetric
+    /// produced the Score (see ScheduleConstructor::GetScore).
+    /// Set on first visit; replaced by a lexicographically-greater
+    /// visit. Default-constructed Score has all slots zero, so an
+    /// Entry built via DenseMap::operator[] is a valid "no prior
+    /// visit yet" sentinel.
+    Score best_score = Score::Make();
   };
 
   /// Bind:
   ///   - `scheduled_set_tracker` — source of truth for the
   ///     partition key. Non-null; must outlive the tracker.
-  ///   - `working_register_tracker` — source of truth for
-  ///     current_prefix_score that the no-arg overload of
-  ///     IsDominatedElseRecord reads via the bound metric. May
-  ///     be nullptr in test fixtures that only use the explicit-
-  ///     score overload; in that configuration the no-arg
-  ///     overload fatal-errors. Otherwise must outlive the
-  ///     tracker.
-  ///   - `metric` — ScheduleMetric used by the no-arg overload
-  ///     to read the score from the bound working register
-  ///     tracker via GCNRegisterTracker::GetMetricScore.
-  ///     GetMetricScore normalizes minimize variants so higher
-  ///     = better regardless of direction; length-side metrics
-  ///     fatal-error there because GCNRegisterTracker has no
-  ///     length data.
+  ///   - `working_schedule_constructor` — source of truth for the
+  ///     Score that the no-arg overload reads via the bound metric.
+  ///     May be nullptr in test fixtures that only use the explicit-
+  ///     Score overload; in that configuration the no-arg overload
+  ///     fatal-errors. Otherwise must outlive the tracker.
+  ///   - `metric` — ScheduleMetric used by the no-arg overload to
+  ///     read the Score from the bound working schedule constructor
+  ///     via ScheduleConstructor::GetScore.
   PressureHistoryTracker(
       const ScheduledSetTracker *scheduled_set_tracker,
-      const GCNRegisterTracker *working_register_tracker,
+      const ScheduleConstructor *working_schedule_constructor,
       ScheduleMetric metric);
 
   /// Combined check + record. Reads the partition key from the
@@ -115,41 +112,26 @@ class PressureHistoryTracker {
   /// fire.
   ///
   /// Cases (given the partition this prefix has reached, and
-  /// `current_prefix_score` from the caller):
+  /// `current_score` from the caller):
   ///   - No prior entry at this partition: insert with
-  ///     `best_prefix_score = current_prefix_score`; return false.
-  ///     If inserting would exceed `kMaxEntries`, the insert is
-  ///     silently skipped, `memory_cap_hit_` is set, and the
-  ///     return is still false.
-  ///   - Prior entry's `best_prefix_score >= current_prefix_score`:
-  ///     the prior visit is no worse on the only prefix-dependent
+  ///     `best_score = current_score`; return false. If inserting
+  ///     would exceed `kMaxEntries`, the insert is silently skipped,
+  ///     `memory_cap_hit_` is set, and the return is still false.
+  ///   - Prior entry's `best_score >= current_score` (lex): the
+  ///     prior visit is no worse on every prefix-dependent
   ///     dimension. By the partition's prefix/postfix decoupling,
-  ///     anything our subtree could reach is reachable at no
-  ///     worse score from the prior visit. Increment
-  ///     `prune_count_`; return true.
+  ///     anything our subtree could reach is reachable at no worse
+  ///     Score from the prior visit. Increment `prune_count_`;
+  ///     return true.
   ///   - Prior entry exists and current is strictly better:
-  ///     update `best_prefix_score = max(prior, current)`; return
-  ///     false. (No table growth, so no cap concern.)
-  ///
-  /// Metric-agnostic: this overload just compares ints (higher =
-  /// better). The caller picks what those ints represent. Delegates
-  /// to the (peak, area) overload below with current_area = 0, so
-  /// domination is decided on peak alone.
-  bool IsDominatedElseRecord(int current_prefix_score);
+  ///     update `best_score = current_score`; return false. (No
+  ///     table growth, so no cap concern.)
+  bool IsDominatedElseRecord(const Score &current_score);
 
-  /// Lexicographic (peak, area) variant: peak primary, area as the
-  /// same-peak tiebreak. Prunes when a prior visit's (peak, area) is
-  /// >= this one lexicographically; otherwise records this prefix as
-  /// the partition's new lexicographic best. See class comment for
-  /// the soundness tradeoff.
-  bool IsDominatedElseRecord(int current_peak_score, int64_t current_area);
-
-  /// Production wrapper. Reads peak via GetMetricScore(metric_) from
-  /// the bound working register tracker, and area via
-  /// GetContinuousOccupancyArea() only when metric_ is the area-
-  /// tiebreak metric (0 otherwise, so other metrics prune peak-only),
-  /// then delegates to the (peak, area) overload. Fatal-errors if the
-  /// bound working register tracker is null.
+  /// Production wrapper. Reads the current Score from the bound
+  /// working schedule constructor via GetScore(metric_), then
+  /// delegates to the Score overload. Fatal-errors if the bound
+  /// working schedule constructor is null.
   bool IsDominatedElseRecord();
 
   /// Drop all recorded entries and clear the *.current_run
@@ -196,7 +178,7 @@ class PressureHistoryTracker {
 
  private:
   const ScheduledSetTracker *scheduled_set_tracker_;
-  const GCNRegisterTracker *working_register_tracker_;
+  const ScheduleConstructor *working_schedule_constructor_;
   ScheduleMetric metric_;
   DenseMap<PartitionKey, Entry> table_;
   /// Incremented at every prune event. .current_run is cleared

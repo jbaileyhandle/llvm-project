@@ -9,6 +9,7 @@
 //========================================================================================
 
 #include "PressureHistoryTracker.h"
+#include "ScheduleConstructor.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 
@@ -17,43 +18,32 @@ namespace hierarchical_scheduler {
 
 PressureHistoryTracker::PressureHistoryTracker(
     const ScheduledSetTracker *scheduled_set_tracker,
-    const GCNRegisterTracker *working_register_tracker,
+    const ScheduleConstructor *working_schedule_constructor,
     ScheduleMetric metric)
     : scheduled_set_tracker_(scheduled_set_tracker),
-      working_register_tracker_(working_register_tracker),
+      working_schedule_constructor_(working_schedule_constructor),
       metric_(metric) {
   if (scheduled_set_tracker_ == nullptr) {
     report_fatal_error(
         "PressureHistoryTracker: scheduled_set_tracker must not be null");
   }
-  // working_register_tracker_ is permitted to be null — see header
-  // for the test-fixture contract.
+  // working_schedule_constructor_ is permitted to be null -- see
+  // header for the test-fixture contract.
 }
 
 bool PressureHistoryTracker::IsDominatedElseRecord() {
-  if (working_register_tracker_ == nullptr) {
+  if (working_schedule_constructor_ == nullptr) {
     report_fatal_error(
         "PressureHistoryTracker::IsDominatedElseRecord(): bound working "
-        "register tracker must be non-null for the no-arg overload; either "
-        "bind it at construction or call the explicit-score overload");
+        "schedule constructor must be non-null for the no-arg overload; "
+        "either bind it at construction or call the explicit-Score overload");
   }
-  // The tracker always accumulates occupancy area, but only the
-  // area-tiebreak metric should let it affect domination; pass 0 for
-  // every other metric so their pruning stays peak-only.
-  int64_t area =
-      metric_ == ScheduleMetric::kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea
-          ? working_register_tracker_->GetContinuousOccupancyArea()
-          : 0;
   return IsDominatedElseRecord(
-      working_register_tracker_->GetMetricScore(metric_), area);
+      working_schedule_constructor_->GetScore(metric_));
 }
 
-bool PressureHistoryTracker::IsDominatedElseRecord(int current_prefix_score) {
-  return IsDominatedElseRecord(current_prefix_score, /*current_area=*/0);
-}
-
-bool PressureHistoryTracker::IsDominatedElseRecord(int current_peak_score,
-                                                   int64_t current_area) {
+bool PressureHistoryTracker::IsDominatedElseRecord(
+    const Score &current_score) {
   // Heterogeneous lookup via PartitionKeyView avoids copying the
   // bitset on the existing-entry path. DenseMap dispatches on
   // signature for the hash bucket, then disambiguates with the
@@ -74,33 +64,24 @@ bool PressureHistoryTracker::IsDominatedElseRecord(int current_peak_score,
       return false;
     }
     PartitionKey key = scheduled_set_tracker_->GetPartitionKey();
-    Entry fresh;
-    fresh.best_prefix_score = current_peak_score;
-    fresh.best_area = current_area;
-    table_[std::move(key)] = std::move(fresh);
+    table_[std::move(key)] = Entry{current_score};
     return false;
   }
 
   Entry &prior = it->second;
-  // Lexicographic (peak, area) domination. Prune when the prior
-  // prefix is no worse on peak, or ties peak and is no worse on area.
-  // By the partition's prefix/postfix decoupling the shared postfix
-  // adds the same peak and the same area to both, so the prior prefix
-  // dominates ours on every completion. For pure-peak callers area is
-  // 0 on both sides and this is the old best_prefix_score >= check.
-  bool prior_dominates =
-      prior.best_prefix_score > current_peak_score ||
-      (prior.best_prefix_score == current_peak_score &&
-       prior.best_area >= current_area);
-  if (prior_dominates) {
+  // Lexicographic Score domination. Prune when the prior prefix's
+  // Score is >= this one lexicographically. By the partition's
+  // prefix/postfix decoupling, the shared postfix adds the same per-
+  // dim contribution to both, so the prior prefix dominates ours on
+  // every completion.
+  if (prior.best_score >= current_score) {
     prune_count_.Increment();
     return true;
   }
 
-  // Not dominated ⇒ this prefix is lexicographically greater (total
+  // Not dominated => this prefix is lexicographically greater (total
   // order). Record it as the partition's new best.
-  prior.best_prefix_score = current_peak_score;
-  prior.best_area = current_area;
+  prior.best_score = current_score;
   return false;
 }
 
