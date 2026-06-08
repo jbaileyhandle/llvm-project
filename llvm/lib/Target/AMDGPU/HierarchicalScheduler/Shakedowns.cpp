@@ -5634,6 +5634,178 @@ void RunScoreShakedown() {
   }
 }
 
+// ---- MetricSlot::OnlyWorsensOverCompletion ----
+
+void RunOnlyWorsensOverCompletionShakedown() {
+  llvm::outs() << "  OnlyWorsensOverCompletion shakedown:\n";
+  auto check = [&](const char *desc, bool ok) {
+    llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
+    if (!ok) {
+      report_fatal_error("OnlyWorsensOverCompletion shakedown: failure");
+    }
+  };
+
+  // Peak-style dims (raw monotone non-increasing over extension):
+  //   Maximize -> canonical NI (only worsens). True.
+  //   Minimize -> canonical ND. False.
+  check("RegisterOcc + Maximize: NI",
+        MetricSlot{ScoreDimension::kRegisterOcc, Polarity::kMaximize}
+            .OnlyWorsensOverCompletion());
+  check("RegisterOcc + Minimize: ND (!NI)",
+        !MetricSlot{ScoreDimension::kRegisterOcc, Polarity::kMinimize}
+             .OnlyWorsensOverCompletion());
+  check("ContinuousOccScore + Maximize: NI",
+        MetricSlot{ScoreDimension::kContinuousOccScore, Polarity::kMaximize}
+            .OnlyWorsensOverCompletion());
+  check("ContinuousOccScore + Minimize: ND (!NI)",
+        !MetricSlot{ScoreDimension::kContinuousOccScore, Polarity::kMinimize}
+             .OnlyWorsensOverCompletion());
+
+  // Sum-style dims (raw monotone non-decreasing over extension):
+  //   Minimize -> canonical NI (only worsens). True.
+  //   Maximize -> canonical ND. False.
+  check("ContinuousOccArea + Minimize: NI",
+        MetricSlot{ScoreDimension::kContinuousOccArea, Polarity::kMinimize}
+            .OnlyWorsensOverCompletion());
+  check("ContinuousOccArea + Maximize: ND (!NI)",
+        !MetricSlot{ScoreDimension::kContinuousOccArea, Polarity::kMaximize}
+             .OnlyWorsensOverCompletion());
+  check("ScheduleLength + Minimize: NI",
+        MetricSlot{ScoreDimension::kScheduleLength, Polarity::kMinimize}
+            .OnlyWorsensOverCompletion());
+  check("ScheduleLength + Maximize: ND (!NI)",
+        !MetricSlot{ScoreDimension::kScheduleLength, Polarity::kMaximize}
+             .OnlyWorsensOverCompletion());
+  check("IlpScore + Minimize: NI",
+        MetricSlot{ScoreDimension::kIlpScore, Polarity::kMinimize}
+            .OnlyWorsensOverCompletion());
+  check("IlpScore + Maximize: ND (!NI)",
+        !MetricSlot{ScoreDimension::kIlpScore, Polarity::kMaximize}
+             .OnlyWorsensOverCompletion());
+}
+
+// ---- ScoreRecipe::NumSlots and NumLeadingOnlyWorseningSlots ----
+
+void RunRecipeBoundSafePrefixShakedown() {
+  llvm::outs() << "  Recipe bound-safe prefix shakedown:\n";
+  auto check = [&](const char *desc, bool ok) {
+    llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
+    if (!ok) {
+      report_fatal_error("Recipe bound-safe prefix shakedown: failure");
+    }
+  };
+
+  // Single-slot NI: NumSlots=1, NumLeadingOnlyWorseningSlots=1.
+  check("MinimizeScheduleLength: NumSlots=1",
+        score_recipes::kMinimizeScheduleLength.NumSlots() == 1);
+  check("MinimizeScheduleLength: NumLeadingOnlyWorseningSlots=1",
+        score_recipes::kMinimizeScheduleLength.NumLeadingOnlyWorseningSlots() ==
+            1);
+
+  // Single-slot ND: NumSlots=1, NumLeadingOnlyWorseningSlots=0 (slot 0 is ND).
+  check("MaximizeScheduleLength: NumSlots=1",
+        score_recipes::kMaximizeScheduleLength.NumSlots() == 1);
+  check("MaximizeScheduleLength: NumLeadingOnlyWorseningSlots=0",
+        score_recipes::kMaximizeScheduleLength.NumLeadingOnlyWorseningSlots() ==
+            0);
+
+  // Two-slot all-NI (length-Min + cont_occ-Max): both slots NI, count = 2.
+  check("MinScheduleLengthThenMaxContOccScore: NumSlots=2",
+        score_recipes::kMinimizeScheduleLengthThenMaximizeContinuousOccupancyScore
+                .NumSlots() == 2);
+  check("MinScheduleLengthThenMaxContOccScore: NumLeadingOnlyWorseningSlots=2",
+        score_recipes::kMinimizeScheduleLengthThenMaximizeContinuousOccupancyScore
+                .NumLeadingOnlyWorseningSlots() == 2);
+
+  // Two-slot NI+ND (peak-Max + area-Max): only slot 0 is bound-safe.
+  check("MaxContOccScoreThenMaxContOccArea: NumSlots=2",
+        score_recipes::
+                kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea
+                    .NumSlots() == 2);
+  check("MaxContOccScoreThenMaxContOccArea: NumLeadingOnlyWorseningSlots=1",
+        score_recipes::
+                kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea
+                    .NumLeadingOnlyWorseningSlots() == 1);
+
+  // Three-slot mixed (length-Min NI, ilp-Max ND, cont_occ-Max NI): leading
+  // prefix stops at the first non-NI slot, so count = 1.
+  check(
+      "MinSchedLenThenMaxIlpScoreThenMaxContOccScore: NumLeadingOnlyWorseningSlots=1",
+      score_recipes::
+              kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore
+                  .NumLeadingOnlyWorseningSlots() == 1);
+}
+
+// ---- Score::IsWorseOnLeadingSlots / IsAtMostAsGoodOnLeadingSlots ----
+
+void RunScoreLeadingSlotsCompareShakedown() {
+  llvm::outs() << "  Score leading-slots compare shakedown:\n";
+  auto check = [&](const char *desc, bool ok) {
+    llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
+    if (!ok) {
+      report_fatal_error("Score leading-slots compare shakedown: failure");
+    }
+  };
+
+  // working strictly worse on slot 0: both strict and non-strict fire.
+  {
+    Score working = Score::Make(Score::Higher(5));
+    Score best = Score::Make(Score::Higher(10));
+    check("strictly worse: IsWorseOnLeadingSlots(1) true",
+          working.IsWorseOnLeadingSlots(best, 1));
+    check("strictly worse: IsAtMostAsGoodOnLeadingSlots(1) true",
+          working.IsAtMostAsGoodOnLeadingSlots(best, 1));
+  }
+
+  // working strictly better on slot 0: neither fires.
+  {
+    Score working = Score::Make(Score::Higher(15));
+    Score best = Score::Make(Score::Higher(10));
+    check("strictly better: IsWorseOnLeadingSlots(1) false",
+          !working.IsWorseOnLeadingSlots(best, 1));
+    check("strictly better: IsAtMostAsGoodOnLeadingSlots(1) false",
+          !working.IsAtMostAsGoodOnLeadingSlots(best, 1));
+  }
+
+  // working ties on slot 0: strict false, non-strict true (the key
+  // distinction between the two methods).
+  {
+    Score working = Score::Make(Score::Higher(10));
+    Score best = Score::Make(Score::Higher(10));
+    check("tied: IsWorseOnLeadingSlots(1) false",
+          !working.IsWorseOnLeadingSlots(best, 1));
+    check("tied: IsAtMostAsGoodOnLeadingSlots(1) true",
+          working.IsAtMostAsGoodOnLeadingSlots(best, 1));
+  }
+
+  // Compares only the first N slots. Slot 0 ties, slot 1 differs --
+  // with N=1 both methods see only the tie; with N=2 the slot 1
+  // difference fires.
+  {
+    Score working = Score::Make(Score::Higher(10), Score::Higher(3));
+    Score best = Score::Make(Score::Higher(10), Score::Higher(7));
+    check("N=1: only slot 0 (tied): strict false",
+          !working.IsWorseOnLeadingSlots(best, 1));
+    check("N=1: only slot 0 (tied): non-strict true",
+          working.IsAtMostAsGoodOnLeadingSlots(best, 1));
+    check("N=2: slot 1 difference fires: strict true",
+          working.IsWorseOnLeadingSlots(best, 2));
+    check("N=2: slot 1 difference fires: non-strict true",
+          working.IsAtMostAsGoodOnLeadingSlots(best, 2));
+  }
+
+  // N=0: empty prefix. Strict false (no slots to lose on); non-strict
+  // true (everything trivially "at most as good" over an empty prefix).
+  {
+    Score working = Score::Make(Score::Higher(5));
+    Score best = Score::Make(Score::Higher(10));
+    check("N=0: IsWorseOnLeadingSlots false (empty prefix)",
+          !working.IsWorseOnLeadingSlots(best, 0));
+    check("N=0: IsAtMostAsGoodOnLeadingSlots true (empty prefix)",
+          working.IsAtMostAsGoodOnLeadingSlots(best, 0));
+  }
+}
+
 // ---- OccupancyTargetUtil: LimitOccupancyAboveFloor wrapper ----
 
 void RunOccupancyTargetUtilShakedown(const MachineFunction &mf) {
@@ -6021,6 +6193,9 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunDfsAreaTiebreakShakedown(st, MF, *LIS);
   RunAllSubgraphFormationShakedowns();
   RunScoreShakedown();
+  RunOnlyWorsensOverCompletionShakedown();
+  RunRecipeBoundSafePrefixShakedown();
+  RunScoreLeadingSlotsCompareShakedown();
   RunOccupancyTargetUtilShakedown(MF);
   RunVGPRSpillAreaAccumulatorShakedown(MF);
 
