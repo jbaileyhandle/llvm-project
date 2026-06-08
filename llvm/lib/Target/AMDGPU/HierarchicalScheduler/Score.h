@@ -65,6 +65,15 @@ enum class ScoreDimension {
 /// records the configured intent for the recipe.
 enum class Polarity { kMaximize, kMinimize };
 
+/// Apply `polarity` to a raw value, returning the canonical "higher
+/// is better" form: passes through on kMaximize, negates on kMinimize.
+/// Single source of truth for the polarity flip; called from
+/// Score::ApplyPolarity and from any tracker that needs to compute a
+/// scalar score from a (raw, polarity) pair.
+constexpr int64_t ApplyPolarity(int64_t raw_value, Polarity polarity) {
+  return polarity == Polarity::kMaximize ? raw_value : -raw_value;
+}
+
 /// One slot in a ScoreRecipe.
 struct MetricSlot {
   ScoreDimension dim;
@@ -413,11 +422,11 @@ class Score {
   // Score{1, 2, 3} with raw ints does not compile.
   explicit Score(std::array<int64_t, kMaxScoreSlots> v) : values_(v) {}
 
-  /// Single negation primitive. The Make factory routes every
-  /// populated slot through here, so canonicalization lives in
-  /// exactly one place.
+  /// SlotInput overload of the namespace-scope ApplyPolarity above.
+  /// Both Make paths route every populated slot through here.
   static constexpr int64_t ApplyPolarity(SlotInput s) {
-    return s.polarity == Polarity::kMaximize ? s.raw_value : -s.raw_value;
+    return ::llvm::hierarchical_scheduler::ApplyPolarity(s.raw_value,
+                                                         s.polarity);
   }
 };
 

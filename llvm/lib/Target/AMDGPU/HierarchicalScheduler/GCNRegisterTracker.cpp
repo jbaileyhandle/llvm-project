@@ -694,8 +694,7 @@ int GCNRegisterTracker::GetScalarScore(const ScoreRecipe &recipe) const {
         "GCNRegisterTracker::GetScalarScore: slot dim is not pressure-"
         "side; length / ILP scores live on their own trackers");
   }
-  int64_t value = (slot.pol == Polarity::kMaximize) ? raw : -raw;
-  return static_cast<int>(value);
+  return static_cast<int>(ApplyPolarity(raw, slot.pol));
 }
 
 unsigned GCNRegisterTracker::GetConfiguredMachineFunctionOccupancyLimit() const {
