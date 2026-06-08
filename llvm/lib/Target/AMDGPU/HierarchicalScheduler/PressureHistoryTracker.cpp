@@ -19,27 +19,31 @@ namespace hierarchical_scheduler {
 PressureHistoryTracker::PressureHistoryTracker(
     const ScheduledSetTracker *scheduled_set_tracker,
     const ScheduleConstructor *working_schedule_constructor,
-    ScheduleMetric metric)
+    const ScoreRecipe &recipe)
     : scheduled_set_tracker_(scheduled_set_tracker),
       working_schedule_constructor_(working_schedule_constructor),
-      metric_(metric) {
+      recipe_(recipe) {
   if (scheduled_set_tracker_ == nullptr) {
     report_fatal_error(
         "PressureHistoryTracker: scheduled_set_tracker must not be null");
   }
   // working_schedule_constructor_ is permitted to be null -- see
-  // header for the test-fixture contract.
+  // header for the test-fixture contract. The recipe is held but
+  // not validated: PHT is constructed by DfsSearch for every policy
+  // (including length-primary ones that never query it), so a
+  // construction-time recipe check would over-reject. Conditional
+  // construction is a TODO follow-up; see DfsSearch.h.
 }
 
 bool PressureHistoryTracker::IsDominatedElseRecord() {
   if (working_schedule_constructor_ == nullptr) {
     report_fatal_error(
         "PressureHistoryTracker::IsDominatedElseRecord(): bound working "
-        "schedule constructor must be non-null for the no-arg overload; "
-        "either bind it at construction or call the explicit-Score overload");
+        "schedule constructor must be non-null for this overload; either "
+        "bind it at construction or call the explicit-Score overload");
   }
   return IsDominatedElseRecord(
-      working_schedule_constructor_->GetScore(metric_));
+      working_schedule_constructor_->GetScore(recipe_));
 }
 
 bool PressureHistoryTracker::IsDominatedElseRecord(

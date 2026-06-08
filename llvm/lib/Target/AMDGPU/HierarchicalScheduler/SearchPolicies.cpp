@@ -559,23 +559,19 @@ bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
     const ScheduleConstructor &best_schedule_constructor,
     LengthHistoryTracker & /*length_history*/,
     PressureHistoryTracker &pressure_history) {
-  // Score-bound: working's GetMetricScore(kMetric) is non-
-  // increasing as more nodes are scheduled (peak pressure grows
-  // monotonically, kMetric is max-direction so its score only
-  // drops). If working's score is already <= best's, no
-  // completion of working can strictly beat best.
-  if (schedule_constructor.GetPressureTracker().GetMetricScore(kMetric) <=
-      best_schedule_constructor.GetPressureTracker().GetMetricScore(kMetric)) {
+  // Score-bound: working's score (on the bound-safe leading slots
+  // of the bound recipe) is non-increasing as more nodes are
+  // scheduled. If working's score already at-most-matches best's
+  // on those slots, no completion of working can beat best.
+  if (schedule_constructor.CompletionCannotImproveUpon(
+          best_schedule_constructor, kScoreRecipe)) {
     return true;
   }
 
-  if constexpr (kUsePressureHistoryPruning) {
-    // Mutating: records the current state on miss, may also
-    // enqueue a fast-forward hint onto DfsSearch's replay queue.
-    // See PressureHistoryTracker.
-    if (pressure_history.IsDominatedElseRecord()) {
-      return true;
-    }
+  // Mutating: records the current state on miss. See
+  // PressureHistoryTracker.
+  if (pressure_history.IsDominatedElseRecord()) {
+    return true;
   }
 
   return false;

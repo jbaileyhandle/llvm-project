@@ -26,11 +26,11 @@ namespace hierarchical_scheduler {
 /// BfsDpSettings{} — which shakedowns use (sometimes overriding
 /// `metric`). ForOccupancyPass() is the production preset.
 struct BfsDpSettings {
-  /// Per-edge score function. Must be a MAX-direction metric
-  /// (higher = better); PartitionDag's ctor fatal-errors on any
-  /// other value. See PartitionDag's ctor for what each supported
-  /// metric means for the search and its pruning.
-  ScheduleMetric metric = ScheduleMetric::kMaximizeRegisterOccupancy;
+  /// Per-edge score recipe. Must satisfy IsRegisterPeakMetricOnly()
+  /// (single-slot register-peak); PartitionDag's ctor fatal-errors
+  /// otherwise. See PartitionDag's ctor for what each supported
+  /// recipe means for the search and its pruning.
+  ScoreRecipe recipe = score_recipes::kMaximizeRegisterOccupancy;
 
   /// Per-region wall-clock budget for PartitionDag::Build(), in
   /// milliseconds. nullopt (the default) means no timeout — Build
@@ -40,14 +40,14 @@ struct BfsDpSettings {
   /// abort Build with no schedule at all.
   std::optional<int64_t> timeout_ms = std::nullopt;
 
-  /// Preset for the occupancy-maximization pass: the integer-
-  /// occupancy metric with a 10s per-region budget. The budget
-  /// matches the production DFS occupancy pass's default
-  /// (DfsSearch's ctor `timeout_ms` default of 10000) so the
-  /// BfsDpForOccupancy misched.txt toggle compares the two search
-  /// strategies under the same wall-clock budget.
+  /// Preset for the occupancy-maximization pass: integer-occupancy
+  /// recipe with a 10s per-region budget. The budget matches the
+  /// production DFS occupancy pass's default (DfsSearch's ctor
+  /// `timeout_ms` default of 10000) so the BfsDpForOccupancy
+  /// misched.txt toggle compares the two search strategies under
+  /// the same wall-clock budget.
   static constexpr BfsDpSettings ForOccupancyPass() {
-    return BfsDpSettings{ScheduleMetric::kMaximizeRegisterOccupancy,
+    return BfsDpSettings{score_recipes::kMaximizeRegisterOccupancy,
                          /*timeout_ms=*/10000};
   }
 };

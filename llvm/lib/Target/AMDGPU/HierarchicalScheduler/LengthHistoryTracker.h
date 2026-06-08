@@ -213,9 +213,7 @@ class LengthHistoryTracker {
                        const ScheduleLengthTracker *length_tracker,
                        const GCNRegisterTracker *pressure_tracker,
                        const IlpTracker *ilp_tracker,
-                       bool include_pressure_dim,
-                       bool include_ilp_dim,
-                       bool length_max_mode);
+                       const ScoreRecipe &recipe);
 
   /// True iff the bound trackers' current prefix is dominated by
   /// some existing entry in this partition's bucket. Pure read; no

@@ -1090,7 +1090,7 @@ static void RunPlainLengthMinPhase(
   // DfsSearch::Run always populates SearchResult::schedule.
   ScheduleConstructor plain_result = std::move(*plain_search.Run().schedule);
   if (plain_result.IsBetterThan(best_schedule_constructor,
-                                 Policy::kMetric)) {
+                                 Policy::kScoreRecipe)) {
     best_schedule_constructor = plain_result;
   }
   dfs_ms += plain_search.GetRegionElapsedMs();
@@ -1174,7 +1174,7 @@ static void RunMaximizeLengthForRegion(
   // DfsSearch::Run always populates SearchResult::schedule.
   ScheduleConstructor plain_result = std::move(*plain_search.Run().schedule);
   if (plain_result.IsBetterThan(best_schedule_constructor,
-                                DfsMaximizeLengthPolicy::kMetric)) {
+                                DfsMaximizeLengthPolicy::kScoreRecipe)) {
     best_schedule_constructor = plain_result;
   }
   dfs_ms += plain_search.GetRegionElapsedMs();

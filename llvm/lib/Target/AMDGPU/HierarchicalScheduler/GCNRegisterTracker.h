@@ -492,30 +492,14 @@ public:
     test_occupancy_floor_override_.reset();
   }
 
-  /// Pressure-side score for `metric`, normalized so higher is
-  /// better regardless of the metric's natural direction. Lets
-  /// callers (e.g., PressureHistoryTracker's dominance check)
-  /// stay direction-agnostic — they just compare ints with >.
-  ///
-  /// Dispatch:
-  ///   kMaximizeRegisterOccupancy            → +GetRegisterOnlyOccupancy()
-  ///   kMaximizeContinuousRegisterOccupancyScore
-  ///                                         → +GetContinuousOccupancyScore()
-  ///   kMinimizeRegisterOccupancy            → -GetRegisterOnlyOccupancy()
-  ///   kMinimizeContinuousRegisterOccupancyScore
-  ///                                         → -GetContinuousOccupancyScore()
-  ///
-  /// kMinimizeScheduleLength is length-side, not pressure-side;
-  /// length lives on ScheduleLengthTracker, so this method
-  /// fatal-errors on it.
-  ///
-  /// Note: returned values are absolute scores, NOT differences.
-  /// The negation for minimize variants flips the ordering for
-  /// dominance-style comparisons (`a > b` means "a is better than
-  /// b" in either direction), but the magnitude no longer matches
-  /// the raw register count or score. If you need the raw value,
-  /// call the per-metric getters directly.
-  int GetMetricScore(ScheduleMetric metric) const;
+  /// Pressure-side score for a single-slot `recipe`, polarity
+  /// applied so the result is a higher-is-better int. Fatal-errors
+  /// when:
+  ///   - the recipe has more than one populated slot (this function
+  ///     would silently drop tiebreaks otherwise), or
+  ///   - the slot dim is not pressure-side (kScheduleLength /
+  ///     kIlpScore live on their own trackers).
+  int GetScalarScore(const ScoreRecipe &recipe) const;
 
   /// Score points per integer occupancy step (the `M` in the formula
   /// above). One full occupancy level is worth this many points.

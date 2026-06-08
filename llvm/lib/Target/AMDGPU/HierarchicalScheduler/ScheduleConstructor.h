@@ -327,20 +327,44 @@ public:
     return schedule_call_count_;
   }
 
-  /// Canonical comparable Score for this schedule under `metric`. Same
-  /// metric on two schedules → Scores are directly comparable by < / >.
-  /// IsBetterThan is a thin wrapper over this. Tracker-presence
-  /// requirements per metric: length-side metrics require length
-  /// tracking enabled; kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore additionally
-  /// requires ILP tracking enabled. Fatal error otherwise.
-  Score GetScore(ScheduleMetric metric) const;
+  /// Canonical comparable Score for this schedule under `recipe`. Same
+  /// recipe on two schedules → Scores are directly comparable by < / >.
+  /// Tracker-presence requirements per ScoreDimension: kScheduleLength
+  /// requires length tracking enabled; kIlpScore requires ILP
+  /// tracking enabled. Fatal error otherwise.
+  Score GetScore(const ScoreRecipe &recipe) const;
 
-  /// True if this schedule is strictly better than `other` under the
-  /// given metric. Ties return false — callers that want "at least as
-  /// good" should negate IsBetterThan with arguments swapped. Thin
-  /// wrapper over GetScore(metric) > other.GetScore(metric).
+  /// True if this schedule is strictly better than `other` under
+  /// `recipe`. Ties return false — callers that want "at least as
+  /// good" should negate IsBetterThan with arguments swapped.
   bool IsBetterThan(const ScheduleConstructor &other,
-                    ScheduleMetric metric) const;
+                    const ScoreRecipe &recipe) const {
+    return GetScore(recipe) > other.GetScore(recipe);
+  }
+
+  /// True iff `*this`, the in-progress schedule, cannot produce a
+  /// completion whose Score beats `other`'s on `recipe`'s bound-safe
+  /// slot prefix. Backs the score-bound prune.
+  ///
+  /// Strict vs non-strict semantics are derived from the recipe:
+  ///   - All recipe slots are bound-safe -> non-strict
+  ///     (equality on the full recipe prefix means no improvement
+  ///     possible).
+  ///   - Recipe has additional non-bound-safe tiebreak slots ->
+  ///     strict (equality on the bound-safe prefix doesn't preclude
+  ///     improvement via the tiebreak slots in the suffix, so don't
+  ///     prune ties).
+  bool CompletionCannotImproveUpon(const ScheduleConstructor &other,
+                                   const ScoreRecipe &recipe) const {
+    int num_safe = recipe.NumLeadingOnlyWorseningSlots();
+    bool strict = recipe.NumSlots() > num_safe;
+    Score working_score = GetScore(recipe);
+    Score other_score = other.GetScore(recipe);
+    return strict
+               ? working_score.IsWorseOnLeadingSlots(other_score, num_safe)
+               : working_score.IsAtMostAsGoodOnLeadingSlots(other_score,
+                                                            num_safe);
+  }
 
   /// True when this region's register-only occupancy meets or
   /// exceeds the MachineFunction's currently-configured occupancy
@@ -423,6 +447,14 @@ private:
   /// go through Reset() (which also clears per-run counters).
   /// No-op if already empty.
   void UnscheduleAll();
+
+  /// Read the raw value of `dim` from the appropriate bound tracker
+  /// (pressure / length / ILP). GetScore uses this to populate each
+  /// recipe slot before polarity is applied inside Score::Make.
+  /// Fatal-errors if the dim requires a tracker that wasn't enabled
+  /// at construction time (e.g., kScheduleLength with length
+  /// tracking off).
+  int64_t GetScoreDimensionValue(ScoreDimension dim) const;
 
   const ScheduleGraph *graph_;
   ScheduleConstructorOptions options_;

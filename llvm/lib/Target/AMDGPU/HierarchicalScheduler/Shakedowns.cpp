@@ -1967,6 +1967,28 @@ struct LengthHistoryTrackerFixture {
   ScheduleNode *d;
 };
 
+// Build a ScoreRecipe that yields the requested LHT dim/direction flags
+// when LHT derives `include_pressure_dim_` / `include_ilp_dim_` /
+// `length_max_mode_` via HasDim() / IsLengthMaxMode().
+static ScoreRecipe BuildLengthRecipeForFlags(bool include_pressure_dim,
+                                             bool include_ilp_dim,
+                                             bool length_max_mode) {
+  ScoreRecipe r;
+  Polarity length_pol =
+      length_max_mode ? Polarity::kMaximize : Polarity::kMinimize;
+  r.slots[0] = MetricSlot{ScoreDimension::kScheduleLength, length_pol};
+  int next_slot = 1;
+  if (include_ilp_dim) {
+    r.slots[next_slot++] =
+        MetricSlot{ScoreDimension::kIlpScore, Polarity::kMaximize};
+  }
+  if (include_pressure_dim) {
+    r.slots[next_slot++] = MetricSlot{ScoreDimension::kContinuousOccScore,
+                                      Polarity::kMaximize};
+  }
+  return r;
+}
+
 static LengthHistoryTrackerFixture
 BuildLengthHistoryTrackerFixture(const GCNSubtarget &st,
                                  bool include_pressure_dim = false,
@@ -1991,7 +2013,8 @@ BuildLengthHistoryTrackerFixture(const GCNSubtarget &st,
   fixture.length_history_tracker = std::make_unique<LengthHistoryTracker>(
       fixture.scheduled_set_tracker.get(), fixture.length_tracker.get(),
       /*pressure_tracker=*/nullptr, /*ilp_tracker=*/nullptr,
-      include_pressure_dim, include_ilp_dim, length_max_mode);
+      BuildLengthRecipeForFlags(include_pressure_dim, include_ilp_dim,
+                                length_max_mode));
   return fixture;
 }
 
@@ -2635,10 +2658,10 @@ void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
 // Test helpers: build a 1-slot or 2-slot Score from raw ints, with
 // the same Higher orientation production uses for peak / area.
 static Score MakePeakOnlyTestScore(int peak) {
-  return Score::Make(Score::Higher{peak});
+  return Score::Make(Score::Higher(peak));
 }
 static Score MakePeakAreaTestScore(int peak, int64_t area) {
-  return Score::Make(Score::Higher{peak}, Score::Higher{area});
+  return Score::Make(Score::Higher(peak), Score::Higher(area));
 }
 
 struct PressureHistoryTrackerFixture {
@@ -2672,7 +2695,7 @@ BuildPressureHistoryTrackerFixture(const GCNSubtarget &st) {
   fixture.pressure_history_tracker = std::make_unique<PressureHistoryTracker>(
       fixture.scheduled_set_tracker.get(),
       /*working_schedule_constructor=*/nullptr,
-      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore);
+      score_recipes::kMaximizeContinuousRegisterOccupancyScore);
   return fixture;
 }
 
@@ -3157,7 +3180,7 @@ class TestPressurePolicyNoBoundsWithHistory
 // domination. Runs DfsSearch on BuildPressureHistoryPruneTestDAG
 // twice — once with history pruning, once without — using test
 // policies that inherit DfsMaximizeOccupancyPolicy (so kMetric =
-// ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore) and
+// score_recipes::kMaximizeContinuousRegisterOccupancyScore) and
 // override ShouldBoundSearch / ShouldEndSearch to disable production
 // bounds + the IsAtOrAbove end-search. The difference between the
 // runs is therefore attributable to pressure-history pruning alone.
@@ -3201,8 +3224,8 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   // kMetric is inherited from DfsMaximizeOccupancyPolicy on both
   // test policies; reference it explicitly here for the post-Run
   // score read.
-  constexpr ScheduleMetric kPolicyMetric =
-      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
+  constexpr ScoreRecipe kPolicyMetric =
+      score_recipes::kMaximizeContinuousRegisterOccupancyScore;
 
   auto graph = ScheduleGraph::BuildPressureHistoryPruneTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
@@ -3218,7 +3241,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
       std::move(*no_hist_search.Run().schedule);
   int64_t no_hist_calls = no_hist_search.ScheduleCallCount().lifetime;
   int no_hist_score =
-      no_hist_best.GetPressureTracker().GetMetricScore(kPolicyMetric);
+      no_hist_best.GetPressureTracker().GetScalarScore(kPolicyMetric);
 
   DfsSearch<TestPressurePolicyNoBoundsWithHistory> hist_search(
       *graph, st, mf, lis);
@@ -3226,7 +3249,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   ScheduleConstructor hist_best = std::move(*hist_search.Run().schedule);
   int64_t hist_calls = hist_search.ScheduleCallCount().lifetime;
   int hist_score =
-      hist_best.GetPressureTracker().GetMetricScore(kPolicyMetric);
+      hist_best.GetPressureTracker().GetScalarScore(kPolicyMetric);
   int hist_prunes =
       hist_search.GetPressureHistoryTracker().PruneCount().lifetime;
 
@@ -3291,10 +3314,10 @@ class BfsDpVsDfsShakedownOracleNoHistoryPolicy
       const ScheduleConstructor &best_schedule_constructor,
       LengthHistoryTracker & /*length_history*/,
       PressureHistoryTracker & /*pressure_history*/) {
-    constexpr ScheduleMetric kMetric =
-        ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
-    return schedule_constructor.GetPressureTracker().GetMetricScore(kMetric) <=
-           best_schedule_constructor.GetPressureTracker().GetMetricScore(
+    constexpr ScoreRecipe kMetric =
+        score_recipes::kMaximizeContinuousRegisterOccupancyScore;
+    return schedule_constructor.GetPressureTracker().GetScalarScore(kMetric) <=
+           best_schedule_constructor.GetPressureTracker().GetScalarScore(
                kMetric);
   }
 };
@@ -3330,10 +3353,10 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
                                     const LiveIntervals &lis) {
   llvm::outs() << "  RunBfsDpVsDfsShakedown[" << case_name << "]:\n";
 
-  constexpr ScheduleMetric kContinuous =
-      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
-  constexpr ScheduleMetric kInteger =
-      ScheduleMetric::kMaximizeRegisterOccupancy;
+  constexpr ScoreRecipe kContinuous =
+      score_recipes::kMaximizeContinuousRegisterOccupancyScore;
+  constexpr ScoreRecipe kInteger =
+      score_recipes::kMaximizeRegisterOccupancy;
 
   graph.ValidateAndComputeTopologicalOrder();
   graph.ComputeCriticalPaths();
@@ -3348,9 +3371,9 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   dfs_search.EnableTestModeForTest(vgpr_deltas);
   ScheduleConstructor dfs_best = std::move(*dfs_search.Run().schedule);
   int dfs_continuous =
-      dfs_best.GetPressureTracker().GetMetricScore(kContinuous);
+      dfs_best.GetPressureTracker().GetScalarScore(kContinuous);
   int dfs_integer =
-      dfs_best.GetPressureTracker().GetMetricScore(kInteger);
+      dfs_best.GetPressureTracker().GetScalarScore(kInteger);
   unsigned dfs_peak =
       dfs_best.GetPressureTracker().GetPeakPressure().getVGPRNum(
           st.hasGFX90AInsts());
@@ -3489,7 +3512,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   for (const ScheduleNode *n : bfs_cont_dag.GetSchedule()) {
     replay.Schedule(n);
   }
-  int replay_score = replay.GetPressureTracker().GetMetricScore(kContinuous);
+  int replay_score = replay.GetPressureTracker().GetScalarScore(kContinuous);
   bool replay_matches = replay_score == bfs_cont_score;
   llvm::outs() << "    BFS-DP continuous replayed: score=" << replay_score
                << " matches_claim=" << (replay_matches ? "PASS" : "FAIL")
@@ -4519,7 +4542,7 @@ void RunScheduleConstructorShakedown(ScheduleGraph &graph,
                << sc2.Describe() << "\n";
 }
 
-void RunScheduleMetricShakedown(ScheduleGraph &graph,
+void RunScoreRecipeShakedown(ScheduleGraph &graph,
                                 const MachineFunction &mf,
                                 const LiveIntervals &lis) {
   const GCNSubtarget &st =
@@ -4530,7 +4553,7 @@ void RunScheduleMetricShakedown(ScheduleGraph &graph,
   constexpr int M = GCNRegisterTracker::kOccScoreMultiplier;
   int max_waves = static_cast<int>(st.getMaxWavesPerEU());
 
-  llvm::outs() << "  ScheduleMetric shakedown:\n";
+  llvm::outs() << "  ScoreRecipe shakedown:\n";
 
   // --- Part 1: sweep VGPR cliffs, SGPR held at 0 so VGPR dominates ---
   //
@@ -4609,14 +4632,14 @@ void RunScheduleMetricShakedown(ScheduleGraph &graph,
     sc_full.Schedule(node);
   }
 
-  auto check_metric = [&](ScheduleMetric metric, const char *name,
+  auto check_metric = [&](const ScoreRecipe &recipe, const char *name,
                           int val_empty, int val_full, bool higher_is_better) {
     bool expect_empty_better = higher_is_better ? (val_empty > val_full)
                                                 : (val_empty < val_full);
     bool expect_full_better = higher_is_better ? (val_full > val_empty)
                                                : (val_full < val_empty);
-    bool got_empty_better = sc_empty.IsBetterThan(sc_full, metric);
-    bool got_full_better = sc_full.IsBetterThan(sc_empty, metric);
+    bool got_empty_better = sc_empty.IsBetterThan(sc_full, recipe);
+    bool got_full_better = sc_full.IsBetterThan(sc_empty, recipe);
     bool pass = (got_empty_better == expect_empty_better) &&
                 (got_full_better == expect_full_better);
     llvm::outs() << "    " << name << ": empty=" << val_empty
@@ -4625,27 +4648,27 @@ void RunScheduleMetricShakedown(ScheduleGraph &graph,
                  << " full_better=" << got_full_better
                  << (pass ? "  PASS" : "  FAIL") << "\n";
     if (!pass) {
-      report_fatal_error("ScheduleMetric plumbing test failed");
+      report_fatal_error("ScoreRecipe plumbing test failed");
     }
   };
 
   check_metric(
-      ScheduleMetric::kMaximizeRegisterOccupancy, "reg_occ",
+      score_recipes::kMaximizeRegisterOccupancy, "reg_occ",
       sc_empty.GetPressureTracker().GetRegisterOnlyOccupancy(),
       sc_full.GetPressureTracker().GetRegisterOnlyOccupancy(),
       /*higher_is_better=*/true);
   check_metric(
-      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore, "cont_occ",
+      score_recipes::kMaximizeContinuousRegisterOccupancyScore, "cont_occ",
       sc_empty.GetPressureTracker().GetContinuousOccupancyScore(),
       sc_full.GetPressureTracker().GetContinuousOccupancyScore(),
       /*higher_is_better=*/true);
   check_metric(
-      ScheduleMetric::kMinimizeScheduleLength, "length",
+      score_recipes::kMinimizeScheduleLength, "length",
       sc_empty.GetLengthTracker().GetCurrentCycle(),
       sc_full.GetLengthTracker().GetCurrentCycle(),
       /*higher_is_better=*/false);
   check_metric(
-      ScheduleMetric::kMaximizeScheduleLength, "max_length",
+      score_recipes::kMaximizeScheduleLength, "max_length",
       sc_empty.GetLengthTracker().GetCurrentCycle(),
       sc_full.GetLengthTracker().GetCurrentCycle(),
       /*higher_is_better=*/true);
@@ -4755,7 +4778,7 @@ void RunRegionShakedowns(ScheduleGraph &graph,
   RunIlpTrackerShakedown(graph, mf, lis);
   RunScheduleConstructorShakedown(graph, mf, lis);
   RunEffectiveAndTargetLimitHelpersShakedown(graph, mf);
-  RunScheduleMetricShakedown(graph, mf, lis);
+  RunScoreRecipeShakedown(graph, mf, lis);
 
   // Dump EntrySU/ExitSU edges from the LLVM DAG.
   llvm::outs() << "  EntrySU succs (" << entry_su.Succs.size() << "):";
@@ -5542,8 +5565,6 @@ void RunDecomposeAndScheduleFactoryShakedown(const GCNSubtarget &st,
 void RunScoreShakedown() {
   llvm::outs() << "  Score shakedown:\n";
 
-  using H = Score::Higher;
-  using L = Score::Lower;
 
   auto check = [&](const char *desc, bool ok) {
     llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
@@ -5554,8 +5575,8 @@ void RunScoreShakedown() {
 
   // Single-slot Higher: larger raw value scores higher.
   {
-    Score a = Score::Make(H{10});
-    Score b = Score::Make(H{5});
+    Score a = Score::Make(Score::Higher(10));
+    Score b = Score::Make(Score::Higher(5));
     check("single Higher{10} > Higher{5}", a > b);
     check("single Higher{5} < Higher{10}", b < a);
     check("single Higher{10} != Higher{5}", a != b);
@@ -5564,32 +5585,32 @@ void RunScoreShakedown() {
 
   // Single-slot Lower: smaller raw value scores higher (Lower inverts).
   {
-    Score a = Score::Make(L{5});   // canonical: -5
-    Score b = Score::Make(L{10});  // canonical: -10
+    Score a = Score::Make(Score::Lower(5));   // canonical: -5
+    Score b = Score::Make(Score::Lower(10));  // canonical: -10
     check("single Lower{5} > Lower{10} (lower raw is better)", a > b);
     check("single Lower{10} < Lower{5}", b < a);
   }
 
   // Two-slot lex: primary dominates when it differs.
   {
-    Score occ4 = Score::Make(H{4}, L{80});
-    Score occ3 = Score::Make(H{3}, L{80});
+    Score occ4 = Score::Make(Score::Higher(4), Score::Lower(80));
+    Score occ3 = Score::Make(Score::Higher(3), Score::Lower(80));
     check("primary slot wins: (occ=4,len=80) > (occ=3,len=80)",
           occ4 > occ3);
   }
 
   // Two-slot lex: tiebreak by secondary when primary ties.
   {
-    Score occ4_long = Score::Make(H{4}, L{120});
-    Score occ4_short = Score::Make(H{4}, L{80});
+    Score occ4_long = Score::Make(Score::Higher(4), Score::Lower(120));
+    Score occ4_short = Score::Make(Score::Higher(4), Score::Lower(80));
     check("tiebreak by secondary: same occ, shorter len wins",
           occ4_short > occ4_long);
   }
 
   // Equality on identical slots.
   {
-    Score a = Score::Make(H{4}, L{80});
-    Score b = Score::Make(H{4}, L{80});
+    Score a = Score::Make(Score::Higher(4), Score::Lower(80));
+    Score b = Score::Make(Score::Higher(4), Score::Lower(80));
     check("identical Scores: ==", a == b);
     check("identical Scores: !(a < b)", !(a < b));
     check("identical Scores: !(a > b)", !(a > b));
@@ -5597,18 +5618,18 @@ void RunScoreShakedown() {
     check("identical Scores: a >= b", a >= b);
   }
 
-  // Trailing slots default to 0: Make(H{4}) == Make(H{4}, L{0}).
+  // Trailing slots default to 0: Make(Score::Higher(4)) == Make(Score::Higher(4), Score::Lower(0)).
   {
-    Score one_slot = Score::Make(H{4});
-    Score with_trailing_zero = Score::Make(H{4}, L{0});
-    check("Make(H{4}) == Make(H{4}, L{0}) (trailing zero canonical)",
+    Score one_slot = Score::Make(Score::Higher(4));
+    Score with_trailing_zero = Score::Make(Score::Higher(4), Score::Lower(0));
+    check("Make(Score::Higher(4)) == Make(Score::Higher(4), Score::Lower(0)) (trailing zero canonical)",
           one_slot == with_trailing_zero);
   }
 
   // Three-slot lex: tertiary tiebreak.
   {
-    Score a = Score::Make(L{100}, H{50}, H{1000});
-    Score b = Score::Make(L{100}, H{50}, H{500});
+    Score a = Score::Make(Score::Lower(100), Score::Higher(50), Score::Higher(1000));
+    Score b = Score::Make(Score::Lower(100), Score::Higher(50), Score::Higher(500));
     check("same primary + secondary: tertiary tiebreaks", a > b);
   }
 }

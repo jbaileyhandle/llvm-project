@@ -397,88 +397,43 @@ void ScheduleConstructor::Reset() {
 // Comparison
 // ============================================================================
 
-Score ScheduleConstructor::GetScore(ScheduleMetric metric) const {
-  switch (metric) {
-  case ScheduleMetric::kMaximizeRegisterOccupancy:
-    return Score::Make(
-        Score::Higher{pressure_tracker_.GetRegisterOnlyOccupancy()});
-
-  case ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore:
-    return Score::Make(
-        Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()});
-
-  case ScheduleMetric::kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea:
-    return Score::Make(
-        Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()},
-        Score::Higher{pressure_tracker_.GetContinuousOccupancyArea()});
-
-  case ScheduleMetric::kMinimizeScheduleLength:
-    if (!length_tracker_) {
-      report_fatal_error(
-          "ScheduleConstructor::GetScore: kMinimizeScheduleLength "
-          "requires length tracking enabled");
+Score ScheduleConstructor::GetScore(const ScoreRecipe &recipe) const {
+  std::array<std::optional<Score::SlotInput>, kMaxScoreSlots> inputs{};
+  for (int i = 0; i < kMaxScoreSlots; ++i) {
+    if (recipe.slots[i]) {
+      inputs[i] = Score::SlotInput{
+          GetScoreDimensionValue(recipe.slots[i]->dim),
+          recipe.slots[i]->pol};
     }
-    return Score::Make(
-        Score::Lower{length_tracker_->GetCurrentCycle()});
-
-  case ScheduleMetric::kMinimizeScheduleLengthThenMaximizeContinuousOccupancyScore:
-    if (!length_tracker_) {
-      report_fatal_error(
-          "ScheduleConstructor::GetScore: "
-          "kMinimizeScheduleLengthThenMaximizeContinuousOccupancyScore "
-          "requires length tracking enabled");
-    }
-    // Length primary; tiebreak by continuous register occupancy score.
-    // Same-length completions are produced only when the search policy
-    // opts into the bound relaxation via kRefineOccupancyAtSameLength.
-    return Score::Make(
-        Score::Lower{length_tracker_->GetCurrentCycle()},
-        Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()});
-
-  case ScheduleMetric::kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore:
-    if (!length_tracker_) {
-      report_fatal_error(
-          "ScheduleConstructor::GetScore: kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore "
-          "requires length tracking enabled");
-    }
-    if (!ilp_tracker_) {
-      report_fatal_error(
-          "ScheduleConstructor::GetScore: kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore "
-          "requires ILP tracking enabled");
-    }
-    // Length primary; tiebreak by locked-in ILP score (higher = better);
-    // tertiary tiebreak by continuous occupancy score (higher = better) —
-    // among same-length-same-ILP, prefer more pressure headroom. Same-
-    // length completions only get produced when the search policy opts
-    // into the bound relaxation via kRefineIlpAtSameLength.
-    return Score::Make(
-        Score::Lower{length_tracker_->GetCurrentCycle()},
-        Score::Higher{ilp_tracker_->GetIlpScore()},
-        Score::Higher{pressure_tracker_.GetContinuousOccupancyScore()});
-
-  case ScheduleMetric::kMaximizeScheduleLength:
-    if (!length_tracker_) {
-      report_fatal_error(
-          "ScheduleConstructor::GetScore: kMaximizeScheduleLength "
-          "requires length tracking enabled");
-    }
-    return Score::Make(
-        Score::Higher{length_tracker_->GetCurrentCycle()});
-
-  case ScheduleMetric::kMinimizeRegisterOccupancy:
-    return Score::Make(
-        Score::Lower{pressure_tracker_.GetRegisterOnlyOccupancy()});
-
-  case ScheduleMetric::kMinimizeContinuousRegisterOccupancyScore:
-    return Score::Make(
-        Score::Lower{pressure_tracker_.GetContinuousOccupancyScore()});
   }
-  llvm_unreachable("Unknown ScheduleMetric");
+  return Score::Make(inputs);
 }
 
-bool ScheduleConstructor::IsBetterThan(const ScheduleConstructor &other,
-                                       ScheduleMetric metric) const {
-  return GetScore(metric) > other.GetScore(metric);
+int64_t
+ScheduleConstructor::GetScoreDimensionValue(ScoreDimension dim) const {
+  switch (dim) {
+  case ScoreDimension::kRegisterOcc:
+    return pressure_tracker_.GetRegisterOnlyOccupancy();
+  case ScoreDimension::kContinuousOccScore:
+    return pressure_tracker_.GetContinuousOccupancyScore();
+  case ScoreDimension::kContinuousOccArea:
+    return pressure_tracker_.GetContinuousOccupancyArea();
+  case ScoreDimension::kScheduleLength:
+    if (!length_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::GetScoreDimensionValue: "
+          "kScheduleLength requires length tracking enabled");
+    }
+    return length_tracker_->GetCurrentCycle();
+  case ScoreDimension::kIlpScore:
+    if (!ilp_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::GetScoreDimensionValue: kIlpScore "
+          "requires ILP tracking enabled");
+    }
+    return ilp_tracker_->GetIlpScore();
+  }
+  llvm_unreachable("Unknown ScoreDimension");
 }
 
 bool ScheduleConstructor::RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() const {

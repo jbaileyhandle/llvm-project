@@ -88,13 +88,13 @@ class PressureHistoryTracker {
   /// can stage entries directly via InsertEntryForTest.
   struct Entry {
     /// One Score on this partition's Pareto frontier. Slot
-    /// semantics come from whichever ScheduleMetric produced the
+    /// semantics come from whichever ScoreRecipe produced the
     /// Score (see ScheduleConstructor::GetScore). The bucket is
     /// the set of Scores reaching this partition that are not
     /// Pareto-dominated by any other entry in the bucket.
     /// Default-constructed Score has all slots zero, so a default
     /// Entry is a valid "empty" sentinel.
-    Score best_score = Score::Make();
+    Score best_score = Score::Make({});
   };
 
   /// One bucket per partition: the Pareto frontier of incomparable
@@ -105,21 +105,32 @@ class PressureHistoryTracker {
   /// Type alias so the inline capacity is set in one place.
   using Bucket = SmallVector<Entry, 1>;
 
+  /// PHT exposes two `IsDominatedElseRecord` shapes:
+  ///   1. `IsDominatedElseRecord(const Score &current_score)` --
+  ///      caller supplies the Score explicitly. Test fixtures stage
+  ///      Scores directly via this path.
+  ///   2. `IsDominatedElseRecord()` -- production path. Computes
+  ///      `working_schedule_constructor->GetScore(recipe)` internally
+  ///      using the bound SC and the recipe stored at construction.
+  ///
   /// Bind:
-  ///   - `scheduled_set_tracker` — source of truth for the
-  ///     partition key. Non-null; must outlive the tracker.
-  ///   - `working_schedule_constructor` — source of truth for the
-  ///     Score that the no-arg overload reads via the bound metric.
-  ///     May be nullptr in test fixtures that only use the explicit-
-  ///     Score overload; in that configuration the no-arg overload
-  ///     fatal-errors. Otherwise must outlive the tracker.
-  ///   - `metric` — ScheduleMetric used by the no-arg overload to
-  ///     read the Score from the bound working schedule constructor
-  ///     via ScheduleConstructor::GetScore.
+  ///   - `scheduled_set_tracker` — source of truth for the partition
+  ///     key. Non-null; must outlive the tracker.
+  ///   - `working_schedule_constructor` — supplies the Score for the
+  ///     production no-arg `IsDominatedElseRecord()` via
+  ///     GetScore(recipe). May be nullptr in test fixtures that only
+  ///     use the explicit-Score overload; in that configuration the
+  ///     no-arg path fatal-errors. Otherwise must outlive the tracker.
+  ///   - `recipe` — the ScoreRecipe used by the no-arg
+  ///     `IsDominatedElseRecord()` to read the Score from the bound
+  ///     working schedule constructor. Not validated here -- DfsSearch
+  ///     constructs PHT for every policy (including length-primary
+  ///     ones that never query PHT) so a recipe shape check at
+  ///     construction time would over-reject.
   PressureHistoryTracker(
       const ScheduledSetTracker *scheduled_set_tracker,
       const ScheduleConstructor *working_schedule_constructor,
-      ScheduleMetric metric);
+      const ScoreRecipe &recipe);
 
   /// Combined check + record. Reads the partition key from the
   /// bound scheduled-set tracker. Returns true if pruning should
@@ -191,7 +202,7 @@ class PressureHistoryTracker {
  private:
   const ScheduledSetTracker *scheduled_set_tracker_;
   const ScheduleConstructor *working_schedule_constructor_;
-  ScheduleMetric metric_;
+  ScoreRecipe recipe_;
   /// Per-partition Pareto frontier of incomparable Score entries.
   /// Bucket type alias keeps the inline capacity in one place
   /// (see the Bucket typedef above).

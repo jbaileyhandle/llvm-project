@@ -65,8 +65,8 @@ constexpr int64_t kBfsDpWithDfsFallbackTimeoutMs = 5000;
 // either score, so the prune is sound under either.
 class DfsMaximizeIntegerOccupancyPolicy : public DfsMaximizeOccupancyPolicy {
  public:
-  static constexpr ScheduleMetric kMetric =
-      ScheduleMetric::kMaximizeRegisterOccupancy;
+  static constexpr ScoreRecipe kScoreRecipe =
+      score_recipes::kMaximizeRegisterOccupancy;
 };
 
 }  // namespace
@@ -92,7 +92,7 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
   // extracted by ScheduleSubgraph, and nested formation isn't wired yet.
   opts.inner_search = [&st, &mf, &lis](ScheduleGraph &sub) -> SearchResult {
     BfsDpSettings settings;
-    settings.metric = ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
+    settings.recipe = score_recipes::kMaximizeContinuousRegisterOccupancyScore;
     settings.timeout_ms = kBfsDpWithDfsFallbackTimeoutMs;
     BfsDpSearch bfs(&sub, &st, &mf, settings);
     SearchResult result = bfs.Run();
@@ -146,10 +146,10 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
     }
     const bool outer_continuous = (outer == OuterSearch::kBfsDpContinuous);
     BfsDpSettings settings;
-    settings.metric =
+    settings.recipe =
         outer_continuous
-            ? ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore
-            : ScheduleMetric::kMaximizeRegisterOccupancy;
+            ? score_recipes::kMaximizeContinuousRegisterOccupancyScore
+            : score_recipes::kMaximizeRegisterOccupancy;
     settings.timeout_ms = kBfsDpWithDfsFallbackTimeoutMs;
     BfsDpSearch bfs(&g, &st, &mf, settings);
     if (outer_continuous) {

@@ -48,47 +48,14 @@ class SearchPolicyBase {
     out.assign(ready.begin(), ready.end());
   }
 
-  // Length-min refine opt-ins. When EITHER is true, DfsSearch
-  // relaxes the per-Recurse max_acceptable bound from
-  // best.length - 1 to best.length so same-length completions
-  // are produced and IsBetterThan picks among them under the
-  // policy's metric. Two flags rather than one because the two
-  // refinements are distinct policies — they could in principle
-  // be combined, but for now each policy enables exactly one.
-  //
-  //   kRefineOccupancyAtSameLength: refine continuous register-
-  //     occupancy within same length. Used by
-  //     DfsMinimizeLengthRefineOccupancyPolicy.
-  //   kRefineIlpAtSameLength: refine ILP within same length.
-  //     Used by DfsMinimizeLengthRefineIlpPolicy. Also gates
-  //     LengthHistoryTracker's ILP dim (per-open-producer
-  //     inst_counts and locked-in ILP score participate in
-  //     dominance) so the search isn't pruned prematurely on
-  //     paths that could refine ILP.
-  static constexpr bool kRefineOccupancyAtSameLength = false;
-  static constexpr bool kRefineIlpAtSameLength = false;
-
-  // Length-axis direction flag for LengthHistoryTracker. Default
-  // (false) is length-min semantics: dominance uses lower
-  // end_cycle / lower frontier-LB. Override to true on a length-
-  // max policy to flip both length axes — see
-  // LengthHistoryTracker's constructor comment for the soundness
-  // argument. Independent of kUseLengthHistoryPruning (the flag
-  // controls direction, the pruning gate controls whether the
-  // table is consulted at all).
-  static constexpr bool kLengthMaxMode = false;
-
-  // History-based-domination pruning opt-in flags. Default false;
-  // concrete policies override to true to enable the corresponding
-  // history table in DfsSearch. The `if constexpr` gate in
-  // DfsSearch::Recurse dead-strips the consult/insert code when the
-  // flag is false, so policies that don't opt in pay nothing at
-  // runtime in the hot recursion (the table is still constructed
-  // but never queried).
-  //
-  // See AMDGPUHistoryDominationDesign.md §8.1.
-  static constexpr bool kUseLengthHistoryPruning = false;
-  static constexpr bool kUsePressureHistoryPruning = false;
+  // No per-policy configuration constants. Each derived policy
+  // declares its objective via a single `kScoreRecipe` constant; the
+  // recipe's IsLengthPrimary / IsLengthMaxMode / RefinesAtSameLength
+  // / HasDim queries drive all the per-dim plumbing (LHT/PHT
+  // activation, length-axis direction, refinement bound relaxation,
+  // LHT dim-inclusion flags) in DfsSearch and the history trackers.
+  // Adding a new dimension or composite recipe doesn't add per-policy
+  // boilerplate.
 };
 
 // Policy for DFS when the objective is to minimize schedule length for
@@ -97,8 +64,8 @@ class SearchPolicyBase {
 // occupancy pass.
 class DfsMinimizeLengthPolicy : public SearchPolicyBase {
  public:
-  static constexpr ScheduleMetric kMetric =
-      ScheduleMetric::kMinimizeScheduleLength;
+  static constexpr ScoreRecipe kScoreRecipe =
+      score_recipes::kMinimizeScheduleLength;
 
   // Override SearchPolicyBase: two-level filter+sort, modelled on
   // OptSched's cycle-by-cycle window-then-priority pattern.
@@ -185,12 +152,11 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);
 
-  // Override SearchPolicyBase: enable length history-domination
-  // pruning. DFS records each visited prefix's (end_cycle,
-  // frontier-LBs) in a per-partition Pareto frontier; on a later
-  // visit to the same partition, if any recorded entry dominates
-  // the current prefix on every dimension, the subtree is pruned.
-  // See AMDGPUHistoryDominationDesign.md §5.
+  // Enable length history-domination pruning. DFS records each
+  // visited prefix's (end_cycle, frontier-LBs) in a per-partition
+  // Pareto frontier; on a later visit to the same partition, if any
+  // recorded entry dominates the current prefix on every dimension,
+  // the subtree is pruned. See AMDGPUHistoryDominationDesign.md §5.
   static constexpr bool kUseLengthHistoryPruning = true;
 };
 
@@ -220,9 +186,8 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
 class DfsMinimizeLengthRefineOccupancyPolicy
     : public DfsMinimizeLengthPolicy {
  public:
-  static constexpr ScheduleMetric kMetric =
-      ScheduleMetric::kMinimizeScheduleLengthThenMaximizeContinuousOccupancyScore;
-  static constexpr bool kRefineOccupancyAtSameLength = true;
+  static constexpr ScoreRecipe kScoreRecipe =
+      score_recipes::kMinimizeScheduleLengthThenMaximizeContinuousOccupancyScore;
 
   static bool ShouldEndSearch(
       const ScheduleConstructor &schedule_constructor,
@@ -249,9 +214,8 @@ class DfsMinimizeLengthRefineOccupancyPolicy
 class DfsMinimizeLengthRefineIlpPolicy
     : public DfsMinimizeLengthPolicy {
  public:
-  static constexpr ScheduleMetric kMetric =
-      ScheduleMetric::kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore;
-  static constexpr bool kRefineIlpAtSameLength = true;
+  static constexpr ScoreRecipe kScoreRecipe =
+      score_recipes::kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore;
 
   static bool ShouldEndSearch(
       const ScheduleConstructor &schedule_constructor,
@@ -296,23 +260,14 @@ class DfsMinimizeLengthRefineIlpPolicy
 //     Tiebreak on topo_index ascending for determinism.
 class DfsMaximizeLengthPolicy : public SearchPolicyBase {
  public:
-  static constexpr ScheduleMetric kMetric =
-      ScheduleMetric::kMaximizeScheduleLength;
+  static constexpr ScoreRecipe kScoreRecipe =
+      score_recipes::kMaximizeScheduleLength;
 
   // See class comment for the ranking semantics.
   static void FilterAndSortReadyList(
       const ScheduleConstructor &working,
       SmallVectorImpl<const ScheduleNode *> &out);
 
-  // See LengthHistoryTracker constructor comment for the soundness
-  // argument and the assertion that prevents pairing this with
-  // include_ilp_dim (length-max never participates in ILP refinement
-  // here, by design).
-  static constexpr bool kLengthMaxMode = true;
-
-  // Enable length history-domination pruning, with the axis
-  // direction flipped via kLengthMaxMode.
-  static constexpr bool kUseLengthHistoryPruning = true;
 
   // Bound the current subtree if any of:
   //   (a) the working schedule's register-only occupancy has dropped
@@ -335,6 +290,10 @@ class DfsMaximizeLengthPolicy : public SearchPolicyBase {
   static bool ShouldEndSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);
+
+  // Enable length history-domination pruning, with the axis
+  // direction flipped via the recipe's IsLengthMaxMode().
+  static constexpr bool kUseLengthHistoryPruning = true;
 };
 
 // Policy for DFS when the objective is to maximize register-only
@@ -342,12 +301,12 @@ class DfsMaximizeLengthPolicy : public SearchPolicyBase {
 class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
  public:
   // Use the continuous score, not the integer one. The integer
-  // metric ties any two schedules in the same occupancy bracket;
+  // recipe ties any two schedules in the same occupancy bracket;
   // continuous distinguishes within-bracket pressure too, which
   // gives ShouldBoundSearch real prune signal even when we're not
   // crossing a cliff.
-  static constexpr ScheduleMetric kMetric =
-      ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore;
+  static constexpr ScoreRecipe kScoreRecipe =
+      score_recipes::kMaximizeContinuousRegisterOccupancyScore;
 
   // Override SearchPolicyBase: pressure-aware filter + sort.
   //
@@ -406,8 +365,8 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);
 
-  // Override SearchPolicyBase: enable pressure history-domination
-  // pruning. See PressureHistoryTracker.
+  // Enable pressure history-domination pruning. See
+  // PressureHistoryTracker.
   static constexpr bool kUsePressureHistoryPruning = true;
 };
 
@@ -424,8 +383,8 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
 class DfsMaximizeContinuousOccupancyThenAreaPolicy
     : public DfsMaximizeOccupancyPolicy {
  public:
-  static constexpr ScheduleMetric kMetric =
-      ScheduleMetric::kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea;
+  static constexpr ScoreRecipe kScoreRecipe =
+      score_recipes::kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea;
 
   // Strict < on the fixed best-bound (base uses <=): working's
   // current peak score is an upper bound on any completion's peak, so
@@ -438,9 +397,8 @@ class DfsMaximizeContinuousOccupancyThenAreaPolicy
       const ScheduleConstructor &best_schedule_constructor,
       LengthHistoryTracker & /*length_history*/,
       PressureHistoryTracker &pressure_history) {
-    if (schedule_constructor.GetPressureTracker().GetMetricScore(kMetric) <
-        best_schedule_constructor.GetPressureTracker().GetMetricScore(
-            kMetric)) {
+    if (schedule_constructor.CompletionCannotImproveUpon(
+            best_schedule_constructor, kScoreRecipe)) {
       return true;
     }
     return pressure_history.IsDominatedElseRecord();

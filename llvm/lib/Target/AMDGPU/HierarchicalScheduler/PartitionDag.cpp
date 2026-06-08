@@ -23,17 +23,15 @@ PartitionDag::PartitionDag(const ScheduleGraph *graph,
                            const MachineFunction *mf,
                            BfsDpSettings settings)
     : graph_(graph), st_(st), mf_(mf), settings_(settings) {
-  // Only MAX-direction metrics make sense for BFS-DP's
-  // max-over-paths of min-along-path bottleneck DP. Min-direction
-  // metrics would invert the semantics (we'd want min-over-paths of
-  // max-along-path); not implemented.
-  if (settings_.metric != ScheduleMetric::kMaximizeRegisterOccupancy &&
-      settings_.metric !=
-          ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore) {
+  // BFS-DP's max-over-paths of min-along-path bottleneck DP only
+  // supports single-slot register-peak recipes (peak occupancy or
+  // continuous occupancy score). Sum-style dims (length, area,
+  // ILP) don't fit the bottleneck DP shape.
+  if (!settings_.recipe.IsRegisterPeakMetricOnly()) {
     report_fatal_error(
-        "PartitionDag: only kMaximizeRegisterOccupancy and "
-        "kMaximizeContinuousRegisterOccupancyScore are currently "
-        "supported metrics");
+        "PartitionDag: only single-slot register-peak recipes are "
+        "supported (kRegisterOcc or kContinuousOccScore primary, "
+        "no tiebreak slots)");
   }
 }
 
@@ -278,18 +276,21 @@ int PartitionDag::GetInputOrderIndex(const ScheduleNode *node) {
 
 int PartitionDag::ComputeScoreFromPressure(
     const GCNRegPressure &pressure) const {
-  switch (settings_.metric) {
-    case ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore:
+  // Recipe is single-slot per the ctor's IsRegisterPeakMetricOnly
+  // guard, so slot 0's dimension fully determines the score.
+  ScoreDimension dim = settings_.recipe.slots[0]->dim;
+  switch (dim) {
+    case ScoreDimension::kContinuousOccScore:
       return GCNRegisterTracker::ComputeContinuousOccupancyScore(
           *st_, pressure.getVGPRNum(st_->hasGFX90AInsts()),
           pressure.getSGPRNum());
-    case ScheduleMetric::kMaximizeRegisterOccupancy:
+    case ScoreDimension::kRegisterOcc:
       return static_cast<int>(pressure.getOccupancy(*st_));
     default:
-      // Constructor rejected all other values.
+      // Constructor rejected all other dims.
       llvm_unreachable(
-          "PartitionDag: unsupported metric in ComputeScoreFromPressure "
-          "— constructor validation lapse");
+          "PartitionDag: unsupported ScoreDimension in "
+          "ComputeScoreFromPressure -- constructor validation lapse");
   }
 }
 

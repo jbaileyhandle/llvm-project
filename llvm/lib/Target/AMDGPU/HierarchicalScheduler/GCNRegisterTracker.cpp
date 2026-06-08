@@ -670,31 +670,32 @@ unsigned GCNRegisterTracker::GetCurSGPRCountAboveSpillCap() const {
   return (cur > cap) ? (cur - cap) : 0;
 }
 
-int GCNRegisterTracker::GetMetricScore(ScheduleMetric metric) const {
-  switch (metric) {
-  case ScheduleMetric::kMaximizeRegisterOccupancy:
-    return static_cast<int>(GetRegisterOnlyOccupancy());
-  case ScheduleMetric::kMaximizeContinuousRegisterOccupancyScore:
-    return GetContinuousOccupancyScore();
-  case ScheduleMetric::kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea:
-    // Primary peak score; the area tiebreak is read separately.
-    return GetContinuousOccupancyScore();
-  case ScheduleMetric::kMinimizeRegisterOccupancy:
-    return -static_cast<int>(GetRegisterOnlyOccupancy());
-  case ScheduleMetric::kMinimizeContinuousRegisterOccupancyScore:
-    return -GetContinuousOccupancyScore();
-  case ScheduleMetric::kMinimizeScheduleLength:
+int GCNRegisterTracker::GetScalarScore(const ScoreRecipe &recipe) const {
+  if (recipe.NumSlots() != 1) {
     report_fatal_error(
-        "GCNRegisterTracker::GetMetricScore: kMinimizeScheduleLength is "
-        "length-side, not pressure-side; length lives on "
-        "ScheduleLengthTracker");
-  case ScheduleMetric::kMaximizeScheduleLength:
-    report_fatal_error(
-        "GCNRegisterTracker::GetMetricScore: kMaximizeScheduleLength is "
-        "length-side, not pressure-side; length lives on "
-        "ScheduleLengthTracker");
+        "GCNRegisterTracker::GetScalarScore: recipe must be single-"
+        "slot; this function returns the polarity-applied value of "
+        "the only slot and would silently drop tiebreak slots");
   }
-  llvm_unreachable("Unknown ScheduleMetric");
+  const MetricSlot &slot = *recipe.slots[0];
+  int64_t raw = 0;
+  switch (slot.dim) {
+  case ScoreDimension::kRegisterOcc:
+    raw = GetRegisterOnlyOccupancy();
+    break;
+  case ScoreDimension::kContinuousOccScore:
+    raw = GetContinuousOccupancyScore();
+    break;
+  case ScoreDimension::kContinuousOccArea:
+    raw = GetContinuousOccupancyArea();
+    break;
+  default:
+    report_fatal_error(
+        "GCNRegisterTracker::GetScalarScore: slot dim is not pressure-"
+        "side; length / ILP scores live on their own trackers");
+  }
+  int64_t value = (slot.pol == Polarity::kMaximize) ? raw : -raw;
+  return static_cast<int>(value);
 }
 
 unsigned GCNRegisterTracker::GetConfiguredMachineFunctionOccupancyLimit() const {

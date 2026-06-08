@@ -16,16 +16,14 @@ LengthHistoryTracker::LengthHistoryTracker(
     const ScheduleLengthTracker *length_tracker,
     const GCNRegisterTracker *pressure_tracker,
     const IlpTracker *ilp_tracker,
-    bool include_pressure_dim,
-    bool include_ilp_dim,
-    bool length_max_mode)
+    const ScoreRecipe &recipe)
     : scheduled_set_tracker_(scheduled_set_tracker),
       length_tracker_(length_tracker),
       pressure_tracker_(pressure_tracker),
       ilp_tracker_(ilp_tracker),
-      include_pressure_dim_(include_pressure_dim),
-      include_ilp_dim_(include_ilp_dim),
-      length_max_mode_(length_max_mode) {
+      include_pressure_dim_(recipe.HasDim(ScoreDimension::kContinuousOccScore)),
+      include_ilp_dim_(recipe.HasDim(ScoreDimension::kIlpScore)),
+      length_max_mode_(recipe.IsLengthMaxMode()) {
   if (scheduled_set_tracker_ == nullptr) {
     report_fatal_error(
         "LengthHistoryTracker: scheduled_set_tracker must not be null");

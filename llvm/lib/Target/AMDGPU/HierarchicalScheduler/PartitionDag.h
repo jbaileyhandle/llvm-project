@@ -241,17 +241,17 @@ class PartitionDag {
   /// `score <= INT_MIN` is never true for real scores.
   void SetInitialBestScore(int score) { initial_best_score_ = score; }
 
-  /// Convenience overload: extract the score from `init`'s pressure
-  /// tracker using this dag's metric, then SetInitialBestScore on
+  /// Convenience overload: extract the score from `init`'s peak
+  /// pressure using this dag's recipe, then SetInitialBestScore on
   /// the result. Use when the caller already has a baseline
   /// ScheduleConstructor (e.g., from replaying the input order
   /// through a fresh tracker) and doesn't want to spell out the
-  /// metric a second time. `init` must be in the same test/production
+  /// recipe a second time. `init` must be in the same test/production
   /// mode the dag will run in (so the extracted score is comparable
   /// to BFS-DP's per-edge scores).
   void SetInitialBestScore(const ScheduleConstructor &init) {
-    SetInitialBestScore(
-        init.GetPressureTracker().GetMetricScore(settings_.metric));
+    SetInitialBestScore(ComputeScoreFromPressure(
+        init.GetPressureTracker().GetPeakPressure()));
   }
 
   /// Test-only: enable delta-based synthetic pressure on the source

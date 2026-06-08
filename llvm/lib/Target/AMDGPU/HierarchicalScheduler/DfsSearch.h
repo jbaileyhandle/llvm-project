@@ -85,31 +85,28 @@ class DfsSearch {
         timeout_ms_(timeout_ms),
         working_schedule_constructor_(graph, st, mf),
         best_schedule_constructor_(graph.GetInputScheduleConstructor()),
-        // length_history_ binds to working_'s trackers. Constructed
-        // unconditionally; queried only when Policy::
-        // kUseLengthHistoryPruning is true (the `if constexpr` in
-        // Recurse dead-strips the consult/insert otherwise).
-        // Pressure-score dim is gated by Policy::
-        // kRefineOccupancyAtSameLength; ILP dim is gated by
-        // Policy::kRefineIlpAtSameLength. When neither gate is
-        // set, dominance reduces to length-only.
+        // length_history_ binds to working_'s trackers and to the
+        // policy's ScoreRecipe; the tracker self-derives its
+        // include_pressure_dim / include_ilp_dim / length_max_mode
+        // flags from the recipe via HasDim() / IsLengthMaxMode().
+        // Constructed unconditionally; queried only when
+        // Policy::kUseLengthHistoryPruning is true (the `if constexpr`
+        // in Recurse dead-strips the consult/insert otherwise).
         length_history_(
             &working_schedule_constructor_.GetScheduledSetTracker(),
             &working_schedule_constructor_.GetLengthTracker(),
             &working_schedule_constructor_.GetPressureTracker(),
             &working_schedule_constructor_.GetIlpTracker(),
-            Policy::kRefineOccupancyAtSameLength,
-            Policy::kRefineIlpAtSameLength,
-            Policy::kLengthMaxMode),
+            Policy::kScoreRecipe),
         // pressure_history_ binds to working_'s scheduled-set
-        // tracker for partition keys, and to working_ itself for
-        // the no-arg Score read via ScheduleConstructor::GetScore.
-        // The metric matches Policy::kMetric so the tracker reads
-        // values consistent with what the search optimizes.
+        // tracker for partition keys, to working_ itself as the
+        // source for production GetScore reads, and to the policy's
+        // ScoreRecipe so PHT can call working_->GetScore(recipe) in
+        // its no-arg IsDominatedElseRecord overload.
         pressure_history_(
             &working_schedule_constructor_.GetScheduledSetTracker(),
             &working_schedule_constructor_,
-            Policy::kMetric) {
+            Policy::kScoreRecipe) {
     // Stamp the stopwatch's lifetime_start at construction. (This
     // first Start() also seeds current_run_start, which Run()
     // overwrites on every entry.) timing_.lifetime_start is
@@ -352,24 +349,20 @@ class DfsSearch {
   // changes — at construction, at each ResetForReuse, and after
   // every best-improvement event in Recurse.
   //
-  // The improvement_offset is policy-controlled via two flags
-  // that both express "allow same-length completions":
-  //   - kRefineOccupancyAtSameLength: refine occupancy within
-  //     same length.
-  //   - kRefineIlpAtSameLength: refine ILP within same length.
-  // Either being true relaxes the bound from best.length - 1 to
-  // best.length so same-length completions are produced and
-  // IsBetterThan picks among them.
-  //   neither set: offset = 1 → bound = best.length - 1, only
+  // The improvement_offset is policy-controlled via the recipe's
+  // RefinesAtSameLength() helper (true when the recipe is length-
+  // primary AND has tiebreak slots). When true, bound is relaxed
+  // from best.length - 1 to best.length so same-length completions
+  // are produced and IsBetterThan picks among them via the
+  // tiebreak slots.
+  //   not refining: offset = 1 → bound = best.length - 1, only
   //     strictly shorter completions are produced.
-  //   either set:  offset = 0 → bound = best.length, same-length
+  //   refining:     offset = 0 → bound = best.length, same-length
   //     completions allowed.
   void RecomputeWorkingMaxScheduleCycles() {
     int best_length = best_schedule_constructor_.GetScheduleLength();
-    constexpr bool kAllowSameLength =
-        Policy::kRefineOccupancyAtSameLength ||
-        Policy::kRefineIlpAtSameLength;
-    constexpr int kImprovementOffset = kAllowSameLength ? 0 : 1;
+    constexpr int kImprovementOffset =
+        Policy::kScoreRecipe.RefinesAtSameLength() ? 0 : 1;
     working_schedule_constructor_.SetMaxAcceptableScheduleLength(
         std::min(requested_target_length_,
                  best_length - kImprovementOffset));
@@ -405,7 +398,7 @@ class DfsSearch {
     if (working_schedule_constructor_.IsDone()) {
       ++complete_schedules_count_;
       if (working_schedule_constructor_.IsBetterThan(
-              best_schedule_constructor_, Policy::kMetric)) {
+              best_schedule_constructor_, Policy::kScoreRecipe)) {
         // Cross-check the candidate's register pressure against LLVM's
         // GCNUpwardRPTracker before committing to it. If LLVM's
         // ground-truth occupancy is below what OUR tracker computed,
