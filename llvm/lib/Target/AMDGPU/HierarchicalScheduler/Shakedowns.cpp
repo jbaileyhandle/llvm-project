@@ -5806,6 +5806,92 @@ void RunScoreLeadingSlotsCompareShakedown() {
   }
 }
 
+// ---- ScheduleConstructor::CompletionCannotImproveUpon ----
+//
+// Exercises the strict-vs-non-strict derivation: single-slot
+// bound-safe recipe -> non-strict (ties prune), multi-slot
+// bound-safe-prefix + ND tiebreak -> strict (ties don't prune
+// because the tiebreak could still rescue at completion).
+//
+// Self-contained: builds a synthetic test DAG internally and uses
+// SetMaxPressureForTest to drive each SC's GetScore output to known
+// values. Independent of any region's actual pressure.
+
+void RunCompletionCannotImproveUponShakedown(const MachineFunction &mf) {
+  llvm::outs() << "  CompletionCannotImproveUpon shakedown:\n";
+
+  const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
+  auto graph = ScheduleGraph::BuildTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPaths();
+
+  ScheduleConstructor working(*graph, st, mf);
+  ScheduleConstructor best(*graph, st, mf);
+
+  auto &working_tr = working.GetPressureTrackerForTest();
+  auto &best_tr = best.GetPressureTrackerForTest();
+
+  auto check = [&](const char *desc, bool ok) {
+    llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
+    if (!ok) {
+      report_fatal_error("CompletionCannotImproveUpon shakedown: failure");
+    }
+  };
+
+  // ScoreDimension::kContinuousOccScore reads from peak (max_pressure_).
+  // Higher VGPR pressure -> lower occupancy score -> "worse" canonical
+  // value when polarity is Maximize. We control the relationship by
+  // setting max_pressure_ directly on each SC.
+
+  // --- Case 1: single-slot bound-safe recipe (non-strict path) ---
+  const ScoreRecipe &single =
+      score_recipes::kMaximizeContinuousRegisterOccupancyScore;
+
+  // 1a: working strictly worse (higher peak VGPR -> lower score).
+  working_tr.SetMaxPressureForTest(GCNRegPressure(40, /*sgpr32=*/0));
+  best_tr.SetMaxPressureForTest(GCNRegPressure(20, /*sgpr32=*/0));
+  check("single-slot, working strictly worse: returns true",
+        working.CompletionCannotImproveUpon(best, single));
+
+  // 1b: working strictly better.
+  working_tr.SetMaxPressureForTest(GCNRegPressure(20, /*sgpr32=*/0));
+  best_tr.SetMaxPressureForTest(GCNRegPressure(40, /*sgpr32=*/0));
+  check("single-slot, working strictly better: returns false",
+        !working.CompletionCannotImproveUpon(best, single));
+
+  // 1c: working tied with best -- non-strict fires the prune.
+  working_tr.SetMaxPressureForTest(GCNRegPressure(30, /*sgpr32=*/0));
+  best_tr.SetMaxPressureForTest(GCNRegPressure(30, /*sgpr32=*/0));
+  check("single-slot, working tied: returns true (non-strict)",
+        working.CompletionCannotImproveUpon(best, single));
+
+  // --- Case 2: multi-slot NI+ND recipe (strict path) ---
+  // NumLeadingOnlyWorseningSlots = 1, NumSlots = 2, so strict mode.
+  const ScoreRecipe &multi = score_recipes::
+      kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea;
+
+  // 2a: working strictly worse on slot 0 -- strict fires.
+  working_tr.SetMaxPressureForTest(GCNRegPressure(40, /*sgpr32=*/0));
+  best_tr.SetMaxPressureForTest(GCNRegPressure(20, /*sgpr32=*/0));
+  check("multi-slot, working strictly worse on slot 0: returns true",
+        working.CompletionCannotImproveUpon(best, multi));
+
+  // 2b: working strictly better on slot 0.
+  working_tr.SetMaxPressureForTest(GCNRegPressure(20, /*sgpr32=*/0));
+  best_tr.SetMaxPressureForTest(GCNRegPressure(40, /*sgpr32=*/0));
+  check("multi-slot, working strictly better on slot 0: returns false",
+        !working.CompletionCannotImproveUpon(best, multi));
+
+  // 2c: working tied on slot 0 -- strict mode means ties don't prune.
+  // The ND slot-1 (area) could still let working catch up at completion,
+  // so we don't prune here even though both Scores are equal on the
+  // bound-safe prefix.
+  working_tr.SetMaxPressureForTest(GCNRegPressure(30, /*sgpr32=*/0));
+  best_tr.SetMaxPressureForTest(GCNRegPressure(30, /*sgpr32=*/0));
+  check("multi-slot, working tied on slot 0: returns false (strict)",
+        !working.CompletionCannotImproveUpon(best, multi));
+}
+
 // ---- OccupancyTargetUtil: LimitOccupancyAboveFloor wrapper ----
 
 void RunOccupancyTargetUtilShakedown(const MachineFunction &mf) {
@@ -6196,6 +6282,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunOnlyWorsensOverCompletionShakedown();
   RunRecipeBoundSafePrefixShakedown();
   RunScoreLeadingSlotsCompareShakedown();
+  RunCompletionCannotImproveUponShakedown(MF);
   RunOccupancyTargetUtilShakedown(MF);
   RunVGPRSpillAreaAccumulatorShakedown(MF);
 
