@@ -5803,6 +5803,120 @@ void RunRecipeBoundSafePrefixShakedown() {
                   .NumLeadingOnlyWorseningSlots() == 1);
 }
 
+// ---- ScoreRecipe::IsPressurePrimary +
+//      PHT::{DimHasPartitionDeterminedSuffix, IsApplicableToRecipe,
+//             IsParetoSoundForRecipe} ----
+//
+// Covers the routing-vs-soundness split:
+//   - IsPressurePrimary: primary-slot ownership check; parallel to
+//     IsLengthPrimary. PHT::IsApplicableToRecipe forwards to it.
+//   - DimHasPartitionDeterminedSuffix: per-dim soundness primitive.
+//   - IsParetoSoundForRecipe: walks every slot via the primitive.
+//
+// Tests are constexpr-only -- no DAG/SC needed.
+void RunPressureHistoryRoutingAndSoundnessShakedown() {
+  llvm::outs()
+      << "  PHT routing-and-soundness shakedown:\n";
+  auto check = [&](const char *desc, bool ok) {
+    llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL")
+                 << "\n";
+    if (!ok) {
+      report_fatal_error(
+          "PHT routing-and-soundness shakedown: failure");
+    }
+  };
+
+  // ---- ScoreRecipe::IsPressurePrimary ----
+  check("MaximizeRegisterOccupancy: IsPressurePrimary=true",
+        score_recipes::kMaximizeRegisterOccupancy.IsPressurePrimary());
+  check("MaximizeContinuousRegisterOccupancyScore: IsPressurePrimary=true",
+        score_recipes::kMaximizeContinuousRegisterOccupancyScore
+            .IsPressurePrimary());
+  check("Peak+area composite: IsPressurePrimary=true",
+        score_recipes::
+            kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea
+                .IsPressurePrimary());
+  check("MinimizeScheduleLength: IsPressurePrimary=false",
+        !score_recipes::kMinimizeScheduleLength.IsPressurePrimary());
+  check("Length+ilp+occ composite: IsPressurePrimary=false",
+        !score_recipes::
+             kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore
+                 .IsPressurePrimary());
+
+  // Pressure-primary should be mutually exclusive with length-primary.
+  check("Pressure-primary and length-primary mutually exclusive (peak)",
+        score_recipes::kMaximizeContinuousRegisterOccupancyScore
+                .IsPressurePrimary() !=
+            score_recipes::kMaximizeContinuousRegisterOccupancyScore
+                .IsLengthPrimary());
+  check("Pressure-primary and length-primary mutually exclusive (length)",
+        score_recipes::kMinimizeScheduleLength.IsPressurePrimary() !=
+            score_recipes::kMinimizeScheduleLength.IsLengthPrimary());
+
+  // ---- PHT::DimHasPartitionDeterminedSuffix ----
+  check("DimHasPartitionDeterminedSuffix(kRegisterOcc)=true",
+        PressureHistoryTracker::DimHasPartitionDeterminedSuffix(
+            ScoreDimension::kRegisterOcc));
+  check("DimHasPartitionDeterminedSuffix(kContinuousOccScore)=true",
+        PressureHistoryTracker::DimHasPartitionDeterminedSuffix(
+            ScoreDimension::kContinuousOccScore));
+  check("DimHasPartitionDeterminedSuffix(kContinuousOccArea)=true",
+        PressureHistoryTracker::DimHasPartitionDeterminedSuffix(
+            ScoreDimension::kContinuousOccArea));
+  check("DimHasPartitionDeterminedSuffix(kVgprSpillArea)=true",
+        PressureHistoryTracker::DimHasPartitionDeterminedSuffix(
+            ScoreDimension::kVgprSpillArea));
+  check("DimHasPartitionDeterminedSuffix(kScheduleLength)=false",
+        !PressureHistoryTracker::DimHasPartitionDeterminedSuffix(
+            ScoreDimension::kScheduleLength));
+  check("DimHasPartitionDeterminedSuffix(kIlpScore)=false",
+        !PressureHistoryTracker::DimHasPartitionDeterminedSuffix(
+            ScoreDimension::kIlpScore));
+
+  // ---- PHT::IsApplicableToRecipe (routing) ----
+  check("PHT::IsApplicableToRecipe(MaximizeContOccScore)=true",
+        PressureHistoryTracker::IsApplicableToRecipe(
+            score_recipes::kMaximizeContinuousRegisterOccupancyScore));
+  check("PHT::IsApplicableToRecipe(MinimizeScheduleLength)=false",
+        !PressureHistoryTracker::IsApplicableToRecipe(
+            score_recipes::kMinimizeScheduleLength));
+
+  // ---- PHT::IsParetoSoundForRecipe ----
+  check("IsParetoSoundForRecipe(MaximizeContOccScore)=true",
+        PressureHistoryTracker::IsParetoSoundForRecipe(
+            score_recipes::kMaximizeContinuousRegisterOccupancyScore));
+  check("IsParetoSoundForRecipe(peak+area)=true",
+        PressureHistoryTracker::IsParetoSoundForRecipe(
+            score_recipes::
+                kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea));
+  check(
+      "IsParetoSoundForRecipe(MinimizeScheduleLength)=false (length unsafe)",
+      !PressureHistoryTracker::IsParetoSoundForRecipe(
+          score_recipes::kMinimizeScheduleLength));
+  check(
+      "IsParetoSoundForRecipe(length+ilp+occ)=false (length AND ilp unsafe)",
+      !PressureHistoryTracker::IsParetoSoundForRecipe(
+          score_recipes::
+              kMinimizeScheduleLengthThenMaximizeIlpScoreThenMaximizeContinuousOccupancyScore));
+
+  // Mixed recipe: pressure-primary + length tiebreak. Routes to PHT
+  // (primary is pressure-derived) but is NOT Pareto-sound (length
+  // tiebreak's suffix depends on prefix). Exercises the routing-vs-
+  // soundness split: the ctor would fatal on this, even though the
+  // routing predicate accepts it. Constructed inline since no named
+  // legacy recipe has this shape.
+  constexpr ScoreRecipe kPressurePrimaryWithLengthTiebreak{{
+      MetricSlot{ScoreDimension::kContinuousOccScore, Polarity::kMaximize},
+      MetricSlot{ScoreDimension::kScheduleLength, Polarity::kMinimize},
+  }};
+  check("Pressure+lengthTiebreak: IsApplicableToRecipe=true (routes to PHT)",
+        PressureHistoryTracker::IsApplicableToRecipe(
+            kPressurePrimaryWithLengthTiebreak));
+  check("Pressure+lengthTiebreak: IsParetoSoundForRecipe=false (length unsafe)",
+        !PressureHistoryTracker::IsParetoSoundForRecipe(
+            kPressurePrimaryWithLengthTiebreak));
+}
+
 // ---- Score::IsWorseOnLeadingSlots / IsAtMostAsGoodOnLeadingSlots ----
 
 void RunScoreLeadingSlotsCompareShakedown() {
@@ -6348,6 +6462,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunScoreShakedown();
   RunOnlyWorsensOverCompletionShakedown();
   RunRecipeBoundSafePrefixShakedown();
+  RunPressureHistoryRoutingAndSoundnessShakedown();
   RunScoreLeadingSlotsCompareShakedown();
   RunCompletionCannotImproveUponShakedown(MF);
   RunOccupancyTargetUtilShakedown(MF);

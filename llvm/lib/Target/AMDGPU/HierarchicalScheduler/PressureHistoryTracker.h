@@ -120,72 +120,91 @@ class PressureHistoryTracker {
   /// Type alias so the inline capacity is set in one place.
   using Bucket = SmallVector<Entry, 1>;
 
-  /// True iff this tracker's prune is sound and well-defined for
-  /// `recipe`. DfsSearch reads this to decide whether to construct a
-  /// PHT for a given policy; the constructor re-checks it and
-  /// fatal-errors on a mismatch (so any other caller that bypasses
-  /// the DfsSearch gate still trips loudly).
+  /// Routing predicate: does `recipe` route to PHT? Parallel to
+  /// LengthHistoryTracker::IsApplicableToRecipe -- each tracker
+  /// class declares which recipe shapes "belong" to it, and
+  /// DfsSearch reads these predicates at construction to decide
+  /// which tracker (if any) to build. PHT owns recipes whose
+  /// primary dim is computed by the register-pressure tracker; the
+  /// recipe-side check is ScoreRecipe::IsPressurePrimary().
   ///
-  /// What this predicate is measuring (formally): for the recipe's
-  /// PRIMARY slot, "is full-Score Pareto dominance over this slot
-  /// alone a sound completion-prune?" The dominance argument is:
-  ///
-  ///   if prefix A dominates prefix B at the same partition P, then
-  ///   A's best completion (across all suffix orderings) must score
-  ///   at least as well as B's best completion.
-  ///
-  /// For this to hold on a single slot it is sufficient that the
-  /// slot's per-step contribution during the suffix is determined
-  /// only by the partition (which nodes are scheduled) and the
-  /// suffix ordering itself -- not by the prefix order that reached
-  /// the partition. When that holds, A's full score and B's full
-  /// score share the same suffix contribution for any chosen
-  /// suffix ordering, so the prefix dominance (A.prefix ≥ B.prefix)
-  /// carries cleanly to the completion (A.full ≥ B.full for every
-  /// suffix ordering, and therefore for each side's best).
-  ///
-  /// Polarity doesn't enter this question. The split is purely
-  /// structural: does the per-step contribution to this slot depend
-  /// on prefix-carried state (running peak, accumulated locks, ...)
-  /// or only on partition-and-suffix state (live set at each suffix
-  /// step, suffix-determined cycle delta, ...)?
-  ///
-  /// Per-dim verdict:
-  ///   * kRegisterOcc, kContinuousOccScore: peak-style. Final peak
-  ///     = max(prefix_peak, suffix_peak); the suffix's contribution
-  ///     to peak is determined by the partition's live set + suffix
-  ///     order, not the prefix order. → true.
-  ///   * kVgprSpillArea: per-step contribution
-  ///     max(0, vgpr_count - cap). vgpr_count at each suffix step is
-  ///     determined by the partition's live set + which suffix nodes
-  ///     have been scheduled so far; no prefix dependency. → true.
-  ///   * kContinuousOccArea: per-step contribution depends on
-  ///     running peak, which carries prefix_peak forward into the
-  ///     suffix (running_peak_at_step =
-  ///     max(prefix_peak, suffix-running-max)). The suffix's area
-  ///     contribution diverges between A and B according to whose
-  ///     prefix peak was lower. → false. (Sound only as a tiebreak
-  ///     paired with a peak primary; the peak slot then constrains
-  ///     prefix_peak so the running peak agrees between A and B.)
-  ///   * kScheduleLength: belongs to LHT; not PHT's concern. → false.
-  ///   * kIlpScore: locked-in ILP score depends on the prefix order
-  ///     in which producers were closed; suffix contribution is
-  ///     prefix-dependent and not analyzed beyond that. → false.
+  /// This is purely a routing check on the primary slot. It does
+  /// NOT validate the full recipe -- a recipe that routes here but
+  /// includes a tiebreak slot whose suffix contribution depends on
+  /// the prefix order (e.g. kScheduleLength or kIlpScore as a
+  /// tiebreak) would route to PHT but be unsound for the Pareto
+  /// prune. The ctor catches that via IsParetoSoundForRecipe below.
   static constexpr bool IsApplicableToRecipe(const ScoreRecipe &recipe) {
-    if (!recipe.slots[0]) {
+    return recipe.IsPressurePrimary();
+  }
+
+  /// Per-dim predicate used by the soundness check below. True iff
+  /// this dim's per-step contribution during the suffix from any
+  /// partition P depends only on (P's live set, suffix order so
+  /// far) -- not on the prefix order that reached P.
+  ///
+  /// That property is exactly the per-slot sufficient condition for
+  /// prefix Pareto dominance to carry to completion Pareto
+  /// dominance on that slot:
+  ///   A.prefix[i] >= B.prefix[i]
+  ///     + suffix contribution is the same for A and B at the same
+  ///       partition + same suffix order
+  ///     ==> A.full[i] >= B.full[i].
+  ///
+  /// Polarity doesn't enter -- the carry is structural.
+  ///
+  /// Per-dim:
+  ///   * kRegisterOcc, kContinuousOccScore (peak-style): final peak
+  ///     = max(prefix_peak, suffix_peak); suffix_peak is determined
+  ///     by P's live set + suffix order.
+  ///   * kContinuousOccArea: per-step contribution
+  ///     ContinuousScoreForPressure(cur_pressure_) -- cur_pressure_
+  ///     is the live set's pressure at that step, partition-
+  ///     determined per suffix step.
+  ///   * kVgprSpillArea: per-step contribution
+  ///     max(0, vgpr_count - cap) -- vgpr_count is live-set-derived,
+  ///     partition-determined per suffix step.
+  ///   * kScheduleLength: per-step cycle delta depends on the
+  ///     prefix's scheduled_cycle values.
+  ///   * kIlpScore: locked-in ILP depends on when producers were
+  ///     opened in the prefix and the order their first uses are
+  ///     scheduled.
+  ///
+  /// (This per-dim table happens to coincide with
+  /// IsPressurePrimary's pressure-derived set today, but that's a
+  /// fact about our current dims, not the same predicate. Adding a
+  /// future dim that's pressure-tracker-computed but prefix-
+  /// dependent -- or vice versa -- would split them.)
+  static constexpr bool DimHasPartitionDeterminedSuffix(ScoreDimension dim) {
+    switch (dim) {
+    case ScoreDimension::kRegisterOcc:
+    case ScoreDimension::kContinuousOccScore:
+    case ScoreDimension::kContinuousOccArea:
+    case ScoreDimension::kVgprSpillArea:
+      return true;
+    case ScoreDimension::kScheduleLength:
+    case ScoreDimension::kIlpScore:
       return false;
     }
-    switch (recipe.slots[0]->dim) {
-      case ScoreDimension::kRegisterOcc:
-      case ScoreDimension::kContinuousOccScore:
-      case ScoreDimension::kVgprSpillArea:
-        return true;
-      case ScoreDimension::kContinuousOccArea:
-      case ScoreDimension::kScheduleLength:
-      case ScoreDimension::kIlpScore:
-        return false;
-    }
     return false;
+  }
+
+  /// Soundness predicate: is PHT's full-Score Pareto-dominance
+  /// prune sound for `recipe`? Sufficient condition: every
+  /// populated slot's dim has partition-determined suffix
+  /// contribution. Then prefix Pareto dominance implies completion
+  /// Pareto dominance, which is what PHT's prune requires.
+  ///
+  /// Checked by the PHT ctor in addition to IsApplicableToRecipe.
+  /// A recipe that routes to PHT but has an unsafe tiebreak slot
+  /// trips this check rather than silently producing wrong prunes.
+  static constexpr bool IsParetoSoundForRecipe(const ScoreRecipe &recipe) {
+    for (const auto &slot : recipe.slots) {
+      if (slot && !DimHasPartitionDeterminedSuffix(slot->dim)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /// PHT exposes two `IsDominatedElseRecord` shapes:

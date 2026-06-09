@@ -160,11 +160,35 @@ struct ScoreRecipe {
   std::array<std::optional<MetricSlot>, kMaxScoreSlots> slots;
 
   /// True iff the primary slot's dimension is kScheduleLength.
-  /// Length-primary recipes drive the length pass (LHT-pruned);
-  /// non-length-primary recipes drive the occupancy pass
-  /// (PHT-pruned).
+  /// Length-primary recipes are owned by LengthHistoryTracker --
+  /// LHT::IsApplicableToRecipe routes them to LHT for history
+  /// pruning.
   constexpr bool IsLengthPrimary() const {
     return slots[0] && slots[0]->dim == ScoreDimension::kScheduleLength;
+  }
+
+  /// True iff the primary slot's dimension is computed by the
+  /// register-pressure tracker -- one of kRegisterOcc,
+  /// kContinuousOccScore, kContinuousOccArea, kVgprSpillArea.
+  /// Pressure-primary recipes are owned by PressureHistoryTracker;
+  /// PHT::IsApplicableToRecipe routes them to PHT for history
+  /// pruning. Parallel to IsLengthPrimary on the tracker-ownership
+  /// axis.
+  constexpr bool IsPressurePrimary() const {
+    if (!slots[0]) {
+      return false;
+    }
+    switch (slots[0]->dim) {
+    case ScoreDimension::kRegisterOcc:
+    case ScoreDimension::kContinuousOccScore:
+    case ScoreDimension::kContinuousOccArea:
+    case ScoreDimension::kVgprSpillArea:
+      return true;
+    case ScoreDimension::kScheduleLength:
+    case ScoreDimension::kIlpScore:
+      return false;
+    }
+    return false;
   }
 
   /// True iff length is primary AND polarity is kMaximize. The

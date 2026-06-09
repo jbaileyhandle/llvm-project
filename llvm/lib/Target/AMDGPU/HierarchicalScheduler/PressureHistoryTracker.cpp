@@ -30,14 +30,27 @@ PressureHistoryTracker::PressureHistoryTracker(
   // working_schedule_constructor_ is permitted to be null -- see
   // header for the test-fixture contract.
   //
-  // Recipe shape: DfsSearch already gates construction on
-  // IsApplicableToRecipe; the re-check here catches any other caller
-  // that bypassed the gate. See the predicate's doc for what's
-  // supported.
+  // Recipe checks (see PHT.h for each predicate's doc):
+  //   - IsApplicableToRecipe: routing. DfsSearch already gates
+  //     construction on this; the re-check here catches any other
+  //     caller that bypassed the gate.
+  //   - IsParetoSoundForRecipe: tiebreak-slot soundness. Pareto-
+  //     dominance prune is only sound when every slot's suffix
+  //     contribution is partition-determined; this catches recipes
+  //     that route here but mix in an unsound tiebreak slot (e.g.
+  //     pressure-primary + length tiebreak).
   if (!IsApplicableToRecipe(recipe_)) {
     report_fatal_error(
-        "PressureHistoryTracker: recipe shape not supported "
-        "(see PressureHistoryTracker::IsApplicableToRecipe)");
+        "PressureHistoryTracker: recipe does not route to PHT "
+        "(primary dim is not pressure-derived; see "
+        "PressureHistoryTracker::IsApplicableToRecipe)");
+  }
+  if (!IsParetoSoundForRecipe(recipe_)) {
+    report_fatal_error(
+        "PressureHistoryTracker: recipe contains a slot whose "
+        "suffix contribution depends on prefix order; full-Score "
+        "Pareto dominance would be unsound (see "
+        "PressureHistoryTracker::IsParetoSoundForRecipe)");
   }
 }
 
