@@ -689,6 +689,9 @@ int GCNRegisterTracker::GetScalarScore(const ScoreRecipe &recipe) const {
   case ScoreDimension::kContinuousOccArea:
     raw = GetContinuousOccupancyArea();
     break;
+  case ScoreDimension::kVgprSpillArea:
+    raw = GetVGPRSpillArea();
+    break;
   default:
     report_fatal_error(
         "GCNRegisterTracker::GetScalarScore: slot dim is not pressure-"

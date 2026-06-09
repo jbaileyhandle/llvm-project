@@ -439,6 +439,8 @@ ScheduleConstructor::GetScoreDimensionValue(ScoreDimension dim) const {
     return pressure_tracker_.GetContinuousOccupancyScore();
   case ScoreDimension::kContinuousOccArea:
     return pressure_tracker_.GetContinuousOccupancyArea();
+  case ScoreDimension::kVgprSpillArea:
+    return pressure_tracker_.GetVGPRSpillArea();
   case ScoreDimension::kScheduleLength:
     if (!length_tracker_) {
       report_fatal_error(

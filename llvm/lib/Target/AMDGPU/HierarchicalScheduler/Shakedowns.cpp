@@ -3954,6 +3954,80 @@ void RunVGPRSpillAreaAccumulatorShakedown(const MachineFunction &mf) {
   }
 }
 
+// Tests the ScoreDimension::kVgprSpillArea dispatch on
+// GCNRegisterTracker::GetScalarScore (the production single-slot
+// path) and ScheduleConstructor::GetScore (which feeds the dim
+// through its GetScoreDimensionValue private dispatch). Verifies:
+//   - The pressure tracker's scalar score for kVgprSpillArea Min
+//     equals -GetVGPRSpillArea() (Min polarity inverts).
+//   - The pressure tracker's scalar score for kVgprSpillArea Max
+//     equals +GetVGPRSpillArea().
+//   - SC's GetScore on a kVgprSpillArea Min recipe equals a Score
+//     constructed directly from -raw, exercising the SC-side
+//     dispatch path end-to-end.
+//
+// Drives a known non-zero spill area via the same test-mode delta
+// sequence and floor override the accumulator shakedown uses, so
+// the expected value is computable directly from the deltas.
+void RunVGPRSpillAreaScoreDispatchShakedown(const MachineFunction &mf) {
+  llvm::outs() << "  VGPR-spill-area score-dispatch shakedown:\n";
+  const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
+
+  auto graph = ScheduleGraph::BuildAreaTiebreakTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPaths();
+
+  ScheduleConstructor sc(*graph, st, mf);
+  auto &tracker = sc.GetPressureTrackerForTest();
+
+  // Same setup as RunVGPRSpillAreaAccumulatorShakedown -- floor=8 gives
+  // spill_cap=32 on gfx9; the delta sequence below pushes the running
+  // VGPR above the cap on steps B/M and accumulates spill area = 6.
+  constexpr unsigned kTestFloor = 8;
+  tracker.SetOccupancyFloorForTest(kTestFloor);
+  std::vector<int> vgpr_deltas = {+10, +25, 0, -15, -10, -10};
+  tracker.EnableTestModeForTest(vgpr_deltas);
+
+  SmallVector<ScheduleNode *> nodes(graph->GetTopoOrder().begin(),
+                                    graph->GetTopoOrder().end());
+  for (ScheduleNode *node : nodes) {
+    sc.Schedule(node);
+  }
+
+  const int64_t raw_area = tracker.GetVGPRSpillArea();
+  llvm::outs() << "    accumulated spill area=" << raw_area << "\n";
+
+  constexpr ScoreRecipe kSpillAreaMin{{
+      MetricSlot{ScoreDimension::kVgprSpillArea, Polarity::kMinimize},
+  }};
+  constexpr ScoreRecipe kSpillAreaMax{{
+      MetricSlot{ScoreDimension::kVgprSpillArea, Polarity::kMaximize},
+  }};
+
+  const int scalar_min = tracker.GetScalarScore(kSpillAreaMin);
+  const int scalar_max = tracker.GetScalarScore(kSpillAreaMax);
+  const Score sc_score_min = sc.GetScore(kSpillAreaMin);
+  const Score expected_score_min =
+      Score::Make({Score::Lower(raw_area)});
+
+  bool min_ok = scalar_min == -static_cast<int>(raw_area);
+  bool max_ok = scalar_max == static_cast<int>(raw_area);
+  bool sc_ok = sc_score_min == expected_score_min;
+
+  llvm::outs() << "    GCNRegisterTracker::GetScalarScore Min == -raw: "
+               << (min_ok ? "PASS" : "FAIL") << "\n";
+  llvm::outs() << "    GCNRegisterTracker::GetScalarScore Max == +raw: "
+               << (max_ok ? "PASS" : "FAIL") << "\n";
+  llvm::outs() << "    ScheduleConstructor::GetScore Min == expected: "
+               << (sc_ok ? "PASS" : "FAIL") << "\n";
+
+  tracker.ClearTargetAndFloorOverridesForTest();
+  if (!(min_ok && max_ok && sc_ok)) {
+    report_fatal_error(
+        "VGPR-spill-area score-dispatch shakedown failed");
+  }
+}
+
 // Tests GCNRegisterTracker::NoHistoryClone:
 //   1. Build a parent tracker with track_pressure_history=true,
 //      schedule a prefix of nodes so it has non-trivial
@@ -6278,6 +6352,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunCompletionCannotImproveUponShakedown(MF);
   RunOccupancyTargetUtilShakedown(MF);
   RunVGPRSpillAreaAccumulatorShakedown(MF);
+  RunVGPRSpillAreaScoreDispatchShakedown(MF);
 
   for (auto &region : regions_) {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {

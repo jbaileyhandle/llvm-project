@@ -52,6 +52,12 @@ enum class ScoreDimension {
   /// higher area = pressure kept lower throughout.
   kContinuousOccArea,
 
+  /// Sum-along-path of per-step VGPR counts above the configured
+  /// spill cap (GCNRegisterTracker::GetVGPRSpillArea). Sum-style;
+  /// higher area = more cycles spent in the spill regime. Use with
+  /// Min polarity to penalize spill-heavy schedules.
+  kVgprSpillArea,
+
   /// Schedule length in cycles (ScheduleLengthTracker::
   /// GetCurrentCycle). Sum-style.
   kScheduleLength,
@@ -101,6 +107,7 @@ struct MetricSlot {
         // polarity is Maximize.
         return pol == Polarity::kMaximize;
       case ScoreDimension::kContinuousOccArea:
+      case ScoreDimension::kVgprSpillArea:
       case ScoreDimension::kScheduleLength:
       case ScoreDimension::kIlpScore:
         // Sum-style raw: only GROWS over completion. Canonical NI

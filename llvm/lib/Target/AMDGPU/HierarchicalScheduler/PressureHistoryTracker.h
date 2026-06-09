@@ -126,15 +126,51 @@ class PressureHistoryTracker {
   /// fatal-errors on a mismatch (so any other caller that bypasses
   /// the DfsSearch gate still trips loudly).
   ///
-  /// Sound shapes today: primary dim is one of the peak-style
-  /// pressure metrics — kRegisterOcc or kContinuousOccScore. For
-  /// these, prefix Pareto dominance on the full Score carries
-  /// through to completion (peak dominance constrains the suffix's
-  /// running peak, which in turn constrains any sum-style tiebreak
-  /// like kContinuousOccArea). Other primaries — kScheduleLength
-  /// (use LHT instead), kContinuousOccArea (sum-style alone is not
-  /// dominance-preserving without a peak slot), kIlpScore (not
-  /// analyzed) — are rejected.
+  /// What this predicate is measuring (formally): for the recipe's
+  /// PRIMARY slot, "is full-Score Pareto dominance over this slot
+  /// alone a sound completion-prune?" The dominance argument is:
+  ///
+  ///   if prefix A dominates prefix B at the same partition P, then
+  ///   A's best completion (across all suffix orderings) must score
+  ///   at least as well as B's best completion.
+  ///
+  /// For this to hold on a single slot it is sufficient that the
+  /// slot's per-step contribution during the suffix is determined
+  /// only by the partition (which nodes are scheduled) and the
+  /// suffix ordering itself -- not by the prefix order that reached
+  /// the partition. When that holds, A's full score and B's full
+  /// score share the same suffix contribution for any chosen
+  /// suffix ordering, so the prefix dominance (A.prefix ≥ B.prefix)
+  /// carries cleanly to the completion (A.full ≥ B.full for every
+  /// suffix ordering, and therefore for each side's best).
+  ///
+  /// Polarity doesn't enter this question. The split is purely
+  /// structural: does the per-step contribution to this slot depend
+  /// on prefix-carried state (running peak, accumulated locks, ...)
+  /// or only on partition-and-suffix state (live set at each suffix
+  /// step, suffix-determined cycle delta, ...)?
+  ///
+  /// Per-dim verdict:
+  ///   * kRegisterOcc, kContinuousOccScore: peak-style. Final peak
+  ///     = max(prefix_peak, suffix_peak); the suffix's contribution
+  ///     to peak is determined by the partition's live set + suffix
+  ///     order, not the prefix order. → true.
+  ///   * kVgprSpillArea: per-step contribution
+  ///     max(0, vgpr_count - cap). vgpr_count at each suffix step is
+  ///     determined by the partition's live set + which suffix nodes
+  ///     have been scheduled so far; no prefix dependency. → true.
+  ///   * kContinuousOccArea: per-step contribution depends on
+  ///     running peak, which carries prefix_peak forward into the
+  ///     suffix (running_peak_at_step =
+  ///     max(prefix_peak, suffix-running-max)). The suffix's area
+  ///     contribution diverges between A and B according to whose
+  ///     prefix peak was lower. → false. (Sound only as a tiebreak
+  ///     paired with a peak primary; the peak slot then constrains
+  ///     prefix_peak so the running peak agrees between A and B.)
+  ///   * kScheduleLength: belongs to LHT; not PHT's concern. → false.
+  ///   * kIlpScore: locked-in ILP score depends on the prefix order
+  ///     in which producers were closed; suffix contribution is
+  ///     prefix-dependent and not analyzed beyond that. → false.
   static constexpr bool IsApplicableToRecipe(const ScoreRecipe &recipe) {
     if (!recipe.slots[0]) {
       return false;
@@ -142,6 +178,7 @@ class PressureHistoryTracker {
     switch (recipe.slots[0]->dim) {
       case ScoreDimension::kRegisterOcc:
       case ScoreDimension::kContinuousOccScore:
+      case ScoreDimension::kVgprSpillArea:
         return true;
       case ScoreDimension::kContinuousOccArea:
       case ScoreDimension::kScheduleLength:
