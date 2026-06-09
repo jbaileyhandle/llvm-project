@@ -28,11 +28,17 @@ PressureHistoryTracker::PressureHistoryTracker(
         "PressureHistoryTracker: scheduled_set_tracker must not be null");
   }
   // working_schedule_constructor_ is permitted to be null -- see
-  // header for the test-fixture contract. The recipe is held but
-  // not validated: PHT is constructed by DfsSearch for every policy
-  // (including length-primary ones that never query it), so a
-  // construction-time recipe check would over-reject. Conditional
-  // construction is a TODO follow-up; see DfsSearch.h.
+  // header for the test-fixture contract.
+  //
+  // Recipe shape: DfsSearch already gates construction on
+  // IsApplicableToRecipe; the re-check here catches any other caller
+  // that bypassed the gate. See the predicate's doc for what's
+  // supported.
+  if (!IsApplicableToRecipe(recipe_)) {
+    report_fatal_error(
+        "PressureHistoryTracker: recipe shape not supported "
+        "(see PressureHistoryTracker::IsApplicableToRecipe)");
+  }
 }
 
 bool PressureHistoryTracker::IsDominatedElseRecord() {

@@ -501,9 +501,9 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
       // (the indent tabs come from key_indent).
       << key_indent << "search:   calls=" << search.ScheduleCallCount().lifetime
       << " length_prunes="
-      << search.GetLengthHistoryTracker().PruneCount().lifetime
+      << search.LengthHistoryPruneCount().lifetime
       << " pressure_prunes="
-      << search.GetPressureHistoryTracker().PruneCount().lifetime
+      << search.PressureHistoryPruneCount().lifetime
       << " complete_schedules=" << search.CompleteSchedulesCount()
       << " best_updates=" << search.BestUpdatesCount()
       << " llvm_verif_rejects=" << search.LlvmTrackerRejectionsCount()
@@ -511,9 +511,9 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
       << key_indent << "          timed_out="
       << (search.RegionTimedOut() ? "yes" : "no")
       << " length_cap_hit="
-      << (search.GetLengthHistoryTracker().MemoryCapHit().lifetime ? "yes" : "no")
+      << (search.LengthHistoryMemoryCapHit().lifetime ? "yes" : "no")
       << " pressure_cap_hit="
-      << (search.GetPressureHistoryTracker().MemoryCapHit().lifetime ? "yes" : "no")
+      << (search.PressureHistoryMemoryCapHit().lifetime ? "yes" : "no")
       << "\n";
 
   // rates: per-region throughput so cross-scheduler comparisons
@@ -894,13 +894,13 @@ static LengthPassIterationLog CaptureIterationLog(
   log.elapsed_ms = search.GetCurrentRunElapsedMs();
   log.schedule_calls = search.ScheduleCallCount().current_run;
   log.length_history_prunes =
-      search.GetLengthHistoryTracker().PruneCount().current_run;
+      search.LengthHistoryPruneCount().current_run;
   log.pressure_history_prunes =
-      search.GetPressureHistoryTracker().PruneCount().current_run;
+      search.PressureHistoryPruneCount().current_run;
   log.length_history_cap_hit =
-      search.GetLengthHistoryTracker().MemoryCapHit().current_run;
+      search.LengthHistoryMemoryCapHit().current_run;
   log.pressure_history_cap_hit =
-      search.GetPressureHistoryTracker().MemoryCapHit().current_run;
+      search.PressureHistoryMemoryCapHit().current_run;
   log.region_timed_out_observed = search.RegionTimedOut();
   return log;
 }

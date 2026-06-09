@@ -3048,23 +3048,21 @@ void RunPressureHistoryTrackerShakedown(const GCNSubtarget &st) {
 // history pruning to demonstrate value.
 class TestLengthPolicyNoBoundsNoHistory : public DfsMinimizeLengthPolicy {
  public:
-  static constexpr bool kUseLengthHistoryPruning = false;
   static bool ShouldBoundSearch(const ScheduleConstructor &,
                                 const ScheduleConstructor &,
-                                LengthHistoryTracker &,
-                                PressureHistoryTracker &) {
+                                std::optional<LengthHistoryTracker> &,
+                                std::optional<PressureHistoryTracker> &) {
     return false;
   }
 };
 
 class TestLengthPolicyNoBoundsWithHistory : public DfsMinimizeLengthPolicy {
  public:
-  static constexpr bool kUseLengthHistoryPruning = true;
-  static bool ShouldBoundSearch(const ScheduleConstructor &,
-                                const ScheduleConstructor &,
-                                LengthHistoryTracker &length_history,
-                                PressureHistoryTracker &) {
-    return length_history.IsDominatedElseInsert();
+  static bool ShouldBoundSearch(
+      const ScheduleConstructor &, const ScheduleConstructor &,
+      std::optional<LengthHistoryTracker> &length_history,
+      std::optional<PressureHistoryTracker> &) {
+    return length_history->IsDominatedElseInsert();
   }
 };
 
@@ -3108,8 +3106,7 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   ScheduleConstructor hist_best = std::move(*hist_search.Run().schedule);
   int hist_length = hist_best.GetLengthTracker().GetCurrentCycle();
   int64_t hist_calls = hist_search.ScheduleCallCount().lifetime;
-  int hist_prunes =
-      hist_search.GetLengthHistoryTracker().PruneCount().lifetime;
+  int hist_prunes = hist_search.LengthHistoryPruneCount().lifetime;
 
   llvm::outs() << "    no-history: length=" << no_hist_length
                << " schedule_calls=" << no_hist_calls << "\n";
@@ -3146,11 +3143,10 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
 class TestPressurePolicyNoBoundsNoHistory
     : public DfsMaximizeOccupancyPolicy {
  public:
-  static constexpr bool kUsePressureHistoryPruning = false;
   static bool ShouldBoundSearch(const ScheduleConstructor &,
                                 const ScheduleConstructor &,
-                                LengthHistoryTracker &,
-                                PressureHistoryTracker &) {
+                                std::optional<LengthHistoryTracker> &,
+                                std::optional<PressureHistoryTracker> &) {
     return false;
   }
   static bool ShouldEndSearch(const ScheduleConstructor &,
@@ -3162,13 +3158,11 @@ class TestPressurePolicyNoBoundsNoHistory
 class TestPressurePolicyNoBoundsWithHistory
     : public DfsMaximizeOccupancyPolicy {
  public:
-  static constexpr bool kUsePressureHistoryPruning = true;
   static bool ShouldBoundSearch(
-      const ScheduleConstructor &,
-      const ScheduleConstructor &,
-      LengthHistoryTracker &,
-      PressureHistoryTracker &pressure_history) {
-    return pressure_history.IsDominatedElseRecord();
+      const ScheduleConstructor &, const ScheduleConstructor &,
+      std::optional<LengthHistoryTracker> &,
+      std::optional<PressureHistoryTracker> &pressure_history) {
+    return pressure_history->IsDominatedElseRecord();
   }
   static bool ShouldEndSearch(const ScheduleConstructor &,
                               const ScheduleConstructor &) {
@@ -3251,7 +3245,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   int hist_score =
       hist_best.GetPressureTracker().GetScalarScore(kPolicyMetric);
   int hist_prunes =
-      hist_search.GetPressureHistoryTracker().PruneCount().lifetime;
+      hist_search.PressureHistoryPruneCount().lifetime;
 
   llvm::outs() << "    no-history: best_score=" << no_hist_score
                << " schedule_calls=" << no_hist_calls << "\n";
@@ -3304,7 +3298,6 @@ class BfsDpVsDfsShakedownOraclePolicy : public DfsMaximizeOccupancyPolicy {
 class BfsDpVsDfsShakedownOracleNoHistoryPolicy
     : public DfsMaximizeOccupancyPolicy {
  public:
-  static constexpr bool kUsePressureHistoryPruning = false;
   static bool ShouldEndSearch(const ScheduleConstructor &,
                               const ScheduleConstructor &) {
     return false;
@@ -3312,8 +3305,8 @@ class BfsDpVsDfsShakedownOracleNoHistoryPolicy
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      LengthHistoryTracker & /*length_history*/,
-      PressureHistoryTracker & /*pressure_history*/) {
+      std::optional<LengthHistoryTracker> & /*length_history*/,
+      std::optional<PressureHistoryTracker> & /*pressure_history*/) {
     constexpr ScoreRecipe kMetric =
         score_recipes::kMaximizeContinuousRegisterOccupancyScore;
     return schedule_constructor.GetPressureTracker().GetScalarScore(kMetric) <=
@@ -3382,7 +3375,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
                << " integer=" << dfs_integer
                << " schedule_calls=" << dfs_search.ScheduleCallCount().lifetime
                << " history_prunes="
-               << dfs_search.GetPressureHistoryTracker().PruneCount().lifetime
+               << dfs_search.PressureHistoryPruneCount().lifetime
                << "\n";
 
   // DFS variant with history pruning off — isolates score-bound prune.

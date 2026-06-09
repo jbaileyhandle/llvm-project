@@ -154,6 +154,22 @@ class LengthHistoryTracker {
   /// place (matches PressureHistoryTracker::Bucket's intent).
   using Bucket = SmallVector<Entry, 2>;
 
+  /// True iff this tracker's prune is sound and well-defined for
+  /// `recipe`. DfsSearch reads this to decide whether to construct
+  /// an LHT for a given policy; the constructor re-checks it and
+  /// fatal-errors on a mismatch (so any other caller that bypasses
+  /// the DfsSearch gate still trips loudly).
+  ///
+  /// Sound shape: primary dim is kScheduleLength. LHT's dominance
+  /// is built around end_cycle + per-frontier-node LBs (length-axis
+  /// quantities); other primaries don't have a meaningful length-
+  /// axis dominance to memoize here, and route to PressureHistoryTracker
+  /// (peak-style primaries) or get no history tracker at all
+  /// (kIlpScore, until its own tracker is analyzed and added).
+  static constexpr bool IsApplicableToRecipe(const ScoreRecipe &recipe) {
+    return recipe.IsLengthPrimary();
+  }
+
   /// Construct over the bound trackers. `scheduled_set_tracker`
   /// and `length_tracker` must be non-null and outlive this
   /// tracker. `pressure_tracker` and `ilp_tracker` may be null

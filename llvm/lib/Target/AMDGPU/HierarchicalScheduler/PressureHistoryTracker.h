@@ -25,6 +25,21 @@
 // completion. The Pareto frontier preserves every non-dominated
 // entry and prunes only what is provably dominated on every slot.
 //
+// FUTURE: Pareto vs lex prune. Pareto is necessary here because the
+// production occupancy recipe (peak + area) contains a ND-canonical
+// slot (area Max grows over completion). For an all-NI-canonical
+// recipe, lex-on-prefix dominance is sound AND prunes strictly more
+// than Pareto: per-slot A.best_final = min(A.prefix, S_partition) >=
+// min(B.prefix, S_partition) = B.best_final, so the lex decision on
+// prefix carries to the lex decision on best completions. Today's
+// single-slot peak recipes are degenerate NI cases where lex and
+// Pareto coincide. To realize the optimization in multi-slot form,
+// the ND area dim could be replaced with its NI complement (see
+// Score.h's note on the (max_per_step * num_scheduled - accumulated)
+// deficit transformation) so the entire recipe becomes NI, then
+// IsDominatedElseRecord could switch to a lex check on the recorded
+// entries. Not implementing now; the all-NI recipe doesn't exist yet.
+//
 // Memory cap: soft-internal `kMaxEntries`. Insertion past the cap
 // silently no-ops (no insert, no fatal error) and sets a flag
 // readable via `MemoryCapWasHit()` for telemetry. Existing
@@ -104,6 +119,37 @@ class PressureHistoryTracker {
   /// allocate (revisit if profiling identifies that as a hot spot).
   /// Type alias so the inline capacity is set in one place.
   using Bucket = SmallVector<Entry, 1>;
+
+  /// True iff this tracker's prune is sound and well-defined for
+  /// `recipe`. DfsSearch reads this to decide whether to construct a
+  /// PHT for a given policy; the constructor re-checks it and
+  /// fatal-errors on a mismatch (so any other caller that bypasses
+  /// the DfsSearch gate still trips loudly).
+  ///
+  /// Sound shapes today: primary dim is one of the peak-style
+  /// pressure metrics — kRegisterOcc or kContinuousOccScore. For
+  /// these, prefix Pareto dominance on the full Score carries
+  /// through to completion (peak dominance constrains the suffix's
+  /// running peak, which in turn constrains any sum-style tiebreak
+  /// like kContinuousOccArea). Other primaries — kScheduleLength
+  /// (use LHT instead), kContinuousOccArea (sum-style alone is not
+  /// dominance-preserving without a peak slot), kIlpScore (not
+  /// analyzed) — are rejected.
+  static constexpr bool IsApplicableToRecipe(const ScoreRecipe &recipe) {
+    if (!recipe.slots[0]) {
+      return false;
+    }
+    switch (recipe.slots[0]->dim) {
+      case ScoreDimension::kRegisterOcc:
+      case ScoreDimension::kContinuousOccScore:
+        return true;
+      case ScoreDimension::kContinuousOccArea:
+      case ScoreDimension::kScheduleLength:
+      case ScoreDimension::kIlpScore:
+        return false;
+    }
+    return false;
+  }
 
   /// PHT exposes two `IsDominatedElseRecord` shapes:
   ///   1. `IsDominatedElseRecord(const Score &current_score)` --

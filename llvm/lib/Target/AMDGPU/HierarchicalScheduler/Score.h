@@ -111,6 +111,27 @@ struct MetricSlot {
   }
 };
 
+// FUTURE: deriving NI variants of ND dims via complement.
+//
+// kContinuousOccArea Max is ND-canonical: raw area grows over
+// completion, Max keeps it growing in canonical. Its NI counterpart
+// is the "area deficit" form:
+//     deficit_area = max_per_step * num_scheduled - accumulated_area
+// with Min polarity. Per-step deficit contribution is max_per_step -
+// per_step_score >= 0, so raw deficit is monotone-increasing => NI
+// under Min. The transformation is derivable from accumulated raw
+// plus the schedule count -- no per-step tracking needed.
+//
+// Why we'd want this: an all-NI recipe lets PressureHistoryTracker
+// downgrade from Pareto dominance to lex compare on prefix scores,
+// pruning strictly more (see PressureHistoryTracker.h's
+// "Pareto vs lex prune" note). Generalizes to any sum-style raw
+// with a known per-step ceiling (kIlpScore, etc.).
+//
+// Not implementing now; the all-NI multi-slot recipe doesn't exist
+// yet and the single-slot peak recipes that DO exist are lex-and-
+// Pareto-equivalent (degenerate NI).
+
 /// A ScoreRecipe describes HOW to compute a Score: an ordered list of
 /// at most kMaxScoreSlots MetricSlots (primary + tiebreakers). The
 /// recipe is the configuration; Score is the observed value computed

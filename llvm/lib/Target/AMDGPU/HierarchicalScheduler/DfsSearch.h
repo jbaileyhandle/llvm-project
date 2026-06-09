@@ -32,18 +32,27 @@ namespace hierarchical_scheduler {
 
 // Policy contract (the static methods below — Policy classes don't
 // inherit, they just have these by name):
-//   static constexpr ScheduleMetric kMetric;
+//   static constexpr ScoreRecipe kScoreRecipe;
 //   static void FilterAndSortReadyList(
 //       const ScheduleConstructor &working,
 //       SmallVectorImpl<const ScheduleNode *> &out);
 //   static bool ShouldBoundSearch(
 //       const ScheduleConstructor &schedule_constructor,
 //       const ScheduleConstructor &best_schedule_constructor,
-//       LengthHistoryTracker &length_history,
-//       PressureHistoryTracker &pressure_history);
+//       std::optional<LengthHistoryTracker> &length_history,
+//       std::optional<PressureHistoryTracker> &pressure_history);
 //   static bool ShouldEndSearch(
 //       const ScheduleConstructor &schedule_constructor,
 //       const ScheduleConstructor &best_schedule_constructor);
+//
+// DfsSearch constructs each history tracker only when its
+// IsApplicableToRecipe predicate accepts kScoreRecipe (LHT for
+// length-primary recipes, PHT for peak-style pressure-primary
+// recipes). Policies whose recipe matches receive a populated
+// optional and use `tracker->Whatever()`; policies whose recipe
+// doesn't match receive nullopt for that tracker and must not
+// dereference. Each policy uses whichever tracker its recipe
+// selects; the other parameter is ignored.
 //
 // FilterAndSortReadyList is provided with a default by SearchPolicyBase
 // (see SearchPolicies.h); concrete policies override as needed.
@@ -85,28 +94,36 @@ class DfsSearch {
         timeout_ms_(timeout_ms),
         working_schedule_constructor_(graph, st, mf),
         best_schedule_constructor_(graph.GetInputScheduleConstructor()),
-        // length_history_ binds to working_'s trackers and to the
-        // policy's ScoreRecipe; the tracker self-derives its
-        // include_pressure_dim / include_ilp_dim / length_max_mode
-        // flags from the recipe via HasDim() / IsLengthMaxMode().
-        // Constructed unconditionally; queried only when
-        // Policy::kUseLengthHistoryPruning is true (the `if constexpr`
-        // in Recurse dead-strips the consult/insert otherwise).
+        // length_history_ / pressure_history_ are conditional on the
+        // policy's recipe. Each tracker class exposes a static
+        // IsApplicableToRecipe(recipe) predicate that DfsSearch reads
+        // to decide whether to construct that tracker for this policy.
+        // Policies whose recipe matches LHT (length-primary) get LHT
+        // and a null pressure pointer in ShouldBoundSearch; policies
+        // matching PHT (peak-style pressure primary) get the reverse.
+        // The conditional avoids constructing a tracker the policy
+        // would never query, and -- because construction is gated --
+        // each tracker's ctor can recipe-shape-validate without over-
+        // rejecting (see PressureHistoryTracker::IsApplicableToRecipe
+        // and LengthHistoryTracker::IsApplicableToRecipe).
         length_history_(
-            &working_schedule_constructor_.GetScheduledSetTracker(),
-            &working_schedule_constructor_.GetLengthTracker(),
-            &working_schedule_constructor_.GetPressureTracker(),
-            &working_schedule_constructor_.GetIlpTracker(),
-            Policy::kScoreRecipe),
-        // pressure_history_ binds to working_'s scheduled-set
-        // tracker for partition keys, to working_ itself as the
-        // source for production GetScore reads, and to the policy's
-        // ScoreRecipe so PHT can call working_->GetScore(recipe) in
-        // its no-arg IsDominatedElseRecord overload.
+            LengthHistoryTracker::IsApplicableToRecipe(Policy::kScoreRecipe)
+                ? std::optional<LengthHistoryTracker>(
+                      std::in_place,
+                      &working_schedule_constructor_.GetScheduledSetTracker(),
+                      &working_schedule_constructor_.GetLengthTracker(),
+                      &working_schedule_constructor_.GetPressureTracker(),
+                      &working_schedule_constructor_.GetIlpTracker(),
+                      Policy::kScoreRecipe)
+                : std::nullopt),
         pressure_history_(
-            &working_schedule_constructor_.GetScheduledSetTracker(),
-            &working_schedule_constructor_,
-            Policy::kScoreRecipe) {
+            PressureHistoryTracker::IsApplicableToRecipe(Policy::kScoreRecipe)
+                ? std::optional<PressureHistoryTracker>(
+                      std::in_place,
+                      &working_schedule_constructor_.GetScheduledSetTracker(),
+                      &working_schedule_constructor_,
+                      Policy::kScoreRecipe)
+                : std::nullopt) {
     // Stamp the stopwatch's lifetime_start at construction. (This
     // first Start() also seeds current_run_start, which Run()
     // overwrites on every entry.) timing_.lifetime_start is
@@ -199,8 +216,12 @@ class DfsSearch {
   // multiple Run() calls (see ScheduleRegionForLengthPass).
   void ResetForReuse(int requested_target_length) {
     working_schedule_constructor_.Reset();
-    length_history_.Reset();
-    pressure_history_.Reset();
+    if (length_history_) {
+      length_history_->Reset();
+    }
+    if (pressure_history_) {
+      pressure_history_->Reset();
+    }
     best_schedule_constructor_ =
         working_schedule_constructor_.GetGraph().GetInputScheduleConstructor();
     should_end_search_ = false;
@@ -269,11 +290,23 @@ class DfsSearch {
     return working_schedule_constructor_.ScheduleCallCount();
   }
 
-  // Read-only access to the length history tracker. Useful for
-  // shakedowns that want to inspect prune_count, total_entries, etc.
-  // after Run() returns.
-  const LengthHistoryTracker &GetLengthHistoryTracker() const {
+  // Read-only access to the length history tracker. nullopt for
+  // policies whose recipe doesn't route to LHT (see ctor for the
+  // gating predicate). Callers that just need the prune counter or
+  // memory-cap-hit flag should prefer the helpers below, which
+  // return a default-constructed (zero / false) value when the
+  // tracker wasn't built -- avoids a has_value() check at every
+  // call site.
+  const std::optional<LengthHistoryTracker> &GetLengthHistoryTracker() const {
     return length_history_;
+  }
+  DualRunAndLifetimeCounter LengthHistoryPruneCount() const {
+    return length_history_ ? length_history_->PruneCount()
+                           : DualRunAndLifetimeCounter{};
+  }
+  DualRunAndLifetimeFlag LengthHistoryMemoryCapHit() const {
+    return length_history_ ? length_history_->MemoryCapHit()
+                           : DualRunAndLifetimeFlag{};
   }
 
   // Diagnostic counters — total count of complete schedules
@@ -303,10 +336,21 @@ class DfsSearch {
     return llvm_tracker_rejections_count_;
   }
 
-  // Read-only access to the pressure history tracker. Useful for
-  // shakedowns and per-region stat reporting.
-  const PressureHistoryTracker &GetPressureHistoryTracker() const {
+  // Read-only access to the pressure history tracker. nullopt for
+  // policies whose recipe doesn't route to PHT (see ctor for the
+  // gating predicate). Mirrors GetLengthHistoryTracker -- prefer
+  // the helpers below for prune-count / cap-hit consumers.
+  const std::optional<PressureHistoryTracker> &GetPressureHistoryTracker()
+      const {
     return pressure_history_;
+  }
+  DualRunAndLifetimeCounter PressureHistoryPruneCount() const {
+    return pressure_history_ ? pressure_history_->PruneCount()
+                             : DualRunAndLifetimeCounter{};
+  }
+  DualRunAndLifetimeFlag PressureHistoryMemoryCapHit() const {
+    return pressure_history_ ? pressure_history_->MemoryCapHit()
+                             : DualRunAndLifetimeFlag{};
   }
 
   // Test-only: enable delta-based synthetic pressure on both the
@@ -443,11 +487,17 @@ class DfsSearch {
     }
 
     // ShouldBoundSearch covers all prune decisions for this policy,
-    // including history-based domination when the policy opts in.
-    // It MAY MUTATE length_history_ and/or pressure_history_ (record
-    // current state, push fast-forward replay hints onto DfsSearch's
-    // replay queue) as part of its check — see the policy's
-    // ShouldBoundSearch contract and the trackers' class comments.
+    // including history-based domination when the policy's recipe
+    // routes to one of the trackers. It MAY MUTATE *length_history_
+    // and/or *pressure_history_ (record current state, push fast-
+    // forward replay hints onto DfsSearch's replay queue) as part
+    // of its check -- see the policy's ShouldBoundSearch contract
+    // and the trackers' class comments. The trackers are passed by
+    // reference to their std::optional<> wrapper: nullopt for any
+    // tracker DfsSearch declined to construct for this policy's
+    // recipe (see ctor); policies dereference via `->` after
+    // confirming has_value() (or just unconditionally when the
+    // policy's recipe guarantees presence).
     if (Policy::ShouldBoundSearch(working_schedule_constructor_,
                                   best_schedule_constructor_,
                                   length_history_,
@@ -537,20 +587,24 @@ class DfsSearch {
   // before each Run().
   int requested_target_length_ = std::numeric_limits<int>::max();
 
-  // History-based-domination table for length pruning. Bound to
-  // working_schedule_constructor_'s ScheduledSetTracker and
-  // ScheduleLengthTracker. Active only when
-  // Policy::kUseLengthHistoryPruning is true; for other policies
-  // the construction overhead is small but nonzero
-  LengthHistoryTracker length_history_;
+  // History-based-domination table for length pruning. Populated
+  // only when Policy::kScoreRecipe routes to LHT via
+  // LengthHistoryTracker::IsApplicableToRecipe (length-primary
+  // recipes). When populated, bound to working_schedule_constructor_'s
+  // ScheduledSetTracker and ScheduleLengthTracker. Nullopt for
+  // pressure-primary recipes -- their policy never queries this
+  // member and the tracker's storage isn't allocated.
+  std::optional<LengthHistoryTracker> length_history_;
 
-  // History-based-domination table for pressure pruning. Bound to
-  // working's ScheduledSetTracker for partition keys, and to
+  // History-based-domination table for pressure pruning. Populated
+  // only when Policy::kScoreRecipe routes to PHT via
+  // PressureHistoryTracker::IsApplicableToRecipe (peak-style
+  // pressure primary). When populated, bound to working's
+  // ScheduledSetTracker for partition keys and to
   // working_schedule_constructor_ for Score reads via
-  // ScheduleConstructor::GetScore. Active only when
-  // Policy::kUsePressureHistoryPruning is true; otherwise
-  // constructed but never queried.
-  PressureHistoryTracker pressure_history_;
+  // ScheduleConstructor::GetScore. Nullopt for length-primary
+  // recipes.
+  std::optional<PressureHistoryTracker> pressure_history_;
 };
 
 } // namespace hierarchical_scheduler

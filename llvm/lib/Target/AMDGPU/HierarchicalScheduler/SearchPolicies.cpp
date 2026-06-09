@@ -291,8 +291,8 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
 bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
-    LengthHistoryTracker &length_history,
-    PressureHistoryTracker & /*pressure_history*/) {
+    std::optional<LengthHistoryTracker> &length_history,
+    std::optional<PressureHistoryTracker> & /*pressure_history*/) {
   // Max acceptable schedule length is read straight from working's
   // length tracker, which DfsSearch keeps in sync with
   // min(requested_target_length, best.length - 1) at every event
@@ -354,12 +354,10 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
     return true;
   }
 
-  if constexpr (kUseLengthHistoryPruning) {
-    // Mutating: records the current prefix in length_history when
-    // it is NOT dominated. See LengthHistoryTracker class comment.
-    if (length_history.IsDominatedElseInsert()) {
-      return true;
-    }
+  // Mutating: records the current prefix in length_history when
+  // it is NOT dominated. See LengthHistoryTracker class comment.
+  if (length_history->IsDominatedElseInsert()) {
+    return true;
   }
   return false;
 }
@@ -462,8 +460,8 @@ void DfsMaximizeLengthPolicy::FilterAndSortReadyList(
 bool DfsMaximizeLengthPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
-    LengthHistoryTracker &length_history,
-    PressureHistoryTracker & /*pressure_history*/) {
+    std::optional<LengthHistoryTracker> &length_history,
+    std::optional<PressureHistoryTracker> & /*pressure_history*/) {
   // Gate 1: same as DfsMinimizeLengthPolicy -- effective occupancy
   // must meet target. Effective rather than raw register-only so the
   // spill regime doesn't over-prune.
@@ -479,14 +477,12 @@ bool DfsMaximizeLengthPolicy::ShouldBoundSearch(
     return true;
   }
 
-  // Length-axis-flipped dominance pruning. The tracker's
-  // DoesDominate consults length_max_mode_ (set true at
-  // construction for this policy via Policy::kLengthMaxMode) and
-  // flips end_cycle and frontier-LB direction accordingly.
-  if constexpr (kUseLengthHistoryPruning) {
-    if (length_history.IsDominatedElseInsert()) {
-      return true;
-    }
+  // Length-history dominance. LHT picks the length-axis direction
+  // (end_cycle and frontier-LB compare direction) from the recipe's
+  // IsLengthMaxMode() at construction time -- no per-policy gating
+  // needed here.
+  if (length_history->IsDominatedElseInsert()) {
+    return true;
   }
   return false;
 }
@@ -557,8 +553,8 @@ void DfsMaximizeOccupancyPolicy::FilterAndSortReadyList(
 bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
-    LengthHistoryTracker & /*length_history*/,
-    PressureHistoryTracker &pressure_history) {
+    std::optional<LengthHistoryTracker> & /*length_history*/,
+    std::optional<PressureHistoryTracker> &pressure_history) {
   // Score-bound: working's score (on the bound-safe leading slots
   // of the bound recipe) is non-increasing as more nodes are
   // scheduled. If working's score already at-most-matches best's
@@ -570,7 +566,7 @@ bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
 
   // Mutating: records the current state on miss. See
   // PressureHistoryTracker.
-  if (pressure_history.IsDominatedElseRecord()) {
+  if (pressure_history->IsDominatedElseRecord()) {
     return true;
   }
 

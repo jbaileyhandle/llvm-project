@@ -16,6 +16,7 @@
 #include "ScheduleConstructor.h"
 #include "SubgraphFormation.h"
 #include "llvm/ADT/SmallVector.h"
+#include <optional>
 
 namespace llvm {
 namespace hierarchical_scheduler {
@@ -109,10 +110,10 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   //   (b) the working schedule's register-only occupancy has dropped
   //       below the function occupancy target — no completion can
   //       recover, and we must not degrade occupancy; or
-  //   (c) (when kUseLengthHistoryPruning is true) some prior visit
-  //       to this same scheduled-set partition recorded a state
-  //       that dominates the current prefix on every Pareto
-  //       dimension — see AMDGPUHistoryDominationDesign.md §5.
+  //   (c) some prior visit to this same scheduled-set partition
+  //       recorded a state that dominates the current prefix on
+  //       every Pareto dimension — see
+  //       AMDGPUHistoryDominationDesign.md §5.
   //
   // SOUNDNESS:
   //   (a) LB is monotonically non-decreasing as nodes are scheduled
@@ -127,20 +128,17 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   //   (c) See LengthHistoryTracker class comment.
   //
   // SIDE EFFECT: when (c) does NOT prune, the current prefix is
-  // recorded in `length_history` for future-sibling comparison.
+  // recorded in `*length_history` for future-sibling comparison.
   // (IsDominatedElseInsert combines the check and record so we
-  // don't pay two bucket lookups per visit.)
-  //
-  // `pressure_history` parameter is unused here — present only
-  // because DfsSearch invokes ShouldBoundSearch with a uniform
-  // signature across policies; this policy doesn't opt into
-  // pressure-history pruning.
+  // don't pay two bucket lookups per visit.) This policy's recipe
+  // is length-primary, so DfsSearch guarantees length_history is
+  // populated; pressure_history is nullopt and unused.
   //
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      LengthHistoryTracker &length_history,
-      PressureHistoryTracker &pressure_history);
+      std::optional<LengthHistoryTracker> &length_history,
+      std::optional<PressureHistoryTracker> &pressure_history);
 
   // End the search globally once best matches the graph-level length
   // floor (max(NumSchedulingUnits, cp_length + 1)) — no schedule can
@@ -151,13 +149,6 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   static bool ShouldEndSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);
-
-  // Enable length history-domination pruning. DFS records each
-  // visited prefix's (end_cycle, frontier-LBs) in a per-partition
-  // Pareto frontier; on a later visit to the same partition, if any
-  // recorded entry dominates the current prefix on every dimension,
-  // the subtree is pruned. See AMDGPUHistoryDominationDesign.md §5.
-  static constexpr bool kUseLengthHistoryPruning = true;
 };
 
 // Length-min variant that, after finding a length-optimal schedule,
@@ -274,26 +265,21 @@ class DfsMaximizeLengthPolicy : public SearchPolicyBase {
   //       below the function occupancy target — same monotonicity
   //       argument as length-min: pressure only grows, occupancy
   //       only drops, so no completion can recover.
-  //   (b) (when kUseLengthHistoryPruning is true) history dominance
-  //       fires under the flipped length-axis direction — see
-  //       LengthHistoryTracker.
+  //   (b) length-history dominance — see LengthHistoryTracker.
   //
-  // `pressure_history` parameter unused — uniform signature with
-  // other policies.
+  // This policy's recipe is length-primary, so DfsSearch guarantees
+  // length_history is populated; pressure_history is nullopt and
+  // unused.
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      LengthHistoryTracker &length_history,
-      PressureHistoryTracker &pressure_history);
+      std::optional<LengthHistoryTracker> &length_history,
+      std::optional<PressureHistoryTracker> &pressure_history);
 
   // Always returns false — see class comment for the rationale.
   static bool ShouldEndSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);
-
-  // Enable length history-domination pruning, with the axis
-  // direction flipped via the recipe's IsLengthMaxMode().
-  static constexpr bool kUseLengthHistoryPruning = true;
 };
 
 // Policy for DFS when the objective is to maximize register-only
@@ -331,29 +317,27 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
 
   // Return true if no completion of the current partial schedule
   // can improve on best_schedule_constructor. Bounds:
-  //   (a) Score-bound: working's GetMetricScore(kMetric) is
-  //       non-increasing as nodes are scheduled (peak pressure
-  //       grows monotonically). If working's score is already
-  //       <= best's, no completion of working can strictly beat
-  //       best.
-  //   (b) History dominance (when kUsePressureHistoryPruning is
-  //       true): the pressure-history tracker reports the
-  //       current state can be pruned. See PressureHistoryTracker
-  //       for what the tracker checks and why pruning is safe.
+  //   (a) Score-bound: working's score on the bound-safe leading
+  //       slots of the recipe is non-increasing as nodes are
+  //       scheduled (peak pressure grows monotonically). If working
+  //       can't beat best on those slots, no completion can.
+  //   (b) Pressure-history dominance: the pressure-history tracker
+  //       reports the current state can be pruned. See
+  //       PressureHistoryTracker for what the tracker checks and
+  //       why pruning is safe.
   //
   // SIDE EFFECT: IsDominatedElseRecord can mutate the tracker
   // (recording state for future comparison). See
   // PressureHistoryTracker.
   //
-  // `length_history` parameter is unused here — present only
-  // because DfsSearch invokes ShouldBoundSearch with a uniform
-  // signature across policies. This policy doesn't opt into
-  // length-history pruning.
+  // This policy's recipe is peak-style pressure primary, so
+  // DfsSearch guarantees pressure_history is populated;
+  // length_history is nullopt and unused.
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      LengthHistoryTracker &length_history,
-      PressureHistoryTracker &pressure_history);
+      std::optional<LengthHistoryTracker> &length_history,
+      std::optional<PressureHistoryTracker> &pressure_history);
 
   // Called on completed schedules after the IsBetterThan/update step.
   // Return true to end the entire search and have DfsSearch::Run
@@ -364,10 +348,6 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
   static bool ShouldEndSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor);
-
-  // Enable pressure history-domination pruning. See
-  // PressureHistoryTracker.
-  static constexpr bool kUsePressureHistoryPruning = true;
 };
 
 // Like DfsMaximizeOccupancyPolicy, but among schedules with equal peak
@@ -395,13 +375,13 @@ class DfsMaximizeContinuousOccupancyThenAreaPolicy
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      LengthHistoryTracker & /*length_history*/,
-      PressureHistoryTracker &pressure_history) {
+      std::optional<LengthHistoryTracker> & /*length_history*/,
+      std::optional<PressureHistoryTracker> &pressure_history) {
     if (schedule_constructor.CompletionCannotImproveUpon(
             best_schedule_constructor, kScoreRecipe)) {
       return true;
     }
-    return pressure_history.IsDominatedElseRecord();
+    return pressure_history->IsDominatedElseRecord();
   }
 
   // Never end early: the base stops once best hits the occupancy

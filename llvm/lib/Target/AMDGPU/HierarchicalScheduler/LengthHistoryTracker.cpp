@@ -32,6 +32,15 @@ LengthHistoryTracker::LengthHistoryTracker(
     report_fatal_error(
         "LengthHistoryTracker: length_tracker must not be null");
   }
+  // Recipe shape: DfsSearch already gates construction on
+  // IsApplicableToRecipe; the re-check here catches any other caller
+  // that bypassed the gate. See the predicate's doc for what's
+  // supported.
+  if (!IsApplicableToRecipe(recipe)) {
+    report_fatal_error(
+        "LengthHistoryTracker: recipe shape not supported "
+        "(see LengthHistoryTracker::IsApplicableToRecipe)");
+  }
   // Length-max + ILP-dim is unsupported by design (see header).
   // Trip loudly on a stray configuration rather than silently
   // producing meaningless dominance results.
