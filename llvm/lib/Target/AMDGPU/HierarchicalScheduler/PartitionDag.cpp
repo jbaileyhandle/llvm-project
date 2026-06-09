@@ -89,16 +89,19 @@ bool PartitionDag::Build() {
 }
 
 PartitionNode *PartitionDag::CreateSourceNode() {
-  // Source uses a fresh BfsDp-preset ScheduleConstructor (length +
-  // ILP trackers off, schedule_order_ maintained so Schedule /
-  // Unschedule probe cycles round-trip cleanly). Inserted into
-  // partition_node_by_key_ directly rather than via FindOrInsert
-  // because the source isn't on any layer's queue — it goes
-  // straight into current_layer.
+  // Source's ScheduleConstructor is bound to BFS-DP's pressure-
+  // primary recipe. Under SC's recipe-driven gating, that means
+  // the length tracker and ILP tracker are both off (the recipe
+  // has no kScheduleLength dim and isn't length-primary), giving
+  // the per-LatticeNode snapshots the same lean shape the old
+  // BfsDp() preset produced. schedule_order_ is still maintained
+  // so probe Schedule / Unschedule round-trip cleanly. Inserted
+  // into partition_node_by_key_ directly rather than via
+  // FindOrInsert because the source isn't on any layer's queue --
+  // it goes straight into current_layer.
   nodes_.push_back(std::make_unique<PartitionNode>());
   source_ = nodes_.back().get();
-  source_->schedule_state.emplace(*graph_, *st_, *mf_,
-                                  ScheduleConstructorOptions::BfsDp());
+  source_->schedule_state.emplace(*graph_, *st_, *mf_, settings_.recipe);
   // Test-mode propagation: if EnableTestModeForTest was called on
   // this dag, apply the deltas to the source's tracker now (before
   // the first Schedule). GCNRegisterTracker::NoHistoryClone

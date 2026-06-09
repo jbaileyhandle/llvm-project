@@ -73,59 +73,16 @@ class MachineFunction;
 
 namespace hierarchical_scheduler {
 
-/// Construction-time configuration for ScheduleConstructor. All
-/// flags default to "full-featured" so existing call sites that
-/// don't pass an Options struct get the same behavior as before
-/// the refactor.
-///
-/// BFS-DP wants a stripped-down constructor: register tracker,
-/// scheduled-set tracker, and ready list, with everything else
-/// (length / ILP tracking, schedule_order_ history) off. Use
-/// `ScheduleConstructorOptions::BfsDp()` for that preset rather
-/// than spelling out each flip.
-///
-/// Caller bug to (a) consult a tracker that was disabled — e.g.,
-/// GetLengthTracker() / GetScheduleLength() when
-/// enable_length_tracking is false — or (b) clone via
-/// NoHistoryClone() when length / ILP tracking are enabled (the
-/// inner trackers don't have history-clearing clones yet; only
-/// GCNRegisterTracker does). Both fatal-error at runtime.
+/// Construction-time configuration for ScheduleConstructor. Holds
+/// only knobs orthogonal to the recipe; length / ILP tracker
+/// enablement is now derived from the optional recipe passed to
+/// the SC ctor (see ScheduleConstructor::ScheduleConstructor).
 struct ScheduleConstructorOptions {
-  /// Build a ScheduleLengthTracker. Disable when the caller has no
-  /// need for cycle / critical-path / max-acceptable-length info
-  /// (e.g., BFS-DP, whose objective is pressure not length).
-  bool enable_length_tracking = true;
-
-  /// Build an IlpTracker. Disable when ILP-score metrics aren't
-  /// needed (e.g., BFS-DP).
-  bool enable_ilp_tracking = true;
-
   /// Forwarded to the inner GCNRegisterTracker's same-named flag.
   /// Default false to match the tracker's default — the only
   /// reader of GetPressureHistory() is shakedown code; nothing in
   /// production consults it.
   bool track_pressure_history = false;
-
-  /// Preset for the current full-featured behavior. Same as a
-  /// default-constructed Options, but lets callers spell it
-  /// explicitly: `ScheduleConstructorOptions::Default()` documents
-  /// "I want everything on" rather than relying on the implicit
-  /// default. Useful for tests / debug snippets where the intent
-  /// is to mirror production.
-  static ScheduleConstructorOptions Default() {
-    return ScheduleConstructorOptions{};
-  }
-
-  /// Preset for BFS-DP usage: register tracker + scheduled set +
-  /// ready list, nothing else. Lets per-LatticeNode snapshots
-  /// stay small and cheap to clone.
-  static ScheduleConstructorOptions BfsDp() {
-    ScheduleConstructorOptions opts;
-    opts.enable_length_tracking = false;
-    opts.enable_ilp_tracking = false;
-    opts.track_pressure_history = false;
-    return opts;
-  }
 };
 
 class ScheduleConstructor {
@@ -136,11 +93,41 @@ public:
   /// in arbitrary insertion order; per-Recurse iteration priority is
   /// the search policy's responsibility (see Policy::
   /// FilterAndSortReadyList in SearchPolicies.h).
+  ///
+  /// Tracker enablement is recipe-driven:
+  ///   - nullopt (default) -> length and ILP trackers BOTH enabled.
+  ///     This is the "full-featured" mode -- correct for shakedowns,
+  ///     input baselines, and anywhere the caller wants every tracker
+  ///     available regardless of what the search compares on.
+  ///   - present recipe -> length tracker enabled iff
+  ///     `recipe.HasDim(kScheduleLength)`; ILP tracker enabled iff
+  ///     `recipe.IsLengthPrimary()`.
+  ///
+  /// Caveats with the ILP rule -- it's empirical, not derived from
+  /// the recipe's dim list:
+  ///   * The rule exists because the length-min sort heuristic in
+  ///     `DfsMinimizeLengthPolicy::FilterAndSortReadyList` consults
+  ///     the ILP tracker even though `kIlpScore` isn't in its
+  ///     comparison recipe. Tying ILP to `IsLengthPrimary()` covers
+  ///     that dependency without forcing kIlpScore into recipes that
+  ///     don't compare on it.
+  ///   * `DfsMaximizeLengthPolicy` is length-primary but its sort
+  ///     consults only the length tracker. The rule enables ILP for
+  ///     it anyway -- wasted construction, no correctness issue.
+  ///   * A future occupancy-primary policy that wanted ILP for sort
+  ///     heuristics would break the rule. There is no such policy
+  ///     today; adding one means revisiting this rule (perhaps by
+  ///     letting the policy override SC's ILP gate, or by promoting
+  ///     "sort-time tracker dependencies" to a recipe annotation).
+  ///
+  /// `options` carries the non-recipe knobs (today just
+  /// `track_pressure_history`); a default-constructed Options is
+  /// the right pick for nearly every caller.
   ScheduleConstructor(const ScheduleGraph &graph,
                       const GCNSubtarget &st,
                       const MachineFunction &mf,
-                      ScheduleConstructorOptions options =
-                          ScheduleConstructorOptions::Default());
+                      std::optional<ScoreRecipe> recipe = std::nullopt,
+                      ScheduleConstructorOptions options = {});
 
   /// Return a fresh ScheduleConstructor whose live state (register
   /// tracker live regs / cur pressure / remaining uses,
@@ -158,9 +145,9 @@ public:
   ///
   /// Fatal error if length / ILP tracking are enabled on the
   /// source (the inner trackers don't have history-clearing
-  /// clones yet; only GCNRegisterTracker does). BFS-DP construct
-  /// the source with `ScheduleConstructorOptions::BfsDp()` so
-  /// both are off and this path is well-defined.
+  /// clones yet; only GCNRegisterTracker does). BFS-DP constructs
+  /// the source with a pressure-primary recipe so both trackers
+  /// are off and this path is well-defined.
   ScheduleConstructor NoHistoryClone() const;
 
   /// Schedule a node. The node must be in the ready list.
@@ -216,7 +203,7 @@ public:
     if (!length_tracker_) {
       report_fatal_error(
           "ScheduleConstructor::GetScheduleLength called on a "
-          "constructor built with enable_length_tracking=false");
+          "constructor whose recipe has no kScheduleLength dim");
     }
     if (!IsDone()) {
       report_fatal_error(
@@ -272,7 +259,7 @@ public:
     if (!length_tracker_) {
       report_fatal_error(
           "ScheduleConstructor::GetLengthTracker called on a "
-          "constructor built with enable_length_tracking=false");
+          "constructor whose recipe has no kScheduleLength dim");
     }
     return *length_tracker_;
   }
@@ -281,7 +268,8 @@ public:
     if (!ilp_tracker_) {
       report_fatal_error(
           "ScheduleConstructor::GetIlpTracker called on a "
-          "constructor built with enable_ilp_tracking=false");
+          "constructor whose recipe is not length-primary "
+          "(see ScheduleConstructor ctor doc for the ILP gating rule)");
     }
     return *ilp_tracker_;
   }
@@ -296,8 +284,8 @@ public:
     if (!length_tracker_) {
       report_fatal_error(
           "ScheduleConstructor::SetMaxAcceptableScheduleLength "
-          "called on a constructor built with "
-          "enable_length_tracking=false");
+          "called on a constructor whose recipe has no "
+          "kScheduleLength dim");
     }
     length_tracker_->SetMaxAcceptableScheduleLength(
         max_acceptable_schedule_length);
@@ -460,10 +448,10 @@ private:
   ScheduleConstructorOptions options_;
   GCNRegisterTracker pressure_tracker_;
   /// std::optional so we can decline to build a length/ILP tracker
-  /// when the corresponding flag in options_ is false. Schedule /
+  /// when the constructor's recipe doesn't request it. See the
+  /// public ctor for the recipe-driven gating rule. Schedule /
   /// Unschedule / Reset and the public accessors gate on
-  /// has_value(). Built (emplace'd) in the body of the public
-  /// ctor based on the options.
+  /// has_value().
   std::optional<ScheduleLengthTracker> length_tracker_;
   std::optional<IlpTracker> ilp_tracker_;
   ScheduledSetTracker scheduled_set_tracker_;

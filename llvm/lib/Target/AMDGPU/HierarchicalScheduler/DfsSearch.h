@@ -92,6 +92,17 @@ class DfsSearch {
       : mf_(&mf),
         lis_(&lis),
         timeout_ms_(timeout_ms),
+        // DfsSearch uses the default (nullopt) recipe arg so its SC
+        // has all trackers on. Two reasons:
+        //   - Per-region telemetry reads length and ILP from best
+        //     after Run() returns, even for policies that don't
+        //     compare on those dims.
+        //   - `best_schedule_constructor_ = working_schedule_constructor_`
+        //     in Recurse requires both ends to share the same
+        //     tracker shape, and best is copy-constructed from the
+        //     full-featured input SC.
+        // Callers without those constraints can pass a recipe to
+        // get the recipe-driven lean tracker set.
         working_schedule_constructor_(graph, st, mf),
         best_schedule_constructor_(graph.GetInputScheduleConstructor()),
         // length_history_ / pressure_history_ are conditional on the
@@ -404,12 +415,21 @@ class DfsSearch {
   //   refining:     offset = 0 → bound = best.length, same-length
   //     completions allowed.
   void RecomputeWorkingMaxScheduleCycles() {
-    int best_length = best_schedule_constructor_.GetScheduleLength();
-    constexpr int kImprovementOffset =
-        Policy::kScoreRecipe.RefinesAtSameLength() ? 0 : 1;
-    working_schedule_constructor_.SetMaxAcceptableScheduleLength(
-        std::min(requested_target_length_,
-                 best_length - kImprovementOffset));
+    // Only meaningful when the policy's recipe has kScheduleLength
+    // (and therefore working SC's length tracker is built).
+    // Occupancy-primary policies don't compare on length and
+    // don't gate on max-acceptable-length; skip cleanly.
+    if constexpr (!Policy::kScoreRecipe.HasDim(
+                      ScoreDimension::kScheduleLength)) {
+      return;
+    } else {
+      int best_length = best_schedule_constructor_.GetScheduleLength();
+      constexpr int kImprovementOffset =
+          Policy::kScoreRecipe.RefinesAtSameLength() ? 0 : 1;
+      working_schedule_constructor_.SetMaxAcceptableScheduleLength(
+          std::min(requested_target_length_,
+                   best_length - kImprovementOffset));
+    }
   }
 
   // If the region elapsed time has reached the policy's per-region

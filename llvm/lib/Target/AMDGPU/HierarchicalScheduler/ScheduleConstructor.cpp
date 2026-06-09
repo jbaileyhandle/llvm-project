@@ -26,18 +26,39 @@ using namespace llvm::hierarchical_scheduler;
 ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
                                          const GCNSubtarget &st,
                                          const MachineFunction &mf,
+                                         std::optional<ScoreRecipe> recipe,
                                          ScheduleConstructorOptions options)
     : graph_(&graph),
       options_(options),
       pressure_tracker_(graph, mf, options.track_pressure_history),
+      // Tracker gating rules (see ctor doc for the rationale and
+      // caveats):
+      //   length tracker enabled iff recipe absent OR recipe
+      //   declares kScheduleLength.
+      //   ILP tracker enabled iff recipe absent OR recipe is
+      //   length-primary.
+      //
+      // The ILP rule is the load-bearing compromise: length-primary
+      // policies' ready-list sort heuristic consults the ILP tracker
+      // even when kIlpScore isn't a comparison slot. Tying ILP to
+      // IsLengthPrimary() covers that without forcing kIlpScore into
+      // recipes that don't compare on it -- at the cost of (a) a
+      // wasted ILP tracker for DfsMaximizeLengthPolicy (length-
+      // primary, doesn't use ILP for sort) and (b) zero coverage for
+      // a hypothetical future occupancy-primary policy that wants
+      // ILP in its sort. The current policy set fits this rule;
+      // adding a policy that breaks it means revisiting the gating
+      // (e.g., a per-policy "extra trackers" hook or a recipe
+      // annotation distinguishing comparison dims from sort
+      // dependencies).
       length_tracker_(
-          options.enable_length_tracking
+          (!recipe || recipe->HasDim(ScoreDimension::kScheduleLength))
               ? std::make_optional<ScheduleLengthTracker>(graph, st)
               : std::nullopt),
-      ilp_tracker_(options.enable_ilp_tracking
-                       ? std::make_optional<IlpTracker>(graph,
-                                                        pressure_tracker_)
-                       : std::nullopt),
+      ilp_tracker_(
+          (!recipe || recipe->IsLengthPrimary())
+              ? std::make_optional<IlpTracker>(graph, pressure_tracker_)
+              : std::nullopt),
       scheduled_set_tracker_(
           &graph,
           length_tracker_ ? &*length_tracker_ : nullptr) {
@@ -50,11 +71,11 @@ ScheduleConstructor ScheduleConstructor::NoHistoryClone() const {
   // own undo stacks but we haven't written NoHistoryClone equivalents
   // for them. Catch the misconfiguration loudly rather than silently
   // producing a clone with stale length/ILP state.
-  if (options_.enable_length_tracking || options_.enable_ilp_tracking) {
+  if (length_tracker_ || ilp_tracker_) {
     report_fatal_error(
         "ScheduleConstructor::NoHistoryClone called on a constructor "
-        "with enable_length_tracking or enable_ilp_tracking set. "
-        "Only the BFS-DP preset (both off) is currently supported.");
+        "whose recipe enables length or ILP tracking. Only the "
+        "pressure-only configuration (BFS-DP path) is supported.");
   }
   return ScheduleConstructor(*this, NoHistoryCloneTag{});
 }
