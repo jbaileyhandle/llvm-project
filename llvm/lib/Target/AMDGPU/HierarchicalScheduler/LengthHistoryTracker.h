@@ -109,26 +109,25 @@ class LengthHistoryTracker {
   /// InsertEntryForTest without going through the production
   /// schedule-the-DAG path.
   struct Entry {
-    int end_cycle;
+    /// Recipe-driven canonical Score, computed by walking the
+    /// tracker's bound ScoreRecipe slot-by-slot and feeding each
+    /// dim's value through the matching tracker (length -> length
+    /// tracker, kContinuousOccScore/kContinuousOccArea/kVgprSpillArea
+    /// -> pressure tracker, kIlpScore -> ILP tracker). Same shape
+    /// as PressureHistoryTracker::Entry::best_score; dominance is
+    /// `score.Dominates(other.score)`. Polarity in each recipe slot
+    /// flips the canonical direction, so e.g. length-min and
+    /// length-max share the same compare logic differing only in
+    /// the recipe's slot-0 polarity.
+    Score score = Score::Make({});
     /// Frontier LBs sorted by node_topo_idx. Two prefixes in the
     /// same partition have the same frontier nodes (same topo
     /// indices) but possibly different LBs, so element-wise
-    /// comparison is a parallel walk.
+    /// comparison is a parallel walk. Direction follows
+    /// `length_max_mode_`: length-min wants lower LBs, length-max
+    /// wants higher LBs. Vector-shaped, so it stays a sibling
+    /// field rather than collapsing into the scalar Score.
     SmallVector<FrontierLb, 16> frontier_lbs;
-    /// Continuous register-occupancy score at the time this entry
-    /// was inserted. Always populated. Whether it participates in
-    /// dominance is gated by `include_pressure_dim_` on the
-    /// owning tracker — set true for the length-min-refine-
-    /// occupancy policy, false otherwise. When the gate is off,
-    /// this field is dead weight (~4 bytes/entry).
-    int continuous_occupancy_score;
-    /// Locked-in ILP score (IlpTracker::GetIlpScore) at the time
-    /// this entry was inserted. Always populated. Whether it
-    /// participates in dominance is gated by `include_ilp_dim_`
-    /// on the owning tracker. Used as the final tiebreaker on
-    /// the ILP dim — when per-open-producer inst_counts all tie,
-    /// A dominates B requires A.ilp_score >= B.ilp_score.
-    int ilp_score;
     /// Per-open-producer issue positions, sorted by reg ascending.
     /// Always populated. Whether it participates in dominance is
     /// gated by `include_ilp_dim_`. When the gate is on, A
@@ -136,7 +135,8 @@ class LengthHistoryTracker {
     /// for every open producer R (so A has same-or-more future
     /// ILP cover for each). Same-partition entries share the
     /// same vreg set in the same reg-sorted order, so element-
-    /// wise comparison is well-defined.
+    /// wise comparison is well-defined. Vector-shaped, doesn't
+    /// fit into Score either.
     ///
     /// Inline-16 capacity matches frontier_lbs to avoid heap
     /// allocs in the typical case (|open| ≤ 16). Cost: when
@@ -178,49 +178,35 @@ class LengthHistoryTracker {
   /// fallback (typically 0). Production callers (DfsSearch) wire
   /// all four trackers consistently.
   ///
-  /// Two optional dominance dims, in priority order (matching the
-  /// IsBetterThan tiebreak hierarchy length → ILP → occupancy):
+  /// The scalar Pareto axes -- length, continuous occupancy score,
+  /// VGPR spill area, ILP score -- are all carried by the Entry's
+  /// `score` field, computed from `recipe` by walking the recipe's
+  /// slots and feeding each dim's value through the matching
+  /// tracker. The set of slots in the recipe is the set of dims
+  /// that participate in scalar dominance; adding a new scalar dim
+  /// is "extend the recipe + extend the per-dim dispatch," no new
+  /// gate flag.
   ///
-  /// `include_ilp_dim` controls whether ILP participates in
-  /// dominance. False reproduces the prior behavior. True adds
-  /// two required-no-worse Pareto checks (both must hold for
-  /// prior to dominate current):
-  ///   1. For every open producer R, prior.inst_count[R] <=
-  ///      current.inst_count[R] (prior has same-or-more future
-  ///      ILP cover for every open producer).
-  ///   2. prior.ilp_score >= current.ilp_score (prior has same-
-  ///      or-more locked-in ILP).
-  /// Used by DfsMinimizeLengthRefineIlpPolicy.
+  /// Two dim-shaped axes don't fit into the scalar Score and stay
+  /// as sibling Entry fields:
   ///
-  /// `include_pressure_dim` controls whether the partial
-  /// schedule's continuous occupancy score (at insertion time)
-  /// participates in dominance. False reproduces the length-
-  /// only behavior; true adds a reversed-direction dim (higher
-  /// score is better) so prior dominates only if its score >=
-  /// current's. Used by DfsMinimizeLengthRefineOccupancyPolicy.
+  ///   * `frontier_lbs` (length-axis vector): per-frontier-node
+  ///     lower bounds. Direction follows length_max_mode_ derived
+  ///     from `recipe.IsLengthMaxMode()`: length-min wants lower
+  ///     LBs, length-max wants higher.
   ///
-  /// `length_max_mode` flips the direction of the length
-  /// dimensions (end_cycle and per-frontier-node LB). False
-  /// (default) is length-min semantics: lower end_cycle and
-  /// lower frontier LBs dominate. True is length-max semantics:
-  /// higher end_cycle and higher frontier LBs dominate. The
-  /// soundness argument mirrors length-min — propagating
-  /// component-wise no-smaller starting LBs through any postfix
-  /// ordering yields no-shorter completions, so dominated
-  /// entries can be pruned. Pressure direction is unaffected by
-  /// this flag (lower peak pressure still dominates regardless
-  /// of length direction).
+  ///   * `open_producer_inst_counts` (ILP-axis vector): per-open-
+  ///     producer issue positions. Gated by `include_ilp_dim_`
+  ///     derived from `recipe.HasDim(kIlpScore)`. When gated on,
+  ///     a Pareto carry check `a.inst_count[R] <= b.inst_count[R]`
+  ///     for every R must hold for `a` to dominate `b`.
   ///
   /// Combining `length_max_mode = true` with `include_ilp_dim =
-  /// true` is unsupported by design — length-max policies do not
+  /// true` is unsupported by design -- length-max policies do not
   /// participate in ILP refinement here, for simplicity. The
   /// constructor asserts against this combination so a stray
   /// future configuration trips loudly instead of silently
   /// producing meaningless dominance results.
-  ///
-  /// All Entry score fields are always populated regardless of
-  /// the gates — the gates only control whether the fields are
-  /// consulted by DoesDominate.
   ///
   /// The bitset-size >= 2 invariant required by PartitionKey's
   /// DenseMapInfo sentinels is enforced by ScheduledSetTracker's
@@ -312,13 +298,18 @@ class LengthHistoryTracker {
 
  private:
   /// Returns true iff `a` dominates `b` on every Pareto dimension.
-  /// Length dimensions (end_cycle and each frontier LB) use
-  /// smaller-is-better. When `include_pressure_dim` is true, also
-  /// requires a's continuous_occupancy_score >= b's
-  /// (higher-is-better — a reversed-direction dimension). When
-  /// `include_ilp_dim` is true, also requires a.inst_count[R] <=
-  /// b.inst_count[R] for every open producer R (parallel walk over
-  /// open_producer_inst_counts) AND a.ilp_score >= b.ilp_score.
+  /// Three layers:
+  ///   1. Scalar Score (via Score::Dominates): all recipe slots
+  ///      compared with polarity-applied "higher is better"
+  ///      semantics. Slot 0's polarity handles length min/max
+  ///      direction automatically; other slots take their
+  ///      direction from the recipe too.
+  ///   2. frontier_lbs (length-axis vector): parallel walk;
+  ///      direction follows length_max_mode_ (min mode wants
+  ///      a's LBs no greater, max mode wants no smaller).
+  ///   3. open_producer_inst_counts (ILP-axis vector, gated by
+  ///      include_ilp_dim_): parallel walk requiring
+  ///      a.inst_count[R] <= b.inst_count[R] for every R.
   /// Both Entries must be from the same partition: their
   /// frontier_lbs and open_producer_inst_counts vectors have
   /// equal length and parallel orderings.
@@ -326,24 +317,35 @@ class LengthHistoryTracker {
 
   /// Snapshot the bound trackers' current state into an Entry.
   /// Used by IsDominated and IsDominatedElseInsert to construct
-  /// the query Entry. Populates all score fields regardless of
-  /// the gates (DoesDominate consults them conditionally), with
-  /// fallback values when the corresponding tracker pointer is
-  /// null.
+  /// the query Entry. Populates the scalar Score from the bound
+  /// recipe + trackers, plus the two vector dims.
   Entry BuildQueryEntry() const;
+
+  /// Per-dim dispatch from the bound trackers to the raw value
+  /// for a given ScoreDimension. Mirrors
+  /// ScheduleConstructor::GetScoreDimensionValue's switch but
+  /// reads from the four trackers LHT was bound to. Returns 0
+  /// when the matching tracker is null (test-only path; production
+  /// callers wire all four trackers consistently).
+  int64_t GetDimRawValue(ScoreDimension dim) const;
 
   const ScheduledSetTracker *scheduled_set_tracker_;
   const ScheduleLengthTracker *length_tracker_;
   const GCNRegisterTracker *pressure_tracker_;
   const IlpTracker *ilp_tracker_;
-  /// Gate for the pressure-score dimension on dominance. See
-  /// constructor comment.
-  bool include_pressure_dim_;
-  /// Gate for the ILP dimension on dominance. See constructor
-  /// comment.
+  /// Recipe used to build the canonical scalar Score stored on
+  /// each Entry (see Entry::score). Captured at construction so
+  /// BuildQueryEntry can walk the slots without an extra pass-
+  /// through.
+  ScoreRecipe recipe_;
+  /// Gate for the ILP-axis vector dim (open_producer_inst_counts).
+  /// Derived at construction from `recipe.HasDim(kIlpScore)`.
   bool include_ilp_dim_;
-  /// Flip the direction of length-axis dominance (end_cycle and
-  /// per-frontier-node LB). See constructor comment.
+  /// Flip the direction of `frontier_lbs` element comparison.
+  /// Derived at construction from `recipe.IsLengthMaxMode()`. The
+  /// length-scalar direction is already encoded in `Entry::score`'s
+  /// slot-0 polarity, so it doesn't need this flag; only the
+  /// vector frontier-LB check does.
   bool length_max_mode_;
   DenseMap<PartitionKey, Bucket> table_;
   int total_entries_ = 0;

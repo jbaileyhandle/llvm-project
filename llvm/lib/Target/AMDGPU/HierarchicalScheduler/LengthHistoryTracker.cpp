@@ -21,7 +21,7 @@ LengthHistoryTracker::LengthHistoryTracker(
       length_tracker_(length_tracker),
       pressure_tracker_(pressure_tracker),
       ilp_tracker_(ilp_tracker),
-      include_pressure_dim_(recipe.HasDim(ScoreDimension::kContinuousOccScore)),
+      recipe_(recipe),
       include_ilp_dim_(recipe.HasDim(ScoreDimension::kIlpScore)),
       length_max_mode_(recipe.IsLengthMaxMode()) {
   if (scheduled_set_tracker_ == nullptr) {
@@ -64,28 +64,64 @@ LengthHistoryTracker::LengthHistoryTracker(
   // by ScheduledSetTracker's ctor — no recheck here.
 }
 
-LengthHistoryTracker::Entry LengthHistoryTracker::BuildQueryEntry() const {
-  // Skip the work when the corresponding gate is off — leave the
-  // field at its default (0 / empty) since DoesDominate won't
-  // consult it. When the gate is on but the tracker is null
-  // (test paths only — production wires both consistently), fall
-  // back to default too.
-  int continuous_occupancy_score = 0;
-  if (include_pressure_dim_ && pressure_tracker_ != nullptr) {
-    continuous_occupancy_score =
-        pressure_tracker_->GetContinuousOccupancyScore();
+// Per-dim dispatch from this tracker's bound trackers to the raw
+// value for a recipe slot. Mirrors
+// ScheduleConstructor::GetScoreDimensionValue's switch but pulls
+// from the four trackers LHT was bound to (rather than from a
+// ScheduleConstructor it doesn't have). Returns 0 when the matching
+// tracker is null -- test paths use that to stage Score values
+// directly via InsertEntryForTest without driving the production
+// trackers; production callers (DfsSearch) wire all four trackers
+// consistently so the null path never fires.
+int64_t LengthHistoryTracker::GetDimRawValue(ScoreDimension dim) const {
+  switch (dim) {
+  case ScoreDimension::kScheduleLength:
+    return length_tracker_->GetCurrentCycle();
+  case ScoreDimension::kRegisterOcc:
+    return pressure_tracker_ ? pressure_tracker_->GetRegisterOnlyOccupancy()
+                             : 0;
+  case ScoreDimension::kContinuousOccScore:
+    return pressure_tracker_
+               ? pressure_tracker_->GetContinuousOccupancyScore()
+               : 0;
+  case ScoreDimension::kContinuousOccArea:
+    return pressure_tracker_
+               ? pressure_tracker_->GetContinuousOccupancyArea()
+               : 0;
+  case ScoreDimension::kVgprSpillArea:
+    return pressure_tracker_ ? pressure_tracker_->GetVGPRSpillArea() : 0;
+  case ScoreDimension::kIlpScore:
+    return ilp_tracker_ ? ilp_tracker_->GetIlpScore() : 0;
   }
-  int ilp_score = 0;
+  llvm_unreachable("LengthHistoryTracker::GetDimRawValue: unknown dim");
+}
+
+LengthHistoryTracker::Entry LengthHistoryTracker::BuildQueryEntry() const {
+  // Walk recipe slots; for each populated slot, snapshot the raw
+  // value from the matching tracker and pair it with the slot's
+  // polarity. Score::Make applies polarity to produce the
+  // canonical "higher is better" form, the same shape as
+  // PressureHistoryTracker::Entry::best_score.
+  std::array<std::optional<Score::SlotInput>, kMaxScoreSlots> inputs{};
+  for (int i = 0; i < kMaxScoreSlots; ++i) {
+    if (!recipe_.slots[i]) {
+      continue;
+    }
+    inputs[i] = Score::SlotInput{GetDimRawValue(recipe_.slots[i]->dim),
+                                 recipe_.slots[i]->pol};
+  }
+
+  // open_producer_inst_counts: vector ILP dim, populated only when
+  // the gate is on (and a tracker is available). Otherwise leave
+  // empty.
   SmallVector<IlpTracker::OpenProducerInstCount, 16>
       open_producer_inst_counts;
   if (include_ilp_dim_ && ilp_tracker_ != nullptr) {
-    ilp_score = ilp_tracker_->GetIlpScore();
     open_producer_inst_counts =
         ilp_tracker_->GetOpenProducerInstCountsSnapshot();
   }
-  return Entry{length_tracker_->GetCurrentCycle(),
-               GetFrontierLbsSnapshot(),
-               continuous_occupancy_score, ilp_score,
+
+  return Entry{Score::Make(inputs), GetFrontierLbsSnapshot(),
                std::move(open_producer_inst_counts)};
 }
 
@@ -110,27 +146,23 @@ LengthHistoryTracker::GetFrontierLbsSnapshot() const {
 
 bool LengthHistoryTracker::DoesDominate(const Entry &a,
                                         const Entry &b) const {
-  // Length axes flip direction based on length_max_mode_. In min
-  // mode, lower end_cycle / lower frontier LB dominates (a beats b
-  // iff a's value is no greater). In max mode, higher end_cycle /
-  // higher frontier LB dominates (a beats b iff a's value is no
-  // smaller). Soundness in max mode: propagating component-wise
-  // no-smaller starting LBs through any postfix ordering yields
-  // no-shorter completions — the symmetric argument to the min-mode
-  // case. See the LengthHistoryTracker constructor comment.
-  if (length_max_mode_) {
-    if (a.end_cycle < b.end_cycle) {
-      return false;
-    }
-  } else {
-    if (a.end_cycle > b.end_cycle) {
-      return false;
-    }
+  // Scalar Pareto dominance: full Score.Dominates() over every
+  // recipe slot. Polarity in each slot encodes direction --
+  // length-min (Min polarity on kScheduleLength) maps lower raw
+  // cycles to higher canonical value, length-max (Max polarity)
+  // the reverse, and tiebreak slots (kContinuousOccScore Max,
+  // kVgprSpillArea Min, kIlpScore Max, ...) each carry their own
+  // polarity. So this single check covers what used to be three
+  // separate scalar comparisons (end_cycle, ilp_score,
+  // continuous_occupancy_score).
+  if (!a.score.Dominates(b.score)) {
+    return false;
   }
-  // Parallel walk over frontier_lbs. Same-partition invariant
-  // (caller restricts to one DenseMap bucket) guarantees same
-  // length and same node_topo_idx ordering, so we can ignore
-  // node_topo_idx and compare only the LBs.
+  // Frontier-LB parallel walk (length-axis vector). Direction
+  // follows length_max_mode_. Same-partition invariant (caller
+  // restricts to one DenseMap bucket) guarantees same length and
+  // same node_topo_idx ordering, so we can ignore node_topo_idx
+  // and compare only the LBs.
   for (size_t i = 0; i < a.frontier_lbs.size(); ++i) {
     if (length_max_mode_) {
       if (a.frontier_lbs[i].lower_bound < b.frontier_lbs[i].lower_bound) {
@@ -142,41 +174,34 @@ bool LengthHistoryTracker::DoesDominate(const Entry &a,
       }
     }
   }
-  // ILP dimension (in priority order before pressure: matches
-  // the IsBetterThan tiebreak hierarchy length → ILP → pressure).
-  // Two required-no-worse Pareto checks:
-  //   1. Per-open-producer: a.inst_count[R] <= b.inst_count[R]
-  //      for every R (same-partition entries share the same
-  //      reg-sorted order of open producers, so a parallel walk
-  //      aligns them). Ensures a has same-or-more future ILP
-  //      cover for every open producer.
-  //   2. Locked-in: a.ilp_score >= b.ilp_score (reversed
-  //      direction: higher is better).
-  // Together (1) and (2) imply a's max completion ILP >=
-  // b's max completion ILP — sound for refine-ILP dominance.
-  // Gated on include_ilp_dim_ (false in policies that don't
-  // refine ILP).
+  // ILP vector dim: per-open-producer issue positions. Gated on
+  // include_ilp_dim_ (recipe.HasDim(kIlpScore)). When on, a
+  // dominates b only if a.inst_count[R] <= b.inst_count[R] for
+  // every R (same-partition entries share the same reg-sorted
+  // order, so a parallel walk aligns them). This pairs with the
+  // ilp_score slot already in a.score / b.score: together they
+  // capture both same-or-more locked-in ILP and same-or-more
+  // future ILP cover.
+  //
+  // NOTE -- conservative on saturated producers. Each open producer
+  // R has a per-op desirable_spacing cap (see IlpTracker): the
+  // contribution at close is min(actual_spacing, desirable_spacing[R]),
+  // so once spacing meets the cap, further reductions in inst_count
+  // don't earn more credit. Two entries that are both already past
+  // saturation for R contribute identically, but this strict
+  // inst_count compare still discriminates them and keeps both on
+  // the frontier. That's a performance issue (extra incomparable
+  // entries) rather than a soundness issue -- the check never
+  // wrongly prunes, just under-prunes when both sides are saturated.
+  // A saturation-aware variant (clamp inst_count at
+  // current_issue_count - desirable_spacing[R] before comparing)
+  // would collapse those into equals; not implemented now.
   if (include_ilp_dim_) {
     for (size_t i = 0; i < a.open_producer_inst_counts.size(); ++i) {
       if (a.open_producer_inst_counts[i].inst_count >
           b.open_producer_inst_counts[i].inst_count) {
         return false;
       }
-    }
-    if (a.ilp_score < b.ilp_score) {
-      return false;
-    }
-  }
-  // Pressure-score dimension. Reversed direction: higher score is
-  // better, so a dominates iff a.score >= b.score. Pressure is
-  // monotonically non-decreasing during search, so the recorded
-  // score is an upper bound on any completion's score — making
-  // this dominance sound when paired with the length dimensions
-  // above. Gated on include_pressure_dim_ (false in the default
-  // length-only policy).
-  if (include_pressure_dim_) {
-    if (a.continuous_occupancy_score < b.continuous_occupancy_score) {
-      return false;
     }
   }
   return true;

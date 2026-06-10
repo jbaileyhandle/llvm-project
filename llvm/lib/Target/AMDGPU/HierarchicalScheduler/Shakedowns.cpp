@@ -1959,6 +1959,10 @@ struct LengthHistoryTrackerFixture {
   std::unique_ptr<ScheduleLengthTracker> length_tracker;
   std::unique_ptr<ScheduledSetTracker> scheduled_set_tracker;
   std::unique_ptr<LengthHistoryTracker> length_history_tracker;
+  /// The recipe LHT was built with -- staged in the fixture so
+  /// tests can hand it to BuildLhtEntryForTest below without
+  /// reconstructing it from the original flag args.
+  ScoreRecipe recipe;
   // Common BuildTestDAG node handles. Topo indices: A=0, H=1,
   // C=2, D=3.
   ScheduleNode *a;
@@ -1967,12 +1971,70 @@ struct LengthHistoryTrackerFixture {
   ScheduleNode *d;
 };
 
-// Build a ScoreRecipe that yields the requested LHT dim/direction flags
-// when LHT derives `include_pressure_dim_` / `include_ilp_dim_` /
-// `length_max_mode_` via HasDim() / IsLengthMaxMode().
+/// Inputs for BuildLhtEntryForTest: named raw values that the
+/// helper will plumb into the appropriate Score slots based on the
+/// recipe's slot layout. Unset values default to 0 (which becomes
+/// the Score slot's default when polarity-applied).
+struct LhtEntryInputs {
+  int end_cycle = 0;
+  int continuous_occupancy_score = 0;
+  int ilp_score = 0;
+  int vgpr_spill_area = 0;
+};
+
+/// Build an LHT Entry suitable for InsertEntryForTest /
+/// IsDominatedByEntryForTest. Walks the recipe's slots; for each
+/// populated slot, pulls the matching named input and applies the
+/// slot's polarity via Score::Make -- producing an Entry with the
+/// same Score shape BuildQueryEntry would produce on a live
+/// schedule with the same values.
+static LengthHistoryTracker::Entry
+BuildLhtEntryForTest(const ScoreRecipe &recipe,
+                     const LhtEntryInputs &inputs,
+                     SmallVector<FrontierLb, 16> frontier_lbs = {},
+                     SmallVector<IlpTracker::OpenProducerInstCount, 16>
+                         open_producer_inst_counts = {}) {
+  std::array<std::optional<Score::SlotInput>, kMaxScoreSlots> slot_inputs{};
+  for (int i = 0; i < kMaxScoreSlots; ++i) {
+    if (!recipe.slots[i]) {
+      continue;
+    }
+    int64_t raw;
+    switch (recipe.slots[i]->dim) {
+    case ScoreDimension::kScheduleLength:
+      raw = inputs.end_cycle;
+      break;
+    case ScoreDimension::kContinuousOccScore:
+      raw = inputs.continuous_occupancy_score;
+      break;
+    case ScoreDimension::kIlpScore:
+      raw = inputs.ilp_score;
+      break;
+    case ScoreDimension::kVgprSpillArea:
+      raw = inputs.vgpr_spill_area;
+      break;
+    case ScoreDimension::kRegisterOcc:
+    case ScoreDimension::kContinuousOccArea:
+      llvm_unreachable(
+          "BuildLhtEntryForTest: dim not exposed via LhtEntryInputs; "
+          "extend the struct + this switch if a shakedown needs it");
+    }
+    slot_inputs[i] = Score::SlotInput{raw, recipe.slots[i]->pol};
+  }
+  return LengthHistoryTracker::Entry{
+      Score::Make(slot_inputs), std::move(frontier_lbs),
+      std::move(open_producer_inst_counts)};
+}
+
+// Build a ScoreRecipe whose populated slots drive LHT to consult the
+// requested tiebreak dims via its score-based dominance check.
+// `length_max_mode` flips slot 0's polarity (which the recipe drives
+// LHT to read via `IsLengthMaxMode()` for the `frontier_lbs`
+// direction).
 static ScoreRecipe BuildLengthRecipeForFlags(bool include_pressure_dim,
                                              bool include_ilp_dim,
-                                             bool length_max_mode) {
+                                             bool length_max_mode,
+                                             bool include_spill_area_dim = false) {
   ScoreRecipe r;
   Polarity length_pol =
       length_max_mode ? Polarity::kMaximize : Polarity::kMinimize;
@@ -1986,6 +2048,10 @@ static ScoreRecipe BuildLengthRecipeForFlags(bool include_pressure_dim,
     r.slots[next_slot++] = MetricSlot{ScoreDimension::kContinuousOccScore,
                                       Polarity::kMaximize};
   }
+  if (include_spill_area_dim) {
+    r.slots[next_slot++] =
+        MetricSlot{ScoreDimension::kVgprSpillArea, Polarity::kMinimize};
+  }
   return r;
 }
 
@@ -1993,7 +2059,8 @@ static LengthHistoryTrackerFixture
 BuildLengthHistoryTrackerFixture(const GCNSubtarget &st,
                                  bool include_pressure_dim = false,
                                  bool include_ilp_dim = false,
-                                 bool length_max_mode = false) {
+                                 bool length_max_mode = false,
+                                 bool include_spill_area_dim = false) {
   LengthHistoryTrackerFixture fixture;
   fixture.graph = ScheduleGraph::BuildTestDAG();
   fixture.graph->ValidateAndComputeTopologicalOrder();
@@ -2010,11 +2077,14 @@ BuildLengthHistoryTrackerFixture(const GCNSubtarget &st,
   // Score-source trackers are nullptr; tests stage Entry contents
   // directly via InsertEntryForTest rather than driving the
   // production query path.
+  fixture.recipe = BuildLengthRecipeForFlags(include_pressure_dim,
+                                             include_ilp_dim,
+                                             length_max_mode,
+                                             include_spill_area_dim);
   fixture.length_history_tracker = std::make_unique<LengthHistoryTracker>(
       fixture.scheduled_set_tracker.get(), fixture.length_tracker.get(),
       /*pressure_tracker=*/nullptr, /*ilp_tracker=*/nullptr,
-      BuildLengthRecipeForFlags(include_pressure_dim, include_ilp_dim,
-                                length_max_mode));
+      fixture.recipe);
   return fixture;
 }
 
@@ -2106,13 +2176,13 @@ static void RunLengthHistoryStrictDominatorShakedown(
   PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
   // Equal frontier_lbs to query (H=1, C=2, D=3 sorted by topo
   // idx); end_cycle=0 strictly beats query's end_cycle=1.
-  LengthHistoryTracker::Entry strict_dominator;
-  strict_dominator.end_cycle = 0;
-  strict_dominator.frontier_lbs = {
-      {fixture.h->GetTopoIndex(), 1},
-      {fixture.c->GetTopoIndex(), 2},
-      {fixture.d->GetTopoIndex(), 3},
-  };
+  auto strict_dominator = BuildLhtEntryForTest(
+      fixture.recipe, {.end_cycle = 0},
+      {
+          {fixture.h->GetTopoIndex(), 1},
+          {fixture.c->GetTopoIndex(), 2},
+          {fixture.d->GetTopoIndex(), 3},
+      });
   fixture.length_history_tracker->InsertEntryForTest(key, strict_dominator);
 
   bool dominated = fixture.length_history_tracker->IsDominated();
@@ -2138,13 +2208,13 @@ static void RunLengthHistoryParetoTrimShakedown(const GCNSubtarget &st) {
   ScheduleNodeOnFixture(fixture, fixture.a);
   PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
   // end_cycle=5 (worse than query's 1); frontier_lbs all equal.
-  LengthHistoryTracker::Entry strictly_worse;
-  strictly_worse.end_cycle = 5;
-  strictly_worse.frontier_lbs = {
-      {fixture.h->GetTopoIndex(), 1},
-      {fixture.c->GetTopoIndex(), 2},
-      {fixture.d->GetTopoIndex(), 3},
-  };
+  auto strictly_worse = BuildLhtEntryForTest(
+      fixture.recipe, {.end_cycle = 5},
+      {
+          {fixture.h->GetTopoIndex(), 1},
+          {fixture.c->GetTopoIndex(), 2},
+          {fixture.d->GetTopoIndex(), 3},
+      });
   fixture.length_history_tracker->InsertEntryForTest(key, strictly_worse);
 
   bool not_dominated = !fixture.length_history_tracker->IsDominated();
@@ -2158,7 +2228,10 @@ static void RunLengthHistoryParetoTrimShakedown(const GCNSubtarget &st) {
   bool bucket_one = bucket.size() == 1;
   // The remaining entry should be the query (end_cycle=1), not the
   // strictly_worse one we trimmed (end_cycle=5).
-  bool query_is_what_remains = bucket_one && bucket[0].end_cycle == 1;
+  auto expected_query =
+      BuildLhtEntryForTest(fixture.recipe, {.end_cycle = 1});
+  bool query_is_what_remains =
+      bucket_one && bucket[0].score == expected_query.score;
 
   bool ok = not_dominated && insert_succeeded && count_one &&
             bucket_one && query_is_what_remains;
@@ -2174,13 +2247,13 @@ static void RunLengthHistoryIncomparableShakedown(const GCNSubtarget &st) {
   PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
   // end_cycle=0 (better than query's 1); H_lb=5 (worse than
   // query's 1). C and D LBs equal. Neither dominates the other.
-  LengthHistoryTracker::Entry incomparable;
-  incomparable.end_cycle = 0;
-  incomparable.frontier_lbs = {
-      {fixture.h->GetTopoIndex(), 5},
-      {fixture.c->GetTopoIndex(), 2},
-      {fixture.d->GetTopoIndex(), 3},
-  };
+  auto incomparable = BuildLhtEntryForTest(
+      fixture.recipe, {.end_cycle = 0},
+      {
+          {fixture.h->GetTopoIndex(), 5},
+          {fixture.c->GetTopoIndex(), 2},
+          {fixture.d->GetTopoIndex(), 3},
+      });
   fixture.length_history_tracker->InsertEntryForTest(key, incomparable);
 
   bool not_dominated = !fixture.length_history_tracker->IsDominated();
@@ -2254,10 +2327,8 @@ static void RunLengthHistoryHashCollisionShakedown(const GCNSubtarget &st) {
   PartitionKey key2{42, BitVector(n)};
   key2.scheduled_set.set(1);
 
-  LengthHistoryTracker::Entry entry1;
-  entry1.end_cycle = 100;
-  LengthHistoryTracker::Entry entry2;
-  entry2.end_cycle = 200;
+  auto entry1 = BuildLhtEntryForTest(fixture.recipe, {.end_cycle = 100});
+  auto entry2 = BuildLhtEntryForTest(fixture.recipe, {.end_cycle = 200});
   fixture.length_history_tracker->InsertEntryForTest(key1, entry1);
   fixture.length_history_tracker->InsertEntryForTest(key2, entry2);
 
@@ -2268,8 +2339,8 @@ static void RunLengthHistoryHashCollisionShakedown(const GCNSubtarget &st) {
   bool both_buckets_present =
       bucket1.size() == 1 && bucket2.size() == 1;
   bool entries_in_correct_buckets =
-      both_buckets_present && bucket1[0].end_cycle == 100 &&
-      bucket2[0].end_cycle == 200;
+      both_buckets_present && bucket1[0].score == entry1.score &&
+      bucket2[0].score == entry2.score;
   bool count_two =
       fixture.length_history_tracker->GetTotalEntries() == 2;
 
@@ -2300,15 +2371,14 @@ static void RunLengthHistoryPressureDimShakedown(const GCNSubtarget &st) {
   // frontier_lbs — it ties query on every length dim.
   auto make_length_equal_prior = [](const LengthHistoryTrackerFixture &f,
                                     int score) {
-    LengthHistoryTracker::Entry prior;
-    prior.end_cycle = 1;
-    prior.frontier_lbs = {
-        {f.h->GetTopoIndex(), 1},
-        {f.c->GetTopoIndex(), 2},
-        {f.d->GetTopoIndex(), 3},
-    };
-    prior.continuous_occupancy_score = score;
-    return prior;
+    return BuildLhtEntryForTest(
+        f.recipe,
+        {.end_cycle = 1, .continuous_occupancy_score = score},
+        {
+            {f.h->GetTopoIndex(), 1},
+            {f.c->GetTopoIndex(), 2},
+            {f.d->GetTopoIndex(), 3},
+        });
   };
 
   // Case 1: include_pressure_dim=true, prior.score=5 (better than
@@ -2391,17 +2461,14 @@ static void RunLengthHistoryIlpDimShakedown(const GCNSubtarget &st) {
   auto make_entry = [](
       const LengthHistoryTrackerFixture &f, int ilp_score,
       SmallVector<IlpTracker::OpenProducerInstCount, 16> opens) {
-    LengthHistoryTracker::Entry entry;
-    entry.end_cycle = 1;
-    entry.frontier_lbs = {
-        {f.h->GetTopoIndex(), 1},
-        {f.c->GetTopoIndex(), 2},
-        {f.d->GetTopoIndex(), 3},
-    };
-    entry.continuous_occupancy_score = 0;
-    entry.ilp_score = ilp_score;
-    entry.open_producer_inst_counts = std::move(opens);
-    return entry;
+    return BuildLhtEntryForTest(
+        f.recipe, {.end_cycle = 1, .ilp_score = ilp_score},
+        {
+            {f.h->GetTopoIndex(), 1},
+            {f.c->GetTopoIndex(), 2},
+            {f.d->GetTopoIndex(), 3},
+        },
+        std::move(opens));
   };
 
   // Two synthetic open-producer vregs used in cases below. Reg
@@ -2543,14 +2610,13 @@ static void RunLengthHistoryLengthMaxModeShakedown(const GCNSubtarget &st) {
   auto make_prior_for_query_state = [](const LengthHistoryTrackerFixture &f,
                                        int end_cycle, int h_lb, int c_lb,
                                        int d_lb) {
-    LengthHistoryTracker::Entry prior;
-    prior.end_cycle = end_cycle;
-    prior.frontier_lbs = {
-        {f.h->GetTopoIndex(), h_lb},
-        {f.c->GetTopoIndex(), c_lb},
-        {f.d->GetTopoIndex(), d_lb},
-    };
-    return prior;
+    return BuildLhtEntryForTest(
+        f.recipe, {.end_cycle = end_cycle},
+        {
+            {f.h->GetTopoIndex(), h_lb},
+            {f.c->GetTopoIndex(), c_lb},
+            {f.d->GetTopoIndex(), d_lb},
+        });
   };
 
   // Case A: max-mode, prior strictly higher on every length axis.
@@ -2628,6 +2694,91 @@ static void RunLengthHistoryLengthMaxModeShakedown(const GCNSubtarget &st) {
   }
 }
 
+// VGPR-spill-area dim on LHT dominance. With kVgprSpillArea Min as
+// a tiebreak slot in the recipe, LHT's scalar Score includes spill
+// area with lower-raw-is-better polarity. Length-equal entries are
+// then compared on spill area: prior.spill < query.spill dominates;
+// prior.spill > query.spill fails to dominate; gate is "is
+// kVgprSpillArea in the recipe."
+//
+// Cases on a state where length dims would otherwise dominate:
+//   prior.spill = 0 vs query.spill = 5 → prior dominates → IsDominated true.
+//   prior.spill = 5 vs query.spill = 0 → prior loses on spill → false.
+// Gate-off control:
+//   include_spill_area_dim=false: prior.spill = 5 still dominates
+//     (length dims alone suffice).
+static void RunLengthHistorySpillAreaDimShakedown(const GCNSubtarget &st) {
+  // Length-equal prior (end_cycle=1, frontier matches query post-
+  // Schedule(a)) with the supplied raw spill area. The recipe slot
+  // for kVgprSpillArea has Min polarity, so Score::Make stores
+  // canonical -raw -- prior dominates query iff its raw spill is
+  // lower.
+  auto make_length_equal_prior = [](const LengthHistoryTrackerFixture &f,
+                                    int spill_area) {
+    return BuildLhtEntryForTest(
+        f.recipe, {.end_cycle = 1, .vgpr_spill_area = spill_area},
+        {
+            {f.h->GetTopoIndex(), 1},
+            {f.c->GetTopoIndex(), 2},
+            {f.d->GetTopoIndex(), 3},
+        });
+  };
+
+  // Case 1: spill_area_dim=true, prior.spill=0 (better than
+  // query.spill=0 -- they tie, so prior dominates on the Score's
+  // length+spill slots all >= query).
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/false,
+        /*length_max_mode=*/false, /*include_spill_area_dim=*/true);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    fixture.length_history_tracker->InsertEntryForTest(
+        key, make_length_equal_prior(fixture, /*spill_area=*/0));
+    bool dominated = fixture.length_history_tracker->IsDominated();
+    llvm::outs() << "    spill_dim=true, prior.spill=0 (tied): "
+                    "dominated="
+                 << (dominated ? "true" : "false") << "  "
+                 << (dominated ? "PASS\n" : "FAIL\n");
+  }
+
+  // Case 2: spill_area_dim=true, prior.spill=5 (worse than
+  // query.spill=0 since LHT reads spill from null pressure_tracker
+  // as 0). Score check on the spill slot blocks dominance.
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/false,
+        /*length_max_mode=*/false, /*include_spill_area_dim=*/true);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    fixture.length_history_tracker->InsertEntryForTest(
+        key, make_length_equal_prior(fixture, /*spill_area=*/5));
+    bool not_dominated = !fixture.length_history_tracker->IsDominated();
+    llvm::outs() << "    spill_dim=true, prior.spill=5 (worse): "
+                    "not_dominated="
+                 << (not_dominated ? "true" : "false") << "  "
+                 << (not_dominated ? "PASS\n" : "FAIL\n");
+  }
+
+  // Case 3: spill_area_dim=false, prior.spill=5. Spill slot isn't
+  // in the recipe so Score has no spill slot -- length dims alone
+  // dominate.
+  {
+    auto fixture = BuildLengthHistoryTrackerFixture(
+        st, /*include_pressure_dim=*/false, /*include_ilp_dim=*/false,
+        /*length_max_mode=*/false, /*include_spill_area_dim=*/false);
+    ScheduleNodeOnFixture(fixture, fixture.a);
+    PartitionKey key = fixture.scheduled_set_tracker->GetPartitionKey();
+    fixture.length_history_tracker->InsertEntryForTest(
+        key, make_length_equal_prior(fixture, /*spill_area=*/5));
+    bool dominated = fixture.length_history_tracker->IsDominated();
+    llvm::outs() << "    spill_dim=false, prior.spill=5 (gate off): "
+                    "dominated="
+                 << (dominated ? "true" : "false") << "  "
+                 << (dominated ? "PASS\n" : "FAIL\n");
+  }
+}
+
 void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
   llvm::outs() << "  RunLengthHistoryTrackerShakedown:\n";
   RunLengthHistoryEmptyShakedown(st);
@@ -2640,6 +2791,7 @@ void RunLengthHistoryTrackerShakedown(const GCNSubtarget &st) {
   RunLengthHistoryHashCollisionShakedown(st);
   RunLengthHistoryPressureDimShakedown(st);
   RunLengthHistoryIlpDimShakedown(st);
+  RunLengthHistorySpillAreaDimShakedown(st);
   RunLengthHistoryLengthMaxModeShakedown(st);
 }
 
