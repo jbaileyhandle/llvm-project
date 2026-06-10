@@ -1284,6 +1284,15 @@ public:
     return *input_schedule_constructor_;
   }
 
+  /// Test-only: mutable handle on the input ScheduleConstructor.
+  /// Shakedowns use this to poke per-tracker test-mode setters
+  /// (e.g., GCNRegisterTracker::SetVGPRSpillAreaForTest) so the
+  /// input baseline a policy reads via graph.GetInputScheduleConstructor()
+  /// has known values. Production code should never call this.
+  ScheduleConstructor &GetInputScheduleConstructorForTest() {
+    return *input_schedule_constructor_;
+  }
+
   /// Test-only: populate input_schedule_constructor_ by Schedule()-
   /// ing every node in topo order. Synthetic test DAGs (BuildTestDAG
   /// etc.) lack the entry/exit + region-tied setup that the

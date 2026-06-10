@@ -213,6 +213,53 @@ class DfsMinimizeLengthRefineIlpPolicy
       const ScheduleConstructor &best_schedule_constructor);
 };
 
+// Length-min variant that treats VGPR spill area as a hard upper
+// bound (not a score dimension). The input schedule's spill area is
+// captured at pass entry and stays fixed across the entire search:
+// any working prefix whose spill area exceeds it is bounded. This
+// matches how the integer occupancy floor is already enforced
+// (target captured up front, working prefixes that drop below it
+// are bounded) rather than the refine-X pattern where the secondary
+// dim lives in the score and participates in dominance.
+//
+// The occupancy pass (with its own spill-area refinement variant)
+// is responsible for finding the minimum-spill schedule at the
+// chosen occupancy; the length pass takes that as input and
+// shouldn't regress spill while chasing shorter lengths. Spill
+// could in principle live in the score with engineering to keep
+// length from regressing, but treating it as a fixed bound is
+// simpler and matches the existing "occupancy floor" pattern.
+//
+// Inherits everything from DfsMinimizeLengthPolicy except for
+// ShouldBoundSearch, which adds the spill-area regression gate.
+class DfsMinimizeLengthBoundedSpillAreaPolicy
+    : public DfsMinimizeLengthPolicy {
+ public:
+  // Same recipe as the base -- spill is NOT a score slot.
+  static constexpr ScoreRecipe kScoreRecipe =
+      score_recipes::kMinimizeScheduleLength;
+
+  // Inherits the base bounds (length deadline, occupancy floor,
+  // peak-spill-regime regression, length-history dominance) and
+  // adds: if working's accumulated VGPR spill area exceeds the
+  // input baseline's spill area, bound. The input baseline is read
+  // from graph.GetInputScheduleConstructor() -- captured once when
+  // the graph was built, so it's a fixed ceiling for this region.
+  //
+  // Soundness: per-step spill contribution is
+  // max(0, vgpr_count - cap) >= 0, so the raw spill_area is
+  // monotonically non-decreasing across schedule extensions. Under
+  // the lower-is-better polarity we use for spill, "exceeded input"
+  // can never be undone -- raw can only grow further or stay the
+  // same. So bounding on `working_raw > input_raw` correctly
+  // forecloses any completion that would still be in violation.
+  static bool ShouldBoundSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor,
+      std::optional<LengthHistoryTracker> &length_history,
+      std::optional<PressureHistoryTracker> &pressure_history);
+};
+
 // Policy for DFS when the objective is to MAXIMIZE schedule length
 // for a single region, SUBJECT TO not dropping the region's
 // register-only occupancy below the function-wide ceiling. Useful as

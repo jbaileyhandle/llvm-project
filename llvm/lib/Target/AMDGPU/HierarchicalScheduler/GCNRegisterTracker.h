@@ -467,6 +467,17 @@ public:
     cur_pressure_ = new_cur;
   }
 
+  /// Test-only: directly set vgpr_spill_area_. Lets shakedowns
+  /// stage SCs with known accumulated spill area without driving
+  /// pressure deltas through the full schedule path. Used by the
+  /// DfsMinimizeLengthBoundedSpillAreaPolicy shakedown to seed
+  /// both the input baseline's spill area and the working SC's
+  /// spill area at controlled boundary points (below, at, above
+  /// the input ceiling).
+  void SetVGPRSpillAreaForTest(int64_t new_spill_area) {
+    vgpr_spill_area_ = new_spill_area;
+  }
+
   /// Test-only: override what the helpers see for MFI->getOccupancy()
   /// (the target occupancy). Lets shakedowns drive the per-track
   /// helpers' limit calculations independent of the test MF's actual

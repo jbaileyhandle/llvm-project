@@ -362,6 +362,38 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
   return false;
 }
 
+bool DfsMinimizeLengthBoundedSpillAreaPolicy::ShouldBoundSearch(
+    const ScheduleConstructor &schedule_constructor,
+    const ScheduleConstructor &best_schedule_constructor,
+    std::optional<LengthHistoryTracker> &length_history,
+    std::optional<PressureHistoryTracker> &pressure_history) {
+  // Inherit base bounds first -- length deadline, occupancy floor,
+  // peak-spill-regime regression, length-history dominance. These
+  // catch most prunable prefixes; the spill-area gate below is the
+  // last line of defense for "spill exceeded input baseline."
+  if (DfsMinimizeLengthPolicy::ShouldBoundSearch(
+          schedule_constructor, best_schedule_constructor, length_history,
+          pressure_history)) {
+    return true;
+  }
+  // Spill-area hard ceiling against the input baseline. The input
+  // SC was built once when the graph was constructed
+  // (ScheduleGraph::PopulateInputScheduleConstructor) and lives on
+  // the graph. Each call walks SC -> graph -> input SC -> pressure
+  // tracker -> spill area field. If profiling shows this as a hot
+  // spot, lift the baseline to DfsSearch state at construction and
+  // plumb it through ShouldBoundSearch.
+  const int64_t input_spill = schedule_constructor.GetGraph()
+                                  .GetInputScheduleConstructor()
+                                  .GetPressureTracker()
+                                  .GetVGPRSpillArea();
+  if (schedule_constructor.GetPressureTracker().GetVGPRSpillArea() >
+      input_spill) {
+    return true;
+  }
+  return false;
+}
+
 bool DfsMinimizeLengthPolicy::ShouldEndSearch(
     const ScheduleConstructor & /*schedule_constructor*/,
     const ScheduleConstructor &best_schedule_constructor) {

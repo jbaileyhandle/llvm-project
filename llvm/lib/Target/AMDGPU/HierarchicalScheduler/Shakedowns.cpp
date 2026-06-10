@@ -6225,6 +6225,103 @@ void RunCompletionCannotImproveUponShakedown(const MachineFunction &mf) {
         !working.CompletionCannotImproveUpon(best, multi));
 }
 
+// ---- DfsMinimizeLengthBoundedSpillAreaPolicy: ShouldBoundSearch ----
+//
+// Exercises the new spill-area regression gate. Stage:
+//   - Build a test DAG and populate its input ScheduleConstructor.
+//   - Set the input baseline's vgpr_spill_area via the *ForTest
+//     setters on the graph's input SC.
+//   - Build a working SC; stage its vgpr_spill_area below / at /
+//     above the input baseline.
+//   - Call the policy's ShouldBoundSearch. Verify the spill gate
+//     fires iff working > input. The base bounds should not fire
+//     here: SCs are empty (no Schedule calls), peak pressure 0, no
+//     spill regime; we set max_acceptable_schedule_length to a
+//     huge value so the length deadline check passes.
+//
+// Best SC is left in default empty state -- the policy's spill gate
+// reads only the working SC's pressure tracker and the graph's
+// input SC's pressure tracker, not best's. The other base bounds
+// that consult best (peak-spill-regime regression) don't fire when
+// neither SC is in the spill regime, which is true with default
+// (zero pressure) state.
+void RunDfsMinimizeLengthBoundedSpillAreaPolicyShakedown(
+    const MachineFunction &mf) {
+  llvm::outs()
+      << "  DfsMinimizeLengthBoundedSpillAreaPolicy shakedown:\n";
+
+  const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
+  auto graph = ScheduleGraph::BuildTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPaths();
+  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+
+  // Stage the input baseline's spill area. The policy reads this
+  // via working.GetGraph().GetInputScheduleConstructor().GetPressureTracker().
+  constexpr int64_t kInputSpillBaseline = 100;
+  graph->GetInputScheduleConstructorForTest()
+      .GetPressureTrackerForTest()
+      .SetVGPRSpillAreaForTest(kInputSpillBaseline);
+
+  ScheduleConstructor working(*graph, st, mf);
+  ScheduleConstructor best(*graph, st, mf);
+
+  // Defang the length-deadline base gate by setting a max
+  // acceptable far above any LB working could derive.
+  working.SetMaxAcceptableScheduleLength(/*huge=*/1'000'000);
+
+  // Construct a real LHT bound to working's trackers. The base
+  // policy's ShouldBoundSearch dereferences length_history
+  // unconditionally, so a populated optional is required even
+  // though we expect history dominance not to fire on a fresh,
+  // empty LHT.
+  std::optional<LengthHistoryTracker> length_history{std::in_place,
+      &working.GetScheduledSetTracker(),
+      &working.GetLengthTracker(),
+      &working.GetPressureTracker(),
+      &working.GetIlpTracker(),
+      DfsMinimizeLengthBoundedSpillAreaPolicy::kScoreRecipe};
+  std::optional<PressureHistoryTracker> pressure_history;
+
+  auto check = [&](const char *desc, bool ok) {
+    llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
+    if (!ok) {
+      report_fatal_error(
+          "DfsMinimizeLengthBoundedSpillAreaPolicy shakedown: failure");
+    }
+  };
+
+  // Each case calls ShouldBoundSearch, which (via the inherited
+  // base) inserts a length_history entry for the current partition
+  // -- if we re-query the SAME partition in the next case, the LHT
+  // would dominate-and-prune for an unrelated reason (length-history
+  // dominance, not the spill gate we want to exercise). Reset
+  // between cases so each starts with an empty LHT.
+  auto reset_history = [&]() { length_history->Reset(); };
+
+  // Case 1: working.spill < input.spill -- gate doesn't fire.
+  working.GetPressureTrackerForTest().SetVGPRSpillAreaForTest(50);
+  check("working.spill=50 < input.spill=100: not bounded",
+        !DfsMinimizeLengthBoundedSpillAreaPolicy::ShouldBoundSearch(
+            working, best, length_history, pressure_history));
+  reset_history();
+
+  // Case 2: working.spill == input.spill -- gate doesn't fire
+  // (strict >, not >=).
+  working.GetPressureTrackerForTest().SetVGPRSpillAreaForTest(
+      kInputSpillBaseline);
+  check("working.spill=100 == input.spill=100: not bounded",
+        !DfsMinimizeLengthBoundedSpillAreaPolicy::ShouldBoundSearch(
+            working, best, length_history, pressure_history));
+  reset_history();
+
+  // Case 3: working.spill > input.spill -- gate fires.
+  working.GetPressureTrackerForTest().SetVGPRSpillAreaForTest(150);
+  check("working.spill=150 > input.spill=100: bounded",
+        DfsMinimizeLengthBoundedSpillAreaPolicy::ShouldBoundSearch(
+            working, best, length_history, pressure_history));
+}
+
 // ---- OccupancyTargetUtil: LimitOccupancyAboveFloor wrapper ----
 
 void RunOccupancyTargetUtilShakedown(const MachineFunction &mf) {
@@ -6617,6 +6714,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunPressureHistoryRoutingAndSoundnessShakedown();
   RunScoreLeadingSlotsCompareShakedown();
   RunCompletionCannotImproveUponShakedown(MF);
+  RunDfsMinimizeLengthBoundedSpillAreaPolicyShakedown(MF);
   RunOccupancyTargetUtilShakedown(MF);
   RunVGPRSpillAreaAccumulatorShakedown(MF);
   RunVGPRSpillAreaScoreDispatchShakedown(MF);
