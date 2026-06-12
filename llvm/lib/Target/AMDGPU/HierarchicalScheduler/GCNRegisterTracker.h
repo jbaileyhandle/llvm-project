@@ -205,11 +205,11 @@ public:
   /// gates that compare against the function's target -- a raw
   /// register-only gate over-prunes in the spill regime (where
   /// every path has reg-only < floor).
-  unsigned GetEffectiveOccupancy() const;
+  unsigned GetLaunchFloorClampedOccupancy() const;
 
   /// True when current VGPR pressure (cur_pressure_'s VGPR count)
   /// exceeds the VGPR cap permitted at the occupancy floor
-  /// (getMaxNumVGPRs(GetOccupancyFloor())). Per-step view; useful
+  /// (getMaxNumVGPRs(GetLaunchOccupancyFloor())). Per-step view; useful
   /// for per-step area accumulators.
   bool IsCurVGPRInSpillRegime() const;
 
@@ -279,7 +279,7 @@ public:
 
   // ----------------------------------------------------------------
   // Current-pressure helpers, relative to the per-track spill cap --
-  // the per-track cap at the occupancy floor (GetOccupancyFloor()).
+  // the per-track cap at the occupancy floor (GetLaunchOccupancyFloor()).
   // Cur counts above this cap are the per-step magnitude of actual
   // spilling: any VGPR/SGPR beyond the cap will be spilled by the
   // allocator. Bool-predicate parallels exist as
@@ -289,13 +289,13 @@ public:
   // callers.
   // ----------------------------------------------------------------
 
-  /// max(0, getMaxNumVGPRs(GetOccupancyFloor()) - cur_VGPR). The
+  /// max(0, getMaxNumVGPRs(GetLaunchOccupancyFloor()) - cur_VGPR). The
   /// count of VGPRs by which the current step is below the spill
   /// cap; 0 if at or above. Suitable for per-step "below-spill-cap
   /// area" measures.
   unsigned GetCurVGPRCountBelowSpillCap() const;
 
-  /// max(0, cur_VGPR - getMaxNumVGPRs(GetOccupancyFloor())). The
+  /// max(0, cur_VGPR - getMaxNumVGPRs(GetLaunchOccupancyFloor())). The
   /// count of VGPRs by which the current step is over the spill cap;
   /// 0 if at or below. Backs the per-step VGPR spill-area
   /// accumulator (see GetVGPRSpillArea) and is suitable for callers
@@ -304,7 +304,7 @@ public:
 
   /// SGPR-side parallels of the two VGPR spill-cap helpers above.
   /// Same semantics, swapping VGPR for SGPR and using
-  /// getMaxNumSGPRs(GetOccupancyFloor(), /*Addressable=*/true) as
+  /// getMaxNumSGPRs(GetLaunchOccupancyFloor(), /*Addressable=*/true) as
   /// the cap.
   unsigned GetCurSGPRCountBelowSpillCap() const;
   unsigned GetCurSGPRCountAboveSpillCap() const;
@@ -487,7 +487,7 @@ public:
     test_target_occupancy_override_ = t;
   }
 
-  /// Test-only: override what GetEffectiveOccupancy and the
+  /// Test-only: override what GetLaunchFloorClampedOccupancy and the
   /// IsCur/IsPeak spill predicates see for the occupancy floor (the
   /// MFI->getMinWavesPerEU() value -- the minimum occupancy the
   /// kernel can be launched at given its attributes). Lets shakedowns
@@ -668,7 +668,7 @@ private:
   /// "OccupancyFloor" because that's what the value represents in
   /// HierarchicalScheduler vocabulary -- the minimum occupancy the
   /// kernel can be launched at given its attributes.
-  unsigned GetOccupancyFloor() const {
+  unsigned GetLaunchOccupancyFloor() const {
     return test_occupancy_floor_override_.value_or(
         mfi_->getMinWavesPerEU());
   }

@@ -6616,7 +6616,7 @@ void RunEffectiveAndTargetLimitHelpersShakedown(
                       "(no cliff at floor)\n";
     }
 
-    // -- Peak-pressure: GetEffectiveOccupancy + spill predicates --
+    // -- Peak-pressure: GetLaunchFloorClampedOccupancy + spill predicates --
 
     // Healthy peak: max_pressure_ at target's VGPR limit
     // -> reg-only = target, effective = reg-only, no spill.
@@ -6624,7 +6624,7 @@ void RunEffectiveAndTargetLimitHelpersShakedown(
       tr.SetMaxPressureForTest(
           GCNRegPressure(vgpr_limit_at_target, /*sgpr32=*/0));
       const unsigned reg_only = tr.GetRegisterOnlyOccupancy();
-      const unsigned effective = tr.GetEffectiveOccupancy();
+      const unsigned effective = tr.GetLaunchFloorClampedOccupancy();
       check("healthy peak: !IsPeakVGPRInSpillRegime",
             !tr.IsPeakVGPRInSpillRegime());
       check("healthy peak: !IsPeakSGPRInSpillRegime",
@@ -6646,7 +6646,7 @@ void RunEffectiveAndTargetLimitHelpersShakedown(
       check("VGPR peak spill: IsPeakInSpillRegime=true",
             tr.IsPeakInSpillRegime());
       check("VGPR peak spill: effective == floor",
-            tr.GetEffectiveOccupancy() == floor);
+            tr.GetLaunchFloorClampedOccupancy() == floor);
     }
 
     // SGPR peak spill: max_pressure_'s SGPR one above floor's cap.
