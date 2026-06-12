@@ -336,7 +336,7 @@ public:
 
   /// Occupancy ignoring register pressure: arch max ∩ LDS ∩ launch
   /// bounds. Useful as an independent cross-check against
-  /// GetConfiguredMachineFunctionOccupancyLimit — after
+  /// GetConfiguredMachineFunctionOccupancyTarget — after
   /// resetInitialOccupancy they should match, and a mismatch means
   /// something lowered the MFI value without a corresponding reset.
   /// Thin wrapper over ComputeAllFactorsOccupancy(st, mf, 0, 0).
@@ -351,7 +351,7 @@ public:
   /// passes or from this scheduler processing other regions of the
   /// same function. Improving this region's register pressure cannot
   /// raise occupancy above this value.
-  unsigned GetConfiguredMachineFunctionOccupancyLimit() const;
+  unsigned GetConfiguredMachineFunctionOccupancyTarget() const;
 
   /// Continuous occupancy score based on peak SGPR/VGPR pressure.
   ///
@@ -362,7 +362,7 @@ public:
   ///
   /// Register-only: LDS and launch bounds are not considered. Parallel
   /// to GetRegisterOnlyOccupancy(); compose with
-  /// GetConfiguredMachineFunctionOccupancyLimit() / an early-exit
+  /// GetConfiguredMachineFunctionOccupancyTarget() / an early-exit
   /// check to handle non-register ceilings.
   ///
   /// For a single dimension (VGPR or SGPR):
@@ -663,13 +663,6 @@ private:
   /// live MFI value."
   std::optional<unsigned> test_target_occupancy_override_;
   std::optional<unsigned> test_occupancy_floor_override_;
-
-  /// Wrap MFI->getOccupancy() so the helpers can route through the
-  /// test override when one is set. All non-test paths see the live
-  /// MFI value unchanged.
-  unsigned GetTargetOccupancy() const {
-    return test_target_occupancy_override_.value_or(mfi_->getOccupancy());
-  }
 
   /// Wrap MFI->getMinWavesPerEU() with the same override semantics.
   /// "OccupancyFloor" because that's what the value represents in

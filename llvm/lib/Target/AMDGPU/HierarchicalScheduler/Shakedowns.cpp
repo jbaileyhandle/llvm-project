@@ -4899,12 +4899,12 @@ void RunScoreRecipeShakedown(ScheduleGraph &graph,
   llvm::outs() << "    initial ceiling check: reg_occ="
                << sc_empty.GetPressureTracker().GetRegisterOnlyOccupancy()
                << " fn_limit="
-               << sc_empty.GetPressureTracker().GetConfiguredMachineFunctionOccupancyLimit()
+               << sc_empty.GetPressureTracker().GetConfiguredMachineFunctionOccupancyTarget()
                << " at_ceiling=" << sc_empty.RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() << "\n";
   llvm::outs() << "    full ceiling check:    reg_occ="
                << sc_full.GetPressureTracker().GetRegisterOnlyOccupancy()
                << " fn_limit="
-               << sc_full.GetPressureTracker().GetConfiguredMachineFunctionOccupancyLimit()
+               << sc_full.GetPressureTracker().GetConfiguredMachineFunctionOccupancyTarget()
                << " at_ceiling=" << sc_full.RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() << "\n";
 }
 

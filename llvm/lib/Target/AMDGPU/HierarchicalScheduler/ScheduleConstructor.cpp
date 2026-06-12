@@ -461,17 +461,17 @@ ScheduleConstructor::GetScoreDimensionValue(ScoreDimension dim) const {
 
 bool ScheduleConstructor::RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() const {
   return pressure_tracker_.GetRegisterOnlyOccupancy() >=
-         pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
+         pressure_tracker_.GetConfiguredMachineFunctionOccupancyTarget();
 }
 
 bool ScheduleConstructor::RegisterOnlyOccupancyExceedsFunctionOccupancyTarget() const {
   return pressure_tracker_.GetRegisterOnlyOccupancy() >
-         pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
+         pressure_tracker_.GetConfiguredMachineFunctionOccupancyTarget();
 }
 
 bool ScheduleConstructor::EffectiveOccupancyIsAtOrAboveFunctionOccupancyTarget() const {
   return pressure_tracker_.GetEffectiveOccupancy() >=
-         pressure_tracker_.GetConfiguredMachineFunctionOccupancyLimit();
+         pressure_tracker_.GetConfiguredMachineFunctionOccupancyTarget();
 }
 
 ScheduleConstructor::LlvmTrackerVerification

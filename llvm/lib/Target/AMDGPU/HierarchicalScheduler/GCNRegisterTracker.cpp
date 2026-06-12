@@ -585,53 +585,53 @@ bool GCNRegisterTracker::IsPeakInSpillRegime() const {
 // limit answer here would diverge from "this VGPR/SGPR count actually
 // drops occupancy."
 //
-// Target occupancy comes from GetTargetOccupancy() rather than
+// Target occupancy comes from GetConfiguredMachineFunctionOccupancyTarget() rather than
 // mfi_->getOccupancy() directly so shakedowns can override it via
 // SetTargetOccupancyForTest. Production always sees the live MFI value.
 
 bool GCNRegisterTracker::IsCurVGPRCountAtOrBelowTargetLimit() const {
   return cur_pressure_.getVGPRNum(st_->hasGFX90AInsts()) <=
-         st_->getMaxNumVGPRs(GetTargetOccupancy());
+         st_->getMaxNumVGPRs(GetConfiguredMachineFunctionOccupancyTarget());
 }
 
 bool GCNRegisterTracker::IsCurVGPRCountAboveTargetLimit() const {
   return cur_pressure_.getVGPRNum(st_->hasGFX90AInsts()) >
-         st_->getMaxNumVGPRs(GetTargetOccupancy());
+         st_->getMaxNumVGPRs(GetConfiguredMachineFunctionOccupancyTarget());
 }
 
 unsigned GCNRegisterTracker::GetCurVGPRCountBelowTargetLimit() const {
   unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
-  unsigned limit = st_->getMaxNumVGPRs(GetTargetOccupancy());
+  unsigned limit = st_->getMaxNumVGPRs(GetConfiguredMachineFunctionOccupancyTarget());
   return (cur <= limit) ? (limit - cur) : 0;
 }
 
 unsigned GCNRegisterTracker::GetCurVGPRCountAboveTargetLimit() const {
   unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
-  unsigned limit = st_->getMaxNumVGPRs(GetTargetOccupancy());
+  unsigned limit = st_->getMaxNumVGPRs(GetConfiguredMachineFunctionOccupancyTarget());
   return (cur > limit) ? (cur - limit) : 0;
 }
 
 bool GCNRegisterTracker::IsCurSGPRCountAtOrBelowTargetLimit() const {
   return cur_pressure_.getSGPRNum() <=
-         st_->getMaxNumSGPRs(GetTargetOccupancy(), /*Addressable=*/true);
+         st_->getMaxNumSGPRs(GetConfiguredMachineFunctionOccupancyTarget(), /*Addressable=*/true);
 }
 
 bool GCNRegisterTracker::IsCurSGPRCountAboveTargetLimit() const {
   return cur_pressure_.getSGPRNum() >
-         st_->getMaxNumSGPRs(GetTargetOccupancy(), /*Addressable=*/true);
+         st_->getMaxNumSGPRs(GetConfiguredMachineFunctionOccupancyTarget(), /*Addressable=*/true);
 }
 
 unsigned GCNRegisterTracker::GetCurSGPRCountBelowTargetLimit() const {
   unsigned cur = cur_pressure_.getSGPRNum();
   unsigned limit =
-      st_->getMaxNumSGPRs(GetTargetOccupancy(), /*Addressable=*/true);
+      st_->getMaxNumSGPRs(GetConfiguredMachineFunctionOccupancyTarget(), /*Addressable=*/true);
   return (cur <= limit) ? (limit - cur) : 0;
 }
 
 unsigned GCNRegisterTracker::GetCurSGPRCountAboveTargetLimit() const {
   unsigned cur = cur_pressure_.getSGPRNum();
   unsigned limit =
-      st_->getMaxNumSGPRs(GetTargetOccupancy(), /*Addressable=*/true);
+      st_->getMaxNumSGPRs(GetConfiguredMachineFunctionOccupancyTarget(), /*Addressable=*/true);
   return (cur > limit) ? (cur - limit) : 0;
 }
 
@@ -700,8 +700,14 @@ int GCNRegisterTracker::GetScalarScore(const ScoreRecipe &recipe) const {
   return static_cast<int>(ApplyPolarity(raw, slot.pol));
 }
 
-unsigned GCNRegisterTracker::GetConfiguredMachineFunctionOccupancyLimit() const {
-  return mfi_->getOccupancy();
+unsigned GCNRegisterTracker::GetConfiguredMachineFunctionOccupancyTarget() const {
+  // Reads MFI's current occupancy target (the kernel's chosen waves/SIMD,
+  // initially computed and then lowered by limitOccupancy / raised by
+  // increaseOccupancy as scheduling passes update it). Honors
+  // test_target_occupancy_override_ so shakedowns can drive consumers at
+  // synthetic targets without mutating MFI; in production the override is
+  // always nullopt and the raw MFI value is returned.
+  return test_target_occupancy_override_.value_or(mfi_->getOccupancy());
 }
 
 int GCNRegisterTracker::ComputeAllFactorsOccupancy(
