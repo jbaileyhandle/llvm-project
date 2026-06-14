@@ -6322,6 +6322,102 @@ void RunDfsMinimizeLengthBoundedSpillAreaPolicyShakedown(
             working, best, length_history, pressure_history));
 }
 
+// ---- DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy: ShouldEndSearch ----
+//
+// Exercises the "end iff ceiling AND spill==0" override. Stages
+// best's peak pressure (controls integer occupancy) and spill area
+// directly via the *ForTest setters; doesn't run a search.
+//
+// Self-contained: uses SetTargetOccupancyForTest on best's tracker
+// to drive the function-occ-target the predicate consults
+// (RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget routes
+// through GetConfiguredMachineFunctionOccupancyTarget, which honors
+// the override). With target=2:
+//   - best.peak = 0 -> integer occupancy = arch max (>= 2) -> AT
+//     CEILING.
+//   - best.peak = (200 VGPRs) -> integer occupancy = 1 < 2 -> BELOW
+//     CEILING (gfx906 spec: peak >128 VGPRs lands in the occupancy=1
+//     bracket).
+//
+// Cases:
+//   1. at ceiling, spill > 0 -> not ended (keep refining spill)
+//   2. at ceiling, spill == 0 -> ENDED (provably optimal, common
+//      case)
+//   3. below ceiling, spill == 0 -> not ended (still seeking higher
+//      occ)
+//   4. below ceiling, spill > 0 -> not ended
+void RunDfsMaximizeIntegerOccupancyRefineSpillAreaPolicyShakedown(
+    const MachineFunction &mf) {
+  llvm::outs()
+      << "  DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy shakedown:\n";
+
+  const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
+  auto graph = ScheduleGraph::BuildTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPaths();
+
+  ScheduleConstructor working(*graph, st, mf);
+  ScheduleConstructor best(*graph, st, mf);
+  auto &best_tr = best.GetPressureTrackerForTest();
+
+  // Drive the function-occ target via the tracker override so the
+  // shakedown is independent of the test MF's actual occupancy
+  // attribute. Target=2 is low enough that peak=0 trivially clears
+  // it and peak=200 VGPRs (occupancy bracket 1) falls below it.
+  constexpr unsigned kTestTargetOccupancy = 2;
+  best_tr.SetTargetOccupancyForTest(kTestTargetOccupancy);
+
+  auto restore = [&]() {
+    best_tr.SetTargetOccupancyForTest(std::nullopt);
+  };
+
+  auto check = [&](const char *desc, bool ok) {
+    llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
+    if (!ok) {
+      restore();
+      report_fatal_error(
+          "DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy shakedown: "
+          "failure");
+    }
+  };
+
+  // --- At ceiling: peak=0 -> max integer occupancy >= target ---
+  best_tr.SetMaxPressureForTest(GCNRegPressure(/*vgpr=*/0, /*sgpr=*/0));
+
+  // Case 1: at ceiling, spill > 0 -> keep refining spill.
+  best_tr.SetVGPRSpillAreaForTest(5);
+  check(
+      "best at ceiling, spill=5: not ended (still refining)",
+      !DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy::ShouldEndSearch(
+          working, best));
+
+  // Case 2: at ceiling, spill == 0 -> end (provably optimal).
+  best_tr.SetVGPRSpillAreaForTest(0);
+  check(
+      "best at ceiling, spill=0: ENDED (provably optimal)",
+      DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy::ShouldEndSearch(
+          working, best));
+
+  // --- Below ceiling: peak=200 VGPRs -> integer occupancy 1 < 2 ---
+  best_tr.SetMaxPressureForTest(GCNRegPressure(/*vgpr=*/200, /*sgpr=*/0));
+
+  // Case 3: below ceiling, spill == 0 -> keep pushing occ.
+  best_tr.SetVGPRSpillAreaForTest(0);
+  check(
+      "best below ceiling, spill=0: not ended (still seeking occ)",
+      !DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy::ShouldEndSearch(
+          working, best));
+
+  // Case 4: below ceiling, spill > 0 -> keep searching.
+  best_tr.SetVGPRSpillAreaForTest(5);
+  check(
+      "best below ceiling, spill=5: not ended",
+      !DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy::ShouldEndSearch(
+          working, best));
+
+  restore();
+}
+
 // ---- OccupancyTargetUtil: LimitOccupancyAboveFloor wrapper ----
 
 void RunOccupancyTargetUtilShakedown(const MachineFunction &mf) {
@@ -6715,6 +6811,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunScoreLeadingSlotsCompareShakedown();
   RunCompletionCannotImproveUponShakedown(MF);
   RunDfsMinimizeLengthBoundedSpillAreaPolicyShakedown(MF);
+  RunDfsMaximizeIntegerOccupancyRefineSpillAreaPolicyShakedown(MF);
   RunOccupancyTargetUtilShakedown(MF);
   RunVGPRSpillAreaAccumulatorShakedown(MF);
   RunVGPRSpillAreaScoreDispatchShakedown(MF);

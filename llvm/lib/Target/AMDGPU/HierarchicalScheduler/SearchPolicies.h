@@ -442,6 +442,43 @@ class DfsMaximizeContinuousOccupancyThenAreaPolicy
   }
 };
 
+// Integer-occupancy maximizer with VGPR spill area as the same-
+// occupancy tiebreak. The primary objective is the same coarse
+// integer occupancy bracket DfsMaximizeIntegerOccupancyPolicy
+// targets; among schedules sharing the same bracket, this variant
+// prefers the one with less accumulated spill area. Intended as the
+// occupancy-pass workhorse when spill matters: it finds the
+// minimum-spill schedule at the chosen integer occupancy, which
+// then becomes the input to the length pass's
+// DfsMinimizeLengthBoundedSpillAreaPolicy.
+//
+// Inherits everything from DfsMaximizeOccupancyPolicy except:
+//   - kScoreRecipe: integer-occupancy primary plus spill tiebreak.
+//     Both slots are bound-safe (NI canonical -- peak occ only
+//     drops over completion, spill area only grows), so the score-
+//     bound prune via CompletionCannotImproveUpon fires on the full
+//     two-slot lex compare.
+//   - ShouldEndSearch overridden: the base ends as soon as best is
+//     at the function-occ ceiling, but we want to keep searching
+//     ceiling-occ completions to refine spill. Only end when best
+//     is at the ceiling AND best.spill_area == 0 (provably
+//     optimal). spill==0 is the common case -- most kernels reduce
+//     occupancy rather than spill when register pressure is high
+//     -- so this early-exit fires often. When spill > 0, search
+//     runs to the per-region timeout.
+class DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy
+    : public DfsMaximizeOccupancyPolicy {
+ public:
+  static constexpr ScoreRecipe kScoreRecipe{{
+      MetricSlot{ScoreDimension::kRegisterOcc, Polarity::kMaximize},
+      MetricSlot{ScoreDimension::kVgprSpillArea, Polarity::kMinimize},
+  }};
+
+  static bool ShouldEndSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor);
+};
+
 } // namespace hierarchical_scheduler
 } // namespace llvm
 

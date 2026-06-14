@@ -610,3 +610,24 @@ bool DfsMaximizeOccupancyPolicy::ShouldEndSearch(
     const ScheduleConstructor &best_schedule_constructor) {
   return best_schedule_constructor.RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget();
 }
+
+bool DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy::ShouldEndSearch(
+    const ScheduleConstructor & /*schedule_constructor*/,
+    const ScheduleConstructor &best_schedule_constructor) {
+  // End only when BOTH slots of the recipe are at their optima:
+  //   - Integer occupancy at the function ceiling (peak can't drop
+  //     any lower in a way that gains a wave).
+  //   - Spill area at 0 (no spill anywhere on the schedule).
+  // Otherwise keep searching: working may still find a ceiling-occ
+  // completion with lower spill, or a higher-occ completion at any
+  // spill. The per-region timeout caps total work.
+  if (!best_schedule_constructor
+           .RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
+    return false;
+  }
+  if (best_schedule_constructor.GetPressureTracker().GetVGPRSpillArea() >
+      0) {
+    return false;
+  }
+  return true;
+}
