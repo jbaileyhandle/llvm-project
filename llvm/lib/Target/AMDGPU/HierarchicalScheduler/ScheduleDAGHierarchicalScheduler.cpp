@@ -365,8 +365,8 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     occ_row.orig_sgpr = region_result.orig_sgpr;
     occ_row.fin_vgpr = region_result.fin_vgpr;
     occ_row.fin_sgpr = region_result.fin_sgpr;
-    occ_row.improved =
-        region_result.all_factors_occupancy > original_register_only_occupancy;
+    occ_row.improved = region_result.raw_all_factors_occupancy >
+                       original_register_only_occupancy;
     RecordSearchOutcome(occ_row);
 
     // Per-subgraph rows (decompose only; empty otherwise). Per-search
@@ -391,9 +391,20 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
       RecordSearchOutcome(sub_row);
     }
 
-    // Update kernel_occupancy_so_far.
+    // Update kernel_occupancy_so_far. Uses the RAW all-factors value
+    // (can be below launch floor) so the cross-region running min is
+    // on the same register-driven scale as the loop's bail check
+    // against original_register_only_occupancy. Using the floor-
+    // clamped value here would make the bail's threshold artificially
+    // high (a spill-regime region would appear to be at the floor
+    // rather than below it), so the bail would fail to fire and the
+    // loop would do wasted work on subsequent regions that can't
+    // raise the kernel's bottleneck. LimitOccupancyAboveFloor below
+    // does its own clamp at the floor when updating MFI's target
+    // occupancy -- so the compiler-side target value is never set
+    // below the launch floor, even when this raw running min is.
     int kernel_occupancy_after_region = std::min(
-        kernel_occupancy_so_far, region_result.all_factors_occupancy);
+        kernel_occupancy_so_far, region_result.raw_all_factors_occupancy);
     llvm::outs() << "\t\tkernel_occupancy: " << kernel_occupancy_so_far
                  << " -> " << kernel_occupancy_after_region << "\n";
     kernel_occupancy_so_far = kernel_occupancy_after_region;
@@ -693,7 +704,9 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
 
   MaxOccupancyRegionResult result{
-      /*all_factors_occupancy=*/0,
+      /*raw_all_factors_occupancy=*/0,
+      /*launch_floor_clamped_all_factors_occupancy=*/0,
+      /*in_spill_regime=*/false,
       /*termination_cause=*/SearchTerminationCause::kFullyExplored,
   };
   WithRegionGraph(region, [&](ScheduleGraph &graph) {
@@ -748,8 +761,15 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
         search_result.schedule ? *search_result.schedule
                                : input_schedule_constructor;
     ApplyScheduleOrder(region, applied);
-    result.all_factors_occupancy =
-        applied.GetPressureTracker().GetAllFactorsRegionOnlyOccupancy();
+    const GCNRegisterTracker &applied_tracker = applied.GetPressureTracker();
+    result.raw_all_factors_occupancy =
+        applied_tracker.GetAllFactorsRegionOnlyOccupancy();
+    result.launch_floor_clamped_all_factors_occupancy =
+        applied_tracker.GetLaunchFloorClampedAllFactorsRegionOnlyOccupancy();
+    result.in_spill_regime = applied_tracker.IsPeakInSpillRegime();
+    result.orig_spill_area =
+        input_schedule_constructor.GetPressureTracker().GetVGPRSpillArea();
+    result.fin_spill_area = applied_tracker.GetVGPRSpillArea();
     result.termination_cause = search_result.termination_cause;
     result.winner = search_result.winner;
     result.bfs_pct = search_result.bfs_pct;

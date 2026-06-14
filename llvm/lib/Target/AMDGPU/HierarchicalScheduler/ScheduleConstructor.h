@@ -381,8 +381,8 @@ public:
   /// reg-only < floor); the effective version keeps the search alive
   /// there, letting the no-spill-regression gate and score-based
   /// dominance discriminate among spilling candidates. See
-  /// GCNRegisterTracker::GetLaunchFloorClampedOccupancy for the semantics.
-  bool LaunchFloorClampedOccupancyIsAtOrAboveFunctionOccupancyTarget() const;
+  /// GCNRegisterTracker::GetLaunchFloorClampedRegisterOnlyOccupancy for the semantics.
+  bool LaunchFloorClampedRegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() const;
 
   /// Result of cross-checking the candidate schedule's register
   /// pressure with LLVM's tracker. See VerifyPressureWithLlvmTracker.

@@ -543,7 +543,7 @@ unsigned GCNRegisterTracker::GetRegisterOnlyOccupancy() const {
   return max_pressure_.getOccupancy(*st_);
 }
 
-unsigned GCNRegisterTracker::GetLaunchFloorClampedOccupancy() const {
+unsigned GCNRegisterTracker::GetLaunchFloorClampedRegisterOnlyOccupancy() const {
   return std::max(GetRegisterOnlyOccupancy(), GetLaunchOccupancyFloor());
 }
 
@@ -710,6 +710,15 @@ unsigned GCNRegisterTracker::GetConfiguredMachineFunctionOccupancyTarget() const
   return test_target_occupancy_override_.value_or(mfi_->getOccupancy());
 }
 
+unsigned GCNRegisterTracker::GetLaunchOccupancyFloor() const {
+  // Reads MFI's launch-time occupancy floor (the minimum waves/SIMD the
+  // kernel can be launched at given its attributes). Honors
+  // test_occupancy_floor_override_ so shakedowns can drive consumers at
+  // synthetic floors without mutating MFI; in production the override is
+  // always nullopt and the raw MFI value is returned.
+  return test_occupancy_floor_override_.value_or(mfi_->getMinWavesPerEU());
+}
+
 int GCNRegisterTracker::ComputeAllFactorsOccupancy(
     const GCNSubtarget &st, const MachineFunction &mf,
     unsigned num_sgprs, unsigned num_vgprs) {
@@ -730,6 +739,12 @@ int GCNRegisterTracker::GetAllFactorsRegionOnlyOccupancy() const {
       *st_, *mf_,
       max_pressure_.getSGPRNum(),
       max_pressure_.getVGPRNum(st_->hasGFX90AInsts()));
+}
+
+int GCNRegisterTracker::GetLaunchFloorClampedAllFactorsRegionOnlyOccupancy()
+    const {
+  return std::max(GetAllFactorsRegionOnlyOccupancy(),
+                  static_cast<int>(GetLaunchOccupancyFloor()));
 }
 
 // ============================================================================

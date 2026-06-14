@@ -469,8 +469,8 @@ bool ScheduleConstructor::RegisterOnlyOccupancyExceedsFunctionOccupancyTarget() 
          pressure_tracker_.GetConfiguredMachineFunctionOccupancyTarget();
 }
 
-bool ScheduleConstructor::LaunchFloorClampedOccupancyIsAtOrAboveFunctionOccupancyTarget() const {
-  return pressure_tracker_.GetLaunchFloorClampedOccupancy() >=
+bool ScheduleConstructor::LaunchFloorClampedRegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() const {
+  return pressure_tracker_.GetLaunchFloorClampedRegisterOnlyOccupancy() >=
          pressure_tracker_.GetConfiguredMachineFunctionOccupancyTarget();
 }
 

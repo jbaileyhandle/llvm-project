@@ -112,7 +112,22 @@ public:
   //     counts of regions that timed out vs. ran to completion vs.
   //     ended because the policy was satisfied.
   struct MaxOccupancyRegionResult {
-    int all_factors_occupancy;
+    // The honest GCNSubtarget::computeOccupancy result for the
+    // region's final schedule -- highest waves/SIMD the schedule's
+    // SGPR/VGPR/LDS usage can fit at. Can be BELOW
+    // GetLaunchOccupancyFloor for a region that ended up in the
+    // spill regime (register pressure too high to fit at the
+    // launch-attribute minimum).
+    int raw_all_factors_occupancy;
+    // raw_all_factors_occupancy clamped up to the launch floor --
+    // the occupancy the kernel actually launches at for this
+    // region. Equal to raw_all_factors_occupancy when no spilling
+    // is required; equal to the floor when raw is below it.
+    int launch_floor_clamped_all_factors_occupancy;
+    // True iff raw_all_factors_occupancy < GetLaunchOccupancyFloor
+    // -- the region's schedule exceeded the launch floor's
+    // register budget and is spilling.
+    bool in_spill_regime;
     SearchTerminationCause termination_cause;
     std::string winner;
     std::optional<float> bfs_pct;
@@ -121,6 +136,13 @@ public:
     std::optional<int> bfs_ms, dfs_ms;
     std::optional<int> bfs_steps, dfs_steps;
     int orig_vgpr = 0, orig_sgpr = 0, fin_vgpr = 0, fin_sgpr = 0;
+    // Accumulated VGPR spill area
+    // (GCNRegisterTracker::GetVGPRSpillArea) for the region's
+    // input and final schedules respectively. Parallel to
+    // orig/fin_vgpr/sgpr above: a per-region snapshot of the
+    // spill-area metric for telemetry.
+    int64_t orig_spill_area = 0;
+    int64_t fin_spill_area = 0;
 
     // Per-subgraph search outcome for the search_outcomes.csv "sub{n}"
     // rows. Only the per-search fields are recorded; region-level

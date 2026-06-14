@@ -338,7 +338,7 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
   // structural floor) doesn't over-prune -- there, this gate stays
   // silent and Gate 2 / score-based dominance discriminate among
   // spilling candidates.
-  if (!schedule_constructor.LaunchFloorClampedOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
+  if (!schedule_constructor.LaunchFloorClampedRegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
     return true;
   }
 
@@ -498,7 +498,7 @@ bool DfsMaximizeLengthPolicy::ShouldBoundSearch(
   // must meet target. Effective rather than raw register-only so the
   // spill regime doesn't over-prune.
   if (!schedule_constructor
-           .LaunchFloorClampedOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
+           .LaunchFloorClampedRegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
     return true;
   }
 

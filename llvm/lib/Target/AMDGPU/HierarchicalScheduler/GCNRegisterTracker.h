@@ -205,7 +205,7 @@ public:
   /// gates that compare against the function's target -- a raw
   /// register-only gate over-prunes in the spill regime (where
   /// every path has reg-only < floor).
-  unsigned GetLaunchFloorClampedOccupancy() const;
+  unsigned GetLaunchFloorClampedRegisterOnlyOccupancy() const;
 
   /// True when current VGPR pressure (cur_pressure_'s VGPR count)
   /// exceeds the VGPR cap permitted at the occupancy floor
@@ -326,6 +326,17 @@ public:
   /// currently configured on the MachineFunction.
   int GetAllFactorsRegionOnlyOccupancy() const;
 
+  /// max(GetAllFactorsRegionOnlyOccupancy(), GetLaunchOccupancyFloor()).
+  /// The occupancy the kernel actually launches at for this region's
+  /// schedule -- equal to the raw all-factors value when no spilling
+  /// is required; equal to the launch floor when the raw value is
+  /// below it (i.e., the schedule is in the spill regime, where the
+  /// launch attribute keeps the kernel runnable at the cost of spill
+  /// loads/stores). Region-only, like its raw counterpart; parallels
+  /// GetLaunchFloorClampedRegisterOnlyOccupancy on the all-factors
+  /// view that callers use to track per-region launch occupancy.
+  int GetLaunchFloorClampedAllFactorsRegionOnlyOccupancy() const;
+
   /// Static version of the compose used by
   /// GetAllFactorsRegionOnlyOccupancy, parameterized by register
   /// pressure. Register args of 0 skip the register-pressure clamping
@@ -352,6 +363,16 @@ public:
   /// same function. Improving this region's register pressure cannot
   /// raise occupancy above this value.
   unsigned GetConfiguredMachineFunctionOccupancyTarget() const;
+
+  /// The launch-time occupancy floor (MFI->getMinWavesPerEU()) --
+  /// the minimum waves/SIMD the kernel can be launched at given its
+  /// attributes. The kernel is guaranteed to run at this occupancy
+  /// even if register pressure would otherwise demand lower (spill
+  /// regime). Honors test_occupancy_floor_override_ (set via
+  /// SetOccupancyFloorForTest) so shakedowns can drive consumers at
+  /// synthetic floors without mutating MFI; in production the
+  /// override is always nullopt and the raw MFI value is returned.
+  unsigned GetLaunchOccupancyFloor() const;
 
   /// Continuous occupancy score based on peak SGPR/VGPR pressure.
   ///
@@ -487,7 +508,7 @@ public:
     test_target_occupancy_override_ = t;
   }
 
-  /// Test-only: override what GetLaunchFloorClampedOccupancy and the
+  /// Test-only: override what GetLaunchFloorClampedRegisterOnlyOccupancy and the
   /// IsCur/IsPeak spill predicates see for the occupancy floor (the
   /// MFI->getMinWavesPerEU() value -- the minimum occupancy the
   /// kernel can be launched at given its attributes). Lets shakedowns
@@ -663,15 +684,6 @@ private:
   /// live MFI value."
   std::optional<unsigned> test_target_occupancy_override_;
   std::optional<unsigned> test_occupancy_floor_override_;
-
-  /// Wrap MFI->getMinWavesPerEU() with the same override semantics.
-  /// "OccupancyFloor" because that's what the value represents in
-  /// HierarchicalScheduler vocabulary -- the minimum occupancy the
-  /// kernel can be launched at given its attributes.
-  unsigned GetLaunchOccupancyFloor() const {
-    return test_occupancy_floor_override_.value_or(
-        mfi_->getMinWavesPerEU());
-  }
 
   const MachineFunction *mf_;
   const GCNSubtarget *st_;
