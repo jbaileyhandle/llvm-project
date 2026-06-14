@@ -37,6 +37,12 @@ struct SearchOutcome {
   std::optional<int> bfs_steps, dfs_steps;
   std::optional<int> orig_vgpr, orig_sgpr, fin_vgpr, fin_sgpr;
   std::optional<int> orig_len, fin_len;
+  // Accumulated VGPR spill area for the region's input and final
+  // schedules respectively. Set on the per-region "occ"/"len" rows;
+  // left unset (blank in the CSV) on the per-subgraph rows the
+  // decompose pass emits, which don't carry per-region pressure
+  // metadata.
+  std::optional<int64_t> orig_spill_area, fin_spill_area;
   std::optional<bool> improved;
 };
 

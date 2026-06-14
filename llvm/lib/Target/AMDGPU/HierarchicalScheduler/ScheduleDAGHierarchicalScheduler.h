@@ -182,6 +182,11 @@ public:
     bool timed_out = false;
     int nodes = 0;
     int orig_vgpr = 0, orig_sgpr = 0, fin_vgpr = 0, fin_sgpr = 0;
+    // Accumulated VGPR spill area (GCNRegisterTracker::GetVGPRSpillArea)
+    // for the region's input and final schedules respectively. Parallel
+    // to the matching fields on MaxOccupancyRegionResult.
+    int64_t orig_spill_area = 0;
+    int64_t fin_spill_area = 0;
     // Length pass is DFS-only; bfs_* stay blank on len rows.
     std::optional<int> dfs_ms, dfs_steps;
   };

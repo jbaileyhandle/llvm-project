@@ -365,6 +365,8 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     occ_row.orig_sgpr = region_result.orig_sgpr;
     occ_row.fin_vgpr = region_result.fin_vgpr;
     occ_row.fin_sgpr = region_result.fin_sgpr;
+    occ_row.orig_spill_area = region_result.orig_spill_area;
+    occ_row.fin_spill_area = region_result.fin_spill_area;
     occ_row.improved = region_result.raw_all_factors_occupancy >
                        original_register_only_occupancy;
     RecordSearchOutcome(occ_row);
@@ -464,6 +466,8 @@ static void PrintPreScheduleInfo(const ScheduleGraph &graph,
       << input.GetPressureTracker().GetRegisterOnlyOccupancy()
       << " all_factors_occ="
       << input.GetPressureTracker().GetAllFactorsRegionOnlyOccupancy()
+      << " spill_area="
+      << input.GetPressureTracker().GetVGPRSpillArea()
       << "\n"
       << key_indent << "length:   cycles="
       << input.GetLengthTracker().GetCurrentCycle()
@@ -499,6 +503,8 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
       << dfs_best.GetPressureTracker().GetRegisterOnlyOccupancy()
       << " all_factors_occ="
       << dfs_best.GetPressureTracker().GetAllFactorsRegionOnlyOccupancy()
+      << " spill_area="
+      << dfs_best.GetPressureTracker().GetVGPRSpillArea()
       << "\n"
       << key_indent << "length:   cycles="
       << dfs_best.GetLengthTracker().GetCurrentCycle()
@@ -856,6 +862,8 @@ void ScheduleDAGHierarchicalScheduler::RunLengthPass() {
     len_row.orig_sgpr = stats.orig_sgpr;
     len_row.fin_vgpr = stats.fin_vgpr;
     len_row.fin_sgpr = stats.fin_sgpr;
+    len_row.orig_spill_area = stats.orig_spill_area;
+    len_row.fin_spill_area = stats.fin_spill_area;
     len_row.orig_len = stats.input_length;
     len_row.fin_len = stats.output_length;
     len_row.improved = improved;
@@ -1299,6 +1307,10 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForLengthPass(
     stats.orig_sgpr = in.getSGPRNum();
     stats.fin_vgpr = out.getVGPRNum(st.hasGFX90AInsts());
     stats.fin_sgpr = out.getSGPRNum();
+    stats.orig_spill_area =
+        input_schedule_constructor.GetPressureTracker().GetVGPRSpillArea();
+    stats.fin_spill_area =
+        best_schedule_constructor.GetPressureTracker().GetVGPRSpillArea();
     stats.dfs_ms = static_cast<int>(total_dfs_ms);
     stats.dfs_steps = static_cast<int>(total_dfs_steps);
   });

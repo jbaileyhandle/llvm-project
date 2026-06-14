@@ -39,6 +39,13 @@ void AppendOpt(std::string &out, const std::optional<int> &v) {
   }
 }
 
+void AppendOpt(std::string &out, const std::optional<int64_t> &v) {
+  out += ',';
+  if (v.has_value()) {
+    out += std::to_string(*v);
+  }
+}
+
 void AppendOpt(std::string &out, const std::optional<float> &v) {
   out += ',';
   if (v.has_value()) {
@@ -78,7 +85,9 @@ void FlushSearchOutcomes() {
   std::ofstream f(kFile, started ? std::ios::app : std::ios::trunc);
   if (!started) {
     f << "function,pass,region,slot,nodes,term_cause,winner,bfs_pct,"
-         "orig_vgpr,orig_sgpr,fin_vgpr,fin_sgpr,orig_len,fin_len,improved,"
+         "orig_vgpr,orig_sgpr,fin_vgpr,fin_sgpr,"
+         "orig_spill_area,fin_spill_area,"
+         "orig_len,fin_len,improved,"
          "bfs_ms,bfs_steps,bfs_rate,dfs_ms,dfs_steps,dfs_rate\n";
     started = true;
   }
@@ -92,6 +101,8 @@ void FlushSearchOutcomes() {
     AppendOpt(line, r.orig_sgpr);
     AppendOpt(line, r.fin_vgpr);
     AppendOpt(line, r.fin_sgpr);
+    AppendOpt(line, r.orig_spill_area);
+    AppendOpt(line, r.fin_spill_area);
     AppendOpt(line, r.orig_len);
     AppendOpt(line, r.fin_len);
     line += ',';
