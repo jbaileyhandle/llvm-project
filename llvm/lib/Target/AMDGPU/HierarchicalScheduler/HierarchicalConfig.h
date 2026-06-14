@@ -50,7 +50,17 @@ enum class Search { kDfs, kBfsDp, kBfsDpDfs };
 ///   kMinRefineOccupancy - minimize, then refine occupancy likewise.
 ///   kMax                - maximize length (control / worst-legal
 ///                         baseline).
-enum class LengthPolicy { kMin, kMinRefineIlp, kMinRefineOccupancy, kMax };
+enum class LengthPolicy {
+  kMin,
+  kMinRefineIlp,
+  kMinRefineOccupancy,
+  // length-min with a hard upper bound on VGPR spill area equal to
+  // the input baseline's accumulated spill area. Use after the
+  // occupancy pass has nailed spill: this prevents length-min from
+  // making spill worse while chasing shorter schedules.
+  kMinBoundedSpillArea,
+  kMax,
+};
 
 /// Occupancy-pass configuration. Fixed objective (maximize occupancy),
 /// so no `policy`; varies on the search algorithm and (when a formation

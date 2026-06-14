@@ -1282,6 +1282,13 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForLengthPass(
           best_schedule_constructor, any_timed_out, total_dfs_ms,
           total_dfs_steps);
       break;
+    case LengthPolicy::kMinBoundedSpillArea:
+      RunMinimizeLengthForRegionWithPolicy<
+          DfsMinimizeLengthBoundedSpillAreaPolicy>(
+          graph, st, MF, *LIS, input_schedule_constructor,
+          best_schedule_constructor, any_timed_out, total_dfs_ms,
+          total_dfs_steps);
+      break;
     case LengthPolicy::kMax:
       RunMaximizeLengthForRegion(graph, st, MF, *LIS,
                                  input_schedule_constructor,
