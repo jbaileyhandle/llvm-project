@@ -575,6 +575,14 @@ bool GCNRegisterTracker::IsPeakInSpillRegime() const {
   return IsPeakVGPRInSpillRegime() || IsPeakSGPRInSpillRegime();
 }
 
+unsigned GCNRegisterTracker::GetPeakVGPRNum() const {
+  return max_pressure_.getVGPRNum(st_->hasGFX90AInsts());
+}
+
+unsigned GCNRegisterTracker::GetPeakSGPRNum() const {
+  return max_pressure_.getSGPRNum();
+}
+
 // ---- Current-pressure helpers, relative to target's per-track limit ----
 //
 // SGPR helpers pass Addressable=true to getMaxNumSGPRs. That matches the

@@ -74,7 +74,7 @@ enum class LengthPolicy {
   // the input baseline's accumulated spill area. Use after the
   // occupancy pass has nailed spill: this prevents length-min from
   // making spill worse while chasing shorter schedules.
-  kMinBoundedSpillArea,
+  kMinBoundedSpillSignals,
   kMax,
 };
 

@@ -362,7 +362,7 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
   return false;
 }
 
-bool DfsMinimizeLengthBoundedSpillAreaPolicy::ShouldBoundSearch(
+bool DfsMinimizeLengthBoundedSpillSignalsPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
     std::optional<LengthHistoryTracker> &length_history,
@@ -383,12 +383,32 @@ bool DfsMinimizeLengthBoundedSpillAreaPolicy::ShouldBoundSearch(
   // tracker -> spill area field. If profiling shows this as a hot
   // spot, lift the baseline to DfsSearch state at construction and
   // plumb it through ShouldBoundSearch.
-  const int64_t input_spill = schedule_constructor.GetGraph()
-                                  .GetInputScheduleConstructor()
-                                  .GetPressureTracker()
-                                  .GetVGPRSpillArea();
-  if (schedule_constructor.GetPressureTracker().GetVGPRSpillArea() >
-      input_spill) {
+  const auto &working_pressure = schedule_constructor.GetPressureTracker();
+  const auto &input_pressure = schedule_constructor.GetGraph()
+                                   .GetInputScheduleConstructor()
+                                   .GetPressureTracker();
+  // Peak VGPR regression in spill regime. When either schedule has VGPR
+  // peak in the spill regime, require working's VGPR peak to be at or
+  // below input's. Peak VGPR is a direct lower bound on RA's distinct
+  // VGPR spills (max(0, peak - budget)), so this catches the failure
+  // mode where the spill-area integral stays flat but peak grows.
+  // Sound: peak pressure is monotonically non-decreasing as scheduling
+  // progresses.
+  if ((working_pressure.IsPeakVGPRInSpillRegime() ||
+       input_pressure.IsPeakVGPRInSpillRegime()) &&
+      working_pressure.GetPeakVGPRNum() > input_pressure.GetPeakVGPRNum()) {
+    return true;
+  }
+  // SGPR-side parallel of the above.
+  if ((working_pressure.IsPeakSGPRInSpillRegime() ||
+       input_pressure.IsPeakSGPRInSpillRegime()) &&
+      working_pressure.GetPeakSGPRNum() > input_pressure.GetPeakSGPRNum()) {
+    return true;
+  }
+  // Spill-area integral gate against the input baseline. Complements
+  // the peak gates above by catching schedules that stay at the same
+  // peak but spend more cycles in spill regime (peak * time area).
+  if (working_pressure.GetVGPRSpillArea() > input_pressure.GetVGPRSpillArea()) {
     return true;
   }
   return false;

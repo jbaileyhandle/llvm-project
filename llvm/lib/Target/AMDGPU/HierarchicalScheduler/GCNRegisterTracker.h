@@ -234,6 +234,15 @@ public:
   /// "this schedule has spilled (on either track) at some point."
   bool IsPeakInSpillRegime() const;
 
+  /// Peak VGPR count seen so far (max_pressure_'s VGPR count, with the
+  /// gfx90a-aware accounting baked in). Convenience accessor that hides
+  /// the st_->hasGFX90AInsts() call sites need to make through
+  /// GCNRegPressure::getVGPRNum.
+  unsigned GetPeakVGPRNum() const;
+
+  /// SGPR-side parallel of GetPeakVGPRNum.
+  unsigned GetPeakSGPRNum() const;
+
   // ----------------------------------------------------------------
   // Current-pressure helpers, relative to the per-track limit
   // implied by the function's currently-configured occupancy target
@@ -491,7 +500,7 @@ public:
   /// Test-only: directly set vgpr_spill_area_. Lets shakedowns
   /// stage SCs with known accumulated spill area without driving
   /// pressure deltas through the full schedule path. Used by the
-  /// DfsMinimizeLengthBoundedSpillAreaPolicy shakedown to seed
+  /// DfsMinimizeLengthBoundedSpillSignalsPolicy shakedown to seed
   /// both the input baseline's spill area and the working SC's
   /// spill area at controlled boundary points (below, at, above
   /// the input ceiling).

@@ -106,15 +106,15 @@ LengthPolicy ParseLengthPolicy(StringRef scope, StringRef key, StringRef v) {
   if (v == "min+refine-occupancy") {
     return LengthPolicy::kMinRefineOccupancy;
   }
-  if (v == "min+bounded-spill-area") {
-    return LengthPolicy::kMinBoundedSpillArea;
+  if (v == "min+bounded-spill-signals") {
+    return LengthPolicy::kMinBoundedSpillSignals;
   }
   if (v == "max") {
     return LengthPolicy::kMax;
   }
   BadValue(scope, key, v,
            "min|min+refine-ilp|min+refine-occupancy|"
-           "min+bounded-spill-area|max");
+           "min+bounded-spill-signals|max");
 }
 
 bool ParseBool(StringRef scope, StringRef key, StringRef v) {
@@ -443,8 +443,8 @@ StringRef LengthPolicyName(LengthPolicy p) {
     return "min+refine-ilp";
   case LengthPolicy::kMinRefineOccupancy:
     return "min+refine-occupancy";
-  case LengthPolicy::kMinBoundedSpillArea:
-    return "min+bounded-spill-area";
+  case LengthPolicy::kMinBoundedSpillSignals:
+    return "min+bounded-spill-signals";
   case LengthPolicy::kMax:
     return "max";
   }

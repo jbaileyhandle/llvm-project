@@ -232,7 +232,7 @@ class DfsMinimizeLengthRefineIlpPolicy
 //
 // Inherits everything from DfsMinimizeLengthPolicy except for
 // ShouldBoundSearch, which adds the spill-area regression gate.
-class DfsMinimizeLengthBoundedSpillAreaPolicy
+class DfsMinimizeLengthBoundedSpillSignalsPolicy
     : public DfsMinimizeLengthPolicy {
  public:
   // Same recipe as the base -- spill is NOT a score slot.
@@ -468,7 +468,7 @@ class DfsMaximizeContinuousOccupancyThenAreaPolicy
 // occupancy-pass workhorse when spill matters: it finds the
 // minimum-spill schedule at the chosen integer occupancy, which
 // then becomes the input to the length pass's
-// DfsMinimizeLengthBoundedSpillAreaPolicy.
+// DfsMinimizeLengthBoundedSpillSignalsPolicy.
 //
 // Inherits everything from DfsMaximizeContinuousOccupancyPolicy except:
 //   - kScoreRecipe: integer-occupancy primary plus spill tiebreak.

@@ -6223,7 +6223,7 @@ void RunCompletionCannotImproveUponShakedown(const MachineFunction &mf) {
         !working.CompletionCannotImproveUpon(best, multi));
 }
 
-// ---- DfsMinimizeLengthBoundedSpillAreaPolicy: ShouldBoundSearch ----
+// ---- DfsMinimizeLengthBoundedSpillSignalsPolicy: ShouldBoundSearch ----
 //
 // Exercises the new spill-area regression gate. Stage:
 //   - Build a test DAG and populate its input ScheduleConstructor.
@@ -6243,10 +6243,10 @@ void RunCompletionCannotImproveUponShakedown(const MachineFunction &mf) {
 // that consult best (peak-spill-regime regression) don't fire when
 // neither SC is in the spill regime, which is true with default
 // (zero pressure) state.
-void RunDfsMinimizeLengthBoundedSpillAreaPolicyShakedown(
+void RunDfsMinimizeLengthBoundedSpillSignalsPolicyShakedown(
     const MachineFunction &mf) {
   llvm::outs()
-      << "  DfsMinimizeLengthBoundedSpillAreaPolicy shakedown:\n";
+      << "  DfsMinimizeLengthBoundedSpillSignalsPolicy shakedown:\n";
 
   const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
   auto graph = ScheduleGraph::BuildTestDAG();
@@ -6278,14 +6278,14 @@ void RunDfsMinimizeLengthBoundedSpillAreaPolicyShakedown(
       &working.GetLengthTracker(),
       &working.GetPressureTracker(),
       &working.GetIlpTracker(),
-      DfsMinimizeLengthBoundedSpillAreaPolicy::kScoreRecipe};
+      DfsMinimizeLengthBoundedSpillSignalsPolicy::kScoreRecipe};
   std::optional<PressureHistoryTracker> pressure_history;
 
   auto check = [&](const char *desc, bool ok) {
     llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
     if (!ok) {
       report_fatal_error(
-          "DfsMinimizeLengthBoundedSpillAreaPolicy shakedown: failure");
+          "DfsMinimizeLengthBoundedSpillSignalsPolicy shakedown: failure");
     }
   };
 
@@ -6300,7 +6300,7 @@ void RunDfsMinimizeLengthBoundedSpillAreaPolicyShakedown(
   // Case 1: working.spill < input.spill -- gate doesn't fire.
   working.GetPressureTrackerForTest().SetVGPRSpillAreaForTest(50);
   check("working.spill=50 < input.spill=100: not bounded",
-        !DfsMinimizeLengthBoundedSpillAreaPolicy::ShouldBoundSearch(
+        !DfsMinimizeLengthBoundedSpillSignalsPolicy::ShouldBoundSearch(
             working, best, length_history, pressure_history));
   reset_history();
 
@@ -6309,14 +6309,14 @@ void RunDfsMinimizeLengthBoundedSpillAreaPolicyShakedown(
   working.GetPressureTrackerForTest().SetVGPRSpillAreaForTest(
       kInputSpillBaseline);
   check("working.spill=100 == input.spill=100: not bounded",
-        !DfsMinimizeLengthBoundedSpillAreaPolicy::ShouldBoundSearch(
+        !DfsMinimizeLengthBoundedSpillSignalsPolicy::ShouldBoundSearch(
             working, best, length_history, pressure_history));
   reset_history();
 
   // Case 3: working.spill > input.spill -- gate fires.
   working.GetPressureTrackerForTest().SetVGPRSpillAreaForTest(150);
   check("working.spill=150 > input.spill=100: bounded",
-        DfsMinimizeLengthBoundedSpillAreaPolicy::ShouldBoundSearch(
+        DfsMinimizeLengthBoundedSpillSignalsPolicy::ShouldBoundSearch(
             working, best, length_history, pressure_history));
 }
 
@@ -6808,7 +6808,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunPressureHistoryRoutingAndSoundnessShakedown();
   RunScoreLeadingSlotsCompareShakedown();
   RunCompletionCannotImproveUponShakedown(MF);
-  RunDfsMinimizeLengthBoundedSpillAreaPolicyShakedown(MF);
+  RunDfsMinimizeLengthBoundedSpillSignalsPolicyShakedown(MF);
   RunDfsMaximizeIntegerOccupancyRefineSpillAreaPolicyShakedown(MF);
   RunOccupancyTargetUtilShakedown(MF);
   RunVGPRSpillAreaAccumulatorShakedown(MF);
