@@ -651,3 +651,22 @@ bool DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy::ShouldEndSearch(
   }
   return true;
 }
+
+bool DfsMaximizeContinuousOccupancyRefineSpillAreaPolicy::ShouldEndSearch(
+    const ScheduleConstructor & /*schedule_constructor*/,
+    const ScheduleConstructor &best_schedule_constructor) {
+  // Same shape as the integer-occ variant: end only when both slots
+  // are at their optima. "At occupancy target" uses the integer occ
+  // check (the function target is itself an integer bracket); the
+  // continuous primary discriminates within that bracket but ending
+  // is still gated on reaching the target.
+  if (!best_schedule_constructor
+           .RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
+    return false;
+  }
+  if (best_schedule_constructor.GetPressureTracker().GetVGPRSpillArea() >
+      0) {
+    return false;
+  }
+  return true;
+}

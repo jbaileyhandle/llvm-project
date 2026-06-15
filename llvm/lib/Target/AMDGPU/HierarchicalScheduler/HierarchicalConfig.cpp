@@ -83,7 +83,12 @@ OccupancyPolicy ParseOccupancyPolicy(StringRef scope, StringRef key, StringRef v
   if (v == "integer+refine-spill-area") {
     return OccupancyPolicy::kIntegerOccupancyRefineSpillArea;
   }
-  BadValue(scope, key, v, "continuous|integer|integer+refine-spill-area");
+  if (v == "continuous+refine-spill-area") {
+    return OccupancyPolicy::kContinuousOccupancyRefineSpillArea;
+  }
+  BadValue(scope, key, v,
+           "continuous|integer|integer+refine-spill-area|"
+           "continuous+refine-spill-area");
 }
 
 SubgraphScheduleMode ParseMode(StringRef scope, StringRef key, StringRef v) {
@@ -354,12 +359,14 @@ void ValidateOccupancy(const OccupancyConfig &c) {
     report_fatal_error(
         "HierarchicalConfig: occupancy.max_occ_above_input must be >= 0");
   }
-  // BFS-DP isn't equipped for spill-area; the integer+area metric is DFS-only.
-  if (c.policy == OccupancyPolicy::kIntegerOccupancyRefineSpillArea &&
+  // BFS-DP isn't equipped for spill-area; the refine-spill-area policies are
+  // DFS-only.
+  if ((c.policy == OccupancyPolicy::kIntegerOccupancyRefineSpillArea ||
+       c.policy == OccupancyPolicy::kContinuousOccupancyRefineSpillArea) &&
       c.search != Search::kDfs) {
     report_fatal_error(
-        "HierarchicalConfig: occupancy.policy=integer+refine-spill-area "
-        "requires occupancy.search=dfs (BFS-DP is not equipped for spill area)");
+        "HierarchicalConfig: occupancy.policy refine-spill-area variants "
+        "require occupancy.search=dfs (BFS-DP is not equipped for spill area)");
   }
   // BFS-DP maximizes regardless of the function occupancy target, so the cap
   // is only honored by DFS (whose ShouldEndSearch reads that target).
@@ -431,6 +438,8 @@ StringRef OccupancyPolicyName(OccupancyPolicy m) {
     return "integer";
   case OccupancyPolicy::kIntegerOccupancyRefineSpillArea:
     return "integer+refine-spill-area";
+  case OccupancyPolicy::kContinuousOccupancyRefineSpillArea:
+    return "continuous+refine-spill-area";
   }
   return "?";
 }

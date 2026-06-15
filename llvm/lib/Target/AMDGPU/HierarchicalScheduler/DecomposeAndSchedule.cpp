@@ -113,8 +113,8 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
   //   outer_search == kBfsDpDfs: BFS-DP (recipe picked by outer_policy),
   //     fall back to DFS if BFS-DP times out.
   // (outer_search == kBfsDp is rejected upstream by config-build validation
-  //  when decompose is on; outer_policy == kIntegerOccupancyRefineSpillArea
-  //  is rejected upstream unless outer_search == kDfs.)
+  //  when decompose is on; outer_policy == k{Integer,Continuous}OccupancyRefineSpillArea
+  //  are rejected upstream unless outer_search == kDfs.)
   opts.outer_search = [&st, &mf, &lis, seed_occupancy, outer_policy,
                        outer_search](ScheduleGraph &g) -> SearchResult {
     if (outer_search == Search::kDfs) {
@@ -138,6 +138,12 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
         result = dfs.Run();
         break;
       }
+      case OccupancyPolicy::kContinuousOccupancyRefineSpillArea: {
+        DfsSearch<DfsMaximizeContinuousOccupancyRefineSpillAreaPolicy> dfs(
+            g, st, mf, lis);
+        result = dfs.Run();
+        break;
+      }
       }
       result.winner = "dfs";
       return result;
@@ -145,8 +151,8 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
     assert(outer_search == Search::kBfsDpDfs &&
            "decompose outer requires kDfs or kBfsDpDfs");
     // BFS-DP outer with DFS fallback. The recipe is integer-or-continuous;
-    // kIntegerOccupancyRefineSpillArea would land here only as a bug
-    // (config-build validation requires kDfs for it).
+    // the refine-spill-area variants would land here only as a bug
+    // (config-build validation requires kDfs for them).
     bool outer_continuous;
     BfsDpSettings settings;
     switch (outer_policy) {
@@ -159,8 +165,9 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
       settings.recipe = score_recipes::kMaximizeRegisterOccupancy;
       break;
     case OccupancyPolicy::kIntegerOccupancyRefineSpillArea:
+    case OccupancyPolicy::kContinuousOccupancyRefineSpillArea:
       llvm_unreachable(
-          "kIntegerOccupancyRefineSpillArea requires search=dfs");
+          "refine-spill-area policies require search=dfs");
     }
     settings.timeout_ms = kMakeTimeoutMs;
     BfsDpSearch bfs(&g, &st, &mf, settings);

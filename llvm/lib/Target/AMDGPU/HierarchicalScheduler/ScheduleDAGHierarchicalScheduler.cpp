@@ -663,6 +663,10 @@ static SearchResult RunOccupancyRegionWithDfs(
     run(DfsSearch<DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy>(
         graph, st, mf, lis));
     break;
+  case OccupancyPolicy::kContinuousOccupancyRefineSpillArea:
+    run(DfsSearch<DfsMaximizeContinuousOccupancyRefineSpillAreaPolicy>(
+        graph, st, mf, lis));
+    break;
   }
   result.winner = "dfs";
   return result;

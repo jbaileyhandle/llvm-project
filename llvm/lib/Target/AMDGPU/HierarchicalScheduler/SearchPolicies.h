@@ -497,6 +497,47 @@ class DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy
       const ScheduleConstructor &best_schedule_constructor);
 };
 
+// Continuous-occupancy maximizer with VGPR spill area as the same-
+// score tiebreak. Pairs with the length pass's
+// DfsMinimizeLengthBoundedSpillSignalsPolicy: that policy bounds the
+// length-pass output against the input schedule's peak VGPR/SGPR
+// (when in spill regime) and VGPR spill area. The tighter those
+// signals are on the input the occupancy pass hands over, the less
+// room the length pass has to regress. This policy aims for the
+// smallest VGPR spill area at the chosen continuous occupancy, so the
+// schedule it produces is a tighter baseline than the integer variant
+// would emit.
+//
+// Parallels DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy but uses
+// the smooth continuous-occupancy primary instead of the coarse
+// integer bracket. The finer primary means schedules that the integer
+// variant treats as tied are discriminated here directly by the
+// primary, so the spill-area tiebreak runs only on the smaller set of
+// schedules with truly identical continuous scores.
+//
+// Inherits everything from DfsMaximizeContinuousOccupancyPolicy except:
+//   - kScoreRecipe: continuous-occ primary plus spill tiebreak. Both
+//     slots are bound-safe (NI canonical -- continuous score only
+//     drops over completion, spill area only grows), so the score-
+//     bound prune via CompletionCannotImproveUpon fires on the full
+//     two-slot lex compare.
+//   - ShouldEndSearch overridden: the base ends as soon as best is at
+//     the function-occ ceiling, but we want to keep searching ceiling
+//     completions to drive spill_area toward zero. Only end when best
+//     is at the ceiling AND best.spill_area == 0.
+class DfsMaximizeContinuousOccupancyRefineSpillAreaPolicy
+    : public DfsMaximizeContinuousOccupancyPolicy {
+ public:
+  static constexpr ScoreRecipe kScoreRecipe{{
+      MetricSlot{ScoreDimension::kContinuousOccScore, Polarity::kMaximize},
+      MetricSlot{ScoreDimension::kVgprSpillArea, Polarity::kMinimize},
+  }};
+
+  static bool ShouldEndSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor);
+};
+
 } // namespace hierarchical_scheduler
 } // namespace llvm
 

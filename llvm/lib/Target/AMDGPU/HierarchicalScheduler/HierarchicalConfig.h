@@ -45,18 +45,23 @@ enum class Search { kDfs, kBfsDp, kBfsDpDfs };
 
 /// Occupancy-pass primary metric. Applies to both flat and decompose-outer
 /// search; inner per-subgraph searches in decompose are always continuous.
-///   kContinuousOccupancy              - continuous register-occupancy score.
-///   kIntegerOccupancy                 - integer register-occupancy level.
-///   kIntegerOccupancyRefineSpillArea  - integer occupancy with VGPR spill
-///                                       area as a same-occupancy tiebreak.
+///   kContinuousOccupancy                 - continuous register-occupancy score.
+///   kIntegerOccupancy                    - integer register-occupancy level.
+///   kIntegerOccupancyRefineSpillArea     - integer occupancy with VGPR spill
+///                                          area as a same-occupancy tiebreak.
+///   kContinuousOccupancyRefineSpillArea  - continuous occupancy score with
+///                                          VGPR spill area as a same-score
+///                                          tiebreak. Finer primary than the
+///                                          integer variant.
 /// Validated at Build():
-///   kIntegerOccupancyRefineSpillArea requires search=dfs (BFS-DP is not
-///   equipped for area today).
+///   kIntegerOccupancyRefineSpillArea and kContinuousOccupancyRefineSpillArea
+///   both require search=dfs (BFS-DP is not equipped for area today).
 ///   max_occ_above_input requires search=dfs (BFS-DP ignores the cap).
 enum class OccupancyPolicy {
   kContinuousOccupancy,
   kIntegerOccupancy,
   kIntegerOccupancyRefineSpillArea,
+  kContinuousOccupancyRefineSpillArea,
 };
 
 /// `policy` axis (length pass only): the length pass's objective.
