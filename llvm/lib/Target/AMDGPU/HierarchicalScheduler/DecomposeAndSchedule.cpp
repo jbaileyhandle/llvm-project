@@ -62,7 +62,7 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
     const LiveIntervals &lis,
     int seed_occupancy,
     const FormationConfig &subgraph_formation,
-    Metric outer_metric,
+    OccupancyPolicy outer_policy,
     Search outer_search) {
   DecomposeAndScheduleOptions opts;
   // Formation: realized from the caller-supplied config. Decompose
@@ -108,31 +108,31 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
     return dfs_result;
   };
 
-  // Outer: selected by (outer_metric, outer_search).
-  //   outer_search == kDfs: DFS only with the policy picked by outer_metric.
-  //   outer_search == kBfsDpDfs: BFS-DP (recipe picked by outer_metric),
+  // Outer: selected by (outer_policy, outer_search).
+  //   outer_search == kDfs: DFS only with the policy picked by outer_policy.
+  //   outer_search == kBfsDpDfs: BFS-DP (recipe picked by outer_policy),
   //     fall back to DFS if BFS-DP times out.
   // (outer_search == kBfsDp is rejected upstream by config-build validation
-  //  when decompose is on; outer_metric == kIntegerOccupancyRefineSpillArea
+  //  when decompose is on; outer_policy == kIntegerOccupancyRefineSpillArea
   //  is rejected upstream unless outer_search == kDfs.)
-  opts.outer_search = [&st, &mf, &lis, seed_occupancy, outer_metric,
+  opts.outer_search = [&st, &mf, &lis, seed_occupancy, outer_policy,
                        outer_search](ScheduleGraph &g) -> SearchResult {
     if (outer_search == Search::kDfs) {
       // No BFS-DP: DFS directly. Primary-search budget (not the shorter
       // BFS-DP-fallback budget), matching the non-decompose DFS path.
       SearchResult result;
-      switch (outer_metric) {
-      case Metric::kContinuousOccupancy: {
+      switch (outer_policy) {
+      case OccupancyPolicy::kContinuousOccupancy: {
         DfsSearch<DfsMaximizeContinuousOccupancyPolicy> dfs(g, st, mf, lis);
         result = dfs.Run();
         break;
       }
-      case Metric::kIntegerOccupancy: {
+      case OccupancyPolicy::kIntegerOccupancy: {
         DfsSearch<DfsMaximizeIntegerOccupancyPolicy> dfs(g, st, mf, lis);
         result = dfs.Run();
         break;
       }
-      case Metric::kIntegerOccupancyRefineSpillArea: {
+      case OccupancyPolicy::kIntegerOccupancyRefineSpillArea: {
         DfsSearch<DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy> dfs(
             g, st, mf, lis);
         result = dfs.Run();
@@ -149,16 +149,16 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
     // (config-build validation requires kDfs for it).
     bool outer_continuous;
     BfsDpSettings settings;
-    switch (outer_metric) {
-    case Metric::kContinuousOccupancy:
+    switch (outer_policy) {
+    case OccupancyPolicy::kContinuousOccupancy:
       outer_continuous = true;
       settings.recipe = score_recipes::kMaximizeContinuousRegisterOccupancyScore;
       break;
-    case Metric::kIntegerOccupancy:
+    case OccupancyPolicy::kIntegerOccupancy:
       outer_continuous = false;
       settings.recipe = score_recipes::kMaximizeRegisterOccupancy;
       break;
-    case Metric::kIntegerOccupancyRefineSpillArea:
+    case OccupancyPolicy::kIntegerOccupancyRefineSpillArea:
       llvm_unreachable(
           "kIntegerOccupancyRefineSpillArea requires search=dfs");
     }
@@ -216,14 +216,14 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
 SearchResult RecursiveDecomposeAndSchedule(
     ScheduleGraph &graph, const GCNSubtarget &st, const MachineFunction &mf,
     const LiveIntervals &lis, int seed_occupancy,
-    const FormationConfig &subgraph_formation, Metric outer_metric,
+    const FormationConfig &subgraph_formation, OccupancyPolicy outer_policy,
     Search outer_search) {
   // Per-level options: continuous leaf inner search + the composable outer
   // search + the (max_parts-capped) mincut formation. Make builds all three;
   // we reuse its inner as the leaf search and override it below for the
   // non-leaf case.
   DecomposeAndScheduleOptions opts = DecomposeAndScheduleOptions::Make(
-      st, mf, lis, seed_occupancy, subgraph_formation, outer_metric,
+      st, mf, lis, seed_occupancy, subgraph_formation, outer_policy,
       outer_search);
 
   // Leaf: a (sub)graph with at most target_subgraph_size scheduling units is
@@ -239,13 +239,13 @@ SearchResult RecursiveDecomposeAndSchedule(
   // so the recursion terminates at the leaf size. ScheduleSubgraph runs this
   // inner search on each extracted subgraph before the level's outer search,
   // so the schedule is built bottom-up. Deeper levels order subgraph
-  // interiors, so they always use continuous BFS-DP+DFS — (outer_metric,
+  // interiors, so they always use continuous BFS-DP+DFS — (outer_policy,
   // outer_search) is an outermost-only, region-level concept (see header).
   opts.inner_search = [&st, &mf, &lis, seed_occupancy,
                        subgraph_formation](ScheduleGraph &sub) -> SearchResult {
     return RecursiveDecomposeAndSchedule(sub, st, mf, lis, seed_occupancy,
                                          subgraph_formation,
-                                         Metric::kContinuousOccupancy,
+                                         OccupancyPolicy::kContinuousOccupancy,
                                          Search::kBfsDpDfs);
   };
   return DecomposeAndSchedule(graph, st, mf, opts);

@@ -53,7 +53,7 @@ enum class Search { kDfs, kBfsDp, kBfsDpDfs };
 ///   kIntegerOccupancyRefineSpillArea requires search=dfs (BFS-DP is not
 ///   equipped for area today).
 ///   max_occ_above_input requires search=dfs (BFS-DP ignores the cap).
-enum class Metric {
+enum class OccupancyPolicy {
   kContinuousOccupancy,
   kIntegerOccupancy,
   kIntegerOccupancyRefineSpillArea,
@@ -86,13 +86,13 @@ enum class LengthPolicy {
 struct OccupancyConfig {
   FormationConfig formation; // strategy + mode + min-cut settings
   Search search = Search::kDfs;
-  Metric metric = Metric::kContinuousOccupancy;
+  OccupancyPolicy policy = OccupancyPolicy::kContinuousOccupancy;
   bool decompose = false;
   // Recursive decompose: when on (with decompose + mincut formation), split
   // each level into at most 4 subgraphs and recurse down to
   // ~target_subgraph_size-node leaves, instead of one flat decomposition.
   // Composes with the serialized/interleaved subgraph install mode
-  // (formation.mode) and with the (metric, search) pair; deeper levels'
+  // (formation.mode) and with the (policy, search) pair; deeper levels'
   // outer searches are always continuous.
   bool decompose_recursive = false;
   // Max subgraphs per level when decompose_recursive is on (the mincut part

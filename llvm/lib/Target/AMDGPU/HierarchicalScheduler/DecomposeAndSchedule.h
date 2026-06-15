@@ -23,7 +23,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_DECOMPOSEANDSCHEDULE_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_DECOMPOSEANDSCHEDULE_H
 
-#include "HierarchicalConfig.h" // Metric, Search
+#include "HierarchicalConfig.h" // OccupancyPolicy, Search
 #include "SearchResult.h"
 #include "SubgraphFormation.h"
 #include <functional>
@@ -85,9 +85,9 @@ struct DecomposeAndScheduleOptions {
   /// floor, so inner BFS-DP runs unseeded and explores exhaustively
   /// within the budget.
   ///
-  /// `outer_search` is selected by `outer_metric` and `outer_search`.
+  /// `outer_search` is selected by `outer_policy` and `outer_search`.
   /// See HierarchicalConfig.h for the available values and the
-  /// validation rules; see the .cpp for the per-(metric, search)
+  /// validation rules; see the .cpp for the per-(policy, search)
   /// dispatch. When BFS-DP is the chosen outer algorithm, the BFS-DP
   /// score-bound prune is seeded with `seed_occupancy` (integer outer)
   /// or the input order's continuous score (continuous outer); when
@@ -114,7 +114,7 @@ struct DecomposeAndScheduleOptions {
       const LiveIntervals &lis,
       int seed_occupancy,
       const FormationConfig &subgraph_formation,
-      Metric outer_metric = Metric::kIntegerOccupancy,
+      OccupancyPolicy outer_policy = OccupancyPolicy::kIntegerOccupancy,
       Search outer_search = Search::kBfsDpDfs);
 };
 
@@ -134,7 +134,7 @@ SearchResult DecomposeAndSchedule(
 /// parts per level) and recursing, until a subgraph has at most
 /// `min_cut.target_subgraph_size` scheduling units — a leaf, scheduled
 /// directly by the continuous BFS-DP+DFS search. Each non-leaf level's
-/// inner search recurses. `outer_metric` and `outer_search` apply to
+/// inner search recurses. `outer_policy` and `outer_search` apply to
 /// the OUTERMOST level only. Deeper recursion always uses
 /// (kContinuousOccupancy, kBfsDpDfs); the other modes are region-level
 /// constructs that don't apply below the top. Because
@@ -148,7 +148,7 @@ SearchResult RecursiveDecomposeAndSchedule(
     const LiveIntervals &lis,
     int seed_occupancy,
     const FormationConfig &subgraph_formation,
-    Metric outer_metric,
+    OccupancyPolicy outer_policy,
     Search outer_search);
 
 }  // namespace hierarchical_scheduler

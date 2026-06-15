@@ -600,8 +600,8 @@ static SearchResult RunOccupancyRegionWithBfsDp(
 //   - formation: the occupancy pass's configured strategy + install
 //                mode (validated to be a real strategy, never none)
 //   - inner_search: BFS-DP continuous → DFS continuous fallback
-//   - outer_search: selected by (occ.metric, occ.search); see Make for
-//                   the per-(metric, search) dispatch and budgets. May return a SearchResult
+//   - outer_search: selected by (occ.policy, occ.search); see Make for
+//                   the per-(policy, search) dispatch and budgets. May return a SearchResult
 // whose schedule is empty (only the outer BFS-DP can; its DFS
 // fallback always populates one); the dispatcher's common tail keeps
 // the input order in that case.
@@ -611,7 +611,7 @@ static SearchResult RunOccupancyRegionWithDecompose(
     const LiveIntervals &lis) {
   const OccupancyConfig &occ = HierarchicalConfig::Get().occupancy;
   const int seed = region.GetOriginalRegisterOnlyOccupancy();
-  // Outermost outer search is (occ.metric, occ.search). In recursive
+  // Outermost outer search is (occ.policy, occ.search). In recursive
   // decompose this is the outermost level only; deeper levels are always
   // continuous BFS-DP+DFS (see RecursiveDecomposeAndSchedule).
   if (occ.decompose_recursive) {
@@ -620,13 +620,13 @@ static SearchResult RunOccupancyRegionWithDecompose(
     FormationConfig formation = occ.formation;
     formation.min_cut.max_parts = occ.decompose_max_parts; // subgraphs/level cap
     SearchResult result = RecursiveDecomposeAndSchedule(
-        graph, st, mf, lis, seed, formation, occ.metric, occ.search);
+        graph, st, mf, lis, seed, formation, occ.policy, occ.search);
     llvm::outs() << "\t\toutput: (Decompose-recursive) found_improvement="
                  << result.schedule.has_value() << "\n";
     return result;
   }
   DecomposeAndScheduleOptions opts = DecomposeAndScheduleOptions::Make(
-      st, mf, lis, seed, occ.formation, occ.metric, occ.search);
+      st, mf, lis, seed, occ.formation, occ.policy, occ.search);
   SearchResult result = DecomposeAndSchedule(graph, st, mf, opts);
   llvm::outs() << "\t\toutput: (Decompose) found_improvement="
                << result.schedule.has_value() << "\n";
@@ -634,7 +634,7 @@ static SearchResult RunOccupancyRegionWithDecompose(
 }
 
 // Per-region DFS occupancy search. Picks the DFS policy class by
-// occ.metric and seeds the search with the graph's input schedule (so
+// occ.policy and seeds the search with the graph's input schedule (so
 // best is never empty). Runs over the already-formed graph: the
 // occupancy dispatcher forms subgraphs (per the configured strategy)
 // before invoking any search. Emits the standard PostScheduleInfo
@@ -643,7 +643,7 @@ static SearchResult RunOccupancyRegionWithDfs(
     ScheduleGraph &graph, const GCNSubtarget &st,
     const MachineFunction &mf, const LiveIntervals &lis,
     const ScheduleConstructor &input_schedule_constructor) {
-  const Metric metric = HierarchicalConfig::Get().occupancy.metric;
+  const OccupancyPolicy metric = HierarchicalConfig::Get().occupancy.policy;
   SearchResult result;
   auto run = [&](auto search) {
     result = search.Run();
@@ -653,13 +653,13 @@ static SearchResult RunOccupancyRegionWithDfs(
     PrintPostScheduleInfo(graph, *result.schedule, search, st, changed, "\t\t");
   };
   switch (metric) {
-  case Metric::kContinuousOccupancy:
+  case OccupancyPolicy::kContinuousOccupancy:
     run(DfsSearch<DfsMaximizeContinuousOccupancyPolicy>(graph, st, mf, lis));
     break;
-  case Metric::kIntegerOccupancy:
+  case OccupancyPolicy::kIntegerOccupancy:
     run(DfsSearch<DfsMaximizeIntegerOccupancyPolicy>(graph, st, mf, lis));
     break;
-  case Metric::kIntegerOccupancyRefineSpillArea:
+  case OccupancyPolicy::kIntegerOccupancyRefineSpillArea:
     run(DfsSearch<DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy>(
         graph, st, mf, lis));
     break;

@@ -73,17 +73,17 @@ Search ParseSearch(StringRef scope, StringRef key, StringRef v) {
   BadValue(scope, key, v, "dfs|bfsdp|bfsdp+dfs");
 }
 
-Metric ParseMetric(StringRef scope, StringRef key, StringRef v) {
+OccupancyPolicy ParseOccupancyPolicy(StringRef scope, StringRef key, StringRef v) {
   if (v == "continuous") {
-    return Metric::kContinuousOccupancy;
+    return OccupancyPolicy::kContinuousOccupancy;
   }
   if (v == "integer") {
-    return Metric::kIntegerOccupancy;
+    return OccupancyPolicy::kIntegerOccupancy;
   }
-  if (v == "integer-refine-spill-area") {
-    return Metric::kIntegerOccupancyRefineSpillArea;
+  if (v == "integer+refine-spill-area") {
+    return OccupancyPolicy::kIntegerOccupancyRefineSpillArea;
   }
-  BadValue(scope, key, v, "continuous|integer|integer-refine-spill-area");
+  BadValue(scope, key, v, "continuous|integer|integer+refine-spill-area");
 }
 
 SubgraphScheduleMode ParseMode(StringRef scope, StringRef key, StringRef v) {
@@ -186,8 +186,8 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
     c.decompose = ParseBool(scope, key, val);
     return;
   }
-  if (key == "metric") {
-    c.metric = ParseMetric(scope, key, val);
+  if (key == "policy") {
+    c.policy = ParseOccupancyPolicy(scope, key, val);
     return;
   }
   if (key == "decompose_recursive") {
@@ -355,10 +355,10 @@ void ValidateOccupancy(const OccupancyConfig &c) {
         "HierarchicalConfig: occupancy.max_occ_above_input must be >= 0");
   }
   // BFS-DP isn't equipped for spill-area; the integer+area metric is DFS-only.
-  if (c.metric == Metric::kIntegerOccupancyRefineSpillArea &&
+  if (c.policy == OccupancyPolicy::kIntegerOccupancyRefineSpillArea &&
       c.search != Search::kDfs) {
     report_fatal_error(
-        "HierarchicalConfig: occupancy.metric=integer-refine-spill-area "
+        "HierarchicalConfig: occupancy.policy=integer+refine-spill-area "
         "requires occupancy.search=dfs (BFS-DP is not equipped for spill area)");
   }
   // BFS-DP maximizes regardless of the function occupancy target, so the cap
@@ -423,14 +423,14 @@ StringRef ModeName(SubgraphScheduleMode m) {
   return "?";
 }
 
-StringRef MetricName(Metric m) {
+StringRef OccupancyPolicyName(OccupancyPolicy m) {
   switch (m) {
-  case Metric::kContinuousOccupancy:
+  case OccupancyPolicy::kContinuousOccupancy:
     return "continuous";
-  case Metric::kIntegerOccupancy:
+  case OccupancyPolicy::kIntegerOccupancy:
     return "integer";
-  case Metric::kIntegerOccupancyRefineSpillArea:
-    return "integer-refine-spill-area";
+  case OccupancyPolicy::kIntegerOccupancyRefineSpillArea:
+    return "integer+refine-spill-area";
   }
   return "?";
 }
@@ -534,7 +534,7 @@ std::string HierarchicalConfig::ToString() const {
   os << "HierarchicalConfig:\n";
   os << "\toccupancy: formation=" << FormationName(occupancy.formation.strategy)
      << " search=" << SearchName(occupancy.search)
-     << " metric=" << MetricName(occupancy.metric)
+     << " policy=" << OccupancyPolicyName(occupancy.policy)
      << " decompose=" << (occupancy.decompose ? "on" : "off")
      << " decompose_recursive="
      << (occupancy.decompose_recursive ? "on" : "off")
