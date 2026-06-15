@@ -3285,7 +3285,7 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
 // =============================================================================
 //
 // Test policies for pressure-history-vs-no-pressure-history. Both
-// inherit DfsMaximizeOccupancyPolicy and override
+// inherit DfsMaximizeContinuousOccupancyPolicy and override
 // ShouldBoundSearch / ShouldEndSearch to disable production
 // bounds. The two variants differ only in whether ShouldBoundSearch
 // consults the pressure-history tracker. With production bounds
@@ -3293,7 +3293,7 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
 // attributable to pressure-history pruning alone.
 
 class TestPressurePolicyNoBoundsNoHistory
-    : public DfsMaximizeOccupancyPolicy {
+    : public DfsMaximizeContinuousOccupancyPolicy {
  public:
   static bool ShouldBoundSearch(const ScheduleConstructor &,
                                 const ScheduleConstructor &,
@@ -3308,7 +3308,7 @@ class TestPressurePolicyNoBoundsNoHistory
 };
 
 class TestPressurePolicyNoBoundsWithHistory
-    : public DfsMaximizeOccupancyPolicy {
+    : public DfsMaximizeContinuousOccupancyPolicy {
  public:
   static bool ShouldBoundSearch(
       const ScheduleConstructor &, const ScheduleConstructor &,
@@ -3325,7 +3325,7 @@ class TestPressurePolicyNoBoundsWithHistory
 // End-to-end comparison shakedown for pressure history-based
 // domination. Runs DfsSearch on BuildPressureHistoryPruneTestDAG
 // twice — once with history pruning, once without — using test
-// policies that inherit DfsMaximizeOccupancyPolicy (so kMetric =
+// policies that inherit DfsMaximizeContinuousOccupancyPolicy (so kMetric =
 // score_recipes::kMaximizeContinuousRegisterOccupancyScore) and
 // override ShouldBoundSearch / ShouldEndSearch to disable production
 // bounds + the IsAtOrAbove end-search. The difference between the
@@ -3367,7 +3367,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
                                               const LiveIntervals &lis) {
   llvm::outs() << "  RunPressureHistoryDfsComparisonShakedown:\n";
 
-  // kMetric is inherited from DfsMaximizeOccupancyPolicy on both
+  // kMetric is inherited from DfsMaximizeContinuousOccupancyPolicy on both
   // test policies; reference it explicitly here for the post-Run
   // score read.
   constexpr ScoreRecipe kPolicyMetric =
@@ -3434,7 +3434,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
 //
 // ShouldBoundSearch is left at the production default — its
 // score-bound prune is sound and accelerates the search.
-class BfsDpVsDfsShakedownOraclePolicy : public DfsMaximizeOccupancyPolicy {
+class BfsDpVsDfsShakedownOraclePolicy : public DfsMaximizeContinuousOccupancyPolicy {
  public:
   static bool ShouldEndSearch(const ScheduleConstructor &,
                               const ScheduleConstructor &) {
@@ -3448,7 +3448,7 @@ class BfsDpVsDfsShakedownOraclePolicy : public DfsMaximizeOccupancyPolicy {
 // dominance. ShouldBoundSearch is re-derived (not inherited) so it
 // doesn't consult the history tracker.
 class BfsDpVsDfsShakedownOracleNoHistoryPolicy
-    : public DfsMaximizeOccupancyPolicy {
+    : public DfsMaximizeContinuousOccupancyPolicy {
  public:
   static bool ShouldEndSearch(const ScheduleConstructor &,
                               const ScheduleConstructor &) {
@@ -5686,14 +5686,13 @@ void RunDecomposeAndScheduleShakedown(const GCNSubtarget &st,
   }
 }
 
-// Exercises the DecomposeAndScheduleOptions::BfsDpWithDfsFallback
-// factory end-to-end: builds the formation-test DAG, asks the factory
-// for a fully-wired options bundle (formation +
-// BFS-DP-with-DFS-fallback inner_search + BFS-DP-with-DFS-fallback
-// outer_search), and runs DecomposeAndSchedule with it. Verifies the
-// pipeline returns a complete schedule and that each formed
-// subgraph's locked-order property holds. The factory drives the
-// production wiring path (vs. the hand-wired one in
+// Exercises the DecomposeAndScheduleOptions::Make factory end-to-end:
+// builds the formation-test DAG, asks the factory for a fully-wired
+// options bundle (formation + BFS-DP-with-DFS-fallback inner_search +
+// BFS-DP-with-DFS-fallback outer_search), and runs DecomposeAndSchedule
+// with it. Verifies the pipeline returns a complete schedule and that
+// each formed subgraph's locked-order property holds. The factory
+// drives the production wiring path (vs. the hand-wired one in
 // RunDecomposeAndScheduleShakedown above, which tests the pipeline
 // mechanics in isolation).
 //
@@ -5715,10 +5714,9 @@ void RunDecomposeAndScheduleFactoryShakedown(const GCNSubtarget &st,
   graph->ComputeCriticalPaths();
   graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
 
-  DecomposeAndScheduleOptions opts =
-      DecomposeAndScheduleOptions::BfsDpWithDfsFallback(
-          st, mf, lis, /*seed_occupancy=*/1,
-          FormationConfig{SubgraphFormationStrategy::kDomTree});
+  DecomposeAndScheduleOptions opts = DecomposeAndScheduleOptions::Make(
+      st, mf, lis, /*seed_occupancy=*/1,
+      FormationConfig{SubgraphFormationStrategy::kDomTree});
 
   SearchResult result = DecomposeAndSchedule(*graph, st, mf, opts);
 

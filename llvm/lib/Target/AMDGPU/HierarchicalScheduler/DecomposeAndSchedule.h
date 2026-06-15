@@ -23,6 +23,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_DECOMPOSEANDSCHEDULE_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_DECOMPOSEANDSCHEDULE_H
 
+#include "HierarchicalConfig.h" // Metric, Search
 #include "SearchResult.h"
 #include "SubgraphFormation.h"
 #include <functional>
@@ -37,19 +38,6 @@ namespace hierarchical_scheduler {
 
 class ScheduleGraph;
 
-/// Outer-search choice for decompose (the step-4 search over the proxied +
-/// chained graph). Three mutually exclusive modes:
-///   kBfsDpInteger    - BFS-DP on integer register occupancy, seeded with
-///                      the region's occupancy floor (default).
-///   kBfsDpContinuous - BFS-DP on the continuous occupancy score, seeded
-///                      with the input order's continuous score.
-///   kDfs             - DFS (DfsMaximizeOccupancyPolicy) over the proxied
-///                      graph, no BFS-DP. Its ShouldEndSearch honors the
-///                      function occupancy target, so it stops once the
-///                      region reaches it — needed when an occupancy cap
-///                      lowers that target (BFS-DP would maximize past it).
-enum class OuterSearch { kBfsDpInteger, kBfsDpContinuous, kDfs };
-
 /// Options for one DecomposeAndSchedule invocation. Grouped as
 /// formation config (`formation`, `mode`) followed by the two search
 /// callables in pipeline order (`inner_search` runs in step 2,
@@ -58,9 +46,8 @@ enum class OuterSearch { kBfsDpInteger, kBfsDpContinuous, kDfs };
 /// purpose — they run at different stages of the pipeline.
 ///
 /// Searches are stored as owning `std::function` rather than
-/// non-owning `function_ref` so factory methods (see
-/// BfsDpWithDfsFallback below) can build closures that outlive the
-/// factory call. Captures should still be by reference (st, mf, lis,
+/// non-owning `function_ref` so the `Make` factory below can build
+/// closures that outlive the factory call. Captures should still be by reference (st, mf, lis,
 /// settings) — those are expected to outlive the options anyway, and
 /// reference captures keep the closure small enough for std::function's
 /// small-buffer optimization.
@@ -90,28 +77,27 @@ struct DecomposeAndScheduleOptions {
   /// and DFS are valid choices here.
   std::function<SearchResult(ScheduleGraph &)> outer_search;
 
-  /// Standard preset: BFS-DP first, DFS fallback if BFS-DP times out
-  /// or returns no result. Both stages get a 5s wall-clock budget;
-  /// they differ in metric, and each stage's DFS fallback uses the
-  /// same metric as its BFS-DP:
-  ///   - inner_search: BFS-DP and DFS fallback both run on the
-  ///                   continuous occupancy score. No seed.
-  ///   - outer_search: BFS-DP and DFS fallback both run on the
-  ///                   integer occupancy score; BFS-DP is seeded
-  ///                   with `seed_occupancy`.
+  /// Build the options for one DecomposeAndSchedule run.
+  ///
+  /// `inner_search` is fixed: continuous occupancy, BFS-DP first with a
+  /// 5s budget, DFS fallback (continuous policy) if BFS-DP times out.
+  /// The continuous metric uses a different scale from the integer
+  /// floor, so inner BFS-DP runs unseeded and explores exhaustively
+  /// within the budget.
+  ///
+  /// `outer_search` is selected by `outer_metric` and `outer_search`.
+  /// See HierarchicalConfig.h for the available values and the
+  /// validation rules; see the .cpp for the per-(metric, search)
+  /// dispatch. When BFS-DP is the chosen outer algorithm, the BFS-DP
+  /// score-bound prune is seeded with `seed_occupancy` (integer outer)
+  /// or the input order's continuous score (continuous outer); when
+  /// DFS is the chosen outer algorithm, no seed applies and DFS runs
+  /// directly.
   ///
   /// `seed_occupancy` is the function-wide register-only occupancy
   /// floor — typically `RegionInfo::GetOriginalRegisterOnlyOccupancy()`
-  /// or the function's occupancy target. The outer BFS-DP's score-
-  /// bound prune uses it so any partition path that can't strictly
-  /// beat the floor is dropped. Inner BFS-DP doesn't apply this seed
-  /// (the inner metric is continuous, which uses a different scale
-  /// from the integer occupancy value); it explores exhaustively
-  /// within the 5s budget.
-  ///
-  /// Both DFS fallbacks run after formation has already happened (inner
-  /// on a leaf subgraph extracted by ScheduleSubgraph; outer on the
-  /// proxied graph).
+  /// or the function's occupancy target. Only the integer-outer BFS-DP
+  /// uses it; the others ignore it.
   ///
   /// `subgraph_formation` selects the formation strategy, install mode,
   /// and min-cut settings; the factory realizes it into
@@ -122,20 +108,14 @@ struct DecomposeAndScheduleOptions {
   ///
   /// The returned options own their closures; `st`, `mf`, and `lis`
   /// are captured by reference and must outlive the options.
-  /// `outer` selects the outer search (see OuterSearch). kBfsDpInteger
-  /// (default) seeds BFS-DP with `seed_occupancy`; kBfsDpContinuous seeds it
-  /// with the input order's continuous score (a different scale); kDfs runs
-  /// DFS over the proxied graph instead, whose ShouldEndSearch honors the
-  /// function occupancy target (so an occupancy cap restrains it — BFS-DP
-  /// would not). The inner search is always continuous BFS-DP + DFS
-  /// fallback, regardless of `outer`.
-  static DecomposeAndScheduleOptions BfsDpWithDfsFallback(
+  static DecomposeAndScheduleOptions Make(
       const GCNSubtarget &st,
       const MachineFunction &mf,
       const LiveIntervals &lis,
       int seed_occupancy,
       const FormationConfig &subgraph_formation,
-      OuterSearch outer = OuterSearch::kBfsDpInteger);
+      Metric outer_metric = Metric::kIntegerOccupancy,
+      Search outer_search = Search::kBfsDpDfs);
 };
 
 /// Form subgraphs in `graph`, schedule each in isolation, lock the
@@ -153,16 +133,14 @@ SearchResult DecomposeAndSchedule(
 /// decomposing (mincut, capped at `subgraph_formation.min_cut.max_parts`
 /// parts per level) and recursing, until a subgraph has at most
 /// `min_cut.target_subgraph_size` scheduling units — a leaf, scheduled
-/// directly by the continuous BfsDp+Dfs search. Each non-leaf level's inner
-/// search recurses. `outer` selects the OUTERMOST level's outer search only
-/// (see OuterSearch); every deeper level orders sub-subgraph interiors, which
-/// — like the inner/leaf search — are region-agnostic, so they always use
-/// kBfsDpContinuous (the integer and DFS modes are region-level concepts: the
-/// integer outer is seeded with the region floor, and the DFS cap targets the
-/// region occupancy). The recursion therefore passes kBfsDpContinuous below
-/// the top regardless of `outer`. Because DecomposeAndSchedule schedules each
-/// subgraph's interior before the level's outer runs, the schedule is built
-/// bottom-up. Leaves are always continuous.
+/// directly by the continuous BFS-DP+DFS search. Each non-leaf level's
+/// inner search recurses. `outer_metric` and `outer_search` apply to
+/// the OUTERMOST level only. Deeper recursion always uses
+/// (kContinuousOccupancy, kBfsDpDfs); the other modes are region-level
+/// constructs that don't apply below the top. Because
+/// DecomposeAndSchedule schedules each subgraph's interior before the
+/// level's outer runs, the schedule is built bottom-up. Leaves are
+/// always continuous.
 SearchResult RecursiveDecomposeAndSchedule(
     ScheduleGraph &graph,
     const GCNSubtarget &st,
@@ -170,7 +148,8 @@ SearchResult RecursiveDecomposeAndSchedule(
     const LiveIntervals &lis,
     int seed_occupancy,
     const FormationConfig &subgraph_formation,
-    OuterSearch outer);
+    Metric outer_metric,
+    Search outer_search);
 
 }  // namespace hierarchical_scheduler
 }  // namespace llvm

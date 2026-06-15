@@ -327,7 +327,7 @@ class PartitionDag {
   /// order (higher index). Biases the recovered schedule toward
   /// the input schedule's ordering, which in production is already
   /// a reasonable register-pressure-aware schedule. Same trick as
-  /// the SortKey.nid tiebreak in DfsMaximizeOccupancyPolicy and
+  /// the SortKey.nid tiebreak in DfsMaximizeContinuousOccupancyPolicy and
   /// OptSched's NID heuristic.
   static int GetInputOrderIndex(const ScheduleNode *node);
 

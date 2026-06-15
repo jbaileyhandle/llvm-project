@@ -76,9 +76,9 @@ class DfsSearch {
   // timeout_ms is the per-region wall-clock budget; nullopt disables
   // the timeout entirely (used by shakedown oracles that need
   // exhaustive search). Default 10000 (10s). Pass explicitly when a
-  // different budget is wanted (DecomposeAndScheduleOptions::
-  // BfsDpWithDfsFallback uses 1s for the inner DFS fallback to
-  // match the inner BFS-DP budget).
+  // different budget is wanted (DecomposeAndScheduleOptions::Make
+  // uses 1s for the inner DFS fallback to match the inner BFS-DP
+  // budget).
   //
   // Subgraph formation is not the search's concern: the pass forms (per
   // its configured strategy) before constructing the search, which then

@@ -73,6 +73,19 @@ Search ParseSearch(StringRef scope, StringRef key, StringRef v) {
   BadValue(scope, key, v, "dfs|bfsdp|bfsdp+dfs");
 }
 
+Metric ParseMetric(StringRef scope, StringRef key, StringRef v) {
+  if (v == "continuous") {
+    return Metric::kContinuousOccupancy;
+  }
+  if (v == "integer") {
+    return Metric::kIntegerOccupancy;
+  }
+  if (v == "integer-refine-spill-area") {
+    return Metric::kIntegerOccupancyRefineSpillArea;
+  }
+  BadValue(scope, key, v, "continuous|integer|integer-refine-spill-area");
+}
+
 SubgraphScheduleMode ParseMode(StringRef scope, StringRef key, StringRef v) {
   if (v == "serialized") {
     return SubgraphScheduleMode::kSerialized;
@@ -173,8 +186,8 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
     c.decompose = ParseBool(scope, key, val);
     return;
   }
-  if (key == "decompose_outer_continuous") {
-    c.decompose_outer_continuous = ParseBool(scope, key, val);
+  if (key == "metric") {
+    c.metric = ParseMetric(scope, key, val);
     return;
   }
   if (key == "decompose_recursive") {
@@ -225,7 +238,7 @@ void ApplyLengthKey(StringRef key, StringRef val, LengthConfig &c) {
 // The occupancy presets capture today's real configurations and carry
 // the search budget each path uses now (flat BFS-DP: 10s, matching
 // BfsDpSettings::ForOccupancyPass; decompose: 5s, matching
-// BfsDpWithDfsFallback), so wiring (step 3) is a no-behavior-change swap.
+// DecomposeAndScheduleOptions::Make), so wiring (step 3) is a no-behavior-change swap.
 // `max-length` is the length-pass baseline: flat DFS, maximize length.
 using PresetPairs = std::vector<std::pair<StringRef, StringRef>>;
 
@@ -341,6 +354,29 @@ void ValidateOccupancy(const OccupancyConfig &c) {
     report_fatal_error(
         "HierarchicalConfig: occupancy.max_occ_above_input must be >= 0");
   }
+  // BFS-DP isn't equipped for spill-area; the integer+area metric is DFS-only.
+  if (c.metric == Metric::kIntegerOccupancyRefineSpillArea &&
+      c.search != Search::kDfs) {
+    report_fatal_error(
+        "HierarchicalConfig: occupancy.metric=integer-refine-spill-area "
+        "requires occupancy.search=dfs (BFS-DP is not equipped for spill area)");
+  }
+  // BFS-DP maximizes regardless of the function occupancy target, so the cap
+  // is only honored by DFS (whose ShouldEndSearch reads that target).
+  if (c.max_occ_above_input.has_value() && c.search != Search::kDfs) {
+    report_fatal_error("HierarchicalConfig: occupancy.max_occ_above_input "
+                       "requires occupancy.search=dfs (BFS-DP ignores the cap)");
+  }
+  // Decompose's outer search has no "BFS-DP only" branch — it always pairs
+  // BFS-DP with a DFS fallback. search=bfsdp (no-fallback) only makes sense
+  // on the flat path; rejecting it under decompose=on avoids the silent
+  // promotion to bfsdp+dfs.
+  if (c.decompose && c.search == Search::kBfsDp) {
+    report_fatal_error(
+        "HierarchicalConfig: occupancy.decompose=on with occupancy.search=bfsdp "
+        "is not supported (decompose's outer always pairs BFS-DP with a DFS "
+        "fallback; use search=bfsdp+dfs or search=dfs)");
+  }
 }
 
 void ValidateLength(const LengthConfig &c) {
@@ -383,6 +419,18 @@ StringRef ModeName(SubgraphScheduleMode m) {
     return "serialized";
   case SubgraphScheduleMode::kInterleaved:
     return "interleaved";
+  }
+  return "?";
+}
+
+StringRef MetricName(Metric m) {
+  switch (m) {
+  case Metric::kContinuousOccupancy:
+    return "continuous";
+  case Metric::kIntegerOccupancy:
+    return "integer";
+  case Metric::kIntegerOccupancyRefineSpillArea:
+    return "integer-refine-spill-area";
   }
   return "?";
 }
@@ -486,9 +534,8 @@ std::string HierarchicalConfig::ToString() const {
   os << "HierarchicalConfig:\n";
   os << "\toccupancy: formation=" << FormationName(occupancy.formation.strategy)
      << " search=" << SearchName(occupancy.search)
+     << " metric=" << MetricName(occupancy.metric)
      << " decompose=" << (occupancy.decompose ? "on" : "off")
-     << " decompose_outer_continuous="
-     << (occupancy.decompose_outer_continuous ? "on" : "off")
      << " decompose_recursive="
      << (occupancy.decompose_recursive ? "on" : "off")
      << " decompose_max_parts=" << occupancy.decompose_max_parts

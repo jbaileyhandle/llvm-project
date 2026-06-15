@@ -4,7 +4,7 @@
 // for a specific pass objective. A policy is search-strategy-coupled
 // by design — bounding and ordering heuristics that are sound for DFS
 // may not be sound for ACO or other strategies. Policy class names
-// therefore telegraph the coupling (e.g., DfsMaximizeOccupancyPolicy).
+// therefore telegraph the coupling (e.g., DfsMaximizeContinuousOccupancyPolicy).
 //
 //===----------------------------------------------------------------------===//
 
@@ -331,7 +331,7 @@ class DfsMaximizeLengthPolicy : public SearchPolicyBase {
 
 // Policy for DFS when the objective is to maximize register-only
 // occupancy for a single region.
-class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
+class DfsMaximizeContinuousOccupancyPolicy : public SearchPolicyBase {
  public:
   // Use the continuous score, not the integer one. The integer
   // recipe ties any two schedules in the same occupancy bracket;
@@ -397,7 +397,25 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
       const ScheduleConstructor &best_schedule_constructor);
 };
 
-// Like DfsMaximizeOccupancyPolicy, but among schedules with equal peak
+// Integer-metric variant of DfsMaximizeContinuousOccupancyPolicy.
+// Used wherever the DFS metric needs to match an integer occupancy
+// objective (the decompose outer's DFS fallback when the outer is
+// BFS-DP integer; the flat DFS path when occupancy.metric=integer).
+// Everything else (FilterAndSortReadyList, ShouldBoundSearch,
+// ShouldEndSearch, MakeFormationPolicy, pressure-history pruning)
+// inherits unchanged — only the metric flips. PressureHistoryTracker
+// is constructed with this metric, so its pruning reads
+// integer-occupancy scores; monotonicity (peak pressure grows,
+// occupancy drops) holds for either score, so the prune is sound
+// under either.
+class DfsMaximizeIntegerOccupancyPolicy
+    : public DfsMaximizeContinuousOccupancyPolicy {
+ public:
+  static constexpr ScoreRecipe kScoreRecipe =
+      score_recipes::kMaximizeRegisterOccupancy;
+};
+
+// Like DfsMaximizeContinuousOccupancyPolicy, but among schedules with equal peak
 // occupancy score it prefers the one with the higher occupancy area
 // under the curve (kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea) — pressure
 // kept low throughout, not just at the peak. Inner-search use only
@@ -408,7 +426,7 @@ class DfsMaximizeOccupancyPolicy : public SearchPolicyBase {
 // lexicographic, so it already accounts for the area tiebreak. The two
 // overrides below are the rest of what the tiebreak requires.
 class DfsMaximizeContinuousOccupancyThenAreaPolicy
-    : public DfsMaximizeOccupancyPolicy {
+    : public DfsMaximizeContinuousOccupancyPolicy {
  public:
   static constexpr ScoreRecipe kScoreRecipe =
       score_recipes::kMaximizeContinuousOccupancyScoreThenMaximizeContinuousOccupancyArea;
@@ -452,7 +470,7 @@ class DfsMaximizeContinuousOccupancyThenAreaPolicy
 // then becomes the input to the length pass's
 // DfsMinimizeLengthBoundedSpillAreaPolicy.
 //
-// Inherits everything from DfsMaximizeOccupancyPolicy except:
+// Inherits everything from DfsMaximizeContinuousOccupancyPolicy except:
 //   - kScoreRecipe: integer-occupancy primary plus spill tiebreak.
 //     Both slots are bound-safe (NI canonical -- peak occ only
 //     drops over completion, spill area only grows), so the score-
@@ -467,7 +485,7 @@ class DfsMaximizeContinuousOccupancyThenAreaPolicy
 //     -- so this early-exit fires often. When spill > 0, search
 //     runs to the per-region timeout.
 class DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy
-    : public DfsMaximizeOccupancyPolicy {
+    : public DfsMaximizeContinuousOccupancyPolicy {
  public:
   static constexpr ScoreRecipe kScoreRecipe{{
       MetricSlot{ScoreDimension::kRegisterOcc, Polarity::kMaximize},

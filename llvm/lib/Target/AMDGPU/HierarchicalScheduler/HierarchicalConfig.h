@@ -43,6 +43,22 @@ namespace hierarchical_scheduler {
 ///               produced.
 enum class Search { kDfs, kBfsDp, kBfsDpDfs };
 
+/// Occupancy-pass primary metric. Applies to both flat and decompose-outer
+/// search; inner per-subgraph searches in decompose are always continuous.
+///   kContinuousOccupancy              - continuous register-occupancy score.
+///   kIntegerOccupancy                 - integer register-occupancy level.
+///   kIntegerOccupancyRefineSpillArea  - integer occupancy with VGPR spill
+///                                       area as a same-occupancy tiebreak.
+/// Validated at Build():
+///   kIntegerOccupancyRefineSpillArea requires search=dfs (BFS-DP is not
+///   equipped for area today).
+///   max_occ_above_input requires search=dfs (BFS-DP ignores the cap).
+enum class Metric {
+  kContinuousOccupancy,
+  kIntegerOccupancy,
+  kIntegerOccupancyRefineSpillArea,
+};
+
 /// `policy` axis (length pass only): the length pass's objective.
 ///   kMin                - minimize schedule length (base).
 ///   kMinRefineIlp       - minimize, then refine ILP among same-length
@@ -70,17 +86,14 @@ enum class LengthPolicy {
 struct OccupancyConfig {
   FormationConfig formation; // strategy + mode + min-cut settings
   Search search = Search::kDfs;
+  Metric metric = Metric::kContinuousOccupancy;
   bool decompose = false;
-  // Decompose outer search objective: false = integer occupancy level
-  // (seeded with the region floor); true = continuous occupancy score
-  // (seeded with the input order's continuous score).
-  bool decompose_outer_continuous = false;
   // Recursive decompose: when on (with decompose + mincut formation), split
   // each level into at most 4 subgraphs and recurse down to
   // ~target_subgraph_size-node leaves, instead of one flat decomposition.
   // Composes with the serialized/interleaved subgraph install mode
-  // (formation.mode) and with decompose_outer_continuous; leaves always use
-  // the continuous search.
+  // (formation.mode) and with the (metric, search) pair; deeper levels'
+  // outer searches are always continuous.
   bool decompose_recursive = false;
   // Max subgraphs per level when decompose_recursive is on (the mincut part
   // cap). Default 4 ("at most 4"); e.g. 2 gives a binary recursion. Ignored

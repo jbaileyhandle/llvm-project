@@ -528,7 +528,7 @@ bool DfsMaximizeLengthPolicy::ShouldEndSearch(
   return false;
 }
 
-void DfsMaximizeOccupancyPolicy::FilterAndSortReadyList(
+void DfsMaximizeContinuousOccupancyPolicy::FilterAndSortReadyList(
     const ScheduleConstructor &working,
     SmallVectorImpl<const ScheduleNode *> &out) {
   out.clear();
@@ -582,7 +582,7 @@ void DfsMaximizeOccupancyPolicy::FilterAndSortReadyList(
       });
 }
 
-bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
+bool DfsMaximizeContinuousOccupancyPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
     std::optional<LengthHistoryTracker> & /*length_history*/,
@@ -605,7 +605,7 @@ bool DfsMaximizeOccupancyPolicy::ShouldBoundSearch(
   return false;
 }
 
-bool DfsMaximizeOccupancyPolicy::ShouldEndSearch(
+bool DfsMaximizeContinuousOccupancyPolicy::ShouldEndSearch(
     const ScheduleConstructor & /*schedule_constructor*/,
     const ScheduleConstructor &best_schedule_constructor) {
   return best_schedule_constructor.RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget();
