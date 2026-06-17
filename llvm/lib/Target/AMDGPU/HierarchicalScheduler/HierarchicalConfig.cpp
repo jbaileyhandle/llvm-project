@@ -207,6 +207,10 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
     c.max_occ_above_input = ParseInt(scope, key, val);
     return;
   }
+  if (key == "optimize_every_region_past_occupancy_target") {
+    c.optimize_every_region_past_occupancy_target = ParseBool(scope, key, val);
+    return;
+  }
   if (key == "search.timeout") {
     c.timeout_ms = ParseInt(scope, key, val);
     return;
@@ -342,6 +346,14 @@ void BuildLength(const std::map<std::string, std::string> *kv, LengthConfig &c) 
 // --- constraint validation (axis constraints, design doc §4.3) ---
 
 void ValidateOccupancy(const OccupancyConfig &c) {
+  // The two occupancy-target knobs pull opposite directions: one removes the
+  // target so the pass squeezes maximally on every region, the other caps it.
+  if (c.optimize_every_region_past_occupancy_target &&
+      c.max_occ_above_input.has_value()) {
+    report_fatal_error(
+        "HierarchicalConfig: occupancy.optimize_every_region_past_occupancy_"
+        "target and occupancy.max_occ_above_input are mutually exclusive");
+  }
   if (c.decompose && c.formation.strategy == SubgraphFormationStrategy::kNone) {
     report_fatal_error(
         "HierarchicalConfig: occupancy.decompose requires formation != none");
@@ -552,6 +564,8 @@ std::string HierarchicalConfig::ToString() const {
      << (occupancy.max_occ_above_input.has_value()
              ? std::to_string(*occupancy.max_occ_above_input)
              : "off")
+     << " optimize_every_region_past_occupancy_target="
+     << (occupancy.optimize_every_region_past_occupancy_target ? "on" : "off")
      << " mode=" << ModeName(occupancy.formation.mode)
      << " ratio=" << occupancy.formation.min_cut.imbalance_ratio
      << " target_size=" << occupancy.formation.min_cut.target_subgraph_size

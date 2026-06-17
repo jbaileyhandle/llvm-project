@@ -279,8 +279,15 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
                << configured_limit << ")\n";
 
   // Effective starting ceiling: structural max, or capped to input_occ + X
-  // when occupancy.max_occ_above_input is set.
-  int kernel_occupancy_so_far = ApplyOccupancyTargetCap(*mfi_, regions_);
+  // when occupancy.max_occ_above_input is set. In
+  // optimize_every_region_past_occupancy_target mode the ceiling is the
+  // unreachable kAboveHardwareMaxOccupancy, so no region's original occupancy
+  // is ever at/above it and the per-region skip below never fires.
+  int kernel_occupancy_so_far =
+      HierarchicalConfig::Get()
+              .occupancy.optimize_every_region_past_occupancy_target
+          ? static_cast<int>(kAboveHardwareMaxOccupancy)
+          : ApplyOccupancyTargetCap(*mfi_, regions_);
 
   // Per-pass counters. `attempted` is regions where DFS actually ran
   // (i.e., not short-circuited by the "already at kernel ceiling"
@@ -405,20 +412,27 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     // does its own clamp at the floor when updating MFI's target
     // occupancy -- so the compiler-side target value is never set
     // below the launch floor, even when this raw running min is.
-    int kernel_occupancy_after_region = std::min(
-        kernel_occupancy_so_far, region_result.raw_all_factors_occupancy);
-    llvm::outs() << "\t\tkernel_occupancy: " << kernel_occupancy_so_far
-                 << " -> " << kernel_occupancy_after_region << "\n";
-    kernel_occupancy_so_far = kernel_occupancy_after_region;
+    // In optimize_every_region_past_occupancy_target mode the running ceiling
+    // must stay at the unreachable kAboveHardwareMaxOccupancy, so skip both the
+    // running-min update and the MFI tighten — every region runs the full
+    // search and none is skipped or short-circuited.
+    if (!HierarchicalConfig::Get()
+             .occupancy.optimize_every_region_past_occupancy_target) {
+      int kernel_occupancy_after_region = std::min(
+          kernel_occupancy_so_far, region_result.raw_all_factors_occupancy);
+      llvm::outs() << "\t\tkernel_occupancy: " << kernel_occupancy_so_far
+                   << " -> " << kernel_occupancy_after_region << "\n";
+      kernel_occupancy_so_far = kernel_occupancy_after_region;
 
-    // Tighten MFI's occupancy limit immediately so the next region's
-    // search sees the real running kernel ceiling (via
-    // ScheduleConstructor::RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget and
-    // any other code that consults MFI->getOccupancy()).
-    // limitOccupancy only lowers; kernel_occupancy_so_far is
-    // monotonically non-increasing, so this is always a no-op or
-    // tightening.
-    LimitOccupancyAboveFloor(*mfi_, kernel_occupancy_so_far);
+      // Tighten MFI's occupancy limit immediately so the next region's
+      // search sees the real running kernel ceiling (via
+      // ScheduleConstructor::RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget and
+      // any other code that consults MFI->getOccupancy()).
+      // limitOccupancy only lowers; kernel_occupancy_so_far is
+      // monotonically non-increasing, so this is always a no-op or
+      // tightening.
+      LimitOccupancyAboveFloor(*mfi_, kernel_occupancy_so_far);
+    }
   }
 
   int total_regions = static_cast<int>(regions_.size());

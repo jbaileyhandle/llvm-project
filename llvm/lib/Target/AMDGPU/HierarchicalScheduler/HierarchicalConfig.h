@@ -35,6 +35,14 @@ class MachineInstrSchedulerConfig;
 
 namespace hierarchical_scheduler {
 
+/// Occupancy target reported when occupancy.optimize_every_region_past_occupancy_target
+/// is set: one past any achievable waves/SIMD (gfx906's hardware max is 10),
+/// so the occupancy search is never "already at the target" and keeps
+/// maximizing occupancy (= minimizing register pressure) on every region.
+/// Consulted by GCNRegisterTracker::GetConfiguredMachineFunctionOccupancyTarget
+/// and the occupancy pass's per-region skip.
+inline constexpr unsigned kAboveHardwareMaxOccupancy = 11;
+
 /// `search` axis (occupancy pass only): the base scheduling algorithm.
 ///   kDfs      - depth-first occupancy search.
 ///   kBfsDp    - BFS / dynamic-programming partition search; may bail
@@ -113,6 +121,16 @@ struct OccupancyConfig {
   // outer search that honors the lowered target (BFS-DP maximizes
   // regardless). Unset = no cap, BFS-DP outer (default).
   std::optional<int> max_occ_above_input;
+
+  // When set, the occupancy pass optimizes EVERY region to its minimum register
+  // pressure instead of stopping once the function occupancy target is met: it
+  // neither skips a region whose input occupancy already meets the target nor
+  // lets a region's search early-exit at the target. Implemented by reporting
+  // kAboveHardwareMaxOccupancy as the target (so it is never reached) and not
+  // lowering the MFI target between regions. For measuring the true achievable
+  // pressure floor; mutually exclusive with max_occ_above_input (the opposite
+  // direction).
+  bool optimize_every_region_past_occupancy_target = false;
 
   // BFS-DP search params (ignored unless search uses BFS-DP).
   int timeout_ms = 5000;

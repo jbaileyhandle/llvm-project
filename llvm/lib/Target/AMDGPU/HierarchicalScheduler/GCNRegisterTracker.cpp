@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "GCNRegisterTracker.h"
+#include "HierarchicalConfig.h"
 #include "NodeRegInfo.h"
 #include "SIMachineFunctionInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -711,11 +712,21 @@ int GCNRegisterTracker::GetScalarScore(const ScoreRecipe &recipe) const {
 unsigned GCNRegisterTracker::GetConfiguredMachineFunctionOccupancyTarget() const {
   // Reads MFI's current occupancy target (the kernel's chosen waves/SIMD,
   // initially computed and then lowered by limitOccupancy / raised by
-  // increaseOccupancy as scheduling passes update it). Honors
-  // test_target_occupancy_override_ so shakedowns can drive consumers at
-  // synthetic targets without mutating MFI; in production the override is
-  // always nullopt and the raw MFI value is returned.
-  return test_target_occupancy_override_.value_or(mfi_->getOccupancy());
+  // increaseOccupancy as scheduling passes update it), unless an artificial
+  // target is in effect:
+  //   - test_target_occupancy_override_ lets shakedowns drive consumers at a
+  //     per-tracker synthetic target without mutating MFI (takes precedence).
+  //   - occupancy.optimize_every_region_past_occupancy_target reports an
+  //     unreachable target (kAboveHardwareMaxOccupancy) so the search is never
+  //     "at target" and keeps minimizing register pressure on every region.
+  if (test_target_occupancy_override_.has_value()) {
+    return *test_target_occupancy_override_;
+  }
+  if (HierarchicalConfig::Get()
+          .occupancy.optimize_every_region_past_occupancy_target) {
+    return kAboveHardwareMaxOccupancy;
+  }
+  return mfi_->getOccupancy();
 }
 
 unsigned GCNRegisterTracker::GetLaunchOccupancyFloor() const {
