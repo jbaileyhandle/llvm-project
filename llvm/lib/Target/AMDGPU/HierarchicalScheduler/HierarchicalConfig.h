@@ -25,7 +25,9 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_HIERARCHICALCONFIG_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_HIERARCHICALCONFIG_H
 
+#include "HierarchicalConfigEnums.h" // Search, OccupancyPolicy, LengthPolicy
 #include "SubgraphFormation.h" // SubgraphScheduleMode, SubgraphFormationStrategy
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -42,54 +44,6 @@ namespace hierarchical_scheduler {
 /// Consulted by GCNRegisterTracker::GetConfiguredMachineFunctionOccupancyTarget
 /// and the occupancy pass's per-region skip.
 inline constexpr unsigned kAboveHardwareMaxOccupancy = 11;
-
-/// `search` axis (occupancy pass only): the base scheduling algorithm.
-///   kDfs      - depth-first occupancy search.
-///   kBfsDp    - BFS / dynamic-programming partition search; may bail
-///               (timeout / score-bound) and return no schedule.
-///   kBfsDpDfs - BFS-DP with a DFS fallback, so a schedule is always
-///               produced.
-enum class Search { kDfs, kBfsDp, kBfsDpDfs };
-
-/// Occupancy-pass primary metric. Applies to both flat and decompose-outer
-/// search; inner per-subgraph searches in decompose are always continuous.
-///   kContinuousOccupancy                 - continuous register-occupancy score.
-///   kIntegerOccupancy                    - integer register-occupancy level.
-///   kIntegerOccupancyRefineSpillArea     - integer occupancy with VGPR spill
-///                                          area as a same-occupancy tiebreak.
-///   kContinuousOccupancyRefineSpillArea  - continuous occupancy score with
-///                                          VGPR spill area as a same-score
-///                                          tiebreak. Finer primary than the
-///                                          integer variant.
-/// Validated at Build():
-///   kIntegerOccupancyRefineSpillArea and kContinuousOccupancyRefineSpillArea
-///   both require search=dfs (BFS-DP is not equipped for area today).
-///   max_occ_above_input requires search=dfs (BFS-DP ignores the cap).
-enum class OccupancyPolicy {
-  kContinuousOccupancy,
-  kIntegerOccupancy,
-  kIntegerOccupancyRefineSpillArea,
-  kContinuousOccupancyRefineSpillArea,
-};
-
-/// `policy` axis (length pass only): the length pass's objective.
-///   kMin                - minimize schedule length (base).
-///   kMinRefineIlp       - minimize, then refine ILP among same-length
-///                         completions.
-///   kMinRefineOccupancy - minimize, then refine occupancy likewise.
-///   kMax                - maximize length (control / worst-legal
-///                         baseline).
-enum class LengthPolicy {
-  kMin,
-  kMinRefineIlp,
-  kMinRefineOccupancy,
-  // length-min with a hard upper bound on VGPR spill area equal to
-  // the input baseline's accumulated spill area. Use after the
-  // occupancy pass has nailed spill: this prevents length-min from
-  // making spill worse while chasing shorter schedules.
-  kMinBoundedSpillSignals,
-  kMax,
-};
 
 /// Occupancy-pass configuration. Fixed objective (maximize occupancy),
 /// so no `policy`; varies on the search algorithm and (when a formation
@@ -132,15 +86,28 @@ struct OccupancyConfig {
   // direction).
   bool optimize_every_region_past_occupancy_target = false;
 
-  // BFS-DP search params (ignored unless search uses BFS-DP).
-  int timeout_ms = 5000;
-  /// DFS-fallback budget, ms; only valid for search == kBfsDpDfs.
-  /// nullopt means "same as timeout_ms".
+  // Per-region wall-clock budget, ms (occupancy.search.timeout), for the
+  // PRIMARY search whichever it is: flat BFS-DP, flat DFS, and the BFS-DP of
+  // bfsdp+dfs. 0 means "no timeout" — run the search to completion. 10s default.
+  int timeout_ms = 10000;
+  /// Budget for the DFS BACKUP in bfsdp+dfs (occupancy.search.fallback_timeout),
+  /// ms. nullopt means "same as timeout_ms"; 0 means "no timeout".
   std::optional<int> fallback_timeout_ms;
 
-  /// Effective fallback budget: the explicit value, else the primary.
+  /// Effective fallback budget in ms (explicit value, else the primary); 0 is
+  /// "no timeout". Used for display.
   int GetFallbackTimeoutMs() const {
     return fallback_timeout_ms.value_or(timeout_ms);
+  }
+
+  /// Primary / fallback budgets as the search classes' optional<int64_t>, where
+  /// a config value of 0 maps to nullopt ("run to completion").
+  std::optional<int64_t> SearchTimeoutOrUnlimited() const {
+    return timeout_ms == 0 ? std::nullopt : std::optional<int64_t>(timeout_ms);
+  }
+  std::optional<int64_t> FallbackTimeoutOrUnlimited() const {
+    int ms = GetFallbackTimeoutMs();
+    return ms == 0 ? std::nullopt : std::optional<int64_t>(ms);
   }
 };
 

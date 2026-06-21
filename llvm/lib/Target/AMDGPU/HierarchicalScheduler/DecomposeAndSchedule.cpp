@@ -8,6 +8,7 @@
 
 #include "BfsDpSearch.h"
 #include "BfsDpSettings.h"
+#include "DfsOccupancyDispatch.h"
 #include "DfsSearch.h"
 #include "ScheduleGraph.h"
 #include "Score.h"
@@ -77,9 +78,8 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
   // Both run on the already-extracted subgraph: we're inside a subgraph
   // extracted by ScheduleSubgraph, and nested formation isn't wired yet.
   opts.inner_search = [&st, &mf, &lis](ScheduleGraph &sub) -> SearchResult {
-    BfsDpSettings settings;
-    settings.recipe = score_recipes::kMaximizeContinuousRegisterOccupancyScore;
-    settings.timeout_ms = kMakeTimeoutMs;
+    BfsDpSettings settings = BfsDpSettings::ForOccupancy(
+        OccupancyPolicy::kContinuousOccupancy, kMakeTimeoutMs);
     BfsDpSearch bfs(&sub, &st, &mf, settings);
     SearchResult result = bfs.Run();
     // Fraction of the subgraph's layers BFS-DP reached before it
@@ -118,58 +118,22 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
   opts.outer_search = [&st, &mf, &lis, seed_occupancy, outer_policy,
                        outer_search](ScheduleGraph &g) -> SearchResult {
     if (outer_search == Search::kDfs) {
-      // No BFS-DP: DFS directly. Primary-search budget (not the shorter
-      // BFS-DP-fallback budget), matching the non-decompose DFS path.
-      SearchResult result;
-      switch (outer_policy) {
-      case OccupancyPolicy::kContinuousOccupancy: {
-        DfsSearch<DfsMaximizeContinuousOccupancyPolicy> dfs(g, st, mf, lis);
-        result = dfs.Run();
-        break;
-      }
-      case OccupancyPolicy::kIntegerOccupancy: {
-        DfsSearch<DfsMaximizeIntegerOccupancyPolicy> dfs(g, st, mf, lis);
-        result = dfs.Run();
-        break;
-      }
-      case OccupancyPolicy::kIntegerOccupancyRefineSpillArea: {
-        DfsSearch<DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy> dfs(
-            g, st, mf, lis);
-        result = dfs.Run();
-        break;
-      }
-      case OccupancyPolicy::kContinuousOccupancyRefineSpillArea: {
-        DfsSearch<DfsMaximizeContinuousOccupancyRefineSpillAreaPolicy> dfs(
-            g, st, mf, lis);
-        result = dfs.Run();
-        break;
-      }
-      }
-      result.winner = "dfs";
-      return result;
+      // No BFS-DP: DFS directly, no post-run printing. Primary-search budget
+      // (DfsSearch's 10s default, matching the non-decompose DFS path), not
+      // the shorter BFS-DP-fallback budget.
+      return RunOccupancyDfs(outer_policy, g, st, mf, lis,
+                             /*timeout_ms=*/10000,
+                             [](auto &, SearchResult &) {});
     }
     assert(outer_search == Search::kBfsDpDfs &&
            "decompose outer requires kDfs or kBfsDpDfs");
     // BFS-DP outer with DFS fallback. The recipe is integer-or-continuous;
     // the refine-spill-area variants would land here only as a bug
     // (config-build validation requires kDfs for them).
-    bool outer_continuous;
-    BfsDpSettings settings;
-    switch (outer_policy) {
-    case OccupancyPolicy::kContinuousOccupancy:
-      outer_continuous = true;
-      settings.recipe = score_recipes::kMaximizeContinuousRegisterOccupancyScore;
-      break;
-    case OccupancyPolicy::kIntegerOccupancy:
-      outer_continuous = false;
-      settings.recipe = score_recipes::kMaximizeRegisterOccupancy;
-      break;
-    case OccupancyPolicy::kIntegerOccupancyRefineSpillArea:
-    case OccupancyPolicy::kContinuousOccupancyRefineSpillArea:
-      llvm_unreachable(
-          "refine-spill-area policies require search=dfs");
-    }
-    settings.timeout_ms = kMakeTimeoutMs;
+    BfsDpSettings settings =
+        BfsDpSettings::ForOccupancy(outer_policy, kMakeTimeoutMs);
+    bool outer_continuous =
+        outer_policy == OccupancyPolicy::kContinuousOccupancy;
     BfsDpSearch bfs(&g, &st, &mf, settings);
     if (outer_continuous) {
       // Score the input order under the continuous metric and use it as
@@ -199,17 +163,10 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
     }
     // BFS-DP timed out — fall back to DFS over the outer graph,
     // with the policy matching the chosen outer metric.
-    SearchResult dfs_result;
-    if (outer_continuous) {
-      DfsSearch<DfsMaximizeContinuousOccupancyPolicy> dfs(
-          g, st, mf, lis, /*timeout_ms=*/kMakeTimeoutMs);
-      dfs_result = dfs.Run();
-    } else {
-      DfsSearch<DfsMaximizeIntegerOccupancyPolicy> dfs(
-          g, st, mf, lis, /*timeout_ms=*/kMakeTimeoutMs);
-      dfs_result = dfs.Run();
-    }
-    dfs_result.winner = "dfs";
+    SearchResult dfs_result = RunOccupancyDfs(
+        outer_policy, g, st, mf, lis, /*timeout_ms=*/kMakeTimeoutMs,
+        [](auto &, SearchResult &) {});
+    // winner is tagged "dfs" inside RunOccupancyDfs.
     dfs_result.bfs_pct = bfs_pct;
     // Keep the outer BFS-DP throughput on the row even though DFS won.
     dfs_result.bfs_ms = result.bfs_ms;

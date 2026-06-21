@@ -367,6 +367,16 @@ void ValidateOccupancy(const OccupancyConfig &c) {
     report_fatal_error("HierarchicalConfig: occupancy.search.fallback_timeout "
                        "requires search=bfsdp+dfs");
   }
+  // Timeouts are wall-clock budgets in ms: 0 means "no timeout" (run to
+  // completion); a negative budget is meaningless.
+  if (c.timeout_ms < 0) {
+    report_fatal_error("HierarchicalConfig: occupancy.search.timeout must be "
+                       ">= 0 (0 = no timeout)");
+  }
+  if (c.fallback_timeout_ms.has_value() && *c.fallback_timeout_ms < 0) {
+    report_fatal_error("HierarchicalConfig: occupancy.search.fallback_timeout "
+                       "must be >= 0 (0 = no timeout)");
+  }
   if (c.max_occ_above_input.has_value() && *c.max_occ_above_input < 0) {
     report_fatal_error(
         "HierarchicalConfig: occupancy.max_occ_above_input must be >= 0");
