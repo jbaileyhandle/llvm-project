@@ -593,6 +593,21 @@ static SearchResult RunOccupancyRegionWithBfsDp(
   llvm::outs() << "\t\toutput: (BFS-DP) found_improvement="
                << result.schedule.has_value() << "\n";
 
+  // Symmetric with the DFS "rates:" line (PrintPostScheduleInfo): surface
+  // BFS-DP's own step count (VisitSuccessor probes) and wall-clock so the two
+  // searches are directly comparable. bfs_steps/bfs_ms are stamped in Run().
+  if (result.bfs_steps.has_value() && result.bfs_ms.has_value()) {
+    int steps = *result.bfs_steps;
+    int ms = *result.bfs_ms;
+    llvm::outs() << "\t\t\trates:    ";
+    if (ms > 0) {
+      llvm::outs() << "steps/s=" << (steps / (ms / 1000.0));
+    } else {
+      llvm::outs() << "steps/s=-";
+    }
+    llvm::outs() << " elapsed_ms=" << ms << " steps=" << steps << "\n";
+  }
+
   if (result.termination_cause == SearchTerminationCause::kTimedOut) {
     // The BFS expands one partition-dag layer per graph node, so the
     // all-scheduled sink sits at depth graph.Size(). Layers completed
