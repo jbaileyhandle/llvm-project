@@ -50,7 +50,8 @@ Two notes on scope:
 16. [Worked Examples](#16-worked-examples)
 17. [Loop Structure in Real Workloads: A HeCBench Survey](#17-loop-structure-in-real-workloads-a-hecbench-survey)
 18. [Real-World vs. Benchmark Loop Bounds: Is §17 Representative?](#18-real-world-vs-benchmark-loop-bounds-is-17-representative)
-19. [Tuning and Controlling Unrolling](#19-tuning-and-controlling-unrolling)
+19. [Making Benchmark Unrolling Realistic](#19-making-benchmark-unrolling-realistic)
+20. [Tuning and Controlling Unrolling](#20-tuning-and-controlling-unrolling)
 
 ---
 
@@ -2261,7 +2262,91 @@ Caveats, stated plainly:
 
 ---
 
-## 19. Tuning and Controlling Unrolling
+## 19. Making Benchmark Unrolling Realistic
+
+§18 established that HeCBench's hot loops are usually runtime-bounded where the
+equivalent real-world kernels are constant-bounded, so the benchmarks **under-unroll**
+relative to production code. For research on **instruction scheduling and register
+pressure** this is not a cosmetic gap: unrolling is a primary lever on basic-block size
+(hence scheduling freedom) and on register pressure, so a benchmark that fails to unroll
+the way real code would puts the study on an unrepresentative code shape. This section
+records the options for closing that gap and the path chosen.
+
+### 19.1 The requirement, and the §18 guardrail
+
+The goal is to reproduce the **real shape**, not merely "more unrolling": fully-unrolled,
+constant-trip inner loops that collapse to large straight-line basic blocks (and let an
+outer loop's unrolled inner body inline into one block). A transform that produces
+unrolling of a *different* shape — e.g. a loop plus a remainder loop — does not satisfy
+the requirement, because the block structure and register-pressure profile it presents
+are artifacts of that transform, not of real code.
+
+What may be made constant is bounded by the §18 finding, which doubles as the guardrail
+against over-specialization: **make the inner tile / per-thread / reduction count a
+compile-time constant; keep the grid / workload / problem size runtime.** Freezing the
+workload would optimize in ways no real kernel does and risks invalidating the benchmark.
+
+### 19.2 The multi-configuration complication
+
+A benchmark is not run at one size. `benchmarks.json` gives each benchmark a list of
+`run_commands` with different parameters, and a single baked-in constant is correct for
+only one of them (and is *undefined behavior* for the others under an `assume`-based
+approach). The correct unit is therefore **(benchmark, configuration)**, with two
+simplifications that keep it tractable:
+
+- Specialize per **distinct inner trip count**, not per run command — many commands
+  collapse to the same inner loop. Measured examples: `gemv-hip` (`-x 512/128/32`) →
+  **3** distinct inner trips (4, 16, 64); `blas-gemm-hip` (`K = 91`, `4096`) → **2**;
+  `softmax-hip` (both runs `sliceSize = 784`) → **1**. Typically 1–3 variants per
+  benchmark.
+- The variant set is **derivable automatically** from `run_commands` by applying the same
+  argument→trip-count derivation §18 used, then de-duplicating.
+
+### 19.3 The options
+
+| # | Method | Mechanism | Effort / kernel | Real shape (single big BB)? | Remainder loop? | Handles multiple configs? | Faithfulness |
+|---|--------|-----------|-----------------|-----------------------------|-----------------|---------------------------|--------------|
+| **1** | Runtime unroll + raise threshold | Global TTI change (`UP.Runtime`, threshold) | zero | **No** (always loop+remainder) | always | **native** (runtime) | low — wrong shape |
+| **2** | `constexpr`/template (single value) | Move arg → compile-time constant in source | tiny (or rewrite if workload-bounded) | yes | no | **no** alone (→ becomes #6) | high |
+| **3** | `__builtin_assume(bound==C)` | One-line hint; arg stays runtime | 1 line | yes, *if* it folds to an exact constant trip (verify) | no | **no** alone (UB on other configs; needs #4) | high |
+| **4** | `-D` macro / per-config build | Constant from the build flag; one binary per config | tiny + build matrix | yes | no | **native** (one build per config) | highest (Triton/JIT) |
+| **5** | Compiler specialization attribute | Fork feature: attribute/table → clone + const-prop + unroll | 1 annotation (+ build the feature) | yes | no | yes, if it emits a *set* + dispatch | high |
+| **6** | Multi-versioning dispatch | Template kernel + host `switch` + generic fallback | most code | yes (specialized path) | no | **native by design** | highest for libraries (incl. dispatch cost) |
+
+Under the multi-configuration constraint the single-value methods do not stand on their
+own: **#2** needs a dispatch added (which turns it into **#6**), and **#3** is only sound
+inside a per-config build (**#4**), where `-D` is the cleaner way to supply the constant.
+The methods that handle every configuration as shipped are therefore **#1** (runtime,
+natively), **#4** (one specialized build per configuration), **#6** (one binary, dispatch
+on the runtime argument, generic fallback — exactly how cuBLAS/rocBLAS ship), and **#5**
+(the same as #6 but generated by a compiler feature from the `benchmarks.json` variant
+list). The §18 guardrail (constant inner tile, runtime grid) governs which quantities each
+specialization is allowed to freeze.
+
+### 19.4 Chosen path
+
+**Runtime unroll (#1) as the first pass; multi-versioning dispatch (#6) as the
+refinement.** Rationale:
+
+- **#1 first** because it is near-zero effort (a single TTI change), is **configuration-
+  agnostic** (runtime unrolling works for every size with no per-config work), and gets
+  the benchmarks unrolling *at all* quickly so the study can begin. Its limitations are
+  understood and accepted for a first pass: it leaves a remainder loop, the unroll factor
+  is chosen without knowledge of the actual bound (so the unrolled body can be skipped
+  while the remainder carries the work), and it **cannot** produce the single large basic
+  block — so results from this pass are a coarse approximation, not the representative
+  shape.
+- **#6 as the refinement** because it is the option that delivers the real shape for
+  *every* configuration in one binary, mirrors how production libraries actually dispatch,
+  and keeps the build system clean. **Per-config builds (#4) were rejected** specifically
+  to avoid a per-configuration build matrix complicating the build system.
+
+In short: #1 to start cheaply and unblock measurement, #6 to make the unrolling genuinely
+representative if the direction proves worth pursuing.
+
+---
+
+## 20. Tuning and Controlling Unrolling
 
 Ordered roughly from most targeted to most global:
 
