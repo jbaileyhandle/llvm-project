@@ -489,11 +489,12 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   const std::map<std::string, std::map<std::string, std::string>> &scoped =
       cfg.GetAllScopedSettings();
 
-  // Reject unknown scopes up front (only the empty top-level scope,
-  // "occupancy", and "length" are known).
+  // Reject unknown scopes up front. Only "occupancy" and "length" are known;
+  // the generic config only routes dotted "<scope>.<key>" settings into the
+  // scoped store (the global toggles are bare flags now).
   for (const auto &entry : scoped) {
     const std::string &scope = entry.first;
-    if (scope.empty() || scope == "occupancy" || scope == "length") {
+    if (scope == "occupancy" || scope == "length") {
       continue;
     }
     report_fatal_error(Twine("HierarchicalConfig: unknown scope '") + scope +
@@ -514,30 +515,16 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   ValidateOccupancy(hs.occupancy);
   ValidateLength(hs.length);
 
-  // Top-level (empty-scope) global toggles.
-  if (const std::map<std::string, std::string> *top = find_scope("")) {
-    for (const auto &p : *top) {
-      StringRef k = p.first;
-      StringRef v = p.second;
-      if (k == "malicious") {
-        hs.malicious = ParseBool("", k, v);
-      } else if (k == "run_shakedowns") {
-        hs.run_shakedowns = ParseBool("", k, v);
-      } else if (k == "dump_subgraph_dag") {
-        hs.dump_subgraph_dag = ParseBool("", k, v);
-      } else if (k == "dump_search_outcomes") {
-        hs.dump_search_outcomes = ParseBool("", k, v);
-      } else if (k == "scale_edge_latencies") {
-        hs.scale_edge_latencies = ParseBool("", k, v);
-      } else if (k == "skip_occupancy_pass") {
-        hs.skip_occupancy_pass = ParseBool("", k, v);
-      } else if (k == "skip_length_pass") {
-        hs.skip_length_pass = ParseBool("", k, v);
-      } else {
-        UnknownKey("", k);
-      }
-    }
-  }
+  // Global toggles are bare flags on the generic config (their spelling ->
+  // field mapping and validation live there); mirror them into typed fields.
+  const MachineInstrSchedulerConfig::Flags &flags = cfg.GetFlags();
+  hs.malicious = flags.malicious;
+  hs.run_shakedowns = flags.run_shakedowns;
+  hs.dump_subgraph_dag = flags.dump_subgraph_dag;
+  hs.dump_search_outcomes = flags.dump_search_outcomes;
+  hs.scale_edge_latencies = flags.scale_edge_latencies;
+  hs.skip_occupancy_pass = flags.skip_occupancy_pass;
+  hs.skip_length_pass = flags.skip_length_pass;
 
   // Cross-global invariant: the subgraph-DAG dump targets real region
   // graphs (it derives identity and target info from real instructions),

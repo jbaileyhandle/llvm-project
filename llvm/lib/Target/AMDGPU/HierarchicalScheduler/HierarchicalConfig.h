@@ -123,15 +123,16 @@ struct LengthConfig {
 
 /// The HierarchicalScheduler's whole typed configuration, built once at
 /// scheduler init by Build(). Call sites read typed fields (e.g.
-/// `hs.occupancy.search == Search::kBfsDp`) instead of querying
-/// MachineInstrSchedulerConfig::HasSchedulingOption.
+/// `hs.occupancy.search == Search::kBfsDp`) instead of querying the generic
+/// MachineInstrSchedulerConfig.
 struct HierarchicalConfig {
   OccupancyConfig occupancy;
   LengthConfig length;
 
-  // Global toggles that belong to neither pass. Set in misched.txt as
-  // top-level "name = true|false" settings; the defaults below apply
-  // when the setting is absent.
+  // Global toggles that belong to neither pass. Set in misched.txt as bare
+  // flags (e.g. `run_shakedowns`); the generic config owns the spelling and
+  // validation, and Build() mirrors them here. Defaults below apply when the
+  // flag is absent.
   bool malicious = false;            // run the malicious variant instead
   bool run_shakedowns = false;       // run validation harnesses
   bool dump_subgraph_dag = false;    // dump region DAGs for the viewer

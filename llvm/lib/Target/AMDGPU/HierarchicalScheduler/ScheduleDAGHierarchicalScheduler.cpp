@@ -1372,7 +1372,7 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   HierarchicalConfig::Get().DebugPrint();
 
   // Shakedowns are validation harnesses: noisy and slow. Off by default;
-  // opt in via `run_shakedowns = true` in misched.txt.
+  // opt in via the `run_shakedowns` flag in misched.txt.
   if (HierarchicalConfig::Get().run_shakedowns) {
     RunAllShakedowns();
   }

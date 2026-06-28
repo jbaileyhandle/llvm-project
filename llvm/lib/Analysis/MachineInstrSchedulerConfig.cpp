@@ -10,12 +10,51 @@
 #include <cassert>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 
 using namespace llvm;
 
 namespace {
     const std::string waves_per_eu_attr = "amdgpu-waves-per-eu";
+
+    // A flag binding pairs a misched.txt spelling with the Flags field it
+    // controls. The field is held as a pointer-to-data-member
+    // (`bool Flags::*`): it names *which* bool field of Flags, independent of
+    // any object. Bind it to an instance with the `.*` operator --
+    // `flags.*binding.field` -- to read or write that field. One binding
+    // therefore serves both the parser (write) and ToString (read), so the
+    // list of valid flags lives in exactly one place (kFlagBindings).
+    using Flags = MachineInstrSchedulerConfig::Flags;
+    struct FlagBinding {
+        StringRef name;
+        bool Flags::*field;
+    };
+    const FlagBinding kFlagBindings[] = {
+        {"disable_post_ra_scheduling", &Flags::disable_post_ra_scheduling},
+        {"use_jbaile_custom_timing_model", &Flags::use_jbaile_custom_timing_model},
+        {"run_on_all_functions", &Flags::run_on_all_functions},
+        {"run_regardless_of_heuristic_outcome", &Flags::run_regardless_of_heuristic_outcome},
+        {"use_continuous_occupancy_score", &Flags::use_continuous_occupancy_score},
+        {"malicious", &Flags::malicious},
+        {"run_shakedowns", &Flags::run_shakedowns},
+        {"dump_subgraph_dag", &Flags::dump_subgraph_dag},
+        {"dump_search_outcomes", &Flags::dump_search_outcomes},
+        {"scale_edge_latencies", &Flags::scale_edge_latencies},
+        {"skip_occupancy_pass", &Flags::skip_occupancy_pass},
+        {"skip_length_pass", &Flags::skip_length_pass},
+    };
+
+    // Return the binding for flag `name`, or nullptr if `name` is not a known
+    // flag spelling.
+    const FlagBinding *FindFlag(StringRef name) {
+        for (const auto &binding : kFlagBindings) {
+            if (name == binding.name) {
+                return &binding;
+            }
+        }
+        return nullptr;
+    }
 
     // Split a string according to delimiter
     // Return split strings as a vector
@@ -32,7 +71,7 @@ namespace {
         return tokens;
     }
 
-    // Split a string according to whitespace 
+    // Split a string according to whitespace
     // Return split strings as a vector
     std::vector<std::string> SplitByWhitespace(const std::string &input) {
         std::istringstream stream(input);
@@ -125,177 +164,155 @@ bool MachineInstrSchedulerConfig::IsHierarchicalScheduler() const {
     return mi_scheduler_ == Scheduler::HierarchicalScheduler;
 }
 
-bool MachineInstrSchedulerConfig::HasSchedulingOption(MachineInstrSchedulerConfig::SchedulerOption option) const {
-    return (options_.find(option) != options_.end());
-}
-
-std::optional<llvm::StringRef> MachineInstrSchedulerConfig::GetScopedSetting(llvm::StringRef scope, llvm::StringRef key) const {
-    auto scope_it = scoped_.find(scope.str());
-    if (scope_it == scoped_.end()) {
-        return std::nullopt;
-    }
-    auto key_it = scope_it->second.find(key.str());
-    if (key_it == scope_it->second.end()) {
-        return std::nullopt;
-    }
-    return llvm::StringRef(key_it->second);
-}
-
-bool MachineInstrSchedulerConfig::IsPostRASchedulingDisabled() const {
-    return HasSchedulingOption(SchedulerOption::DisablePostRAScheduling);
-}
-
 MachineInstrSchedulerConfig::Scheduler MachineInstrSchedulerConfig::GetScheduler() const {
     return mi_scheduler_;
 }
 
-MachineInstrSchedulerConfig::SchedulerOption MachineInstrSchedulerConfig::GetSchedulerOptionFromString(const std::string &str) {
-    SchedulerOption option = StringSwitch<SchedulerOption>(llvm::StringRef(str))
-        .Case("DisablePostRAScheduling", SchedulerOption::DisablePostRAScheduling)
-        .Case("RunOnAllFunctions", SchedulerOption::RunOnAllFunctions)
-        .Case("RunRegardlessOfHeurisitcOutcome", SchedulerOption::RunRegardlessOfHeurisitcOutcome)
-        .Case("UseContinuousOccupancyScore", SchedulerOption::UseContinuousOccupancyScore)
-        .Case("UseJbaileCustomTimingModel",
-              SchedulerOption::UseJbaileCustomTimingModel)
-        .Default(SchedulerOption::InvalidOption);
-
-    if (option == SchedulerOption::InvalidOption) {
-        llvm::report_fatal_error("Invalid SchedulerOption: " + llvm::StringRef(str));
-    }
-    return option;
+MachineInstrSchedulerConfig::Scheduler
+MachineInstrSchedulerConfig::GetSchedulerFromName(llvm::StringRef name) {
+    return StringSwitch<Scheduler>(name)
+        .Case("MaxOccupancy", Scheduler::MaxOccupancy)
+        .Case("MaxIlp", Scheduler::MaxIlp)
+        .Case("IterativeMaxOccupancy", Scheduler::IterativeMaxOccupancy)
+        .Case("IterativeMaxIlp", Scheduler::IterativeMaxIlp)
+        .Case("AcoOptSched", Scheduler::AcoOptSched)
+        .Case("BnbOptSched", Scheduler::BnbOptSched)
+        .Case("HierarchicalScheduler", Scheduler::HierarchicalScheduler)
+        .Default(Scheduler::InvalidOption);
 }
 
-bool MachineInstrSchedulerConfig::IsValidOptionForScheduler(SchedulerOption option, Scheduler scheduler) {
-    switch (option) {
-    // Generic — valid for any scheduler
-    case SchedulerOption::DisablePostRAScheduling:
-    case SchedulerOption::UseJbaileCustomTimingModel:
+bool MachineInstrSchedulerConfig::SetFlagIfKnown(llvm::StringRef name) {
+    if (const FlagBinding *binding = FindFlag(name)) {
+        flags_.*(binding->field) = true;
         return true;
-    // OptSched-specific
-    case SchedulerOption::RunOnAllFunctions:
-    case SchedulerOption::RunRegardlessOfHeurisitcOutcome:
-    case SchedulerOption::UseContinuousOccupancyScore:
-        return (scheduler == Scheduler::AcoOptSched || scheduler == Scheduler::BnbOptSched);
-    default:
+    }
+    return false;
+}
+
+bool MachineInstrSchedulerConfig::SetGlobalSettingIfKnown(llvm::StringRef key,
+                                                          llvm::StringRef value) {
+    // No unscoped global settings yet; the unroll knobs are added in a later
+    // step (each becomes a typed field handled here).
+    (void)key;
+    (void)value;
+    return false;
+}
+
+bool MachineInstrSchedulerConfig::TrySetSchedulerFromToken(llvm::StringRef tok) {
+    Scheduler scheduler = GetSchedulerFromName(tok);
+    if (scheduler == Scheduler::InvalidOption) {
         return false;
     }
-}
-
-void MachineInstrSchedulerConfig::InitSchedulerOptions(const std::vector<std::string> &option_strings) {
-    for (const auto &str : option_strings) {
-        // A token containing '=' is a scoped "<scope>.<key>=<value>" setting:
-        // route it to the dumb scoped_ store and leave it uninterpreted here.
-        // A bare token is a boolean SchedulerOption (the existing path).
-        if (str.find('=') != std::string::npos) {
-            ParseScopedSetting(str);
-            continue;
-        }
-        SchedulerOption option = GetSchedulerOptionFromString(str);
-        if (!IsValidOptionForScheduler(option, mi_scheduler_)) {
-            llvm::report_fatal_error("Option '" + llvm::StringRef(str) +
-                "' is not valid for scheduler '" + llvm::StringRef(GetSchedulerAsString()) + "'");
-        }
-        options_.insert(option);
+    if (scheduler_set_ && scheduler != mi_scheduler_) {
+        report_fatal_error(Twine("misched.txt: conflicting scheduler '") + tok +
+                           "' (already set to '" + GetSchedulerAsString() + "')");
     }
+    mi_scheduler_ = scheduler;
+    scheduler_set_ = true;
+    return true;
 }
 
-void MachineInstrSchedulerConfig::ParseScopedSetting(const std::string &token) {
+void MachineInstrSchedulerConfig::ApplySetting(llvm::StringRef key,
+                                               llvm::StringRef value) {
+    size_t dot = key.find('.');
+    if (dot == StringRef::npos) {
+        // Unscoped global setting -> its typed field.
+        if (SetGlobalSettingIfKnown(key, value)) {
+            return;
+        }
+        // A known flag written in "key=value" form: point at the bare-flag
+        // spelling rather than calling the name unknown.
+        if (FindFlag(key)) {
+            report_fatal_error(Twine("misched.txt: '") + key +
+                               "' is a flag, not a setting; write it bare "
+                               "(drop '=" + value + "')");
+        }
+        report_fatal_error(Twine("misched.txt: unknown setting '") + key + "'");
+    }
+    // Scoped "<scope>.<subkey>=<value>": stored uninterpreted here;
+    // HierarchicalConfig validates the scope/key and maps it to a typed field.
+    scoped_[key.substr(0, dot).str()][key.substr(dot + 1).str()] = value.str();
+}
+
+void MachineInstrSchedulerConfig::ParseOptionToken(const std::string &token) {
     size_t eq = token.find('=');
-    std::string lhs = token.substr(0, eq);
-    std::string value = token.substr(eq + 1);
-
-    // Split the left-hand side into "<scope>.<key>" on the first dot. The key
-    // may itself contain dots (e.g. "search.timeout"); only the first segment
-    // is the scope. A dotless left-hand side is a top-level setting, stored
-    // under the empty scope.
-    size_t dot = lhs.find('.');
-    std::string scope;
-    std::string key;
-    if (dot == std::string::npos) {
-        scope = "";
-        key = lhs;
-    } else {
-        scope = lhs.substr(0, dot);
-        key = lhs.substr(dot + 1);
+    if (eq == std::string::npos) {
+        // A bare token is a scheduler name or a boolean flag.
+        StringRef tok(token);
+        if (TrySetSchedulerFromToken(tok)) {
+            return;
+        }
+        if (SetFlagIfKnown(tok)) {
+            return;
+        }
+        report_fatal_error(Twine("misched.txt: unknown option '") + tok + "'");
     }
-    scoped_[scope][key] = value;
+    // A token with '=' is a "<key>=<value>" setting.
+    ApplySetting(StringRef(token).substr(0, eq), StringRef(token).substr(eq + 1));
 }
 
+void MachineInstrSchedulerConfig::ParseKernelLine(const std::string &rest) {
+    std::vector<std::string> func_tokens = SplitByDelimter(rest);
+    if (func_tokens.size() < 2) {
+        report_fatal_error(Twine("misched.txt: malformed kernel line '") + rest +
+                           "' (expected `kernel <m|d>/<signature>/[waves]`)");
+    }
+    std::string demangled_func_signature;
+    if (func_tokens[0] == "d" || func_tokens[0] == "D") {
+        demangled_func_signature = func_tokens[1];
+    } else if (func_tokens[0] == "m" || func_tokens[0] == "M") {
+        demangled_func_signature = DemangleFunctionSignature(func_tokens[1]);
+    } else {
+        report_fatal_error("misched.txt: kernel line must indicate mangled (m) or demangled (d) signature");
+    }
+
+    if (demangled_func_signature_to_config_.find(demangled_func_signature) != demangled_func_signature_to_config_.end()) {
+        report_fatal_error("misched.txt: duplicate kernel configuration");
+    }
+    demangled_func_signature_to_config_.emplace(std::piecewise_construct,
+        std::forward_as_tuple(demangled_func_signature),
+        std::forward_as_tuple(demangled_func_signature, func_tokens));
+}
 
 MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
-    // TODO(jbaile): rewrite this parser to the §6 line grammar in
-    // docs/AMDGPUSchedulerConfigDesign.md (deferred). Today the whole
-    // scheduler config is crammed on line 1 ("<Scheduler> tok tok ...")
-    // with kernel lines after. Target: fully line-oriented and
-    // order-independent —
-    //   scheduler = <name>            (replaces the bare line-1 name)
-    //   <scope>.<key> = <value>       (scoped; allow spaces around '=')
-    //   <flag>                        (bare global boolean)
-    //   <key> = <value>               (dotless top-level, e.g. preset)
-    //   kernel m|d/<sig>/ key=val ... (per-kernel; keyword-prefixed,
-    //                                  waves_per_eu as a key)
-    //   # comments + blank lines anywhere.
-    // Clean cutover (no back-compat). Regression set to keep passing:
-    // MaxOccupancy; AcoOptSched + RunOnAllFunctions; BnbOptSched +
-    // UseContinuousOccupancyScore; HierarchicalScheduler + scoped keys.
+    // misched.txt is a line-oriented, order-independent config. Each non-blank,
+    // non-comment line is either a `kernel <m|d>/<sig>/[waves]` per-function
+    // line or a whitespace-separated list of option tokens (a scheduler name,
+    // a bare flag, or a `<key>=<value>` setting). Options may be split across
+    // any number of lines; exactly one scheduler name must appear.
     std::ifstream misched_config_file("misched.txt");
-    if(misched_config_file) {
+    if (misched_config_file) {
         has_config_ = true;
 
-        // Parse 1st line
         std::string line;
-        std::getline(misched_config_file, line);
-        std::vector<std::string> first_line_tokens = SplitByWhitespace(line);
-        std::string misched = first_line_tokens[0];
-
-        // Set scheduler
-        llvm::StringRef misched_ref(misched);
-        mi_scheduler_ = StringSwitch<Scheduler>(misched_ref)
-            .Case("MaxOccupancy", Scheduler::MaxOccupancy)
-            .Case("MaxIlp", Scheduler::MaxIlp)
-            .Case("IterativeMaxOccupancy", Scheduler::IterativeMaxOccupancy)
-            .Case("IterativeMaxIlp", Scheduler::IterativeMaxIlp)
-            .Case("AcoOptSched", Scheduler::AcoOptSched)
-            .Case("BnbOptSched", Scheduler::BnbOptSched)
-            .Case("HierarchicalScheduler", Scheduler::HierarchicalScheduler)
-            .Default(Scheduler::InvalidOption);
-
-        if(mi_scheduler_ == Scheduler::InvalidOption) {
-            llvm::report_fatal_error("Invalid machine instruction scheduler: " + misched_ref);
-        }
-
-        // Parse and validate options
-        InitSchedulerOptions(std::vector<std::string>(first_line_tokens.begin()+1, first_line_tokens.end()));
-
-        // Read in per-func info
-        while(std::getline(misched_config_file, line)) {
-
-            // Skip lines that have been commented out
-            if (!line.empty() && line.at(0) == '#') {
+        while (std::getline(misched_config_file, line)) {
+            StringRef trimmed = StringRef(line).trim();
+            if (trimmed.empty() || trimmed.front() == '#') {
                 continue;
             }
 
-            // Make per-line config object && register
-            std::vector<std::string> func_tokens = SplitByDelimter(line);
-            std::string demangled_func_signature;
-            if(func_tokens[0] == "d" || func_tokens[0] == "D") {
-                demangled_func_signature = func_tokens[1];
-            } else if (func_tokens[0] == "m" || func_tokens[0] == "M") {
-                demangled_func_signature = DemangleFunctionSignature(func_tokens[1]);
-            } else {
-                llvm::report_fatal_error("First field of function config in misched.txt must indicate mangled (m/M) or demangled (d/D) function name");
+            size_t ws = trimmed.find_first_of(" \t");
+            StringRef first_word = trimmed.substr(0, ws);
+            if (first_word == "kernel") {
+                // Signatures contain spaces, so a kernel line is not
+                // whitespace-tokenized: the text after the keyword is parsed
+                // as `<m|d>/<signature>/[waves]`.
+                StringRef rest = (ws == StringRef::npos) ? StringRef() : trimmed.substr(ws).trim();
+                ParseKernelLine(rest.str());
+                continue;
             }
 
-            if(demangled_func_signature_to_config_.find(demangled_func_signature) != demangled_func_signature_to_config_.end()) {
-                llvm::report_fatal_error("In processing misched, found duplicate function configurations");
+            for (const std::string &token : SplitByWhitespace(trimmed.str())) {
+                ParseOptionToken(token);
             }
-            demangled_func_signature_to_config_.emplace(std::piecewise_construct,
-                std::forward_as_tuple(demangled_func_signature), 
-                std::forward_as_tuple(demangled_func_signature, func_tokens));
+        }
+
+        if (!scheduler_set_) {
+            report_fatal_error("misched.txt: no scheduler specified");
         }
     }
 
-    DebugPrint(); 
+    DebugPrint();
 }
 
 const MachineInstrSchedulerConfig::FunctionConfig *MachineInstrSchedulerConfig::GetFunctionConfigFromDemangledFunctionSignature(const std::string &demangled_signature) const {
@@ -352,7 +369,7 @@ void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Fu
 
     // TODO: A kernel must speicfy maximum threaeds per block to unlock >64 registers per thread. Do we want to force this here?
     /*
-    TODO: Do we actually want to preserve maximum waves per eu? Maybe! 
+    TODO: Do we actually want to preserve maximum waves per eu? Maybe!
     But the question is - do we want to overwrite the perscribed maximum_waves_per_eu
     with something else? Possibilities:
     maximum_waves_per_eu = maximum_waves_per_eu form attribute
@@ -392,22 +409,21 @@ std::string MachineInstrSchedulerConfig::GetSchedulerAsString() const {
     return scheduler_to_str_.at(mi_scheduler_);
 }
 
-std::string MachineInstrSchedulerConfig::GetSchedulerOptionAsString(SchedulerOption option) const {
-    return option_to_str_.at(option);
-}
-
 std::string MachineInstrSchedulerConfig::ToString() const {
     std::string result;
 
     // Scheduler
     result += "Scheduler: " + GetSchedulerAsString() + "\n";
 
-    // Options
-    if (!options_.empty()) {
-        result += "\tOptions:\n";
-        for (const auto option : options_) {
-            result += "\t\t" + GetSchedulerOptionAsString(option) + "\n";
+    // Flags (only those that are set)
+    std::string flag_lines;
+    for (const auto &binding : kFlagBindings) {
+        if (flags_.*(binding.field)) {
+            flag_lines += "\t\t" + binding.name.str() + "\n";
         }
+    }
+    if (!flag_lines.empty()) {
+        result += "\tFlags:\n" + flag_lines;
     }
 
     // Scoped settings
@@ -436,4 +452,3 @@ void MachineInstrSchedulerConfig::DebugPrint() const {
     llvm::outs().flush();
     llvm::outs() << "=====================================================================\n";
 }
-

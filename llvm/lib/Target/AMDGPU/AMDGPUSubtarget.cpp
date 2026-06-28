@@ -176,9 +176,7 @@ GCNSubtarget::initializeSubtargetDependencies(const Triple &TT,
   // register-pressure analyses, etc.) reads from this pointer, so the swap
   // is universal — not scoped to any particular scheduler. Must happen
   // before any TargetSchedModel cache fills.
-  if (MachineInstrSchedulerConfig::GetConfig().HasSchedulingOption(
-          MachineInstrSchedulerConfig::SchedulerOption::
-              UseJbaileCustomTimingModel) &&
+  if (MachineInstrSchedulerConfig::GetConfig().GetFlags().use_jbaile_custom_timing_model &&
       getGeneration() >= AMDGPUSubtarget::GFX9) {
     // The custom model symbol is static inside the MCTargetDesc TU and
     // not directly visible here. Look it up through the processor table

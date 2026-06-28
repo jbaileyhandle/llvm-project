@@ -3,8 +3,6 @@
 
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
-#include <set>
 #include <vector>
 #include <map>
 #include <optional>
@@ -26,24 +24,28 @@ class MachineInstrSchedulerConfig {
             BnbOptSched,
             HierarchicalScheduler
         };
-        enum class SchedulerOption {
-            // Generic (any scheduler)
-            DisablePostRAScheduling,
-            // OptSched-specific (AcoOptSched, BnbOptSched)
-            RunOnAllFunctions,
-            RunRegardlessOfHeurisitcOutcome,
-            UseContinuousOccupancyScore,
-            // Generic: swap the AMDGPU subtarget's MCSchedModel to
-            // jbaile's custom gfx906 model. Affects every consumer of
-            // sched-model latency (LLVM's MachineScheduler,
-            // OptSched, HierarchicalScheduler, register-pressure
-            // analyses, etc.). Valid for any scheduler.
-            UseJbaileCustomTimingModel,
-            // Sentinel
-            InvalidOption
-        };
 
-        static bool IsValidOptionForScheduler(SchedulerOption option, Scheduler scheduler);
+        // Every boolean flag settable as a bare token in misched.txt (e.g.
+        // `skip_length_pass`). The flag's spelling IS its field name; the
+        // spelling -> field table in the .cpp (kFlagSpecs) is the single
+        // source of truth for which flags are valid. Read via GetFlags().
+        struct Flags {
+            // Generic / middle-end (any scheduler).
+            bool disable_post_ra_scheduling = false;
+            bool use_jbaile_custom_timing_model = false;
+            // OptSched (AcoOptSched, BnbOptSched).
+            bool run_on_all_functions = false;
+            bool run_regardless_of_heuristic_outcome = false;
+            bool use_continuous_occupancy_score = false;
+            // HierarchicalScheduler toggles.
+            bool malicious = false;
+            bool run_shakedowns = false;
+            bool dump_subgraph_dag = false;
+            bool dump_search_outcomes = false;
+            bool scale_edge_latencies = false;
+            bool skip_occupancy_pass = false;
+            bool skip_length_pass = false;
+        };
 
         // A class to represent per-function configuration info
         class FunctionConfig {
@@ -65,7 +67,7 @@ class MachineInstrSchedulerConfig {
 
         // Return the configuration
         static const MachineInstrSchedulerConfig &GetConfig();
-        
+
         // Return true if we have configuration information for function
         bool HasFunctionConfig(const Function &function) const;
         bool HasFunctionConfigForMangledFunctionSignature(const llvm::StringRef &mangled_signature) const;
@@ -93,27 +95,19 @@ class MachineInstrSchedulerConfig {
         // Return true if HierarchicalScheduler is the configured scheduler
         bool IsHierarchicalScheduler() const;
 
-        // Return true if option is set
-        bool HasSchedulingOption(SchedulerOption option) const;
-
-        // Look up a scoped "<scope>.<key> = <value>" setting parsed from
-        // misched.txt. Returns the raw value string if present, std::nullopt
-        // otherwise. The generic config stores these uninterpreted; the
-        // per-scheduler layer (e.g. AMDGPU HierarchicalConfig) maps them to
-        // typed fields and validates them. A dotless top-level setting is
-        // stored under the empty scope.
-        std::optional<llvm::StringRef> GetScopedSetting(llvm::StringRef scope,
-                                                        llvm::StringRef key) const;
-
-        // Return the entire scope -> key -> value store. The per-scheduler
-        // layer iterates this to validate (fatal on an unknown scope or key)
-        // and to read every setting; GetScopedSetting is the point-read
-        // counterpart. Still uninterpreted at this layer.
-        const std::map<std::string, std::map<std::string, std::string>> &
-        GetAllScopedSettings() const { return scoped_; }
+        // The typed boolean flags parsed from misched.txt. Read e.g.
+        // `GetConfig().GetFlags().skip_length_pass`.
+        const Flags &GetFlags() const { return flags_; }
 
         // Convenience: return true if post-RA scheduling is disabled
-        bool IsPostRASchedulingDisabled() const;
+        bool IsPostRASchedulingDisabled() const { return flags_.disable_post_ra_scheduling; }
+
+        // The occupancy.* / length.* scoped "<scope>.<key> = <value>" settings,
+        // stored uninterpreted here and given typed meaning by AMDGPU's
+        // HierarchicalConfig. (Transitional: these fold into this config's own
+        // typed fields in a later step; the bare-flag bools already have.)
+        const std::map<std::string, std::map<std::string, std::string>> &
+        GetAllScopedSettings() const { return scoped_; }
 
         // Debug printing stuff
         void DebugPrint() const;
@@ -124,9 +118,6 @@ class MachineInstrSchedulerConfig {
 
         // Return the configurd scheduler as a string
         std::string GetSchedulerAsString() const;
-
-        // Return the string-equivalent of a scheduler option
-        std::string GetSchedulerOptionAsString(SchedulerOption option) const;
 
         // Return the FunctionConfig for the function with a given demangled signature
         // Return nullptr if not found
@@ -147,27 +138,55 @@ class MachineInstrSchedulerConfig {
         // Get the configuration for a function
         const FunctionConfig *GetFunctionConfig(const Function &function) const;
 
-        // Parse and validate options from misched.txt tokens
-        void InitSchedulerOptions(const std::vector<std::string> &option_strings);
+        // Parse one whitespace-delimited option token from a non-`kernel` line.
+        // A bare token is a scheduler name or a boolean flag (a Flags field). A
+        // `<key>=<value>` token is a setting: a scoped `<scope>.<key>=<value>`
+        // (occupancy.* / length.*) is stored uninterpreted for
+        // HierarchicalConfig, while an unscoped global setting (e.g. an unroll
+        // knob like `unroll_threshold`) is applied to its own typed field.
+        // An unknown or malformed token is a fatal error.
+        void ParseOptionToken(const std::string &token);
 
-        // Parse a single "<scope>.<key>=<value>" (or dotless "<key>=<value>")
-        // token into the scoped_ store. The left-hand side is split on its
-        // first dot: the first segment is the scope, the remainder (which may
-        // itself contain dots, e.g. "search.timeout") is the key. A dotless
-        // left-hand side lands under the empty scope.
-        void ParseScopedSetting(const std::string &token);
+        // Set the scheduler from a bare scheduler-name token; fatal on a
+        // second, conflicting name. Returns false if `tok` is not a scheduler
+        // name.
+        bool TrySetSchedulerFromToken(llvm::StringRef tok);
 
-        // Convert a string to the corresponding SchedulerOption
-        SchedulerOption GetSchedulerOptionFromString(const std::string &str);
+        // Apply a `<key>=<value>` setting: an unscoped key to its typed global
+        // field (via SetGlobalSettingIfKnown), a scoped `<scope>.<subkey>` to
+        // the uninterpreted scoped store.
+        void ApplySetting(llvm::StringRef key, llvm::StringRef value);
+
+        // If `name` is a known flag spelling, set that flag and return true;
+        // otherwise return false. Defined over kFlagBindings (in the .cpp), the
+        // single list of valid flags.
+        bool SetFlagIfKnown(llvm::StringRef name);
+
+        // If `key` is a known unscoped global setting, parse `value` into its
+        // typed field and return true; otherwise return false. (No global
+        // settings yet; the unroll knobs are added in a later step.)
+        bool SetGlobalSettingIfKnown(llvm::StringRef key, llvm::StringRef value);
+
+        // Parse a `kernel <m|d>/<signature>/ ...` per-function line (the text
+        // after the leading `kernel` keyword).
+        void ParseKernelLine(const std::string &rest);
+
+        // Map a scheduler-name token to the Scheduler enum, or
+        // Scheduler::InvalidOption if it is not a scheduler name.
+        static Scheduler GetSchedulerFromName(llvm::StringRef name);
 
         bool has_config_ = false;
         Scheduler mi_scheduler_ = Scheduler::Default;
+        bool scheduler_set_ = false;
         std::unordered_map<std::string, FunctionConfig> demangled_func_signature_to_config_;
-        std::set<SchedulerOption> options_;
-        // Dumb scope -> key -> value store for "<scope>.<key> = <value>"
-        // settings. Uninterpreted here; read via GetScopedSetting and given
-        // meaning by the per-scheduler config layer.
+
+        // Typed boolean flags (the spelling -> field table is in the .cpp).
+        Flags flags_;
+
+        // Transitional store for occupancy.* / length.* scoped settings, read
+        // by HierarchicalConfig. Folded into typed fields in a later step.
         std::map<std::string, std::map<std::string, std::string>> scoped_;
+
         inline static const std::unordered_map<Scheduler, std::string> scheduler_to_str_ {
             {Scheduler::Default, "Default"},
             {Scheduler::MaxOccupancy, "MaxOccupancy"},
@@ -177,14 +196,6 @@ class MachineInstrSchedulerConfig {
             {Scheduler::AcoOptSched, "AcoOptSched"},
             {Scheduler::BnbOptSched, "BnbOptSched"},
             {Scheduler::HierarchicalScheduler, "HierarchicalScheduler"}
-        };
-        inline static const std::unordered_map<SchedulerOption, std::string> option_to_str_ {
-            {SchedulerOption::InvalidOption, "InvalidOption"},
-            {SchedulerOption::DisablePostRAScheduling, "DisablePostRAScheduling"},
-            {SchedulerOption::RunOnAllFunctions, "RunOnAllFunctions"},
-            {SchedulerOption::RunRegardlessOfHeurisitcOutcome, "RunRegardlessOfHeurisitcOutcome"},
-            {SchedulerOption::UseContinuousOccupancyScore, "UseContinuousOccupancyScore"},
-            {SchedulerOption::UseJbaileCustomTimingModel, "UseJbaileCustomTimingModel"}
         };
 
 
