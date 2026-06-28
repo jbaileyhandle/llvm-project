@@ -52,7 +52,7 @@ class MachineInstrSchedulerConfig {
             public:
                 std::string ToString() const;
 
-                FunctionConfig(const std::string &demangled_signature, const std::vector<std::string> &tokens);
+                FunctionConfig(const std::string &demangled_signature, std::optional<int> waves_per_eu);
                 std::string func_signature_;
                 std::optional<int> waves_per_eu_;
         };

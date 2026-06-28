@@ -1,5 +1,6 @@
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Twine.h"
@@ -54,21 +55,6 @@ namespace {
             }
         }
         return nullptr;
-    }
-
-    // Split a string according to delimiter
-    // Return split strings as a vector
-    std::vector<std::string> SplitByDelimter(const std::string &input, char delimiter='/') {
-
-        std::vector<std::string> tokens;
-        std::stringstream ss(input);
-        std::string token;
-        while(std::getline(ss, token, delimiter)) {
-            if(!token.empty()) {
-                tokens.push_back(token);
-            }
-        }
-        return tokens;
     }
 
     // Split a string according to whitespace
@@ -229,9 +215,22 @@ void MachineInstrSchedulerConfig::ApplySetting(llvm::StringRef key,
         }
         report_fatal_error(Twine("misched.txt: unknown setting '") + key + "'");
     }
-    // Scoped "<scope>.<subkey>=<value>": stored uninterpreted here;
-    // HierarchicalConfig validates the scope/key and maps it to a typed field.
-    scoped_[key.substr(0, dot).str()][key.substr(dot + 1).str()] = value.str();
+    // Scoped "<scope>.<subkey>=<value>". Both halves must be non-empty, and a
+    // given "<scope>.<subkey>" may be set only once -- the order-independent
+    // grammar makes a silent last-wins overwrite a real ambiguity.
+    StringRef scope = key.substr(0, dot);
+    StringRef subkey = key.substr(dot + 1);
+    if (scope.empty() || subkey.empty()) {
+        report_fatal_error(Twine("misched.txt: malformed scoped setting '") + key +
+                           "' (empty scope or key)");
+    }
+    std::map<std::string, std::string> &scope_settings = scoped_[scope.str()];
+    if (scope_settings.count(subkey.str())) {
+        report_fatal_error(Twine("misched.txt: duplicate setting '") + key + "'");
+    }
+    // Stored uninterpreted here; HierarchicalConfig validates the scope/key and
+    // maps it to a typed field.
+    scope_settings[subkey.str()] = value.str();
 }
 
 void MachineInstrSchedulerConfig::ParseOptionToken(const std::string &token) {
@@ -247,31 +246,66 @@ void MachineInstrSchedulerConfig::ParseOptionToken(const std::string &token) {
         }
         report_fatal_error(Twine("misched.txt: unknown option '") + tok + "'");
     }
-    // A token with '=' is a "<key>=<value>" setting.
+    // A token with '=' is a "<key>=<value>" setting; the key must be non-empty.
+    if (eq == 0) {
+        report_fatal_error(Twine("misched.txt: setting has an empty key: '") +
+                           token + "'");
+    }
     ApplySetting(StringRef(token).substr(0, eq), StringRef(token).substr(eq + 1));
 }
 
 void MachineInstrSchedulerConfig::ParseKernelLine(const std::string &rest) {
-    std::vector<std::string> func_tokens = SplitByDelimter(rest);
-    if (func_tokens.size() < 2) {
+    // Grammar: <m|d>/<signature>/[waves]. Split keeping empty fields so a
+    // missing field is rejected, not silently shifted into another position
+    // (e.g. `d//4` must fail, not read "4" as the signature).
+    SmallVector<StringRef, 4> fields;
+    StringRef(rest).split(fields, '/');
+    if (fields.size() < 2 || fields.size() > 3) {
         report_fatal_error(Twine("misched.txt: malformed kernel line '") + rest +
                            "' (expected `kernel <m|d>/<signature>/[waves]`)");
     }
-    std::string demangled_func_signature;
-    if (func_tokens[0] == "d" || func_tokens[0] == "D") {
-        demangled_func_signature = func_tokens[1];
-    } else if (func_tokens[0] == "m" || func_tokens[0] == "M") {
-        demangled_func_signature = DemangleFunctionSignature(func_tokens[1]);
-    } else {
-        report_fatal_error("misched.txt: kernel line must indicate mangled (m) or demangled (d) signature");
+
+    StringRef tag = fields[0];
+    StringRef signature = fields[1];
+    if (signature.empty()) {
+        report_fatal_error(Twine("misched.txt: kernel line '") + rest +
+                           "' has an empty signature");
     }
 
-    if (demangled_func_signature_to_config_.find(demangled_func_signature) != demangled_func_signature_to_config_.end()) {
-        report_fatal_error("misched.txt: duplicate kernel configuration");
+    std::string demangled_func_signature;
+    if (tag == "d" || tag == "D") {
+        demangled_func_signature = signature.str();
+    } else if (tag == "m" || tag == "M") {
+        demangled_func_signature = DemangleFunctionSignature(signature.str());
+    } else {
+        report_fatal_error(Twine("misched.txt: kernel line '") + rest +
+                           "' must start with 'm' (mangled) or 'd' (demangled), got '" +
+                           tag + "'");
     }
-    demangled_func_signature_to_config_.emplace(std::piecewise_construct,
-        std::forward_as_tuple(demangled_func_signature),
-        std::forward_as_tuple(demangled_func_signature, func_tokens));
+
+    // waves is the optional 3rd field. Present => the per-function waves/occupancy
+    // target: OptSched reads it as an occupancy limit (OptSchedGCNTarget), others
+    // apply it as the amdgpu-waves-per-eu attribute. Absent => just register the
+    // function (no target override), which still opts it into OptSched, since
+    // OptSched's per-function opt-in is "has a config entry".
+    std::optional<int> waves;
+    if (fields.size() == 3) {
+        int parsed = 0;
+        if (fields[2].getAsInteger(10, parsed) || parsed < 1) {
+            report_fatal_error(Twine("misched.txt: kernel line '") + rest +
+                               "' has invalid waves '" + fields[2] +
+                               "' (expected an integer >= 1)");
+        }
+        waves = parsed;
+    }
+
+    if (demangled_func_signature_to_config_.count(demangled_func_signature)) {
+        report_fatal_error(Twine("misched.txt: duplicate kernel configuration for '") +
+                           demangled_func_signature + "'");
+    }
+    demangled_func_signature_to_config_.emplace(
+        demangled_func_signature,
+        FunctionConfig(demangled_func_signature, waves));
 }
 
 MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
@@ -310,9 +344,8 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
         if (!scheduler_set_) {
             report_fatal_error("misched.txt: no scheduler specified");
         }
+        DebugPrint();
     }
-
-    DebugPrint();
 }
 
 const MachineInstrSchedulerConfig::FunctionConfig *MachineInstrSchedulerConfig::GetFunctionConfigFromDemangledFunctionSignature(const std::string &demangled_signature) const {
@@ -390,11 +423,9 @@ void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Fu
     function.addFnAttr(waves_per_eu_attr, new_waves_per_eu_pair);
 }
 
-MachineInstrSchedulerConfig::FunctionConfig::FunctionConfig(const std::string &demangled_signature, const std::vector<std::string> &tokens) {
-    func_signature_ = std::move(demangled_signature);
-    if(tokens.size() > 2 && !tokens[2].empty()) {
-        waves_per_eu_ = std::stoi(tokens[2]);
-    }
+MachineInstrSchedulerConfig::FunctionConfig::FunctionConfig(const std::string &demangled_signature, std::optional<int> waves_per_eu) {
+    func_signature_ = demangled_signature;
+    waves_per_eu_ = waves_per_eu;
 }
 
 std::string MachineInstrSchedulerConfig::FunctionConfig::ToString() const {
