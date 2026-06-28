@@ -15,6 +15,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <map>
 #include <optional>
@@ -27,100 +28,104 @@ using namespace llvm::hierarchical_scheduler;
 
 namespace {
 
-// Render "<scope>.<key>" (or just "<key>" for the empty top-level scope)
-// for error messages.
-std::string ScopedKeyName(StringRef scope, StringRef key) {
-  return scope.empty() ? key.str() : (scope.str() + "." + key.str());
+// Format a setting's fully-qualified "<scope>.<key>" name (as written in
+// misched.txt) into a string for error messages. The generic layer guarantees
+// a non-empty scope and key reach here, so there is no empty-scope case.
+std::string FormatQualifiedKey(StringRef scope, StringRef key) {
+  return scope.str() + "." + key.str();
 }
 
 [[noreturn]] void BadValue(StringRef scope, StringRef key, StringRef val,
                            StringRef expected) {
-  report_fatal_error(Twine("HierarchicalConfig: invalid value '") + val +
-                     "' for '" + ScopedKeyName(scope, key) + "' (expected " +
-                     expected + ")");
+  report_fatal_error(Twine("misched.txt: invalid value '") + val + "' for '" +
+                     FormatQualifiedKey(scope, key) + "' (expected " + expected +
+                     ")");
 }
 
 [[noreturn]] void UnknownKey(StringRef scope, StringRef key) {
-  report_fatal_error(Twine("HierarchicalConfig: unknown setting '") +
-                     ScopedKeyName(scope, key) + "'");
+  report_fatal_error(Twine("misched.txt: unknown setting '") +
+                     FormatQualifiedKey(scope, key) + "'");
 }
 
-// --- value parsers (each fatals on an unrecognized value) ---
+// --- config-axis enums ---
+//
+// One {spelling, value} table per axis enum is the single source of truth for
+// that axis's vocabulary. ParseEnum (string -> value) and EnumName (value ->
+// string, for ToString) both read it, and ParseEnum builds BadValue's
+// "expected" list from it -- so the accepted spellings live in exactly one
+// place instead of three hand-synced copies (parse chain, name chain, error
+// string).
 
-SubgraphFormationStrategy ParseFormation(StringRef scope, StringRef key, StringRef v) {
-  if (v == "none") {
-    return SubgraphFormationStrategy::kNone;
+template <typename E> struct EnumSpec {
+  StringRef name;
+  E value;
+};
+
+// Map a spelling to its enum value, or fatal (with an "expected a|b|c" list
+// built from the table) if it is not a known spelling.
+template <typename E, size_t N>
+E ParseEnum(const EnumSpec<E> (&table)[N], StringRef scope, StringRef key,
+            StringRef v) {
+  for (const EnumSpec<E> &spec : table) {
+    if (v == spec.name) {
+      return spec.value;
+    }
   }
-  if (v == "domtree") {
-    return SubgraphFormationStrategy::kDomTree;
+  std::string expected;
+  for (const EnumSpec<E> &spec : table) {
+    if (!expected.empty()) {
+      expected += "|";
+    }
+    expected += spec.name;
   }
-  if (v == "mincut") {
-    return SubgraphFormationStrategy::kMinCut;
-  }
-  BadValue(scope, key, v, "none|domtree|mincut");
+  BadValue(scope, key, v, expected);
 }
 
-Search ParseSearch(StringRef scope, StringRef key, StringRef v) {
-  if (v == "dfs") {
-    return Search::kDfs;
+// Map an enum value back to its spelling. The value always comes from a parsed
+// config, so it is always present in the table.
+template <typename E, size_t N>
+StringRef EnumName(const EnumSpec<E> (&table)[N], E value) {
+  for (const EnumSpec<E> &spec : table) {
+    if (spec.value == value) {
+      return spec.name;
+    }
   }
-  if (v == "bfsdp") {
-    return Search::kBfsDp;
-  }
-  if (v == "bfsdp+dfs") {
-    return Search::kBfsDpDfs;
-  }
-  BadValue(scope, key, v, "dfs|bfsdp|bfsdp+dfs");
+  llvm_unreachable("config enum value missing from its name table");
 }
 
-OccupancyPolicy ParseOccupancyPolicy(StringRef scope, StringRef key, StringRef v) {
-  if (v == "continuous") {
-    return OccupancyPolicy::kContinuousOccupancy;
-  }
-  if (v == "integer") {
-    return OccupancyPolicy::kIntegerOccupancy;
-  }
-  if (v == "integer+refine-spill-area") {
-    return OccupancyPolicy::kIntegerOccupancyRefineSpillArea;
-  }
-  if (v == "continuous+refine-spill-area") {
-    return OccupancyPolicy::kContinuousOccupancyRefineSpillArea;
-  }
-  BadValue(scope, key, v,
-           "continuous|integer|integer+refine-spill-area|"
-           "continuous+refine-spill-area");
-}
+const EnumSpec<SubgraphFormationStrategy> kFormationStrategies[] = {
+    {"none", SubgraphFormationStrategy::kNone},
+    {"domtree", SubgraphFormationStrategy::kDomTree},
+    {"mincut", SubgraphFormationStrategy::kMinCut},
+};
 
-SubgraphScheduleMode ParseMode(StringRef scope, StringRef key, StringRef v) {
-  if (v == "serialized") {
-    return SubgraphScheduleMode::kSerialized;
-  }
-  if (v == "interleaved") {
-    return SubgraphScheduleMode::kInterleaved;
-  }
-  BadValue(scope, key, v, "serialized|interleaved");
-}
+const EnumSpec<Search> kSearches[] = {
+    {"dfs", Search::kDfs},
+    {"bfsdp", Search::kBfsDp},
+    {"bfsdp+dfs", Search::kBfsDpDfs},
+};
 
-LengthPolicy ParseLengthPolicy(StringRef scope, StringRef key, StringRef v) {
-  if (v == "min") {
-    return LengthPolicy::kMin;
-  }
-  if (v == "min+refine-ilp") {
-    return LengthPolicy::kMinRefineIlp;
-  }
-  if (v == "min+refine-occupancy") {
-    return LengthPolicy::kMinRefineOccupancy;
-  }
-  if (v == "min+bounded-spill-signals") {
-    return LengthPolicy::kMinBoundedSpillSignals;
-  }
-  if (v == "max") {
-    return LengthPolicy::kMax;
-  }
-  BadValue(scope, key, v,
-           "min|min+refine-ilp|min+refine-occupancy|"
-           "min+bounded-spill-signals|max");
-}
+const EnumSpec<OccupancyPolicy> kOccupancyPolicies[] = {
+    {"continuous", OccupancyPolicy::kContinuousOccupancy},
+    {"integer", OccupancyPolicy::kIntegerOccupancy},
+    {"integer+refine-spill-area",
+     OccupancyPolicy::kIntegerOccupancyRefineSpillArea},
+    {"continuous+refine-spill-area",
+     OccupancyPolicy::kContinuousOccupancyRefineSpillArea},
+};
+
+const EnumSpec<SubgraphScheduleMode> kScheduleModes[] = {
+    {"serialized", SubgraphScheduleMode::kSerialized},
+    {"interleaved", SubgraphScheduleMode::kInterleaved},
+};
+
+const EnumSpec<LengthPolicy> kLengthPolicies[] = {
+    {"min", LengthPolicy::kMin},
+    {"min+refine-ilp", LengthPolicy::kMinRefineIlp},
+    {"min+refine-occupancy", LengthPolicy::kMinRefineOccupancy},
+    {"min+bounded-spill-signals", LengthPolicy::kMinBoundedSpillSignals},
+    {"max", LengthPolicy::kMax},
+};
 
 bool ParseBool(StringRef scope, StringRef key, StringRef v) {
   if (v == "true" || v == "on") {
@@ -142,13 +147,14 @@ int ParseInt(StringRef scope, StringRef key, StringRef v) {
 }
 
 float ParseFloat(StringRef scope, StringRef key, StringRef v) {
-  std::string s = v.str();
-  char *end = nullptr;
-  float out = std::strtof(s.c_str(), &end);
-  if (end == s.c_str() || *end != '\0') {
-    BadValue(scope, key, v, "a number");
+  double out = 0.0;
+  // getAsDouble is locale-independent and rejects empty / trailing junk (unlike
+  // strtof); also reject non-finite (nan/inf) so a bad value can't flow into
+  // formation.
+  if (v.getAsDouble(out) || !std::isfinite(out)) {
+    BadValue(scope, key, v, "a finite number");
   }
-  return out;
+  return static_cast<float>(out);
 }
 
 // --- per-key application ---
@@ -160,11 +166,11 @@ float ParseFloat(StringRef scope, StringRef key, StringRef v) {
 bool ApplyFormationKey(StringRef scope, StringRef key, StringRef val,
                        FormationConfig &fc) {
   if (key == "formation") {
-    fc.strategy = ParseFormation(scope, key, val);
+    fc.strategy = ParseEnum(kFormationStrategies, scope, key, val);
     return true;
   }
   if (key == "mode") {
-    fc.mode = ParseMode(scope, key, val);
+    fc.mode = ParseEnum(kScheduleModes, scope, key, val);
     return true;
   }
   if (key == "formation.ratio") {
@@ -184,7 +190,7 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
     return;
   }
   if (key == "search") {
-    c.search = ParseSearch(scope, key, val);
+    c.search = ParseEnum(kSearches, scope, key, val);
     return;
   }
   if (key == "decompose") {
@@ -192,7 +198,7 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
     return;
   }
   if (key == "policy") {
-    c.policy = ParseOccupancyPolicy(scope, key, val);
+    c.policy = ParseEnum(kOccupancyPolicies, scope, key, val);
     return;
   }
   if (key == "decompose_recursive") {
@@ -228,7 +234,7 @@ void ApplyLengthKey(StringRef key, StringRef val, LengthConfig &c) {
     return;
   }
   if (key == "policy") {
-    c.policy = ParseLengthPolicy(scope, key, val);
+    c.policy = ParseEnum(kLengthPolicies, scope, key, val);
     return;
   }
   UnknownKey(scope, key);
@@ -292,7 +298,7 @@ std::optional<PresetPairs> GetPreset(StringRef name) {
 PresetPairs LoadPreset(StringRef name) {
   std::optional<PresetPairs> preset = GetPreset(name);
   if (!preset) {
-    report_fatal_error(Twine("HierarchicalConfig: unknown preset '") + name +
+    report_fatal_error(Twine("misched.txt: unknownpreset '") + name +
                        "'");
   }
   return *preset;
@@ -345,41 +351,71 @@ void BuildLength(const std::map<std::string, std::string> *kv, LengthConfig &c) 
 
 // --- constraint validation (axis constraints, design doc §4.3) ---
 
+// Formation params are shared by both passes, so validate them in one place.
+void ValidateFormation(StringRef scope, const FormationConfig &fc) {
+  if (fc.mode == SubgraphScheduleMode::kInterleaved &&
+      fc.strategy == SubgraphFormationStrategy::kNone) {
+    report_fatal_error(Twine("misched.txt: ") + scope +
+                       ".mode=interleaved requires formation != none");
+  }
+  // target_size feeds k = ceil(N / target_size) in min-cut: 0 divides by zero,
+  // and a negative size is meaningless.
+  if (fc.min_cut.target_subgraph_size < 1) {
+    report_fatal_error(Twine("misched.txt: ") + scope +
+                       ".formation.target_size must be >= 1");
+  }
+  // imbalance_ratio is a cap multiplier where 1.0 forces even part sizes; below
+  // 1.0 is degenerate (non-finite was already rejected by ParseFloat).
+  if (fc.min_cut.imbalance_ratio < 1.0f) {
+    report_fatal_error(Twine("misched.txt: ") + scope +
+                       ".formation.ratio must be >= 1.0");
+  }
+}
+
 void ValidateOccupancy(const OccupancyConfig &c) {
+  ValidateFormation("occupancy", c.formation);
   // The two occupancy-target knobs pull opposite directions: one removes the
   // target so the pass squeezes maximally on every region, the other caps it.
   if (c.optimize_every_region_past_occupancy_target &&
       c.max_occ_above_input.has_value()) {
     report_fatal_error(
-        "HierarchicalConfig: occupancy.optimize_every_region_past_occupancy_"
-        "target and occupancy.max_occ_above_input are mutually exclusive");
+        "misched.txt: occupancy.optimize_every_region_past_occupancy_target "
+        "and occupancy.max_occ_above_input are mutually exclusive");
   }
   if (c.decompose && c.formation.strategy == SubgraphFormationStrategy::kNone) {
     report_fatal_error(
-        "HierarchicalConfig: occupancy.decompose requires formation != none");
+        "misched.txt: occupancy.decompose requires formation != none");
   }
-  if (c.formation.mode == SubgraphScheduleMode::kInterleaved &&
-      c.formation.strategy == SubgraphFormationStrategy::kNone) {
-    report_fatal_error("HierarchicalConfig: occupancy.mode=interleaved "
-                       "requires formation != none");
+  // Recursive decompose is a refinement of mincut decompose; it is meaningless
+  // without both.
+  if (c.decompose_recursive &&
+      (!c.decompose ||
+       c.formation.strategy != SubgraphFormationStrategy::kMinCut)) {
+    report_fatal_error("misched.txt: occupancy.decompose_recursive requires "
+                       "occupancy.decompose and formation=mincut");
+  }
+  // A per-level part cap below 2 cannot split.
+  if (c.decompose_recursive && c.decompose_max_parts < 2) {
+    report_fatal_error(
+        "misched.txt: occupancy.decompose_max_parts must be >= 2");
   }
   if (c.fallback_timeout_ms.has_value() && c.search != Search::kBfsDpDfs) {
-    report_fatal_error("HierarchicalConfig: occupancy.search.fallback_timeout "
+    report_fatal_error("misched.txt: occupancy.search.fallback_timeout "
                        "requires search=bfsdp+dfs");
   }
   // Timeouts are wall-clock budgets in ms: 0 means "no timeout" (run to
   // completion); a negative budget is meaningless.
   if (c.timeout_ms < 0) {
-    report_fatal_error("HierarchicalConfig: occupancy.search.timeout must be "
+    report_fatal_error("misched.txt: occupancy.search.timeout must be "
                        ">= 0 (0 = no timeout)");
   }
   if (c.fallback_timeout_ms.has_value() && *c.fallback_timeout_ms < 0) {
-    report_fatal_error("HierarchicalConfig: occupancy.search.fallback_timeout "
+    report_fatal_error("misched.txt: occupancy.search.fallback_timeout "
                        "must be >= 0 (0 = no timeout)");
   }
   if (c.max_occ_above_input.has_value() && *c.max_occ_above_input < 0) {
     report_fatal_error(
-        "HierarchicalConfig: occupancy.max_occ_above_input must be >= 0");
+        "misched.txt: occupancy.max_occ_above_input must be >= 0");
   }
   // BFS-DP isn't equipped for spill-area; the refine-spill-area policies are
   // DFS-only.
@@ -387,13 +423,13 @@ void ValidateOccupancy(const OccupancyConfig &c) {
        c.policy == OccupancyPolicy::kContinuousOccupancyRefineSpillArea) &&
       c.search != Search::kDfs) {
     report_fatal_error(
-        "HierarchicalConfig: occupancy.policy refine-spill-area variants "
+        "misched.txt: occupancy.policy refine-spill-area variants "
         "require occupancy.search=dfs (BFS-DP is not equipped for spill area)");
   }
   // BFS-DP maximizes regardless of the function occupancy target, so the cap
   // is only honored by DFS (whose ShouldEndSearch reads that target).
   if (c.max_occ_above_input.has_value() && c.search != Search::kDfs) {
-    report_fatal_error("HierarchicalConfig: occupancy.max_occ_above_input "
+    report_fatal_error("misched.txt: occupancy.max_occ_above_input "
                        "requires occupancy.search=dfs (BFS-DP ignores the cap)");
   }
   // Decompose's outer search has no "BFS-DP only" branch — it always pairs
@@ -402,84 +438,14 @@ void ValidateOccupancy(const OccupancyConfig &c) {
   // promotion to bfsdp+dfs.
   if (c.decompose && c.search == Search::kBfsDp) {
     report_fatal_error(
-        "HierarchicalConfig: occupancy.decompose=on with occupancy.search=bfsdp "
+        "misched.txt: occupancy.decompose=on with occupancy.search=bfsdp "
         "is not supported (decompose's outer always pairs BFS-DP with a DFS "
         "fallback; use search=bfsdp+dfs or search=dfs)");
   }
 }
 
 void ValidateLength(const LengthConfig &c) {
-  if (c.formation.mode == SubgraphScheduleMode::kInterleaved &&
-      c.formation.strategy == SubgraphFormationStrategy::kNone) {
-    report_fatal_error("HierarchicalConfig: length.mode=interleaved requires "
-                       "formation != none");
-  }
-}
-
-// --- enum -> string (for ToString) ---
-
-StringRef FormationName(SubgraphFormationStrategy f) {
-  switch (f) {
-  case SubgraphFormationStrategy::kNone:
-    return "none";
-  case SubgraphFormationStrategy::kDomTree:
-    return "domtree";
-  case SubgraphFormationStrategy::kMinCut:
-    return "mincut";
-  }
-  return "?";
-}
-
-StringRef SearchName(Search s) {
-  switch (s) {
-  case Search::kDfs:
-    return "dfs";
-  case Search::kBfsDp:
-    return "bfsdp";
-  case Search::kBfsDpDfs:
-    return "bfsdp+dfs";
-  }
-  return "?";
-}
-
-StringRef ModeName(SubgraphScheduleMode m) {
-  switch (m) {
-  case SubgraphScheduleMode::kSerialized:
-    return "serialized";
-  case SubgraphScheduleMode::kInterleaved:
-    return "interleaved";
-  }
-  return "?";
-}
-
-StringRef OccupancyPolicyName(OccupancyPolicy m) {
-  switch (m) {
-  case OccupancyPolicy::kContinuousOccupancy:
-    return "continuous";
-  case OccupancyPolicy::kIntegerOccupancy:
-    return "integer";
-  case OccupancyPolicy::kIntegerOccupancyRefineSpillArea:
-    return "integer+refine-spill-area";
-  case OccupancyPolicy::kContinuousOccupancyRefineSpillArea:
-    return "continuous+refine-spill-area";
-  }
-  return "?";
-}
-
-StringRef LengthPolicyName(LengthPolicy p) {
-  switch (p) {
-  case LengthPolicy::kMin:
-    return "min";
-  case LengthPolicy::kMinRefineIlp:
-    return "min+refine-ilp";
-  case LengthPolicy::kMinRefineOccupancy:
-    return "min+refine-occupancy";
-  case LengthPolicy::kMinBoundedSpillSignals:
-    return "min+bounded-spill-signals";
-  case LengthPolicy::kMax:
-    return "max";
-  }
-  return "?";
+  ValidateFormation("length", c.formation);
 }
 
 } // namespace
@@ -497,7 +463,7 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
     if (scope == "occupancy" || scope == "length") {
       continue;
     }
-    report_fatal_error(Twine("HierarchicalConfig: unknown scope '") + scope +
+    report_fatal_error(Twine("misched.txt: unknownscope '") + scope +
                        "'");
   }
 
@@ -532,7 +498,7 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   // Dumping during shakedowns is meaningless and unsupported, so the two
   // toggles are mutually exclusive.
   if (hs.dump_subgraph_dag && hs.run_shakedowns) {
-    report_fatal_error("HierarchicalConfig: dump_subgraph_dag and "
+    report_fatal_error("misched.txt: dump_subgraph_dag and "
                        "run_shakedowns cannot both be enabled; shakedowns "
                        "operate on synthetic graphs that are not dumpable");
   }
@@ -550,9 +516,10 @@ std::string HierarchicalConfig::ToString() const {
   std::string out;
   raw_string_ostream os(out);
   os << "HierarchicalConfig:\n";
-  os << "\toccupancy: formation=" << FormationName(occupancy.formation.strategy)
-     << " search=" << SearchName(occupancy.search)
-     << " policy=" << OccupancyPolicyName(occupancy.policy)
+  os << "\toccupancy: formation="
+     << EnumName(kFormationStrategies, occupancy.formation.strategy)
+     << " search=" << EnumName(kSearches, occupancy.search)
+     << " policy=" << EnumName(kOccupancyPolicies, occupancy.policy)
      << " decompose=" << (occupancy.decompose ? "on" : "off")
      << " decompose_recursive="
      << (occupancy.decompose_recursive ? "on" : "off")
@@ -563,18 +530,19 @@ std::string HierarchicalConfig::ToString() const {
              : "off")
      << " optimize_every_region_past_occupancy_target="
      << (occupancy.optimize_every_region_past_occupancy_target ? "on" : "off")
-     << " mode=" << ModeName(occupancy.formation.mode)
+     << " mode=" << EnumName(kScheduleModes, occupancy.formation.mode)
      << " ratio=" << occupancy.formation.min_cut.imbalance_ratio
      << " target_size=" << occupancy.formation.min_cut.target_subgraph_size
      << " timeout_ms=" << occupancy.timeout_ms
      << " fallback_timeout_ms=" << occupancy.GetFallbackTimeoutMs()
      << (occupancy.fallback_timeout_ms.has_value() ? "" : " (=timeout)")
      << "\n";
-  os << "\tlength: formation=" << FormationName(length.formation.strategy)
-     << " mode=" << ModeName(length.formation.mode)
+  os << "\tlength: formation="
+     << EnumName(kFormationStrategies, length.formation.strategy)
+     << " mode=" << EnumName(kScheduleModes, length.formation.mode)
      << " ratio=" << length.formation.min_cut.imbalance_ratio
      << " target_size=" << length.formation.min_cut.target_subgraph_size
-     << " policy=" << LengthPolicyName(length.policy) << "\n";
+     << " policy=" << EnumName(kLengthPolicies, length.policy) << "\n";
   os << "\tglobals: malicious=" << (malicious ? "on" : "off")
      << " run_shakedowns=" << (run_shakedowns ? "on" : "off")
      << " dump_subgraph_dag=" << (dump_subgraph_dag ? "on" : "off")
