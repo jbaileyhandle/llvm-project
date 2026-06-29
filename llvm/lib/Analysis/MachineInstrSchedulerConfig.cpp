@@ -34,6 +34,7 @@ namespace {
     const FlagBinding kFlagBindings[] = {
         {"disable_post_ra_scheduling", &Flags::disable_post_ra_scheduling},
         {"use_jbaile_custom_timing_model", &Flags::use_jbaile_custom_timing_model},
+        {"enable_runtime_unroll", &Flags::enable_runtime_unroll},
         {"run_on_all_functions", &Flags::run_on_all_functions},
         {"run_regardless_of_heuristic_outcome", &Flags::run_regardless_of_heuristic_outcome},
         {"use_continuous_occupancy_score", &Flags::use_continuous_occupancy_score},
@@ -50,6 +51,34 @@ namespace {
     // flag spelling.
     const FlagBinding *FindFlag(StringRef name) {
         for (const auto &binding : kFlagBindings) {
+            if (name == binding.name) {
+                return &binding;
+            }
+        }
+        return nullptr;
+    }
+
+    // The same single-source-of-truth pattern for unscoped global integer
+    // settings: each binding pairs a misched.txt spelling with the GlobalSettings
+    // field it controls, held as a pointer-to-data-member
+    // (`std::optional<int> GlobalSettings::*`). One binding serves both the
+    // parser (write) and ToString (read), so the list of valid global settings
+    // lives in exactly one place (kGlobalSettingBindings).
+    using GlobalSettings = MachineInstrSchedulerConfig::GlobalSettings;
+    struct GlobalSettingBinding {
+        StringRef name;
+        std::optional<int> GlobalSettings::*field;
+    };
+    const GlobalSettingBinding kGlobalSettingBindings[] = {
+        {"unroll_threshold", &GlobalSettings::unroll_threshold},
+        {"partial_unroll_threshold", &GlobalSettings::partial_unroll_threshold},
+        {"runtime_unroll_factor", &GlobalSettings::runtime_unroll_factor},
+    };
+
+    // Return the binding for global setting `name`, or nullptr if `name` is not
+    // a known global-setting spelling.
+    const GlobalSettingBinding *FindGlobalSetting(StringRef name) {
+        for (const auto &binding : kGlobalSettingBindings) {
             if (name == binding.name) {
                 return &binding;
             }
@@ -177,11 +206,19 @@ bool MachineInstrSchedulerConfig::SetFlagIfKnown(llvm::StringRef name) {
 
 bool MachineInstrSchedulerConfig::SetGlobalSettingIfKnown(llvm::StringRef key,
                                                           llvm::StringRef value) {
-    // No unscoped global settings yet; the unroll knobs are added in a later
-    // step (each becomes a typed field handled here).
-    (void)key;
-    (void)value;
-    return false;
+    const GlobalSettingBinding *binding = FindGlobalSetting(key);
+    if (!binding) {
+        return false;
+    }
+    // Every global setting is a non-negative integer (a threshold or a count).
+    int parsed = 0;
+    if (value.getAsInteger(10, parsed) || parsed < 0) {
+        report_fatal_error(Twine("misched.txt: setting '") + key +
+                           "' has invalid value '" + value +
+                           "' (expected an integer >= 0)");
+    }
+    global_settings_.*(binding->field) = parsed;
+    return true;
 }
 
 bool MachineInstrSchedulerConfig::TrySetSchedulerFromToken(llvm::StringRef tok) {
@@ -455,6 +492,18 @@ std::string MachineInstrSchedulerConfig::ToString() const {
     }
     if (!flag_lines.empty()) {
         result += "\tFlags:\n" + flag_lines;
+    }
+
+    // Global settings (only those that are set)
+    std::string setting_lines;
+    for (const auto &binding : kGlobalSettingBindings) {
+        if (std::optional<int> value = global_settings_.*(binding.field)) {
+            setting_lines += "\t\t" + binding.name.str() + " = " +
+                             std::to_string(*value) + "\n";
+        }
+    }
+    if (!setting_lines.empty()) {
+        result += "\tGlobal settings:\n" + setting_lines;
     }
 
     // Scoped settings

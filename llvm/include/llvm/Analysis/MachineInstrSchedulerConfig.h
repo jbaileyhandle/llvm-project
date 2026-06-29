@@ -33,6 +33,7 @@ class MachineInstrSchedulerConfig {
             // Generic / middle-end (any scheduler).
             bool disable_post_ra_scheduling = false;
             bool use_jbaile_custom_timing_model = false;
+            bool enable_runtime_unroll = false;
             // OptSched (AcoOptSched, BnbOptSched).
             bool run_on_all_functions = false;
             bool run_regardless_of_heuristic_outcome = false;
@@ -45,6 +46,19 @@ class MachineInstrSchedulerConfig {
             bool scale_edge_latencies = false;
             bool skip_occupancy_pass = false;
             bool skip_length_pass = false;
+        };
+
+        // Every unscoped global integer setting writable as `<name>=<int>` in
+        // misched.txt (e.g. `unroll_threshold=300`). Each is std::optional so an
+        // unset knob leaves the consumer's own default untouched. The spelling
+        // -> field table in the .cpp (kGlobalSettingBindings) is the single
+        // source of truth for which settings are valid. Read via
+        // GetGlobalSettings(). These are generic middle-end knobs (e.g. the
+        // loop-unroll preferences AMDGPU reads in getUnrollingPreferences).
+        struct GlobalSettings {
+            std::optional<int> unroll_threshold;
+            std::optional<int> partial_unroll_threshold;
+            std::optional<int> runtime_unroll_factor;
         };
 
         // A class to represent per-function configuration info
@@ -98,6 +112,10 @@ class MachineInstrSchedulerConfig {
         // The typed boolean flags parsed from misched.txt. Read e.g.
         // `GetConfig().GetFlags().skip_length_pass`.
         const Flags &GetFlags() const { return flags_; }
+
+        // The typed unscoped global settings parsed from misched.txt. Read e.g.
+        // `GetConfig().GetGlobalSettings().unroll_threshold`.
+        const GlobalSettings &GetGlobalSettings() const { return global_settings_; }
 
         // Convenience: return true if post-RA scheduling is disabled
         bool IsPostRASchedulingDisabled() const { return flags_.disable_post_ra_scheduling; }
@@ -163,8 +181,9 @@ class MachineInstrSchedulerConfig {
         bool SetFlagIfKnown(llvm::StringRef name);
 
         // If `key` is a known unscoped global setting, parse `value` into its
-        // typed field and return true; otherwise return false. (No global
-        // settings yet; the unroll knobs are added in a later step.)
+        // typed GlobalSettings field and return true; otherwise return false.
+        // Defined over kGlobalSettingBindings (in the .cpp), the single list of
+        // valid global settings. Fatal on a value that is not a non-negative int.
         bool SetGlobalSettingIfKnown(llvm::StringRef key, llvm::StringRef value);
 
         // Parse a `kernel <m|d>/<signature>/ ...` per-function line (the text
@@ -182,6 +201,10 @@ class MachineInstrSchedulerConfig {
 
         // Typed boolean flags (the spelling -> field table is in the .cpp).
         Flags flags_;
+
+        // Typed unscoped global settings (the spelling -> field table is in the
+        // .cpp). Each field is unset until misched.txt provides a value.
+        GlobalSettings global_settings_;
 
         // Transitional store for occupancy.* / length.* scoped settings, read
         // by HierarchicalConfig. Folded into typed fields in a later step.

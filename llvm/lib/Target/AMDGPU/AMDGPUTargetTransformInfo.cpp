@@ -20,6 +20,11 @@
 #include "SIModeRegisterDefaults.h"
 #include "llvm/Analysis/InlineCost.h"
 #include "llvm/Analysis/LoopInfo.h"
+//========================================================================================
+// jbaile
+//========================================================================================
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+//========================================================================================
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/Analysis.h"
 #include "llvm/IR/IRBuilder.h"
@@ -108,6 +113,32 @@ void AMDGPUTTIImpl::getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
       F.getFnAttributeAsParsedInteger("amdgpu-unroll-threshold", 300);
   UP.MaxCount = std::numeric_limits<unsigned>::max();
   UP.Partial = true;
+
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Apply the global unroll knobs from misched.txt
+  // (MachineInstrSchedulerConfig). Each overrides the built-in default just set
+  // above; the per-loop adjustments below (loop metadata, alloca/LDS
+  // heuristics) still refine from here. An unset knob leaves the default
+  // untouched. Values were validated non-negative when parsed.
+  const MachineInstrSchedulerConfig &mi_config =
+      MachineInstrSchedulerConfig::GetConfig();
+  const MachineInstrSchedulerConfig::GlobalSettings &unroll_settings =
+      mi_config.GetGlobalSettings();
+  if (unroll_settings.unroll_threshold) {
+    UP.Threshold = *unroll_settings.unroll_threshold;
+  }
+  if (unroll_settings.partial_unroll_threshold) {
+    UP.PartialThreshold = *unroll_settings.partial_unroll_threshold;
+  }
+  if (unroll_settings.runtime_unroll_factor) {
+    UP.DefaultUnrollRuntimeCount = *unroll_settings.runtime_unroll_factor;
+  }
+  if (mi_config.GetFlags().enable_runtime_unroll) {
+    UP.Runtime = true;
+  }
+  //========================================================================================
 
   // Conditional branch in a loop back edge needs 3 additional exec
   // manipulations in average.
