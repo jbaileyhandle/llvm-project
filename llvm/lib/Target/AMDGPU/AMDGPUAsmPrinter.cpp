@@ -41,6 +41,17 @@
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/TargetParser.h"
+//========================================================================================
+// jbaile
+//========================================================================================
+// Headers for the always-on per-kernel resource-usage CSV writer (see
+// emitKernelResourceUsageCsv below). MachineInstrSchedulerConfig supplies the
+// demangler; raw_ostream builds the row; fcntl/unistd do the append-write.
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+#include "llvm/Support/raw_ostream.h"
+#include <fcntl.h>
+#include <unistd.h>
+//========================================================================================
 
 using namespace llvm;
 using namespace llvm::AMDGPU;
@@ -520,6 +531,13 @@ bool AMDGPUAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
 
   emitResourceUsageRemarks(MF, CurrentProgramInfo, MFI->isModuleEntryFunction(),
                            STM.hasMAIInsts());
+
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Mirror the resource-usage numbers into a parsable CSV, unconditionally.
+  emitKernelResourceUsageCsv(MF, CurrentProgramInfo);
+  //========================================================================================
 
   if (isVerbose()) {
     MCSectionELF *CommentSection =
@@ -1311,3 +1329,52 @@ void AMDGPUAsmPrinter::emitResourceUsageRemarks(
     EmitResourceUsageRemark("BytesLDS", "LDS Size [bytes/block]",
                             CurrentProgramInfo.LDSSize);
 }
+
+//========================================================================================
+// jbaile
+//========================================================================================
+// Append one CSV row per emitted function to kernel_resource_usage.csv in the
+// compiler's CWD. This is the always-on, machine-parsable twin of
+// emitResourceUsageRemarks: the same SIProgramInfo numbers, but written to a file
+// for every AMDGPU compile rather than gated behind -Rpass-analysis and dumped to
+// stderr. The benchmark harness reads this file to compare per-kernel register
+// spills (and occupancy) across scheduler variants.
+//
+// The values are already computed by AMDGPUResourceUsageAnalysis (a required
+// analysis of the AsmPrinter), so no extra work runs here — we only observe them.
+//
+// Row format (no header), one line per function:
+//   FunctionName,NumSGPR,NumVGPR,ScratchSize,Occupancy,SGPRSpill,VGPRSpill
+// FunctionName is the demangled signature and comes FIRST because it may itself
+// contain commas (e.g. `foo(int, float)`); the six numeric columns follow, so the
+// reader recovers them by splitting off exactly six fields from the right
+// (Python: line.rsplit(",", 6)). There is deliberately no header row: the file is
+// opened O_APPEND and, under parallel `make -j`, several translation-unit compiles
+// append concurrently, so there is no clean way to write a header exactly once.
+//
+// Mechanics mirror the region-stats writer in MachineScheduler.cpp: build the row
+// in a buffer, then a single append-write via raw POSIX calls (O_APPEND makes each
+// write atomic, so parallel translation units interleave whole rows cleanly).
+// Failure to open the file is silently ignored — this must never break a compile.
+void AMDGPUAsmPrinter::emitKernelResourceUsageCsv(
+    const MachineFunction &MF, const SIProgramInfo &CurrentProgramInfo) {
+  std::string FuncName =
+      MachineInstrSchedulerConfig::DemangleFunctionSignature(MF.getName().str());
+
+  std::string Buf;
+  raw_string_ostream OS(Buf);
+  OS << FuncName << ',' << CurrentProgramInfo.NumSGPR << ','
+     << CurrentProgramInfo.NumArchVGPR << ',' << CurrentProgramInfo.ScratchSize
+     << ',' << CurrentProgramInfo.Occupancy << ','
+     << CurrentProgramInfo.SGPRSpill << ',' << CurrentProgramInfo.VGPRSpill
+     << '\n';
+  OS.flush();
+
+  int FD = ::open("kernel_resource_usage.csv", O_WRONLY | O_CREAT | O_APPEND,
+                  0644);
+  if (FD >= 0) {
+    (void)::write(FD, Buf.data(), Buf.size());
+    ::close(FD);
+  }
+}
+//========================================================================================

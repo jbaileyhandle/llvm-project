@@ -71,6 +71,16 @@ private:
   void emitResourceUsageRemarks(const MachineFunction &MF,
                                 const SIProgramInfo &CurrentProgramInfo,
                                 bool isModuleEntryFunction, bool hasMAIInsts);
+  //======================================================================================
+  // jbaile
+  //======================================================================================
+  // Always-on companion to emitResourceUsageRemarks: appends one CSV row per
+  // emitted function to kernel_resource_usage.csv in the compiler's CWD. Unlike
+  // the remark path it is not gated on -Rpass-analysis, so the numbers land in a
+  // machine-parsable file for every AMDGPU compile. See the .cpp for the format.
+  void emitKernelResourceUsageCsv(const MachineFunction &MF,
+                                  const SIProgramInfo &CurrentProgramInfo);
+  //======================================================================================
 
   uint16_t getAmdhsaKernelCodeProperties(
       const MachineFunction &MF) const;
