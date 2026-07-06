@@ -278,14 +278,14 @@ std::optional<PresetPairs> GetPreset(StringRef name) {
   if (name == "decompose-mincut-interleave") {
     return PresetPairs{{"decompose", "on"},
                        {"formation", "mincut"},
-                       {"search", "bfsdp+dfs"},
+                       {"search", "dfs"},
                        {"mode", "interleaved"},
                        {"search.timeout", "5000"}};
   }
   if (name == "decompose-domtree") {
     return PresetPairs{{"decompose", "on"},
                        {"formation", "domtree"},
-                       {"search", "bfsdp+dfs"},
+                       {"search", "dfs"},
                        {"mode", "serialized"},
                        {"search.timeout", "5000"}};
   }

@@ -53,7 +53,10 @@ inline constexpr unsigned kAboveHardwareMaxOccupancy = 11;
 struct OccupancyConfig {
   FormationConfig formation; // strategy + mode + min-cut settings
   Search search = Search::kDfs;
-  OccupancyPolicy policy = OccupancyPolicy::kContinuousOccupancy;
+  // Spill-aware by default: continuous occupancy with VGPR spill area as a
+  // same-score tiebreak. Requires search=dfs (the default above); a config
+  // that switches to BFS-DP must also set a non-refine policy.
+  OccupancyPolicy policy = OccupancyPolicy::kContinuousOccupancyRefineSpillArea;
   bool decompose = false;
   // Recursive decompose: when on (with decompose + mincut formation), split
   // each level into at most 4 subgraphs and recurse down to
@@ -118,7 +121,10 @@ struct OccupancyConfig {
 /// historical default instead formed dom-tree subgraphs.
 struct LengthConfig {
   FormationConfig formation; // strategy + mode + min-cut settings
-  LengthPolicy policy = LengthPolicy::kMin;
+  // Spill-aware by default: minimize length but never let the length pass
+  // push VGPR spill area above the input schedule's. (No search constraint —
+  // the length pass is DFS-only regardless.)
+  LengthPolicy policy = LengthPolicy::kMinBoundedSpillSignals;
 };
 
 /// The HierarchicalScheduler's whole typed configuration, built once at
