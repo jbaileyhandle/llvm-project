@@ -88,11 +88,23 @@ public:
       const RegionInfo &region,
       function_ref<void(ScheduleGraph &)> callback);
 
+  // The scheduling-view latency divisor passed to BuildFromSUnits: the
+  // kernel's occupancy under the ScaleEdgeLatencies option, else 1. Kept
+  // separate from the schedule-length analyzer's own divisors so the
+  // scheduling view and the analysis view never affect one another.
+  int GetLatencyDivisorForScheduling() const;
+
   // Stub pass: schedule every region in topo order and apply.
   // Exercises the full pipeline (WithRegionGraph → ScheduleConstructor
   // → ApplyScheduleOrder) without any real search logic. Useful for
   // verifying the plumbing.
   void RunTopoPass();
+
+  // Post-scheduling diagnostic (analysis only, mutates nothing). Runs after
+  // every pass has applied its order, so each region's graph rebuilt here
+  // reflects the FINAL schedule. Rebuilds each region and hands it to
+  // ScheduleLengthAnalyzer, which prints per-region length/bubble stats.
+  void RunScheduleLengthAnalysis();
 
   // Outer loop of the occupancy-maximization pass. Iterates regions
   // ascending by original register-only occupancy and calls

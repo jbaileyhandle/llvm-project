@@ -765,7 +765,8 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
                                const MachineFunction &mf,
                                const LiveIntervals &lis,
                                const MachineRegisterInfo &mri,
-                               const RegionInfo &region) {
+                               const RegionInfo &region,
+                               int latency_divisor) {
   auto graph = std::make_unique<ScheduleGraph>();
 
   // ReserveNodes provides 2x SUnits + 2 entry/exit nodes of
@@ -789,30 +790,11 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
 
   graph->CreateLeafNodesFromSUnits(sunits, sunit_to_node);
 
-  // Compute the latency divisor for the
-  // ScaleEdgeLatenciesByTargetOccupancy misched option. When the
-  // option is set we divide each edge's data-latency by the
-  // function's current target occupancy, modeling the fact that
-  // other waves on the same SIMD cover most of the memory latency
-  // at runtime. MFI->getOccupancy() reflects the kernel-wide
-  // ceiling — initially the function default, lowered by
-  // RunMaximizeOccupancyPass's per-region limitOccupancy() calls.
-  // When the option is unset (the default), divisor stays at 1
-  // and edges pass through unchanged.
-  //
-  // Note on the occupancy pass: it uses a pressure-only metric
-  // (kMaximizeRegisterOccupancy) for accept/reject, so latency
-  // values don't affect its outcome. The fact that the divisor
-  // can vary across regions within the occupancy pass (as
-  // limitOccupancy tightens the ceiling) is therefore irrelevant
-  // to occupancy results. The length pass is where latency
-  // actually matters, and by then MFI->getOccupancy() has
-  // stabilized at the final kernel-wide ceiling.
-  int latency_divisor = 1;
-  if (HierarchicalConfig::Get().scale_edge_latencies) {
-    latency_divisor = static_cast<int>(
-        mf.getInfo<SIMachineFunctionInfo>()->getOccupancy());
-  }
+  // latency_divisor is a caller-owned policy (see the header): each
+  // data-dependency edge latency becomes ceil(latency / divisor),
+  // floored at 1. divisor == 1 leaves latencies raw. The builder does
+  // not consult any config here — callers decide (the scheduler from
+  // the ScaleEdgeLatencies option, the analyzer from its lens).
   graph->AddEdgesBetweenLeafNodes(sunit_to_node, latency_divisor);
   graph->CreateEntryAndExitNodes(lis, mri, region_begin_idx, region_end_idx);
   // Compute topo and both critical-path directions before Phase 4 so

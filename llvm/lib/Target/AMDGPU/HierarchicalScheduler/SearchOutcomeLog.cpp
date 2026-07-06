@@ -81,6 +81,13 @@ void FlushSearchOutcomes() {
   // than appending); later per-function flushes in the same process
   // append. Avoids piling up duplicate or mixed-format rows across runs
   // and binary versions.
+  //
+  // -j NOTE: this truncate-first + ofstream scheme is NOT safe under
+  // `make -j` — parallel clang processes each truncate on their first flush
+  // and clobber each other's rows. Accepted for now (dump_search_outcomes is
+  // a debugging toggle, rarely used under -j). schedule_length_analysis.csv
+  // shares this exact limitation; if it bites, switch both to the O_APPEND
+  // atomic-per-row scheme kernel_resource_usage.csv uses.
   static bool started = false;
   std::ofstream f(kFile, started ? std::ios::app : std::ios::trunc);
   if (!started) {

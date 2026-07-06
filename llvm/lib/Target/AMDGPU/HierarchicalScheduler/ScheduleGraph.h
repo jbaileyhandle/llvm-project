@@ -533,13 +533,22 @@ public:
   /// Live-in/live-out information comes from LiveIntervals. Register
   /// defs/uses are extracted from MachineInstrs and stored on each node
   /// for use by the RegisterTracker.
+  ///
+  /// latency_divisor scales every data-dependency edge latency to
+  /// ceil(latency / latency_divisor), floored at 1. The caller owns
+  /// this policy so the builder stays config-free: the scheduler
+  /// passes a config-derived value (see WithRegionGraph), while the
+  /// schedule-length analyzer passes 1 for its raw lens and the
+  /// achieved occupancy for its occupancy-adjusted lens. A value of 1
+  /// leaves latencies unscaled.
   static std::unique_ptr<ScheduleGraph> BuildFromSUnits(
       MutableArrayRef<SUnit> sunits,
       const GCNSubtarget &st,
       const MachineFunction &mf,
       const LiveIntervals &lis,
       const MachineRegisterInfo &mri,
-      const RegionInfo &region);
+      const RegionInfo &region,
+      int latency_divisor);
 
   /// Build a standalone leaf graph from a subset of another graph's
   /// scheduling-unit nodes — the extraction step behind isolated

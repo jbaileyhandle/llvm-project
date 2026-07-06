@@ -26,6 +26,7 @@
 #include "OccupancyTargetUtil.h"
 #include "SIMachineFunctionInfo.h"
 #include "ScheduleGraph.h"
+#include "ScheduleLengthAnalysis.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -123,7 +124,32 @@ void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
   }
 
   FlushSearchOutcomes();
+
+  // All passes have applied their orders; the MF now holds the final
+  // schedule. Analyze it (prints only, changes nothing).
+  RunScheduleLengthAnalysis();
+
   ScheduleDAGMILive::finalizeSchedule();
+}
+
+// See header. Rebuilds each region's graph from the (now final) MF order and
+// prints per-region length/bubble stats. buildSchedGraph + graph builds run
+// again here, but only under the hierarchical scheduler and only once per
+// region, so the cost is small next to the search the passes already did.
+void ScheduleDAGHierarchicalScheduler::RunScheduleLengthAnalysis() {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+
+  llvm::outs() << "\n=== Schedule-length analysis: " << MF.getName() << " ("
+               << regions_.size() << " regions) ===\n";
+  for (size_t i = 0; i < regions_.size(); ++i) {
+    ProcessRegion(regions_[i], [&]() {
+      buildSchedGraph(AA);
+      ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule(
+          SUnits, st, MF, *LIS, MF.getRegInfo(), regions_[i],
+          static_cast<int>(i));
+    });
+  }
 }
 
 // Run the malicious scheduler over all recorded regions. For each region,
@@ -157,10 +183,34 @@ void ScheduleDAGHierarchicalScheduler::WithRegionGraph(
     const GCNSubtarget &st =
         static_cast<const GCNSubtarget &>(MF.getSubtarget());
     auto graph = ScheduleGraph::BuildFromSUnits(
-        SUnits, st, MF, *LIS, MF.getRegInfo(), region);
+        SUnits, st, MF, *LIS, MF.getRegInfo(), region,
+        GetLatencyDivisorForScheduling());
 
     callback(*graph);
   });
+}
+
+// The scheduling-view latency divisor for graph construction. Under the
+// ScaleEdgeLatencies misched option, each edge's data latency is divided
+// by the kernel's occupancy, modeling other waves on the same SIMD
+// covering most of the memory latency at runtime; unset (the default) it
+// stays 1 and edges pass through raw. MFI->getOccupancy() reflects the
+// kernel-wide ceiling — initially the function default, lowered by the
+// occupancy pass's per-region limitOccupancy() calls. This is the
+// scheduler's own lens; the schedule-length analyzer computes its divisors
+// independently, so the two views never interfere.
+//
+// The occupancy pass accepts/rejects on a pressure-only metric, so its
+// outcome is latency-independent; a divisor that varies across regions
+// while limitOccupancy tightens the ceiling is therefore irrelevant there.
+// The length pass is where latency matters, and by then getOccupancy() has
+// stabilized at the final kernel-wide ceiling.
+int ScheduleDAGHierarchicalScheduler::GetLatencyDivisorForScheduling() const {
+  if (!HierarchicalConfig::Get().scale_edge_latencies) {
+    return 1;
+  }
+  return static_cast<int>(
+      MF.getInfo<SIMachineFunctionInfo>()->getOccupancy());
 }
 
 // Initialize per-function state. Stores mfi_ and resets occupancy
