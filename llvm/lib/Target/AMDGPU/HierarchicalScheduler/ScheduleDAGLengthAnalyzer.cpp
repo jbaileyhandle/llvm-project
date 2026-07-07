@@ -9,7 +9,9 @@
 #include "GCNSubtarget.h"
 #include "RegionInfo.h"
 #include "ScheduleLengthAnalysis.h"
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/LiveIntervals.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -23,6 +25,17 @@ ScheduleDAGLengthAnalyzer::ScheduleDAGLengthAnalyzer(
     LiveIntervals *lis)
     : ScheduleDAGInstrs(mf, mli, /*RemoveKillFlags=*/false), aa_(aa),
       lis_(lis) {}
+
+ScheduleDAGLengthAnalyzer::~ScheduleDAGLengthAnalyzer() {
+  // Flush one JSON file per function for the HTML viewer. Skip functions with
+  // no schedulable region (nothing to visualize).
+  if (regions_by_block_.empty()) {
+    return;
+  }
+  const std::string scheduler =
+      MachineInstrSchedulerConfig::GetConfig().GetSchedulerAsString();
+  ScheduleLengthAnalyzer::WriteVizJson(MF, scheduler, regions_by_block_);
+}
 
 void ScheduleDAGLengthAnalyzer::schedule() {
   // scheduleRegions has already called enterRegion, so RegionBegin/RegionEnd
@@ -46,6 +59,7 @@ void ScheduleDAGLengthAnalyzer::schedule() {
   }
 
   RegionInfo region(RegionBegin, RegionEnd, *lis_);
-  ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule(
+  RegionViz viz = ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule(
       SUnits, st, MF, *lis_, MF.getRegInfo(), region, region_index_++);
+  regions_by_block_[BB->getNumber()].push_back(std::move(viz));
 }

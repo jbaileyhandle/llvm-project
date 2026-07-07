@@ -30,12 +30,23 @@
 //   - avoidable:     a ready instruction that also fit the budget existed,
 //                    and the schedule idled anyway (a beatable schedule).
 //
+// Alongside the printed stats and schedule_length_analysis.csv, the analyzer
+// returns a structured RegionViz per region and writes a per-function JSON
+// (schedule_length_viz/<func>.json) that the standalone HTML viewer
+// (viz/schedule_length_viewer.html) renders as a control-flow graph of basic
+// blocks with a per-region cycle-accurate timeline.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULELENGTHANALYSIS_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULELENGTHANALYSIS_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+#include <map>
+#include <string>
+#include <vector>
 
 namespace llvm {
 
@@ -49,23 +60,86 @@ namespace hierarchical_scheduler {
 
 class RegionInfo;
 
+/// One issued instruction on a region's cycle-accurate timeline, together with
+/// the idle cycles that immediately precede it. issue_cycle is the cycle this
+/// instruction issues at under the lens's latency model (single-issue: exactly
+/// one instruction per cycle, so a gap of N cycles before it means N bubbles).
+struct TimelineEntry {
+  /// A contiguous run of idle cycles before this instruction, split by cause.
+  /// cause is one of "nothing-ready" / "over-budget" / "avoidable" (that fixed
+  /// order); only nonzero segments are stored.
+  struct BubbleSeg {
+    const char *cause;
+    int cycles;
+  };
+  int issue_cycle = 0;
+  std::string text;          // the MachineInstr as one line
+  bool on_crit_path = false; // zero-slack under this lens's latencies
+  // The instruction's "latency shadow" length: the max latency over its
+  // outgoing data edges (how many cycles until its result feeds a consumer).
+  // Large for loads (memory latency), ~1 for ALU. Scaled by the lens's
+  // latency divisor, so the adjusted lens shows the occupancy-shrunk shadow.
+  int latency = 0;
+  int vgpr = 0, sgpr = 0;    // live registers right after this instruction issues
+  double vgpr_pct = 0.0;     // vgpr as a percentage of the occupancy budget
+  double sgpr_pct = 0.0;     // sgpr as a percentage of the occupancy budget
+  SmallVector<BubbleSeg, 3> bubble_before;
+};
+
+/// One latency lens over a region: the summary stats plus the timeline.
+struct LensViz {
+  int critical_path = 0;
+  int length = 0; // achieved cycles
+  int floor = 0;  // lower bound: max(num_ops, critical_path + 1)
+  int bubbles = 0;
+  int nothing_ready = 0;
+  int over_budget = 0;
+  int avoidable = 0;
+  double efficiency = 0.0; // floor / length
+  std::vector<TimelineEntry> timeline;
+};
+
+/// Everything the visualization needs for one scheduling region.
+struct RegionViz {
+  int index = 0;
+  int num_ops = 0;
+  int occupancy = 0;
+  int peak_vgpr = 0, vgpr_budget = 0;
+  int peak_sgpr = 0, sgpr_budget = 0;
+  LensViz raw;
+  LensViz adjusted;
+};
+
 class ScheduleLengthAnalyzer {
 public:
-  /// Analyze one region's final schedule under both latency lenses and print
-  /// a stats block to stdout. `sunits` must already be populated by
-  /// buildSchedGraph for `region`; the analyzer builds its own two
-  /// ScheduleGraphs from them (raw + occupancy-adjusted) and does not
-  /// disturb the scheduler's state.
-  static void AnalyzeRegionFinalSchedule(MutableArrayRef<SUnit> sunits,
-                                         const GCNSubtarget &st,
-                                         const MachineFunction &mf,
-                                         const LiveIntervals &lis,
-                                         const MachineRegisterInfo &mri,
-                                         const RegionInfo &region,
-                                         int region_index);
+  /// Analyze one region's final schedule under both latency lenses. Prints the
+  /// stats block to stdout and appends to schedule_length_analysis.csv (as
+  /// before), and returns the structured per-region data the visualization
+  /// consumes. `sunits` must already be populated by buildSchedGraph for
+  /// `region`; the analyzer builds its own two ScheduleGraphs (raw +
+  /// occupancy-adjusted) and does not disturb the scheduler's state.
+  static RegionViz AnalyzeRegionFinalSchedule(MutableArrayRef<SUnit> sunits,
+                                              const GCNSubtarget &st,
+                                              const MachineFunction &mf,
+                                              const LiveIntervals &lis,
+                                              const MachineRegisterInfo &mri,
+                                              const RegionInfo &region,
+                                              int region_index);
+
+  /// Write schedule_length_viz/<func>.json for one function: a control-flow
+  /// graph of its basic blocks (edges from each MBB's successors) with the
+  /// per-region RegionViz attached to the block that contains it. Called once
+  /// per function after all its regions have been analyzed.
+  /// `regions_by_block` maps a MachineBasicBlock number to the regions in that
+  /// block, in program order; blocks with no schedulable region still appear
+  /// as nodes so the CFG is complete. `scheduler_name` labels which scheduler
+  /// produced the schedule (one scheduler per compilation).
+  static void WriteVizJson(
+      const MachineFunction &mf, StringRef scheduler_name,
+      const std::map<int, std::vector<RegionViz>> &regions_by_block);
 };
 
 } // namespace hierarchical_scheduler
 } // namespace llvm
 
-#endif
+#endif // LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULELENGTHANALYSIS_H

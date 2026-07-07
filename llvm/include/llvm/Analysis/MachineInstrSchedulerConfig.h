@@ -131,11 +131,15 @@ class MachineInstrSchedulerConfig {
         void DebugPrint() const;
         std::string ToString() const;
 
+        //========================================================================================
+        // jbaile
+        //========================================================================================
+        // Return the configured scheduler as a string (e.g. "MaxIlp").
+        std::string GetSchedulerAsString() const;
+        //========================================================================================
+
     private:
         MachineInstrSchedulerConfig();
-
-        // Return the configurd scheduler as a string
-        std::string GetSchedulerAsString() const;
 
         // Return the FunctionConfig for the function with a given demangled signature
         // Return nullptr if not found

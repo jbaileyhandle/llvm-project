@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<!--
+  schedule_length_viewer.html - offline viewer for the schedule-length /
+  bubble analysis.
+
+  Open this file in a browser, click "Load..." and pick a
+  schedule_length_viz/<func>.json file produced by the analysis pass
+  (MachineSchedulerLengthAnalysis, which runs after every scheduler). The
+  left pane is the function's control-flow graph: one node per basic block,
+  colored by a hotspot metric (default: how much of the block's time is
+  avoidable bubbles). Click a block to see, on the right, a cycle-accurate
+  timeline of each of its scheduling regions: instructions at their issue
+  cycle, idle cycles drawn as colored bars split by cause
+  (nothing-ready / over-budget / avoidable), critical-path instructions
+  highlighted, and per-instruction register %-of-budget.
+
+  Two latency lenses are stored in the file; the "lens" toggle switches
+  between raw (unscaled) and occupancy-adjusted latencies. Everything -
+  node colors and the timeline - re-renders under the selected lens.
+
+  Self-contained: cytoscape + dagre are vendored under lib/, so this works
+  with no network access. The JSON is loaded via a file picker (no fetch),
+  so it also works straight off the filesystem.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Schedule-Length Viewer</title>
+<script src="lib/cytoscape.min.js"></script>
+<script src="lib/dagre.min.js"></script>
+<script src="lib/cytoscape-dagre.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+  #top {
+    padding: 8px 12px; border-bottom: 1px solid #ccc; background: #fafafa;
+    display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+  }
+  #meta { font-size: 13px; color: #333; }
+  #meta b { color: #000; }
+  #controls { font-size: 13px; color: #333; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  #controls label { display: inline-flex; gap: 4px; align-items: center; }
+  #main { display: flex; height: calc(100% - 53px); }
+  #cy { width: 42%; height: 100%; border-right: 1px solid #ccc; display: block; }
+  #detail { width: 58%; height: 100%; overflow: auto; padding: 10px 14px; box-sizing: border-box; }
+  .hint { color: #888; }
+
+  /* legend */
+  .legend { display: flex; gap: 12px; font-size: 12px; align-items: center; }
+  .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; vertical-align: -1px; margin-right: 3px; }
+
+  /* detail: region blocks */
+  .region { margin-bottom: 22px; border: 1px solid #ddd; border-radius: 6px; }
+  .region h3 { margin: 0; padding: 7px 10px; background: #f2f4f8; border-bottom: 1px solid #ddd;
+               font-size: 13px; border-radius: 6px 6px 0 0; }
+  .rstats { padding: 6px 10px; font: 12px/1.5 monospace; color: #333; border-bottom: 1px solid #eee; background: #fbfbfb; }
+  .rstats .k { color: #666; }
+
+  /* timeline */
+  .gridwrap { display: flex; align-items: stretch; }
+  /* the latency-shadow lane: absolutely-positioned bars, one per high-latency
+     instruction, spanning its shadow at the same 18px/cycle as the rows. */
+  .lane { position: relative; flex: none; margin-right: 3px; }
+  .shadowbar { position: absolute; box-sizing: border-box; border-radius: 2px;
+    background: rgba(63,81,181,0.40); border: 1px solid rgba(63,81,181,0.65); }
+  .shadowbar:hover { background: rgba(63,81,181,0.80); z-index: 5; }
+  .grid { position: relative; flex: 1; padding: 0; }
+  .row { display: flex; align-items: stretch; font: 12px/1.35 monospace; height: 18px; }
+  .row.bub { height: auto; } /* scaled bubbles set their own height */
+  .cyc { width: 46px; text-align: right; padding-right: 8px; color: #aaa; flex: none; user-select: none; }
+  /* one line, fixed height so 1 instruction == 1 cycle == 18px (matches the
+     scaled bubbles); full text on hover. */
+  .instr { flex: 1; padding: 1px 6px; border-left: 3px solid transparent;
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 16px; }
+  .instr.crit { border-left-color: #7b1fa2; background: #faf5fd; }
+  .regbars { flex: none; width: 130px; display: flex; gap: 6px; align-items: center; padding-left: 8px; }
+  .bar { flex: 1; height: 9px; background: #eee; border-radius: 2px; position: relative; overflow: hidden; }
+  .bar > span { position: absolute; left: 0; top: 0; bottom: 0; }
+  .bar .lbl { position: absolute; right: 2px; top: -3px; font-size: 9px; color: #555; }
+
+  /* bubbles */
+  .bub { display: flex; }
+  .bub .cyc { color: #ccc; }
+  .bubcell { flex: 1; margin: 1px 6px; border-radius: 2px; color: #fff; font-size: 11px;
+             padding: 1px 6px; display: flex; align-items: center; }
+  .nothing-ready { background: #607d8b; }   /* structural / intrinsic */
+  .over-budget   { background: #ef9a00; }   /* register-limited */
+  .avoidable     { background: #d64545; }   /* beatable */
+  /* cycle-accurate (collapse off): height is proportional to idle cycles at
+     the same ~18px/cycle as instruction rows, with a faint tick per slot. */
+  .bubcell.scaled { align-items: flex-start; padding-top: 2px;
+    background-image: repeating-linear-gradient(to bottom,
+      transparent 0, transparent 17px,
+      rgba(255,255,255,0.30) 17px, rgba(255,255,255,0.30) 18px); }
+</style>
+</head>
+<body>
+<div id="top">
+  <label><b>Load...</b> <input type="file" id="file" accept=".json"></label>
+  <span id="meta" class="hint">No file loaded.</span>
+  <span id="controls">
+    <span>lens:
+      <label><input type="radio" name="lens" value="raw" checked> raw</label>
+      <label><input type="radio" name="lens" value="adjusted"> adjusted</label>
+    </span>
+    <label>color:
+      <select id="metric">
+        <option value="avoidable_pct">avoidable %</option>
+        <option value="bubble_pct">bubble %</option>
+        <option value="efficiency">efficiency</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="collapse" checked> collapse gaps</label>
+    <label title="Draw a latency-shadow bar for instructions whose result latency is at least this many cycles (loads). Only shown with collapse off.">shadow ≥ <input type="number" id="shadowMin" value="3" min="1" style="width:42px"> cyc</label>
+    <button id="fit">Fit</button>
+    <span class="legend">
+      <span><span class="swatch nothing-ready"></span>nothing-ready</span>
+      <span><span class="swatch over-budget"></span>over-budget</span>
+      <span><span class="swatch avoidable"></span>avoidable</span>
+    </span>
+  </span>
+</div>
+<div id="main">
+  <div id="cy"></div>
+  <div id="detail"><div class="hint">Load a file, then click a block.</div></div>
+</div>
+
+<script>
+"use strict";
+cytoscape.use(window.cytoscapeDagre);
+
+const metaSpan = document.getElementById("meta");
+const detailDiv = document.getElementById("detail");
+let cy = null;
+let DATA = null;
+let SELECTED = null; // selected block number
+
+function lens() { return document.querySelector('input[name=lens]:checked').value; }
+function metric() { return document.getElementById("metric").value; }
+function collapseOn() { return document.getElementById("collapse").checked; }
+function shadowMin() { return Math.max(1, parseInt(document.getElementById("shadowMin").value) || 3); }
+
+// Aggregate a block's regions under the active lens into the fields the node
+// coloring / label use. Rate metrics (avoidable %, bubble %, efficiency) are
+// scale-free so they compare across hot and cold blocks; absolute length is
+// deliberately not offered as a color.
+function blockAgg(block) {
+  let length = 0, bubbles = 0, avoidable = 0, floor = 0, ops = 0, nreg = 0;
+  for (const r of block.regions) {
+    const L = r[lens()];
+    length += L.length; bubbles += L.bubbles; avoidable += L.avoidable;
+    floor += L.floor; ops += r.num_ops; nreg++;
+  }
+  return {
+    nreg, ops, length, bubbles, avoidable,
+    avoidable_pct: length ? 100 * avoidable / length : 0,
+    bubble_pct: length ? 100 * bubbles / length : 0,
+    efficiency: length ? floor / length : 1,
+  };
+}
+
+// Map a metric value to a node color. Green = good, red = bad. Blocks with no
+// region are grey.
+function nodeColor(agg) {
+  if (agg.nreg === 0) return "#e0e0e0";
+  let bad; // 0 = good, 1 = bad
+  const m = metric();
+  if (m === "efficiency") bad = clamp((1 - agg.efficiency) / 0.5, 0, 1);
+  else if (m === "bubble_pct") bad = clamp(agg.bubble_pct / 60, 0, 1);
+  else bad = clamp(agg.avoidable_pct / 25, 0, 1); // avoidable_pct
+  // green (120) -> red (0)
+  const hue = 120 * (1 - bad);
+  return `hsl(${hue}, 65%, ${72 - 12 * bad}%)`;
+}
+function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
+
+function nodeLabel(block, agg) {
+  const name = block.name && block.name.length ? block.name : ("bb." + block.number);
+  if (agg.nreg === 0) return name + "\n(no region)";
+  const m = metric();
+  let val;
+  if (m === "efficiency") val = "eff " + agg.efficiency.toFixed(2);
+  else if (m === "bubble_pct") val = "bub " + agg.bubble_pct.toFixed(0) + "%";
+  else val = "avoid " + agg.avoidable_pct.toFixed(0) + "%";
+  return name + "\n" + agg.length + " cyc · " + val;
+}
+
+function buildGraph() {
+  if (!DATA) return;
+  const els = [];
+  for (const b of DATA.blocks) {
+    const agg = blockAgg(b);
+    els.push({ data: { id: "b" + b.number, num: b.number,
+                       label: nodeLabel(b, agg), color: nodeColor(agg),
+                       hasReg: agg.nreg > 0 } });
+  }
+  for (const b of DATA.blocks) {
+    for (const s of b.succs) {
+      els.push({ data: { id: "e" + b.number + "_" + s, source: "b" + b.number, target: "b" + s } });
+    }
+  }
+  if (cy) cy.destroy();
+  cy = cytoscape({
+    container: document.getElementById("cy"),
+    elements: els,
+    style: [
+      { selector: "node", style: {
+          "background-color": "data(color)", "label": "data(label)",
+          "text-wrap": "wrap", "text-valign": "center", "text-halign": "center",
+          "font-size": 10, "font-family": "monospace", "text-max-width": 130,
+          "width": 120, "height": 42, "shape": "round-rectangle",
+          "border-width": 1, "border-color": "#888", "color": "#111" } },
+      { selector: "node.sel", style: { "border-width": 3, "border-color": "#1565c0" } },
+      { selector: "edge", style: {
+          "width": 1.5, "line-color": "#bbb", "target-arrow-color": "#bbb",
+          "target-arrow-shape": "triangle", "curve-style": "bezier",
+          "arrow-scale": 0.9 } },
+    ],
+    layout: { name: "dagre", rankDir: "TB", nodeSep: 18, rankSep: 34 },
+    wheelSensitivity: 0.2,
+  });
+  cy.on("tap", "node", evt => selectBlock(evt.target.data("num")));
+  metaSpan.classList.remove("hint");
+  metaSpan.innerHTML = "<b>" + esc(DATA.function) + "</b> — scheduler <b>" +
+    esc(DATA.scheduler) + "</b> — " + DATA.blocks.length + " blocks";
+}
+
+function selectBlock(num) {
+  SELECTED = num;
+  cy.nodes().removeClass("sel");
+  cy.getElementById("b" + num).addClass("sel");
+  renderDetail();
+}
+
+// Skip synthetic boundary entries (no text) but carry any idle cycles they
+// hold forward onto the next real instruction, so no bubble is lost.
+function realEntries(timeline) {
+  const out = [];
+  let pending = [];
+  for (const e of timeline) {
+    const segs = pending.concat(e.bubble_before || []);
+    if (e.text && e.text.length) {
+      out.push(Object.assign({}, e, { bubble_before: segs }));
+      pending = [];
+    } else {
+      pending = segs;
+    }
+  }
+  return out;
+}
+
+// Render the idle cycles before an instruction that issues at `issueCycle`.
+// The segments are contiguous and end at issueCycle-1, so the left column
+// shows the actual cycle range each bubble occupies (continuous with the
+// instruction issue cycles above and below it).
+function bubbleHtml(segs, issueCycle) {
+  let total = 0;
+  for (const s of segs) total += s.cycles;
+  let start = issueCycle - total;
+  let h = "";
+  for (const s of segs) {
+    if (!s.cycles) { continue; }
+    const end = start + s.cycles - 1;
+    const range = s.cycles === 1 ? String(start) : (start + "–" + end);
+    if (collapseOn()) {
+      // compact: one labeled bar regardless of length ("⋯" marks a folded gap).
+      h += '<div class="row bub"><div class="cyc">' + range +
+           '</div><div class="bubcell ' + s.cause + '">' +
+           (s.cycles > 3 ? "⋯ " : "") + s.cycles +
+           " cyc · " + s.cause + "</div></div>";
+    } else {
+      // cycle-accurate: one block whose height is proportional to the idle
+      // cycles, at the same per-cycle scale as instruction rows (18px), with a
+      // tick per slot. So a 77-cycle stall really is ~77 rows tall.
+      const CYCLE_PX = 18;
+      h += '<div class="row bub" style="align-items:stretch">' +
+           '<div class="cyc" style="padding-top:2px">' + range +
+           '</div><div class="bubcell scaled ' + s.cause +
+           '" style="height:' + (s.cycles * CYCLE_PX) + 'px">' +
+           s.cycles + " cyc · " + s.cause + "</div></div>";
+    }
+    start += s.cycles;
+  }
+  return h;
+}
+
+function regBar(cls, pct) {
+  const over = pct > 100;
+  const w = Math.min(pct, 100);
+  const col = over ? "#b71c1c" : (pct > 80 ? "#ef9a00" : "#4caf50");
+  return '<div class="bar" title="' + cls + ' ' + pct.toFixed(0) + '% of budget">' +
+         '<span style="width:' + w + '%;background:' + col + '"></span>' +
+         '<span class="lbl">' + cls + " " + pct.toFixed(0) + "%</span></div>";
+}
+
+// Latency-shadow lane: one vertical bar per instruction whose result latency
+// is >= the threshold (loads), spanning [issue, issue+latency) at 18px/cycle.
+// Bars are packed into side-by-side tracks so concurrent shadows (multiple
+// loads in flight = MLP) show up next to each other. Positions are absolute,
+// aligned to the rows because collapse-off renders a uniform 18px/cycle grid;
+// `startCycle` is the cycle at the top of the grid.
+function shadowLaneHtml(entries, startCycle) {
+  const CYCLE_PX = 18, barW = 7, gap = 2;
+  const thresh = shadowMin();
+  const bars = [];
+  for (const e of entries) {
+    if (e.latency >= thresh) {
+      bars.push({ cycle: e.issue_cycle, lat: e.latency, text: e.text });
+    }
+  }
+  if (!bars.length) return '<div class="lane" style="width:0"></div>';
+  bars.sort((a, b) => a.cycle - b.cycle);
+  const trackEnd = []; // last-used end cycle per track
+  for (const bar of bars) {
+    let t = 0;
+    while (t < trackEnd.length && bar.cycle < trackEnd[t]) t++;
+    bar.track = t;
+    trackEnd[t] = bar.cycle + bar.lat;
+  }
+  let h = '<div class="lane" style="width:' + (trackEnd.length * (barW + gap)) + 'px">';
+  for (const bar of bars) {
+    h += '<div class="shadowbar" style="top:' + ((bar.cycle - startCycle) * CYCLE_PX) +
+         'px;height:' + (bar.lat * CYCLE_PX) + 'px;left:' + (bar.track * (barW + gap)) +
+         'px;width:' + barW + 'px" title="latency ' + bar.lat + ' cyc — ' + esc(bar.text) + '"></div>';
+  }
+  return h + "</div>";
+}
+
+function regionHtml(r) {
+  const L = r[lens()];
+  const eff = L.efficiency;
+  const pct = (x) => L.length ? (100 * x / L.length).toFixed(0) : "0";
+  let h = '<div class="region"><h3>region ' + r.index + " — " + r.num_ops +
+    " ops · occ " + r.occupancy + " · peak VGPR " + r.peak_vgpr + "/" + r.vgpr_budget +
+    " · SGPR " + r.peak_sgpr + "/" + r.sgpr_budget + "</h3>";
+  h += '<div class="rstats"><span class="k">critpath</span> ' + L.critical_path +
+    ' &nbsp; <span class="k">length</span> ' + L.length +
+    ' &nbsp; <span class="k">floor</span> ' + L.floor +
+    ' &nbsp; <span class="k">efficiency</span> ' + eff.toFixed(2) +
+    ' &nbsp; <span class="k">bubbles</span> ' + L.bubbles + " (" + pct(L.bubbles) + "% cyc)<br>" +
+    '&nbsp;&nbsp;<span class="swatch nothing-ready"></span>nothing-ready ' + L.nothing_ready +
+    ' &nbsp; <span class="swatch over-budget"></span>over-budget ' + L.over_budget +
+    ' &nbsp; <span class="swatch avoidable"></span>avoidable ' + L.avoidable + "</div>";
+  const entries = realEntries(L.timeline);
+  // Cycle at the top of the grid (start of the first entry's leading bubble).
+  let startCycle = 0;
+  if (entries.length) {
+    const e0 = entries[0];
+    startCycle = e0.issue_cycle - e0.bubble_before.reduce((a, s) => a + s.cycles, 0);
+  }
+  let rows = "";
+  for (const e of entries) {
+    rows += bubbleHtml(e.bubble_before, e.issue_cycle);
+    rows += '<div class="row"><div class="cyc">' + e.issue_cycle + '</div>' +
+      '<div class="instr' + (e.on_crit_path ? " crit" : "") + '" title="' + esc(e.text) + '">' + esc(e.text) + '</div>' +
+      '<div class="regbars">' + regBar("V", e.vgpr_pct) + regBar("S", e.sgpr_pct) + '</div></div>';
+  }
+  // The lane needs the uniform 18px/cycle grid, which only holds with collapse off.
+  const lane = collapseOn() ? "" : shadowLaneHtml(entries, startCycle);
+  h += '<div class="gridwrap">' + lane + '<div class="grid">' + rows + "</div></div>";
+  h += "</div>";
+  return h;
+}
+
+function renderDetail() {
+  if (SELECTED === null || !DATA) return;
+  const block = DATA.blocks.find(b => b.number === SELECTED);
+  if (!block) return;
+  const name = block.name && block.name.length ? block.name : ("bb." + block.number);
+  if (!block.regions.length) {
+    detailDiv.innerHTML = '<h2>' + name + '</h2><div class="hint">No schedulable region in this block.</div>';
+    return;
+  }
+  let h = '<h2 style="margin:2px 0 10px">' + name + " — " + block.regions.length +
+    " region" + (block.regions.length > 1 ? "s" : "") + "</h2>";
+  for (const r of block.regions) h += regionHtml(r);
+  detailDiv.innerHTML = h;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+document.getElementById("file").addEventListener("change", evt => {
+  const f = evt.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try { DATA = JSON.parse(reader.result); }
+    catch (e) { alert("Bad JSON: " + e.message); return; }
+    SELECTED = null;
+    detailDiv.innerHTML = '<div class="hint">Click a block to see its schedule.</div>';
+    buildGraph();
+    // auto-select the block with the worst (highest avoidable %) schedule.
+    let worst = null, worstVal = -1;
+    for (const b of DATA.blocks) {
+      const a = blockAgg(b);
+      if (a.nreg && a.avoidable_pct > worstVal) { worstVal = a.avoidable_pct; worst = b.number; }
+    }
+    if (worst !== null) selectBlock(worst);
+  };
+  reader.readAsText(f);
+});
+
+document.querySelectorAll('input[name=lens]').forEach(el =>
+  el.addEventListener("change", () => { buildGraph(); if (SELECTED !== null) selectBlock(SELECTED); }));
+document.getElementById("metric").addEventListener("change", buildGraph);
+document.getElementById("collapse").addEventListener("change", renderDetail);
+document.getElementById("shadowMin").addEventListener("input", renderDetail);
+document.getElementById("fit").addEventListener("click", () => cy && cy.fit());
+</script>
+</body>
+</html>
