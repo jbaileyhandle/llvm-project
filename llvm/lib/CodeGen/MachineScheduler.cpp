@@ -262,6 +262,24 @@ public:
 protected:
   ScheduleDAGInstrs *createMachineSchedulerHierarchical();
 };
+
+/// MachineSchedulerLengthAnalysis runs as the last pre-RA scheduling pass.
+/// It reorders nothing: it rebuilds each region's final schedule and emits
+/// schedule-length / bubble stats, so those stats are collected regardless of
+/// which scheduler actually produced the code.
+class MachineSchedulerLengthAnalysis : public MachineSchedulerBase {
+public:
+  MachineSchedulerLengthAnalysis();
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+
+  bool runOnMachineFunction(MachineFunction&) override;
+
+  static char ID;
+
+protected:
+  ScheduleDAGInstrs *createMachineSchedulerLengthAnalysis();
+};
 //========================================================================================
 
 /// PostMachineScheduler runs after shortly before code emission.
@@ -706,6 +724,100 @@ MachineSchedulerHierarchical::createMachineSchedulerHierarchical() {
   }
 
   return createGenericSchedLive(this);
+}
+
+// MachineSchedulerLengthAnalysis — pass registration and implementation.
+//
+// Same thin-shell pattern as MachineSchedulerHierarchical above, but it never
+// reorders: it delegates to ScheduleDAGLengthAnalyzer, which rebuilds each
+// region's final schedule and prints length/bubble stats. Inserted
+// unconditionally as the last pre-RA scheduler (see AMDGPUTargetMachine), so
+// the stats are produced for whatever scheduler was configured.
+
+char MachineSchedulerLengthAnalysis::ID = 0;
+
+char &llvm::MachineSchedulerLengthAnalysisID = MachineSchedulerLengthAnalysis::ID;
+
+INITIALIZE_PASS_BEGIN(MachineSchedulerLengthAnalysis, DEBUG_TYPE,
+                      "Machine Instruction Scheduler Length Analysis", false,
+                      false)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
+INITIALIZE_PASS_DEPENDENCY(MachineLoopInfo)
+INITIALIZE_PASS_DEPENDENCY(SlotIndexes)
+INITIALIZE_PASS_DEPENDENCY(LiveIntervals)
+INITIALIZE_PASS_END(MachineSchedulerLengthAnalysis, DEBUG_TYPE,
+                    "Machine Instruction Scheduler Length Analysis", false,
+                    false)
+
+MachineSchedulerLengthAnalysis::MachineSchedulerLengthAnalysis()
+    : MachineSchedulerBase(ID) {
+  initializeMachineSchedulerLengthAnalysisPass(
+      *PassRegistry::getPassRegistry());
+}
+
+void MachineSchedulerLengthAnalysis::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.setPreservesCFG();
+  AU.addRequired<MachineDominatorTree>();
+  AU.addRequired<MachineLoopInfo>();
+  AU.addRequired<AAResultsWrapperPass>();
+  AU.addRequired<TargetPassConfig>();
+  AU.addRequired<SlotIndexes>();
+  AU.addPreserved<SlotIndexes>();
+  AU.addRequired<LiveIntervals>();
+  AU.addPreserved<LiveIntervals>();
+  MachineFunctionPass::getAnalysisUsage(AU);
+}
+
+bool MachineSchedulerLengthAnalysis::runOnMachineFunction(MachineFunction &mf) {
+  if (skipFunction(mf.getFunction())) {
+    return false;
+  }
+
+  // AMDGPU gfx906 only, matching MachineSchedulerHierarchical.
+  if (!mf.getTarget().getTargetTriple().isAMDGPU()) {
+    return false;
+  }
+  if (mf.getSubtarget().getCPU() != "gfx906") {
+    return false;
+  }
+
+  if (EnableMachineSched.getNumOccurrences()) {
+    if (!EnableMachineSched) {
+      return false;
+    }
+  } else if (!mf.getSubtarget().enableMachineScheduler()) {
+    return false;
+  }
+
+  MF = &mf;
+  MLI = &getAnalysis<MachineLoopInfo>();
+  MDT = &getAnalysis<MachineDominatorTree>();
+  PassConfig = &getAnalysis<TargetPassConfig>();
+  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
+  LIS = &getAnalysis<LiveIntervals>();
+
+  RegClassInfo->runOnMachineFunction(*MF);
+
+  std::unique_ptr<ScheduleDAGInstrs> Scheduler(
+      createMachineSchedulerLengthAnalysis());
+  if (!Scheduler) {
+    return false;
+  }
+  // Analysis only: scheduleRegions drives the per-region loop; the analyzer's
+  // schedule() rebuilds and inspects each region without reordering. We return
+  // false below because the MachineFunction is unchanged.
+  scheduleRegions(*Scheduler, false);
+  return false;
+}
+
+// Factory method. Returns the target's ScheduleDAGLengthAnalyzer, or null if
+// the target has none. Deliberately NO createGenericSchedLive fallback: this
+// is an analysis pass, and the generic scheduler would REORDER instructions.
+// The caller skips when this returns null.
+ScheduleDAGInstrs *
+MachineSchedulerLengthAnalysis::createMachineSchedulerLengthAnalysis() {
+  return PassConfig->createLengthAnalysisScheduler(this);
 }
 //========================================================================================
 

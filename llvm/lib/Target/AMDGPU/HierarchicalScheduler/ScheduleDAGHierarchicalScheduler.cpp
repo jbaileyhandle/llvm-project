@@ -26,7 +26,6 @@
 #include "OccupancyTargetUtil.h"
 #include "SIMachineFunctionInfo.h"
 #include "ScheduleGraph.h"
-#include "ScheduleLengthAnalysis.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -125,31 +124,7 @@ void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
 
   FlushSearchOutcomes();
 
-  // All passes have applied their orders; the MF now holds the final
-  // schedule. Analyze it (prints only, changes nothing).
-  RunScheduleLengthAnalysis();
-
   ScheduleDAGMILive::finalizeSchedule();
-}
-
-// See header. Rebuilds each region's graph from the (now final) MF order and
-// prints per-region length/bubble stats. buildSchedGraph + graph builds run
-// again here, but only under the hierarchical scheduler and only once per
-// region, so the cost is small next to the search the passes already did.
-void ScheduleDAGHierarchicalScheduler::RunScheduleLengthAnalysis() {
-  const GCNSubtarget &st =
-      static_cast<const GCNSubtarget &>(MF.getSubtarget());
-
-  llvm::outs() << "\n=== Schedule-length analysis: " << MF.getName() << " ("
-               << regions_.size() << " regions) ===\n";
-  for (size_t i = 0; i < regions_.size(); ++i) {
-    ProcessRegion(regions_[i], [&]() {
-      buildSchedGraph(AA);
-      ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule(
-          SUnits, st, MF, *LIS, MF.getRegInfo(), regions_[i],
-          static_cast<int>(i));
-    });
-  }
 }
 
 // Run the malicious scheduler over all recorded regions. For each region,

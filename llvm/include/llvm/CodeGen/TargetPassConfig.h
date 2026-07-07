@@ -308,6 +308,13 @@ public:
    createHierarchicalScheduler(MachineSchedContext *C) const {
      return nullptr;
    }
+
+   /// Create the schedule-length analyzer. Runs as an analysis-only pass after
+   /// every scheduler; reorders nothing. Return null to disable it.
+   virtual ScheduleDAGInstrs *
+   createLengthAnalysisScheduler(MachineSchedContext *C) const {
+     return nullptr;
+   }
    //========================================================================================
 
   /// Similar to createMachineScheduler but used when postRA machine scheduling

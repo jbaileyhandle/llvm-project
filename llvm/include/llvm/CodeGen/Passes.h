@@ -155,6 +155,11 @@ namespace llvm {
   /// MachineSchedulerHierarchical - This pass schedules machine instructions
   /// using the hierarchical scheduler.
   extern char &MachineSchedulerHierarchicalID;
+
+  /// MachineSchedulerLengthAnalysis - Analysis-only pre-RA pass that emits
+  /// per-region schedule-length / bubble stats for whatever scheduler ran.
+  /// It reorders nothing.
+  extern char &MachineSchedulerLengthAnalysisID;
   //========================================================================================
 
   /// PostMachineScheduler - This pass schedules machine instructions postRA.

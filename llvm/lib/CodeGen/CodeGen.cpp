@@ -97,6 +97,7 @@ void llvm::initializeCodeGen(PassRegistry &Registry) {
   // jbaile
   //========================================================================================
   initializeMachineSchedulerHierarchicalPass(Registry);
+  initializeMachineSchedulerLengthAnalysisPass(Registry);
   //========================================================================================
   initializeMachineSinkingPass(Registry);
   initializeMachineUniformityAnalysisPassPass(Registry);

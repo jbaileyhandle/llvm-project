@@ -10,6 +10,7 @@
 
 set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.cpp
+  HierarchicalScheduler/ScheduleDAGLengthAnalyzer.cpp
   HierarchicalScheduler/HierarchicalConfig.cpp
   HierarchicalScheduler/Shakedowns.cpp
   HierarchicalScheduler/MaliciousScheduler.cpp

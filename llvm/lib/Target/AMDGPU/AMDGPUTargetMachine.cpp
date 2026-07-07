@@ -68,6 +68,7 @@
 //======================================================================
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "HierarchicalScheduler/ScheduleDAGHierarchicalScheduler.h"
+#include "HierarchicalScheduler/ScheduleDAGLengthAnalyzer.h"
 //======================================================================
 
 using namespace llvm;
@@ -963,6 +964,9 @@ public:
   //========================================================================================
   ScheduleDAGInstrs *
   createHierarchicalScheduler(MachineSchedContext *C) const override;
+
+  ScheduleDAGInstrs *
+  createLengthAnalysisScheduler(MachineSchedContext *C) const override;
   //========================================================================================
 
   ScheduleDAGInstrs *
@@ -1335,6 +1339,22 @@ ScheduleDAGInstrs *GCNPassConfig::createHierarchicalScheduler(
     MachineSchedContext *C) const {
   return createHierarchicalSchedulerGCN(C);
 }
+
+// Factory for the schedule-length analyzer. It inherits ScheduleDAGInstrs
+// (not ScheduleDAGMILive), so there is no MachineSchedStrategy: the analyzer
+// reorders nothing and tracks no pressure, it only calls buildSchedGraph and
+// hands the SUnits to ScheduleLengthAnalyzer. AA and LiveIntervals come
+// straight from the MachineSchedContext.
+static ScheduleDAGInstrs *
+createLengthAnalysisSchedulerGCN(MachineSchedContext *C) {
+  return new hierarchical_scheduler::ScheduleDAGLengthAnalyzer(
+      *C->MF, C->MLI, C->AA, C->LIS);
+}
+
+ScheduleDAGInstrs *GCNPassConfig::createLengthAnalysisScheduler(
+    MachineSchedContext *C) const {
+  return createLengthAnalysisSchedulerGCN(C);
+}
 //========================================================================================
 
 bool GCNPassConfig::addPreISel() {
@@ -1514,15 +1534,28 @@ void GCNPassConfig::addOptimizedRegAlloc() {
       insertPass(&MachineSchedulerID, &MachineSchedulerHierarchicalID);
   }
 
-  // Determine which pass ID is the last pre-RA scheduler in the pipeline.
-  const char *last_sched_pass_id;
+  // Determine which pass ID is the last *real* (reordering) pre-RA scheduler.
+  const char *last_real_sched_pass_id;
   if (config.IsHierarchicalScheduler()) {
-      last_sched_pass_id = &MachineSchedulerHierarchicalID;
+      last_real_sched_pass_id = &MachineSchedulerHierarchicalID;
   } else if (config.IsOptSched()) {
-      last_sched_pass_id = &MachineSchedulerOptSchedID;
+      last_real_sched_pass_id = &MachineSchedulerOptSchedID;
   } else {
-      last_sched_pass_id = &MachineSchedulerID;
+      last_real_sched_pass_id = &MachineSchedulerID;
   }
+
+  // Always insert the schedule-length analyzer immediately after the last real
+  // scheduler, regardless of which scheduler is configured. It reorders
+  // nothing; it rebuilds each region's final schedule and emits length/bubble
+  // stats, so we collect the same stats for whatever scheduler produced the
+  // code (MaxOcc, MaxIlp, OptSched, or the hierarchical scheduler). It
+  // self-limits to gfx906 at run time (MachineSchedulerLengthAnalysis::
+  // runOnMachineFunction), so it is a no-op on other targets.
+  insertPass(last_real_sched_pass_id, &MachineSchedulerLengthAnalysisID);
+
+  // The analyzer now runs last among the pre-RA scheduling passes, so the
+  // WWM / exec-mask / memory-clause passes below anchor to it.
+  const char *last_sched_pass_id = &MachineSchedulerLengthAnalysisID;
 
   insertPass(last_sched_pass_id, &SIWholeQuadModeID);
   insertPass(last_sched_pass_id, &SIPreAllocateWWMRegsID);

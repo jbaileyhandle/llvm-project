@@ -239,6 +239,7 @@ void initializeMachineSchedulerOptSchedPass(PassRegistry&);
 // jbaile
 //========================================================================================
 void initializeMachineSchedulerHierarchicalPass(PassRegistry&);
+void initializeMachineSchedulerLengthAnalysisPass(PassRegistry&);
 //========================================================================================
 void initializeMachineSinkingPass(PassRegistry&);
 void initializeMachineTraceMetricsPass(PassRegistry&);

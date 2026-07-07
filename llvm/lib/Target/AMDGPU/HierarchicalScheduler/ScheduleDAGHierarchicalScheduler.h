@@ -100,12 +100,6 @@ public:
   // verifying the plumbing.
   void RunTopoPass();
 
-  // Post-scheduling diagnostic (analysis only, mutates nothing). Runs after
-  // every pass has applied its order, so each region's graph rebuilt here
-  // reflects the FINAL schedule. Rebuilds each region and hands it to
-  // ScheduleLengthAnalyzer, which prints per-region length/bubble stats.
-  void RunScheduleLengthAnalysis();
-
   // Outer loop of the occupancy-maximization pass. Iterates regions
   // ascending by original register-only occupancy and calls
   // ScheduleRegionForMaximumOccupancy on each, tracking a running
