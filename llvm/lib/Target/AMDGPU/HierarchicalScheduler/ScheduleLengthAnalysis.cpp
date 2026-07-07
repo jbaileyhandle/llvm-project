@@ -16,6 +16,7 @@
 #include "ScheduleLengthTracker.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
@@ -276,29 +277,33 @@ void PrintLensReport(raw_ostream &os, StringRef label, const LensViz &s) {
   PrintBubbleCause(os, "avoidable", s.avoidable, s);
 }
 
-// One row per region per lens, appended to schedule_length_analysis.csv.
+// One row per region per lens, APPENDED to schedule_length_analysis.csv.
 //
-// -j NOTE: written like search_outcomes.csv — a plain ofstream that truncates
-// on the first write of the process (so one compile yields one clean file)
-// and appends afterward. This is NOT safe under `make -j`: parallel clang
-// processes each truncate on their first write and clobber each other's rows.
-// We knowingly accept that here and in FlushSearchOutcomes, which shares the
-// same limitation.
+// Append-only (no truncate): every translation unit of a build accumulates into
+// one file, so a multi-.cpp benchmark (e.g. lulesh) keeps ALL its kernels -- a
+// truncating writer keeps only the last TU's, because each clang process starts
+// fresh. The harness removes any stale copy before the build and renames the
+// result per scheduler config, exactly as it does for kernel_resource_usage.csv.
+// Each call reopens/closes, so its two rows flush together as one atomic append
+// (they fit one buffer), which keeps rows from parallel clang processes from
+// interleaving. No header row: the consumer (gpu2_benchmarks) knows the columns:
+//   function,region,lens,num_ops,occupancy,peak_vgpr,vgpr_budget,peak_sgpr,
+//   sgpr_budget,critical_path,length,floor,efficiency,bubbles,nothing_ready,
+//   over_budget,avoidable
 void WriteCsvRows(StringRef function, const RegionViz &r) {
-  static bool started = false;
-  std::ofstream csv_file("schedule_length_analysis.csv",
-                         started ? std::ios::app : std::ios::trunc);
+  std::ofstream csv_file("schedule_length_analysis.csv", std::ios::app);
   if (!csv_file) {
     return;
   }
-  if (!started) {
-    csv_file << "function,region,lens,num_ops,occupancy,peak_vgpr,vgpr_budget,"
-                "peak_sgpr,sgpr_budget,critical_path,length,floor,efficiency,"
-                "bubbles,nothing_ready,over_budget,avoidable\n";
-    started = true;
-  }
+  // Demangle through the same helper kernel_resource_usage.csv uses, so this
+  // file's kernel names match that file's (and the profiler's) exactly and the
+  // consumer can join them by kernel. The demangled signature may contain
+  // commas, so it stays FIRST in the row: the reader peels the 16 fixed
+  // trailing fields off the right and keeps everything before as the name.
+  std::string demangled =
+      MachineInstrSchedulerConfig::DemangleFunctionSignature(function.str());
   auto write_row = [&](const char *lens, const LensViz &s) {
-    csv_file << function.str() << ',' << r.index << ',' << lens << ','
+    csv_file << demangled << ',' << r.index << ',' << lens << ','
              << r.num_ops << ',' << r.occupancy << ',' << r.peak_vgpr << ','
              << r.vgpr_budget << ',' << r.peak_sgpr << ',' << r.sgpr_budget
              << ',' << s.critical_path << ',' << s.length << ',' << s.floor
