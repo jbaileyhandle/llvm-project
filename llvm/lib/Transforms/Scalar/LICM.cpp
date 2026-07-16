@@ -83,6 +83,14 @@
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
+//========================================================================================
+// jbaile
+//========================================================================================
+// For the device-side `disable_licm` misched knob consumed in runOnLoop below.
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+#include "llvm/IR/Module.h"
+#include "llvm/TargetParser/Triple.h"
+//========================================================================================
 #include <algorithm>
 #include <utility>
 using namespace llvm;
@@ -404,6 +412,16 @@ bool LoopInvariantCodeMotion::runOnLoop(Loop *L, AAResults *AA, LoopInfo *LI,
   if (hasDisableLICMTransformsHint(L)) {
     return false;
   }
+
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Skip LICM on the device (AMDGPU) side when misched.txt sets `disable_licm`.
+  if (MachineInstrSchedulerConfig::GetConfig().GetFlags().disable_licm &&
+      Triple(L->getHeader()->getModule()->getTargetTriple()).isAMDGPU()) {
+    return false;
+  }
+  //========================================================================================
 
   // Don't sink stores from loops with coroutine suspend instructions.
   // LICM would sink instructions into the default destination of

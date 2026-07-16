@@ -35,6 +35,7 @@ namespace {
         {"disable_post_ra_scheduling", &Flags::disable_post_ra_scheduling},
         {"use_jbaile_custom_timing_model", &Flags::use_jbaile_custom_timing_model},
         {"enable_runtime_unroll", &Flags::enable_runtime_unroll},
+        {"disable_licm", &Flags::disable_licm},
         {"run_on_all_functions", &Flags::run_on_all_functions},
         {"run_regardless_of_heuristic_outcome", &Flags::run_regardless_of_heuristic_outcome},
         {"use_continuous_occupancy_score", &Flags::use_continuous_occupancy_score},

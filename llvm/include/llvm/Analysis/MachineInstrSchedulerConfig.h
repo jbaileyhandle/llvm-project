@@ -34,6 +34,10 @@ class MachineInstrSchedulerConfig {
             bool disable_post_ra_scheduling = false;
             bool use_jbaile_custom_timing_model = false;
             bool enable_runtime_unroll = false;
+            // Skip LICM on the device (AMDGPU) side -- an occupancy experiment:
+            // LICM hoists loop-invariant values, lengthening live ranges and
+            // raising register pressure. Consumed in LICM.cpp.
+            bool disable_licm = false;
             // OptSched (AcoOptSched, BnbOptSched).
             bool run_on_all_functions = false;
             bool run_regardless_of_heuristic_outcome = false;
