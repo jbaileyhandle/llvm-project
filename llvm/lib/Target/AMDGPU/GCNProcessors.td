@@ -179,14 +179,19 @@ def : ProcessorModel<"gfx906", SIQuarterSpeedModel,
 //========================================================================================
 // jbaile
 //========================================================================================
-// Synthetic processor binding for SIGfx906JbaileCustomModel. Required by
-// TableGen — a SchedMachineModel that isn't bound to any ProcessorModel<>
-// doesn't get emitted as a C++ symbol (and triggers an assertion failure
-// during sched-resolution if it has content). End-users never select
-// this processor; they compile with -mcpu=gfx906 as usual. The custom
-// model becomes active only when GCNSubtarget swaps to it at runtime
-// based on misched.txt's UseJbaileCustomTimingModel option.
+// Synthetic processor bindings for the jbaile alternate gfx906 sched models.
+// Required by TableGen — a SchedMachineModel that isn't bound to any
+// ProcessorModel<> doesn't get emitted as a C++ symbol (and triggers an
+// assertion failure during sched-resolution if it has content). End-users never
+// select these processors; they compile with -mcpu=gfx906 as usual. A model
+// becomes active only when GCNSubtarget swaps to it at runtime based on
+// misched.txt's `timing_model=<name>` option (see AMDGPUSubtarget):
+//   timing_model=custom      -> gfx906_jbaile_custom   (passthrough)
+//   timing_model=fast_memory -> gfx906_jbaile_fast_mem (global mem at LDS latency)
 def : ProcessorModel<"gfx906_jbaile_custom", SIGfx906JbaileCustomModel,
+  FeatureISAVersion9_0_6.Features
+>;
+def : ProcessorModel<"gfx906_jbaile_fast_mem", SIGfx906JbaileFastMemModel,
   FeatureISAVersion9_0_6.Features
 >;
 //========================================================================================

@@ -32,7 +32,6 @@ class MachineInstrSchedulerConfig {
         struct Flags {
             // Generic / middle-end (any scheduler).
             bool disable_post_ra_scheduling = false;
-            bool use_jbaile_custom_timing_model = false;
             bool enable_runtime_unroll = false;
             // Skip LICM on the device (AMDGPU) side -- an occupancy experiment:
             // LICM hoists loop-invariant values, lengthening live ranges and
@@ -52,17 +51,23 @@ class MachineInstrSchedulerConfig {
             bool skip_length_pass = false;
         };
 
-        // Every unscoped global integer setting writable as `<name>=<int>` in
-        // misched.txt (e.g. `unroll_threshold=300`). Each is std::optional so an
-        // unset knob leaves the consumer's own default untouched. The spelling
-        // -> field table in the .cpp (kGlobalSettingBindings) is the single
-        // source of truth for which settings are valid. Read via
+        // Every unscoped global setting writable as `<name>=<value>` in
+        // misched.txt (e.g. `unroll_threshold=300`, `timing_model=fast_memory`).
+        // Each is std::optional so an unset knob leaves the consumer's own
+        // default untouched. The spelling -> field tables in the .cpp
+        // (kGlobalIntSettingBindings for ints, kGlobalStringSettingBindings for strings)
+        // are the single source of truth for which settings are valid. Read via
         // GetGlobalSettings(). These are generic middle-end knobs (e.g. the
-        // loop-unroll preferences AMDGPU reads in getUnrollingPreferences).
+        // loop-unroll preferences AMDGPU reads in getUnrollingPreferences, or the
+        // alternate sched-model name AMDGPU swaps to in GCNSubtarget).
         struct GlobalSettings {
             std::optional<int> unroll_threshold;
             std::optional<int> partial_unroll_threshold;
             std::optional<int> runtime_unroll_factor;
+            // Name of an alternate target sched (timing) model to swap in, e.g.
+            // "fast_memory". Interpreted by the target (AMDGPU); unknown names are
+            // rejected there, not here.
+            std::optional<std::string> timing_model;
         };
 
         // A class to represent per-function configuration info
@@ -179,7 +184,7 @@ class MachineInstrSchedulerConfig {
         bool TrySetSchedulerFromToken(llvm::StringRef tok);
 
         // Apply a `<key>=<value>` setting: an unscoped key to its typed global
-        // field (via SetGlobalSettingIfKnown), a scoped `<scope>.<subkey>` to
+        // field (via SetGlobalIntSettingIfKnown), a scoped `<scope>.<subkey>` to
         // the uninterpreted scoped store.
         void ApplySetting(llvm::StringRef key, llvm::StringRef value);
 
@@ -190,9 +195,16 @@ class MachineInstrSchedulerConfig {
 
         // If `key` is a known unscoped global setting, parse `value` into its
         // typed GlobalSettings field and return true; otherwise return false.
-        // Defined over kGlobalSettingBindings (in the .cpp), the single list of
+        // Defined over kGlobalIntSettingBindings (in the .cpp), the single list of
         // valid global settings. Fatal on a value that is not a non-negative int.
-        bool SetGlobalSettingIfKnown(llvm::StringRef key, llvm::StringRef value);
+        bool SetGlobalIntSettingIfKnown(llvm::StringRef key, llvm::StringRef value);
+
+        // If `key` is a known unscoped string-valued global setting, store
+        // `value` in its typed GlobalSettings field and return true; otherwise
+        // return false. Defined over kGlobalStringSettingBindings (in the .cpp). The
+        // value is stored uninterpreted -- its validity is the consumer's job
+        // (e.g. AMDGPU rejects an unknown timing_model name).
+        bool SetGlobalStringSettingIfKnown(llvm::StringRef key, llvm::StringRef value);
 
         // Parse a `kernel <m|d>/<signature>/ ...` per-function line (the text
         // after the leading `kernel` keyword).

@@ -138,7 +138,15 @@ def MIReadVGPR : SchedReadVariant<[
 // guide. They may not be accurate.
 
 // The latency values are 1 / (operations / cycle) / 4.
-multiclass SICommonWriteRes {
+//========================================================================================
+// jbaile
+//========================================================================================
+// VMEMLatency is a template arg defaulted to 80 (gfx906's global-memory latency), so
+// every existing caller (SIFullSpeedModel, SIQuarterSpeedModel, ...) expands byte-
+// identically. The jbaile "fast_memory" model instantiates this with a small value to
+// model global memory at LDS access latency.
+multiclass SICommonWriteRes<int VMEMLatency = 80> {
+//========================================================================================
 
   let RetireOOO = 1 in { // llvm-mca specific flag
   def : HWWriteRes<WriteBranch,  [HWBranch], 8>;
@@ -146,7 +154,10 @@ multiclass SICommonWriteRes {
   def : HWWriteRes<WriteLDS,     [HWLGKM],   5>; // Can be between 2 and 64
   def : HWWriteRes<WriteSALU,    [HWSALU],   1>;
   def : HWWriteRes<WriteSMEM,    [HWLGKM],   5>;
-  def : HWWriteRes<WriteVMEM,    [HWVMEM],   80>;
+  //========================================================================================
+  // jbaile: latency was the hardcoded literal 80; now the multiclass template arg.
+  //========================================================================================
+  def : HWWriteRes<WriteVMEM,    [HWVMEM],   VMEMLatency>;
   def : HWWriteRes<WriteBarrier, [HWBranch], 500>; // XXX: Guessed ???
 
   def : HWVALUWriteRes<Write32Bit,         1>;

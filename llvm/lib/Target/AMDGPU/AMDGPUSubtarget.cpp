@@ -32,6 +32,9 @@
 // jbaile
 //========================================================================================
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+#include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/ErrorHandling.h"
 //========================================================================================
 #include <algorithm>
 
@@ -169,20 +172,30 @@ GCNSubtarget::initializeSubtargetDependencies(const Triple &TT,
   //========================================================================================
   // jbaile
   //========================================================================================
-  // If misched.txt opted into the jbaile custom timing model AND we're on
-  // a GFX9-or-later subtarget (where SIQuarterSpeedModel applies), swap the
-  // active MCSchedModel pointer. Every downstream consumer
-  // (LLVM's MachineScheduler, OptSched, HierarchicalScheduler,
-  // register-pressure analyses, etc.) reads from this pointer, so the swap
-  // is universal — not scoped to any particular scheduler. Must happen
-  // before any TargetSchedModel cache fills.
-  if (MachineInstrSchedulerConfig::GetConfig().GetFlags().use_jbaile_custom_timing_model &&
-      getGeneration() >= AMDGPUSubtarget::GFX9) {
-    // The custom model symbol is static inside the MCTargetDesc TU and
-    // not directly visible here. Look it up through the processor table
-    // via the synthetic gfx906_jbaile_custom processor name registered
-    // in GCNProcessors.td.
-    setSchedModel(&getSchedModelForCPU("gfx906_jbaile_custom"));
+  // If misched.txt requested an alternate timing model via `timing_model=<name>`
+  // AND we're on a GFX9-or-later subtarget (where SIQuarterSpeedModel applies),
+  // swap the active MCSchedModel pointer. Every downstream consumer (LLVM's
+  // MachineScheduler, OptSched, HierarchicalScheduler, register-pressure
+  // analyses, etc.) reads from this pointer, so the swap is universal — not
+  // scoped to any particular scheduler. Must happen before any TargetSchedModel
+  // cache fills.
+  //
+  // The model symbols are static inside the MCTargetDesc TU and not directly
+  // visible here, so each name maps to a synthetic processor registered in
+  // GCNProcessors.td, looked up via getSchedModelForCPU. The config stores the
+  // name uninterpreted; validating it (a real model name) is our job.
+  const std::optional<std::string> &timing_model =
+      MachineInstrSchedulerConfig::GetConfig().GetGlobalSettings().timing_model;
+  if (timing_model && getGeneration() >= AMDGPUSubtarget::GFX9) {
+    StringRef processor = StringSwitch<StringRef>(*timing_model)
+        .Case("custom", "gfx906_jbaile_custom")
+        .Case("fast_memory", "gfx906_jbaile_fast_mem")
+        .Default("");
+    if (processor.empty()) {
+      report_fatal_error(Twine("misched.txt: unknown timing_model '") +
+                         *timing_model + "'");
+    }
+    setSchedModel(&getSchedModelForCPU(processor));
   }
   //========================================================================================
 

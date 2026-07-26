@@ -33,7 +33,6 @@ namespace {
     };
     const FlagBinding kFlagBindings[] = {
         {"disable_post_ra_scheduling", &Flags::disable_post_ra_scheduling},
-        {"use_jbaile_custom_timing_model", &Flags::use_jbaile_custom_timing_model},
         {"enable_runtime_unroll", &Flags::enable_runtime_unroll},
         {"disable_licm", &Flags::disable_licm},
         {"run_on_all_functions", &Flags::run_on_all_functions},
@@ -64,13 +63,13 @@ namespace {
     // field it controls, held as a pointer-to-data-member
     // (`std::optional<int> GlobalSettings::*`). One binding serves both the
     // parser (write) and ToString (read), so the list of valid global settings
-    // lives in exactly one place (kGlobalSettingBindings).
+    // lives in exactly one place (kGlobalIntSettingBindings).
     using GlobalSettings = MachineInstrSchedulerConfig::GlobalSettings;
-    struct GlobalSettingBinding {
+    struct GlobalIntSettingBinding {
         StringRef name;
         std::optional<int> GlobalSettings::*field;
     };
-    const GlobalSettingBinding kGlobalSettingBindings[] = {
+    const GlobalIntSettingBinding kGlobalIntSettingBindings[] = {
         {"unroll_threshold", &GlobalSettings::unroll_threshold},
         {"partial_unroll_threshold", &GlobalSettings::partial_unroll_threshold},
         {"runtime_unroll_factor", &GlobalSettings::runtime_unroll_factor},
@@ -78,8 +77,31 @@ namespace {
 
     // Return the binding for global setting `name`, or nullptr if `name` is not
     // a known global-setting spelling.
-    const GlobalSettingBinding *FindGlobalSetting(StringRef name) {
-        for (const auto &binding : kGlobalSettingBindings) {
+    const GlobalIntSettingBinding *FindGlobalIntSetting(StringRef name) {
+        for (const auto &binding : kGlobalIntSettingBindings) {
+            if (name == binding.name) {
+                return &binding;
+            }
+        }
+        return nullptr;
+    }
+
+    // The same single-source-of-truth pattern for unscoped string-valued global
+    // settings (e.g. `timing_model=fast_memory`), held as a pointer-to-data-
+    // member (`std::optional<std::string> GlobalSettings::*`). One binding serves
+    // both the parser (write) and ToString (read).
+    struct GlobalStringSettingBinding {
+        StringRef name;
+        std::optional<std::string> GlobalSettings::*field;
+    };
+    const GlobalStringSettingBinding kGlobalStringSettingBindings[] = {
+        {"timing_model", &GlobalSettings::timing_model},
+    };
+
+    // Return the binding for string setting `name`, or nullptr if `name` is not
+    // a known string-setting spelling.
+    const GlobalStringSettingBinding *FindGlobalStringSetting(StringRef name) {
+        for (const auto &binding : kGlobalStringSettingBindings) {
             if (name == binding.name) {
                 return &binding;
             }
@@ -205,9 +227,9 @@ bool MachineInstrSchedulerConfig::SetFlagIfKnown(llvm::StringRef name) {
     return false;
 }
 
-bool MachineInstrSchedulerConfig::SetGlobalSettingIfKnown(llvm::StringRef key,
+bool MachineInstrSchedulerConfig::SetGlobalIntSettingIfKnown(llvm::StringRef key,
                                                           llvm::StringRef value) {
-    const GlobalSettingBinding *binding = FindGlobalSetting(key);
+    const GlobalIntSettingBinding *binding = FindGlobalIntSetting(key);
     if (!binding) {
         return false;
     }
@@ -219,6 +241,18 @@ bool MachineInstrSchedulerConfig::SetGlobalSettingIfKnown(llvm::StringRef key,
                            "' (expected an integer >= 0)");
     }
     global_settings_.*(binding->field) = parsed;
+    return true;
+}
+
+bool MachineInstrSchedulerConfig::SetGlobalStringSettingIfKnown(llvm::StringRef key,
+                                                          llvm::StringRef value) {
+    const GlobalStringSettingBinding *binding = FindGlobalStringSetting(key);
+    if (!binding) {
+        return false;
+    }
+    // Stored uninterpreted; the consumer validates it (e.g. AMDGPU rejects an
+    // unknown timing_model name when it swaps the sched model).
+    global_settings_.*(binding->field) = value.str();
     return true;
 }
 
@@ -240,8 +274,11 @@ void MachineInstrSchedulerConfig::ApplySetting(llvm::StringRef key,
                                                llvm::StringRef value) {
     size_t dot = key.find('.');
     if (dot == StringRef::npos) {
-        // Unscoped global setting -> its typed field.
-        if (SetGlobalSettingIfKnown(key, value)) {
+        // Unscoped global setting -> its typed field (integer, then string).
+        if (SetGlobalIntSettingIfKnown(key, value)) {
+            return;
+        }
+        if (SetGlobalStringSettingIfKnown(key, value)) {
             return;
         }
         // A known flag written in "key=value" form: point at the bare-flag
@@ -497,10 +534,15 @@ std::string MachineInstrSchedulerConfig::ToString() const {
 
     // Global settings (only those that are set)
     std::string setting_lines;
-    for (const auto &binding : kGlobalSettingBindings) {
+    for (const auto &binding : kGlobalIntSettingBindings) {
         if (std::optional<int> value = global_settings_.*(binding.field)) {
             setting_lines += "\t\t" + binding.name.str() + " = " +
                              std::to_string(*value) + "\n";
+        }
+    }
+    for (const auto &binding : kGlobalStringSettingBindings) {
+        if (const std::optional<std::string> &value = global_settings_.*(binding.field)) {
+            setting_lines += "\t\t" + binding.name.str() + " = " + *value + "\n";
         }
     }
     if (!setting_lines.empty()) {
