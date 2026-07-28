@@ -249,33 +249,73 @@ void ScheduleDAGHierarchicalScheduler::RunTopoPass() {
   }
 }
 
-// Apply the occupancy.max_occ_above_input cap, if set. After
+// The per-kernel occupancy target -- the `max` of a misched
+// `kernel <sig>/<min>,<max>` line -- for this function, if set. This is the
+// Hierarchical scheduler's internal occupancy ceiling. Unlike an
+// amdgpu-waves-per-eu attribute max, it is deliberately NOT written to the
+// function, so it only lowers MFI's Occupancy (the scheduling target), never
+// MFI's WavesPerEU.second (getMaxWavesPerEU) -- and it is the latter that
+// AMDGPUAsmPrinter uses to pad reserved registers. So it steers scheduling
+// without padding registers or cutting the waves the runtime launches; the
+// final occupancy stays register-derived.
+static std::optional<int>
+GetPerKernelOccupancyTarget(const MachineFunction &mf) {
+  const MachineInstrSchedulerConfig &cfg =
+      MachineInstrSchedulerConfig::GetConfig();
+  if (!cfg.HasConfig() || !cfg.HasFunctionConfig(mf.getFunction())) {
+    return std::nullopt;
+  }
+  const MachineInstrSchedulerConfig::FunctionConfig *func_config =
+      cfg.GetFunctionConfigFromMangledFunctionSignature(
+          mf.getFunction().getName());
+  if (func_config == nullptr) {
+    return std::nullopt;
+  }
+  return func_config->max_waves_per_eu_;
+}
+
+// Compute the occupancy pass's starting ceiling and publish it to MFI. After
 // resetInitialOccupancy the MFI occupancy is the structural maximum
-// (arch ∩ LDS ∩ launch bounds, ignoring registers). When the cap is set to
-// X this lowers it to min(structural_max, input_occ + X), where input_occ is
-// the min original register-only occupancy over all regions (the function's
-// input occupancy). Returns the effective starting kernel ceiling (the new
-// MFI occupancy). The DFS occupancy policy and decompose's outer DFS honor
-// the lowered target (BFS-DP maximizes regardless), so the cap pairs with
+// (arch ∩ LDS ∩ launch bounds, ignoring registers); this lowers it by whichever
+// occupancy-target caps are configured, taking the tightest:
+//   - occupancy.max_occ_above_input=X : min(structural_max, input_occ + X),
+//     where input_occ is the min original register-only occupancy over all
+//     regions (the function's input occupancy);
+//   - a misched per-kernel `max`      : that absolute target.
+// The final ceiling is clamped up to the launch floor (getMinWavesPerEU, which a
+// misched `min` may have lowered) and written to MFI, so the occupancy pass and
+// the length pass both see it. The DFS occupancy policy and decompose's outer DFS
+// honor the lowered target (BFS-DP maximizes regardless), so the caps pair with
 // DFS. See OccupancyConfig.
-static int ApplyOccupancyTargetCap(SIMachineFunctionInfo &mfi,
+static int ApplyOccupancyTargetCap(const MachineFunction &mf,
+                                   SIMachineFunctionInfo &mfi,
                                    ArrayRef<RegionInfo> regions) {
-  int structural_max = static_cast<int>(mfi.getOccupancy());
+  int ceiling = static_cast<int>(mfi.getOccupancy());
   const OccupancyConfig &occ_cfg = HierarchicalConfig::Get().occupancy;
-  if (!occ_cfg.max_occ_above_input.has_value() || regions.empty()) {
-    return structural_max;
+
+  // Cap: occupancy.max_occ_above_input lowers the ceiling to input_occ + X.
+  if (occ_cfg.max_occ_above_input.has_value() && !regions.empty()) {
+    int input_occ = ceiling;
+    for (const RegionInfo &r : regions) {
+      input_occ = std::min(input_occ, r.GetOriginalRegisterOnlyOccupancy());
+    }
+    ceiling = std::min(ceiling, input_occ + *occ_cfg.max_occ_above_input);
+    llvm::outs() << "\t(occupancy cap: input_occ=" << input_occ << " + "
+                 << *occ_cfg.max_occ_above_input << " -> target " << ceiling
+                 << ")\n";
   }
-  int input_occ = structural_max;
-  for (const RegionInfo &r : regions) {
-    input_occ = std::min(input_occ, r.GetOriginalRegisterOnlyOccupancy());
+
+  // Cap: a misched per-kernel `max` lowers the ceiling to that absolute target.
+  if (std::optional<int> per_kernel_target = GetPerKernelOccupancyTarget(mf)) {
+    ceiling = std::min(ceiling, *per_kernel_target);
+    llvm::outs() << "\t(per-kernel occupancy target: " << *per_kernel_target
+                 << " -> ceiling " << ceiling << ")\n";
   }
-  int capped =
-      std::min(structural_max, input_occ + *occ_cfg.max_occ_above_input);
-  LimitOccupancyAboveFloor(mfi, capped);
-  llvm::outs() << "\t(occupancy cap: input_occ=" << input_occ << " + "
-               << *occ_cfg.max_occ_above_input << " -> target " << capped
-               << ")\n";
-  return capped;
+
+  // Clamp up to the launch floor and publish to MFI. A no-op when no cap lowered
+  // the ceiling below the structural max (limitOccupancy only ever lowers).
+  LimitOccupancyAboveFloor(mfi, ceiling);
+  return ceiling;
 }
 
 // Maximize-occupancy outer loop. See header for detail.
@@ -313,7 +353,7 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
       HierarchicalConfig::Get()
               .occupancy.optimize_every_region_past_occupancy_target
           ? static_cast<int>(kAboveHardwareMaxOccupancy)
-          : ApplyOccupancyTargetCap(*mfi_, regions_);
+          : ApplyOccupancyTargetCap(MF, *mfi_, regions_);
 
   // Per-pass counters. `attempted` is regions where DFS actually ran
   // (i.e., not short-circuited by the "already at kernel ceiling"

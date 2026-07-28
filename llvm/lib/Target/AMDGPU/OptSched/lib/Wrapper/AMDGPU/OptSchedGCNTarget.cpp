@@ -150,9 +150,9 @@ int OptSchedGCNTarget::getOccupancyLimit(Config &OccFile) const {
       const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
       const MachineInstrSchedulerConfig::FunctionConfig *func_config =  mis_config.GetFunctionConfigFromMangledFunctionSignature(MF->getFunction().getName());
 
-      if((func_config != nullptr) && func_config->waves_per_eu_.has_value()) {
-          Logger::Info("******* NEW FORCE LIMIT: %d", func_config->waves_per_eu_.value());
-          limit = func_config->waves_per_eu_.value();
+      if((func_config != nullptr) && func_config->optsched_occupancy_limit_.has_value()) {
+          Logger::Info("******* NEW FORCE LIMIT: %d", func_config->optsched_occupancy_limit_.value());
+          limit = func_config->optsched_occupancy_limit_.value();
       }
       //======================================================================================
 

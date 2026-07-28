@@ -120,49 +120,6 @@ namespace {
         return tokens;
     }
 
-    // Return the function's configured minimum + maximum waves per eu
-    std::optional<std::pair<int, int>> GetFunctionExistingWavesPerEu(const Function &F) {
-        if(!F.hasFnAttribute(waves_per_eu_attr)) {
-            return std::nullopt;
-        }
-
-        std::string existing_attr_str = F.getFnAttribute(waves_per_eu_attr).getValueAsString().str();
-        size_t comma_pos = existing_attr_str.find(',');
-        if(comma_pos == std::string::npos) {
-            return std::nullopt;
-        }
-
-        return std::make_pair(std::stoi(existing_attr_str.substr(0,comma_pos)), std::stoi(existing_attr_str.substr(comma_pos+1)));
-    }
-
-    // Return the function's configured maximum waves per eu
-    std::optional<int> GetFunctionExistingMaximumWavesPerEu(const Function &F) {
-        std::optional<std::pair<int, int>> min_max = GetFunctionExistingWavesPerEu(F);
-        if(min_max.has_value()) {
-            return min_max->second;
-        }
-        return std::nullopt;
-    }
-
-    int GetOrInferFunctionExistingMaximumWavesPerEU(const Function &function) {
-        std::optional<int> existing_maximum_waves_per_eu = GetFunctionExistingMaximumWavesPerEu(function);
-        return existing_maximum_waves_per_eu.value_or(10);
-    }
-
-    // Return the function's configured minimum waves per eu
-    std::optional<int> GetFunctionExistingMinimumWavesPerEu(const Function &F) {
-        std::optional<std::pair<int, int>> min_max = GetFunctionExistingWavesPerEu(F);
-        if(min_max.has_value()) {
-            return min_max->first;
-        }
-        return std::nullopt;
-    }
-
-    int GetOrInferFunctionExistingMinimumWavesPerEU(const Function &function) {
-        std::optional<int> existing_minimum_waves_per_eu = GetFunctionExistingMinimumWavesPerEu(function);
-        return existing_minimum_waves_per_eu.value_or(1);
-    }
-
 } // end namespace
 
 std::string MachineInstrSchedulerConfig::DemangleFunctionSignature(const std::string &mangled_signature) {
@@ -358,20 +315,57 @@ void MachineInstrSchedulerConfig::ParseKernelLine(const std::string &rest) {
                            tag + "'");
     }
 
-    // waves is the optional 3rd field. Present => the per-function waves/occupancy
-    // target: OptSched reads it as an occupancy limit (OptSchedGCNTarget), others
-    // apply it as the amdgpu-waves-per-eu attribute. Absent => just register the
-    // function (no target override), which still opts it into OptSched, since
-    // OptSched's per-function opt-in is "has a config entry".
-    std::optional<int> waves;
+    // The optional 3rd field is a per-function occupancy override, in one of two
+    // mutually exclusive forms:
+    //   <T>            single value: an occupancy limit consumed only by OptSched
+    //                  (must be >= 1). Non-OptSched schedulers reject it.
+    //   <min>,<max>    a bound pair for the amdgpu-waves-per-eu attribute; each
+    //                  entry is a pure replacement of that bound, and 0 means
+    //                  "preserve the function's existing bound".
+    // Absent => just register the function (no override), which still opts it into
+    // OptSched, since OptSched's per-function opt-in is "has a config entry".
+    std::optional<int> optsched_occupancy_limit;
+    std::optional<int> min_waves;
+    std::optional<int> max_waves;
     if (fields.size() == 3) {
-        int parsed = 0;
-        if (fields[2].getAsInteger(10, parsed) || parsed < 1) {
+        SmallVector<StringRef, 2> wave_fields;
+        fields[2].split(wave_fields, ',');
+        if (wave_fields.size() == 1) {
+            int parsed = 0;
+            if (wave_fields[0].getAsInteger(10, parsed) || parsed < 1) {
+                report_fatal_error(Twine("misched.txt: kernel line '") + rest +
+                                   "' has invalid waves '" + fields[2] +
+                                   "' (expected an integer >= 1)");
+            }
+            optsched_occupancy_limit = parsed;
+        } else if (wave_fields.size() == 2) {
+            int parsed_min = 0;
+            int parsed_max = 0;
+            if (wave_fields[0].getAsInteger(10, parsed_min) || parsed_min < 0 ||
+                wave_fields[1].getAsInteger(10, parsed_max) || parsed_max < 0) {
+                report_fatal_error(Twine("misched.txt: kernel line '") + rest +
+                                   "' has invalid waves pair '" + fields[2] +
+                                   "' (expected `<min>,<max>` with each >= 0; 0 "
+                                   "preserves that bound)");
+            }
+            // 0 = preserve => leave that override unset.
+            if (parsed_min != 0) {
+                min_waves = parsed_min;
+            }
+            if (parsed_max != 0) {
+                max_waves = parsed_max;
+            }
+            if (min_waves.has_value() && max_waves.has_value() &&
+                *min_waves > *max_waves) {
+                report_fatal_error(Twine("misched.txt: kernel line '") + rest +
+                                   "' has min waves (" + Twine(*min_waves) +
+                                   ") > max waves (" + Twine(*max_waves) + ")");
+            }
+        } else {
             report_fatal_error(Twine("misched.txt: kernel line '") + rest +
-                               "' has invalid waves '" + fields[2] +
-                               "' (expected an integer >= 1)");
+                               "' has malformed waves field '" + fields[2] +
+                               "' (expected `<waves>` or `<min>,<max>`)");
         }
-        waves = parsed;
     }
 
     if (demangled_func_signature_to_config_.count(demangled_func_signature)) {
@@ -380,7 +374,8 @@ void MachineInstrSchedulerConfig::ParseKernelLine(const std::string &rest) {
     }
     demangled_func_signature_to_config_.emplace(
         demangled_func_signature,
-        FunctionConfig(demangled_func_signature, waves));
+        FunctionConfig(demangled_func_signature, optsched_occupancy_limit,
+                       min_waves, max_waves));
 }
 
 MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
@@ -470,43 +465,68 @@ void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Fu
     if(!HasFunctionConfig(function)) {
         return;
     }
-    const std::optional<int> &minimum_waves_per_eu_opt = GetFunctionConfig(function)->waves_per_eu_;
-    if(!minimum_waves_per_eu_opt.has_value()) {
-        return;
+    const FunctionConfig *config = GetFunctionConfig(function);
+
+    // Reaching here means the configured scheduler is NOT OptSched (we returned
+    // above otherwise), so a single-value occupancy limit is a misuse: it is an
+    // OptSched-only input. Non-OptSched schedulers steer occupancy through
+    // amdgpu-waves-per-eu, which needs the explicit `<min>,<max>` pair form.
+    if(config->optsched_occupancy_limit_.has_value()) {
+        report_fatal_error(Twine("misched.txt: single-value waves for '") +
+                           function.getName() +
+                           "' is OptSched-only; use `<min>,<max>` instead");
     }
 
-    // TODO: A kernel must speicfy maximum threaeds per block to unlock >64 registers per thread. Do we want to force this here?
-    /*
-    TODO: Do we actually want to preserve maximum waves per eu? Maybe!
-    But the question is - do we want to overwrite the perscribed maximum_waves_per_eu
-    with something else? Possibilities:
-    maximum_waves_per_eu = maximum_waves_per_eu form attribute
-    or
-    maximum_waves_per_eu = std::max(minimum_waves_per_eu, maximum_waves_per_eu from attribute)
-    or
-    maximum_waves_per_eu = minimum_waves_per_eu
-    */
-    int minimum_waves_per_eu = minimum_waves_per_eu_opt.value();
-    int maximum_waves_per_eu = GetOrInferFunctionExistingMaximumWavesPerEU(function);
-    maximum_waves_per_eu = std::max(minimum_waves_per_eu, maximum_waves_per_eu);
+    const std::optional<int> &min_override = config->min_waves_per_eu_;
+    const std::optional<int> &max_override = config->max_waves_per_eu_;
 
-    // Clear old attribute
+    // The `<min>,<max>` pair is a Hierarchical-scheduler directive. Only the min
+    // is expressed here, as an amdgpu-waves-per-eu attribute (a genuine occupancy
+    // floor). The max is the scheduler's internal occupancy target, consumed
+    // inside the Hierarchical scheduler and deliberately NOT written to the
+    // attribute: an attribute max pads reserved registers and caps the waves the
+    // runtime launches regardless of real register use, which is exactly what we
+    // want to avoid. So assert the pair only appears with HierarchicalScheduler.
+    if((min_override.has_value() || max_override.has_value()) &&
+       !IsHierarchicalScheduler()) {
+        report_fatal_error(Twine("misched.txt: `<min>,<max>` waves for '") +
+                           function.getName() +
+                           "' is only valid with HierarchicalScheduler");
+    }
+
+    // Only the min touches the attribute. An unset min (the `0` sentinel) leaves
+    // the function's existing waves-per-eu alone. Write the min as a single value:
+    // amdgpu-waves-per-eu is positional, so a lone value is the min (first field)
+    // and the max stays at the hardware default -- never a cap. getWavesPerEU is
+    // patched to honor this min even below the flat-work-group-size floor for
+    // misched functions, so the requested floor is not silently discarded.
+    if(!min_override.has_value()) {
+        return;
+    }
     function.removeFnAttr(waves_per_eu_attr);
-
-    // Set new attribute
-    std::string new_waves_per_eu_pair = std::to_string(minimum_waves_per_eu) + "," + std::to_string(maximum_waves_per_eu);
-    function.addFnAttr(waves_per_eu_attr, new_waves_per_eu_pair);
+    function.addFnAttr(waves_per_eu_attr, std::to_string(*min_override));
 }
 
-MachineInstrSchedulerConfig::FunctionConfig::FunctionConfig(const std::string &demangled_signature, std::optional<int> waves_per_eu) {
+MachineInstrSchedulerConfig::FunctionConfig::FunctionConfig(const std::string &demangled_signature,
+                                                            std::optional<int> optsched_occupancy_limit,
+                                                            std::optional<int> min_waves_per_eu,
+                                                            std::optional<int> max_waves_per_eu) {
     func_signature_ = demangled_signature;
-    waves_per_eu_ = waves_per_eu;
+    optsched_occupancy_limit_ = optsched_occupancy_limit;
+    min_waves_per_eu_ = min_waves_per_eu;
+    max_waves_per_eu_ = max_waves_per_eu;
 }
 
 std::string MachineInstrSchedulerConfig::FunctionConfig::ToString() const {
     std::string result = "\t" + func_signature_ +  "\n";
-    if(waves_per_eu_.has_value()) {
-        result += "\t\twaves_per_eu_:" + std::to_string(waves_per_eu_.value()) + "\n";
+    if(optsched_occupancy_limit_.has_value()) {
+        result += "\t\toptsched_occupancy_limit_:" + std::to_string(optsched_occupancy_limit_.value()) + "\n";
+    }
+    if(min_waves_per_eu_.has_value()) {
+        result += "\t\tmin_waves_per_eu_:" + std::to_string(min_waves_per_eu_.value()) + "\n";
+    }
+    if(max_waves_per_eu_.has_value()) {
+        result += "\t\tmax_waves_per_eu_:" + std::to_string(max_waves_per_eu_.value()) + "\n";
     }
     return result;
 }

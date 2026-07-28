@@ -75,9 +75,27 @@ class MachineInstrSchedulerConfig {
             public:
                 std::string ToString() const;
 
-                FunctionConfig(const std::string &demangled_signature, std::optional<int> waves_per_eu);
+                FunctionConfig(const std::string &demangled_signature,
+                               std::optional<int> optsched_occupancy_limit,
+                               std::optional<int> min_waves_per_eu,
+                               std::optional<int> max_waves_per_eu);
+
                 std::string func_signature_;
-                std::optional<int> waves_per_eu_;
+
+                // Single-value `kernel .../<T>` form: an occupancy limit consumed
+                // only by OptSched. Non-OptSched schedulers reject it (see
+                // SetFunctionWavesPerEUAttributeBasedOnConfig) -- they target
+                // occupancy through the `<min>,<max>` pair form below. Mutually
+                // exclusive with the pair.
+                std::optional<int> optsched_occupancy_limit_;
+
+                // Pair `kernel .../<min>,<max>` form: per-kernel amdgpu-waves-per-eu
+                // overrides. nullopt = preserve the function's existing bound (the
+                // misched.txt `0` sentinel maps to nullopt here). Applied by
+                // SetFunctionWavesPerEUAttributeBasedOnConfig as a pure replacement
+                // of each set bound (no min/max merge).
+                std::optional<int> min_waves_per_eu_;
+                std::optional<int> max_waves_per_eu_;
         };
 
 

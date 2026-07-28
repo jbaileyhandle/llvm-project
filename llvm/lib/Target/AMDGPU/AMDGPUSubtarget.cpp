@@ -456,7 +456,13 @@ std::pair<unsigned, unsigned> AMDGPUSubtarget::getFlatWorkGroupSizes(
 
 std::pair<unsigned, unsigned> AMDGPUSubtarget::getEffectiveWavesPerEU(
     std::pair<unsigned, unsigned> Requested,
-    std::pair<unsigned, unsigned> FlatWorkGroupSizes) const {
+    std::pair<unsigned, unsigned> FlatWorkGroupSizes,
+    //========================================================================================
+    // jbaile
+    //========================================================================================
+    bool HonorRequestedMinBelowFlatWorkGroupFloor
+    //========================================================================================
+    ) const {
   // Default minimum/maximum number of waves per execution unit.
   std::pair<unsigned, unsigned> Default(1, getMaxWavesPerEU());
 
@@ -479,8 +485,16 @@ std::pair<unsigned, unsigned> AMDGPUSubtarget::getEffectiveWavesPerEU(
 
   // Make sure requested values are compatible with values implied by requested
   // minimum/maximum flat work group sizes.
-  if (Requested.first < MinImpliedByFlatWorkGroupSize)
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // A misched-specified min is authoritative: skip discarding it when it falls
+  // below the flat-work-group-size floor (the caller sets the flag only for those).
+  if (!HonorRequestedMinBelowFlatWorkGroupFloor &&
+      Requested.first < MinImpliedByFlatWorkGroupSize) {
     return Default;
+  }
+  //========================================================================================
 
   return Requested;
 }
@@ -493,7 +507,23 @@ std::pair<unsigned, unsigned> AMDGPUSubtarget::getWavesPerEU(
   // Requested minimum/maximum number of waves per execution unit.
   std::pair<unsigned, unsigned> Requested =
       AMDGPU::getIntegerPairAttribute(F, "amdgpu-waves-per-eu", Default, true);
-  return getEffectiveWavesPerEU(Requested, FlatWorkGroupSizes);
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // A min set via misched (kernel <sig>/<min>,<max>) is authoritative: honor it
+  // even below the flat-work-group-size floor, which getEffectiveWavesPerEU would
+  // otherwise discard (reverting the whole request to the default range).
+  bool honor_misched_min = false;
+  const MachineInstrSchedulerConfig &mis_config =
+      MachineInstrSchedulerConfig::GetConfig();
+  if (mis_config.HasConfig() && mis_config.HasFunctionConfig(F)) {
+    const MachineInstrSchedulerConfig::FunctionConfig *func_config =
+        mis_config.GetFunctionConfigFromMangledFunctionSignature(F.getName());
+    honor_misched_min =
+        func_config != nullptr && func_config->min_waves_per_eu_.has_value();
+  }
+  return getEffectiveWavesPerEU(Requested, FlatWorkGroupSizes, honor_misched_min);
+  //========================================================================================
 }
 
 static unsigned getReqdWorkGroupSize(const Function &Kernel, unsigned Dim) {

@@ -955,12 +955,12 @@ void ScheduleDAGOptSched::loadOptSchedConfig() {
   //======================================================================================
   const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
   const MachineInstrSchedulerConfig::FunctionConfig *func_config =  mis_config.GetFunctionConfigFromMangledFunctionSignature(C->MF->getFunction().getName());
-  if((func_config != nullptr) && func_config->waves_per_eu_.has_value()) {
+  if((func_config != nullptr) && func_config->optsched_occupancy_limit_.has_value()) {
       ShouldLimitOccupancy = true;
       OccupancyLimitSource = OCC_LIMIT_TYPE::OLT_FILE;
       // I'm pretty sure this last part doesn't actually do anything, but conservativley
       // setting it anyway
-      OccupancyLimit = func_config->waves_per_eu_.value();
+      OccupancyLimit = func_config->optsched_occupancy_limit_.value();
   }
   //======================================================================================
 }

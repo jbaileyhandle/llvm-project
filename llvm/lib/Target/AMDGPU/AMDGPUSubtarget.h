@@ -109,7 +109,15 @@ public:
                 std::pair<unsigned, unsigned> FlatWorkGroupSizes) const;
   std::pair<unsigned, unsigned> getEffectiveWavesPerEU(
       std::pair<unsigned, unsigned> WavesPerEU,
-      std::pair<unsigned, unsigned> FlatWorkGroupSizes) const;
+      std::pair<unsigned, unsigned> FlatWorkGroupSizes,
+      //========================================================================================
+      // jbaile
+      //========================================================================================
+      // When set, honor a requested min below the flat-work-group-size floor
+      // instead of discarding the whole request (used for misched-specified mins).
+      bool HonorRequestedMinBelowFlatWorkGroupFloor = false
+      //========================================================================================
+      ) const;
 
   /// Return the amount of LDS that can be used that will not restrict the
   /// occupancy lower than WaveCount.
