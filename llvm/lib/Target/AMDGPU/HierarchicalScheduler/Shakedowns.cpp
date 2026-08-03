@@ -5716,7 +5716,12 @@ void RunDecomposeAndScheduleFactoryShakedown(const GCNSubtarget &st,
 
   DecomposeAndScheduleOptions opts = DecomposeAndScheduleOptions::Make(
       st, mf, lis, /*seed_occupancy=*/1,
-      FormationConfig{SubgraphFormationStrategy::kDomTree});
+      FormationConfig{SubgraphFormationStrategy::kDomTree},
+      /*outer_policy=*/OccupancyPolicy::kIntegerOccupancy,
+      /*outer_search=*/Search::kBfsDpDfs,
+      /*outer_timeout_ms=*/5000, /*outer_fallback_ms=*/5000,
+      /*inner_search=*/Search::kBfsDpDfs,
+      /*inner_timeout_ms=*/5000, /*inner_fallback_ms=*/5000);
 
   SearchResult result = DecomposeAndSchedule(*graph, st, mf, opts);
 

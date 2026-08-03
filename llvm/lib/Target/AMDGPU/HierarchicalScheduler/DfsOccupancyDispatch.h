@@ -33,7 +33,7 @@ namespace hierarchical_scheduler {
 /// `graph` (per-region budget `timeout_ms`), run it, tag the result winner
 /// "dfs", and return it. `after_run(search, result)` runs once after Run()
 /// while the typed search object is still alive: the flat path uses it to
-/// print post-schedule info (PrintPostScheduleInfo is a file-local template
+/// print post-schedule info (PrintDfsPostScheduleInfo is a file-local template
 /// over DfsSearch<PolicyT>, so it can't be called from here); callers needing
 /// no post-processing pass a no-op. `AfterRunFn` is a template parameter
 /// because the `search` it receives has a different type in each switch arm,

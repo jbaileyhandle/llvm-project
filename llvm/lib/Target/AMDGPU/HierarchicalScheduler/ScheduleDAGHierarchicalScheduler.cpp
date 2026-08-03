@@ -14,6 +14,7 @@
 #include "DecomposeAndSchedule.h"
 #include "DfsOccupancyDispatch.h"
 #include "DfsSearch.h"
+#include "OccupancySearchDispatch.h"
 #include "GCNRegisterTracker.h"
 #include "HierarchicalConfig.h"
 #include "MaliciousScheduler.h"
@@ -565,7 +566,7 @@ static void PrintPreScheduleInfo(const ScheduleGraph &graph,
 // the column of the `output:` header line; sub-keys are nested one
 // tab deeper.
 template <typename PolicyT>
-static void PrintPostScheduleInfo(const ScheduleGraph &graph,
+static void PrintDfsPostScheduleInfo(const ScheduleGraph &graph,
                                   const ScheduleConstructor &dfs_best,
                                   const DfsSearch<PolicyT> &search,
                                   const GCNSubtarget &st,
@@ -632,33 +633,16 @@ static void PrintPostScheduleInfo(const ScheduleGraph &graph,
                << "\n";
 }
 
-// Per-region BFS-DP occupancy search. Metric from occupancy.policy (flat search
-// honors it, like decompose-outer); budget from occupancy.search.timeout. The
-// score-bound prune is seeded with the region's original register-only
-// occupancy, so BfsDpSearch only materializes schedules that strictly beat the
-// input. May return a SearchResult whose schedule is empty (no schedule beat
-// the seed, or the budget fired before a complete schedule was found); the
-// dispatcher's common tail handles that.
-static SearchResult RunOccupancyRegionWithBfsDp(
-    ScheduleGraph &graph, const RegionInfo &region,
-    const GCNSubtarget &st, const MachineFunction &mf) {
-  const OccupancyConfig &occ = HierarchicalConfig::Get().occupancy;
-  BfsDpSettings settings =
-      BfsDpSettings::ForOccupancy(occ.policy, occ.SearchTimeoutOrUnlimited());
-
-  BfsDpSearch search(&graph, &st, &mf, settings);
-  search.SetInitialBestScore(region.GetOriginalRegisterOnlyOccupancy());
-  SearchResult result = search.Run();
-
-  result.winner = result.schedule.has_value() ? "bfs" : "input";
-  if (graph.Size() > 0) {
-    result.bfs_pct = (100.0f * search.GetLevelsExplored()) / graph.Size();
-  }
-
+// Prints the flat-path BFS-DP log rows (output / rates / timeout-fraction) for
+// one occupancy search. Passed as RunOccupancySearch's bfs_after_run on the flat
+// path; decompose passes a no-op. winner/bfs_pct are stamped by the dispatcher.
+static void PrintBfsDpPostScheduleInfo(const ScheduleGraph &graph,
+                                       BfsDpSearch &search,
+                                       const SearchResult &result) {
   llvm::outs() << "\t\toutput: (BFS-DP) found_improvement="
                << result.schedule.has_value() << "\n";
 
-  // Symmetric with the DFS "rates:" line (PrintPostScheduleInfo): surface
+  // Symmetric with the DFS "rates:" line (PrintDfsPostScheduleInfo): surface
   // BFS-DP's own step count (VisitSuccessor probes) and wall-clock so the two
   // searches are directly comparable. bfs_steps/bfs_ms are stamped in Run().
   if (result.bfs_steps.has_value() && result.bfs_ms.has_value()) {
@@ -693,7 +677,6 @@ static SearchResult RunOccupancyRegionWithBfsDp(
                  << "% of levels (" << levels_explored << "/"
                  << total_levels << ")\n";
   }
-  return result;
 }
 
 // Per-region DecomposeAndSchedule occupancy search. Runs the full
@@ -713,85 +696,33 @@ static SearchResult RunOccupancyRegionWithDecompose(
     const LiveIntervals &lis) {
   const OccupancyConfig &occ = HierarchicalConfig::Get().occupancy;
   const int seed = region.GetOriginalRegisterOnlyOccupancy();
-  // Outermost outer search is (occ.policy, occ.search). In recursive
-  // decompose this is the outermost level only; deeper levels are always
-  // continuous BFS-DP+DFS (see RecursiveDecomposeAndSchedule).
+  // Outer search/budget = (occ.policy, occ.search, occ.search.timeout); inner
+  // (within-subgraph make) = (occ.inner_search, occ.inner_search.timeout). In
+  // recursive decompose these are the outermost level only; deeper levels use
+  // the inner config (see RecursiveDecomposeAndSchedule).
   if (occ.decompose_recursive) {
     // Recursive: cap each level at decompose_max_parts subgraphs and recurse
     // to leaves. The install mode comes from the configured formation.
     FormationConfig formation = occ.formation;
     formation.min_cut.max_parts = occ.decompose_max_parts; // subgraphs/level cap
     SearchResult result = RecursiveDecomposeAndSchedule(
-        graph, st, mf, lis, seed, formation, occ.policy, occ.search);
+        graph, st, mf, lis, seed, formation, occ.policy, occ.search,
+        occ.SearchTimeoutOrUnlimited(), occ.FallbackTimeoutOrUnlimited(),
+        occ.inner_search, occ.InnerSearchTimeoutOrUnlimited(),
+        occ.InnerFallbackTimeoutOrUnlimited());
     llvm::outs() << "\t\toutput: (Decompose-recursive) found_improvement="
                  << result.schedule.has_value() << "\n";
     return result;
   }
   DecomposeAndScheduleOptions opts = DecomposeAndScheduleOptions::Make(
-      st, mf, lis, seed, occ.formation, occ.policy, occ.search);
+      st, mf, lis, seed, occ.formation, occ.policy, occ.search,
+      occ.SearchTimeoutOrUnlimited(), occ.FallbackTimeoutOrUnlimited(),
+      occ.inner_search, occ.InnerSearchTimeoutOrUnlimited(),
+      occ.InnerFallbackTimeoutOrUnlimited());
   SearchResult result = DecomposeAndSchedule(graph, st, mf, opts);
   llvm::outs() << "\t\toutput: (Decompose) found_improvement="
                << result.schedule.has_value() << "\n";
   return result;
-}
-
-// Per-region DFS occupancy search. Picks the DFS policy class by
-// occ.policy and seeds the search with the graph's input schedule (so
-// best is never empty). Runs over the already-formed graph: the
-// occupancy dispatcher forms subgraphs (per the configured strategy)
-// before invoking any search. Emits the standard PostScheduleInfo
-// block.
-static SearchResult RunOccupancyRegionWithDfs(
-    ScheduleGraph &graph, const GCNSubtarget &st,
-    const MachineFunction &mf, const LiveIntervals &lis,
-    const ScheduleConstructor &input_schedule_constructor,
-    std::optional<int64_t> timeout_ms) {
-  const OccupancyPolicy metric = HierarchicalConfig::Get().occupancy.policy;
-  return RunOccupancyDfs(
-      metric, graph, st, mf, lis, timeout_ms,
-      [&](auto &search, SearchResult &result) {
-        // DFS always populates schedule (best is seeded with input).
-        bool changed = input_schedule_constructor.GetScheduleOrder() !=
-                       result.schedule->GetScheduleOrder();
-        PrintPostScheduleInfo(graph, *result.schedule, search, st, changed,
-                              "\t\t");
-      });
-}
-
-// Per-region "BFS-DP then DFS" occupancy search: the bfsdp+dfs search,
-// which wraps the other two. Run BFS-DP; if it bails (timeout /
-// score-bound) without a schedule, fall back to DFS so a schedule is
-// always produced. Both run over the already-formed graph.
-static SearchResult RunOccupancyRegionWithBfsDpThenDfs(
-    ScheduleGraph &graph, const RegionInfo &region, const GCNSubtarget &st,
-    const MachineFunction &mf, const LiveIntervals &lis,
-    const ScheduleConstructor &input_schedule_constructor) {
-  SearchResult result = RunOccupancyRegionWithBfsDp(graph, region, st, mf);
-  if (result.schedule.has_value()) {
-    return result;
-  }
-  // BFS-DP produced no schedule. Only DFS-rescue a timeout: BFS-DP is
-  // seeded with the region's original occupancy and its score-bound
-  // prune is sound, so a fully-explored empty result proves nothing
-  // beats the seed — DFS over the same objective can't either and would
-  // just re-derive the input. Keep the input order (winner already
-  // "input").
-  if (result.termination_cause != SearchTerminationCause::kTimedOut) {
-    return result;
-  }
-  // Timed out; DFS rescues. Keep BFS's depth-reached and
-  // throughput on the row alongside the DFS that took over.
-  std::optional<float> bfs_pct = result.bfs_pct;
-  std::optional<int> bfs_ms = result.bfs_ms;
-  std::optional<int> bfs_steps = result.bfs_steps;
-  // The backup search gets the fallback budget (occupancy.search.fallback_timeout).
-  SearchResult dfs = RunOccupancyRegionWithDfs(
-      graph, st, mf, lis, input_schedule_constructor,
-      HierarchicalConfig::Get().occupancy.FallbackTimeoutOrUnlimited());
-  dfs.bfs_pct = bfs_pct;
-  dfs.bfs_ms = bfs_ms;
-  dfs.bfs_steps = bfs_steps;
-  return dfs;
 }
 
 // Schedules the region for maximum occupancy and applies the result.
@@ -844,20 +775,26 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
           SubgraphFormationPolicy::FromStrategy(subgraph_formation.strategy,
                                                 subgraph_formation.min_cut),
           subgraph_formation.mode);
-      switch (occupancy_config.search) {
-      case Search::kDfs:
-        search_result = RunOccupancyRegionWithDfs(
-            graph, st, MF, *LIS, input_schedule_constructor,
-            occupancy_config.SearchTimeoutOrUnlimited());
-        break;
-      case Search::kBfsDp:
-        search_result = RunOccupancyRegionWithBfsDp(graph, region, st, MF);
-        break;
-      case Search::kBfsDpDfs:
-        search_result = RunOccupancyRegionWithBfsDpThenDfs(
-            graph, region, st, MF, *LIS, input_schedule_constructor);
-        break;
-      }
+      search_result = RunOccupancySearch(
+          occupancy_config.search, occupancy_config.policy, graph, st, MF, *LIS,
+          occupancy_config.SearchTimeoutOrUnlimited(),
+          occupancy_config.FallbackTimeoutOrUnlimited(),
+          /*seed_bfs=*/
+          [&](BfsDpSearch &bfs) {
+            bfs.SetInitialBestScore(region.GetOriginalRegisterOnlyOccupancy());
+          },
+          /*bfs_after_run=*/
+          [&](BfsDpSearch &search, SearchResult &r) {
+            PrintBfsDpPostScheduleInfo(graph, search, r);
+          },
+          /*dfs_after_run=*/
+          [&](auto &search, SearchResult &r) {
+            // DFS always populates schedule (best is seeded with input).
+            bool changed = input_schedule_constructor.GetScheduleOrder() !=
+                           r.schedule->GetScheduleOrder();
+            PrintDfsPostScheduleInfo(graph, *r.schedule, search, st, changed,
+                                     "\t\t");
+          });
     }
 
     // Common tail. Apply the search's schedule, or keep the input
@@ -1177,7 +1114,7 @@ static void RunIterativeLengthMinPhase(
       best_schedule_constructor.GetScheduleOrder();
 
   MaybePrintIterationLogs(iter_logs, "\t\t\t");
-  PrintPostScheduleInfo(graph, best_schedule_constructor, iter_search, st,
+  PrintDfsPostScheduleInfo(graph, best_schedule_constructor, iter_search, st,
                         iter_changed, "\t\t\t");
   PrintIterativePhaseSummary("\t\t\t", iterations_run, terminated_via,
                              final_target);
@@ -1229,7 +1166,7 @@ static void RunPlainLengthMinPhase(
 
   // Phase header at level 2 (\t\t). The output: block below is level 3.
   llvm::outs() << "\t\tplain_search:\n";
-  PrintPostScheduleInfo(graph, best_schedule_constructor, plain_search, st,
+  PrintDfsPostScheduleInfo(graph, best_schedule_constructor, plain_search, st,
                         changed, "\t\t\t");
 
   if (plain_search.RegionTimedOut()) {
@@ -1314,7 +1251,7 @@ static void RunMaximizeLengthForRegion(
   // stable section name across policies; the per-region heading
   // already disambiguates which policy ran.
   llvm::outs() << "\t\tplain_search:\n";
-  PrintPostScheduleInfo(graph, best_schedule_constructor, plain_search, st,
+  PrintDfsPostScheduleInfo(graph, best_schedule_constructor, plain_search, st,
                         changed, "\t\t\t");
 
   if (plain_search.RegionTimedOut()) {

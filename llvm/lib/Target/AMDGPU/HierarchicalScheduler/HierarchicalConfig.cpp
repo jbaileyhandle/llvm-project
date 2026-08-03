@@ -193,6 +193,10 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
     c.search = ParseEnum(kSearches, scope, key, val);
     return;
   }
+  if (key == "inner_search") {
+    c.inner_search = ParseEnum(kSearches, scope, key, val);
+    return;
+  }
   if (key == "decompose") {
     c.decompose = ParseBool(scope, key, val);
     return;
@@ -223,6 +227,14 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
   }
   if (key == "search.fallback_timeout") {
     c.fallback_timeout_ms = ParseInt(scope, key, val);
+    return;
+  }
+  if (key == "inner_search.timeout") {
+    c.inner_timeout_ms = ParseInt(scope, key, val);
+    return;
+  }
+  if (key == "inner_search.fallback_timeout") {
+    c.inner_fallback_timeout_ms = ParseInt(scope, key, val);
     return;
   }
   UnknownKey(scope, key);
@@ -519,6 +531,7 @@ std::string HierarchicalConfig::ToString() const {
   os << "\toccupancy: formation="
      << EnumName(kFormationStrategies, occupancy.formation.strategy)
      << " search=" << EnumName(kSearches, occupancy.search)
+     << " inner_search=" << EnumName(kSearches, occupancy.inner_search)
      << " policy=" << EnumName(kOccupancyPolicies, occupancy.policy)
      << " decompose=" << (occupancy.decompose ? "on" : "off")
      << " decompose_recursive="
@@ -536,6 +549,9 @@ std::string HierarchicalConfig::ToString() const {
      << " timeout_ms=" << occupancy.timeout_ms
      << " fallback_timeout_ms=" << occupancy.GetFallbackTimeoutMs()
      << (occupancy.fallback_timeout_ms.has_value() ? "" : " (=timeout)")
+     << " inner_timeout_ms=" << occupancy.inner_timeout_ms
+     << " inner_fallback_timeout_ms=" << occupancy.GetInnerFallbackTimeoutMs()
+     << (occupancy.inner_fallback_timeout_ms.has_value() ? "" : " (=inner_timeout)")
      << "\n";
   os << "\tlength: formation="
      << EnumName(kFormationStrategies, length.formation.strategy)

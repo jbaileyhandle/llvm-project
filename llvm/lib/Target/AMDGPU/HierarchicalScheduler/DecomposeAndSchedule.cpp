@@ -10,6 +10,7 @@
 #include "BfsDpSettings.h"
 #include "DfsOccupancyDispatch.h"
 #include "DfsSearch.h"
+#include "OccupancySearchDispatch.h"
 #include "ScheduleGraph.h"
 #include "Score.h"
 #include "ScheduleSubgraph.h"
@@ -46,17 +47,6 @@ SearchResult DecomposeAndSchedule(
   return opts.outer_search(graph);
 }
 
-namespace {
-
-// 5s wall-clock budget shared across both stages, both algorithms
-// in the options the Make factory builds. Inner is per-subgraph
-// (cumulative cost); the same budget caps the outer DFS fallback when
-// BFS-DP outer times out. Namespace-scope so the factory's lambdas
-// can read it without listing it in their capture lists.
-constexpr int64_t kMakeTimeoutMs = 5000;
-
-}  // namespace
-
 DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
     const GCNSubtarget &st,
     const MachineFunction &mf,
@@ -64,7 +54,12 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
     int seed_occupancy,
     const FormationConfig &subgraph_formation,
     OccupancyPolicy outer_policy,
-    Search outer_search) {
+    Search outer_search,
+    std::optional<int64_t> outer_timeout_ms,
+    std::optional<int64_t> outer_fallback_ms,
+    Search inner_search,
+    std::optional<int64_t> inner_timeout_ms,
+    std::optional<int64_t> inner_fallback_ms) {
   DecomposeAndScheduleOptions opts;
   // Formation: realized from the caller-supplied config. Decompose
   // requires a real formation (validated upstream), so the strategy is
@@ -73,105 +68,41 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
       subgraph_formation.strategy, subgraph_formation.min_cut);
   opts.mode = subgraph_formation.mode;
 
-  // Inner: continuous occupancy score, no seed. DFS fallback uses
-  // the same continuous-metric policy (DfsMaximizeContinuousOccupancyPolicy).
-  // Both run on the already-extracted subgraph: we're inside a subgraph
-  // extracted by ScheduleSubgraph, and nested formation isn't wired yet.
-  opts.inner_search = [&st, &mf, &lis](ScheduleGraph &sub) -> SearchResult {
-    BfsDpSettings settings = BfsDpSettings::ForOccupancy(
-        OccupancyPolicy::kContinuousOccupancy, kMakeTimeoutMs);
-    BfsDpSearch bfs(&sub, &st, &mf, settings);
-    SearchResult result = bfs.Run();
-    // Fraction of the subgraph's layers BFS-DP reached before it
-    // finished or bailed — reported on the row whether or not BFS-DP
-    // won, so a DFS-fallback row still shows how far BFS-DP got.
-    std::optional<float> bfs_pct =
-        (100.0f * bfs.GetLevelsExplored()) / sub.Size();
-    if (result.schedule.has_value()) {
-      result.winner = "bfs";
-      result.bfs_pct = bfs_pct;
-      return result;
-    }
-    // BFS-DP returned no schedule. The inner search is unseeded
-    // (initial best INT_MIN), so the score-bound prune never empties the
-    // frontier — an empty result here means the timeout fired, so DFS
-    // rescues unconditionally. Same budget and metric.
-    DfsSearch<DfsMaximizeContinuousOccupancyPolicy> dfs(
-        sub, st, mf, lis,
-        /*timeout_ms=*/kMakeTimeoutMs);
-    SearchResult dfs_result = dfs.Run();
-    dfs_result.winner = "dfs";
-    dfs_result.bfs_pct = bfs_pct;
-    // Keep the BFS-DP throughput on the row even though DFS won.
-    dfs_result.bfs_ms = result.bfs_ms;
-    dfs_result.bfs_steps = result.bfs_steps;
-    return dfs_result;
+  // Inner (within-subgraph "make"): objective is always continuous occupancy
+  // (hardcoded); strategy and budgets come from the inner config. Unseeded (no
+  // prune floor) and silent (decompose logs at a higher level), so all three
+  // callbacks are no-ops.
+  opts.inner_search = [&st, &mf, &lis, inner_search, inner_timeout_ms,
+                       inner_fallback_ms](ScheduleGraph &sub) -> SearchResult {
+    return RunOccupancySearch(
+        inner_search, OccupancyPolicy::kContinuousOccupancy, sub, st, mf, lis,
+        inner_timeout_ms, inner_fallback_ms,
+        /*seed_bfs=*/[](BfsDpSearch &) {},
+        /*bfs_after_run=*/[](BfsDpSearch &, SearchResult &) {},
+        /*dfs_after_run=*/[](auto &, SearchResult &) {});
   };
 
-  // Outer: selected by (outer_policy, outer_search).
-  //   outer_search == kDfs: DFS only with the policy picked by outer_policy.
-  //   outer_search == kBfsDpDfs: BFS-DP (recipe picked by outer_policy),
-  //     fall back to DFS if BFS-DP times out.
-  // (outer_search == kBfsDp is rejected upstream by config-build validation
-  //  when decompose is on; outer_policy == k{Integer,Continuous}OccupancyRefineSpillArea
-  //  are rejected upstream unless outer_search == kDfs.)
+  // Outer (among-subgraphs): strategy/objective/budgets from the outer config.
+  // outer_search is kDfs or kBfsDpDfs (kBfsDp is rejected upstream). BFS-DP
+  // seeds the continuous input score or the integer target occupancy; silent.
   opts.outer_search = [&st, &mf, &lis, seed_occupancy, outer_policy,
-                       outer_search](ScheduleGraph &g) -> SearchResult {
-    if (outer_search == Search::kDfs) {
-      // No BFS-DP: DFS directly, no post-run printing. Primary-search budget
-      // (DfsSearch's 10s default, matching the non-decompose DFS path), not
-      // the shorter BFS-DP-fallback budget.
-      return RunOccupancyDfs(outer_policy, g, st, mf, lis,
-                             /*timeout_ms=*/10000,
-                             [](auto &, SearchResult &) {});
-    }
-    assert(outer_search == Search::kBfsDpDfs &&
-           "decompose outer requires kDfs or kBfsDpDfs");
-    // BFS-DP outer with DFS fallback. The recipe is integer-or-continuous;
-    // the refine-spill-area variants would land here only as a bug
-    // (config-build validation requires kDfs for them).
-    BfsDpSettings settings =
-        BfsDpSettings::ForOccupancy(outer_policy, kMakeTimeoutMs);
-    bool outer_continuous =
+                       outer_search, outer_timeout_ms,
+                       outer_fallback_ms](ScheduleGraph &g) -> SearchResult {
+    const bool outer_continuous =
         outer_policy == OccupancyPolicy::kContinuousOccupancy;
-    BfsDpSearch bfs(&g, &st, &mf, settings);
-    if (outer_continuous) {
-      // Score the input order under the continuous metric and use it as
-      // the prune floor (SetInitialBestScore extracts the metric score).
-      bfs.SetInitialBestScore(g.GetInputScheduleConstructor());
-    } else {
-      bfs.SetInitialBestScore(seed_occupancy);
-    }
-    SearchResult result = bfs.Run();
-    // Fraction of the outer graph's layers BFS-DP reached; kept on
-    // the row even when DFS rescues, to show how far the outer BFS-DP
-    // got before bailing.
-    std::optional<float> bfs_pct =
-        (100.0f * bfs.GetLevelsExplored()) / g.Size();
-    if (result.schedule.has_value()) {
-      result.winner = "bfs";
-      result.bfs_pct = bfs_pct;
-      return result;
-    }
-    result.bfs_pct = bfs_pct;
-    // Only DFS-rescue a timeout. A fully-explored empty result proves
-    // (the score-bound prune is sound) that nothing beats the seed, so
-    // DFS over the same objective can't either — keep the input order.
-    if (result.termination_cause != SearchTerminationCause::kTimedOut) {
-      result.winner = "input";
-      return result;
-    }
-    // BFS-DP timed out — fall back to DFS over the outer graph,
-    // with the policy matching the chosen outer metric.
-    SearchResult dfs_result = RunOccupancyDfs(
-        outer_policy, g, st, mf, lis, /*timeout_ms=*/kMakeTimeoutMs,
-        [](auto &, SearchResult &) {});
-    // winner is tagged "dfs" inside RunOccupancyDfs.
-    dfs_result.bfs_pct = bfs_pct;
-    // Keep the outer BFS-DP throughput on the row even though DFS won.
-    dfs_result.bfs_ms = result.bfs_ms;
-    dfs_result.bfs_steps = result.bfs_steps;
-    return dfs_result;
+    return RunOccupancySearch(
+        outer_search, outer_policy, g, st, mf, lis, outer_timeout_ms,
+        outer_fallback_ms,
+        /*seed_bfs=*/
+        [&](BfsDpSearch &bfs) {
+          if (outer_continuous) {
+            bfs.SetInitialBestScore(g.GetInputScheduleConstructor());
+          } else {
+            bfs.SetInitialBestScore(seed_occupancy);
+          }
+        },
+        /*bfs_after_run=*/[](BfsDpSearch &, SearchResult &) {},
+        /*dfs_after_run=*/[](auto &, SearchResult &) {});
   };
 
   return opts;
@@ -181,36 +112,43 @@ SearchResult RecursiveDecomposeAndSchedule(
     ScheduleGraph &graph, const GCNSubtarget &st, const MachineFunction &mf,
     const LiveIntervals &lis, int seed_occupancy,
     const FormationConfig &subgraph_formation, OccupancyPolicy outer_policy,
-    Search outer_search) {
-  // Per-level options: continuous leaf inner search + the composable outer
-  // search + the (max_parts-capped) mincut formation. Make builds all three;
-  // we reuse its inner as the leaf search and override it below for the
-  // non-leaf case.
+    Search outer_search, std::optional<int64_t> outer_timeout_ms,
+    std::optional<int64_t> outer_fallback_ms, Search inner_search,
+    std::optional<int64_t> inner_timeout_ms,
+    std::optional<int64_t> inner_fallback_ms) {
+  // Per-level options: the inner (leaf) search + the composable outer search +
+  // the (max_parts-capped) mincut formation. Make builds all three; we reuse
+  // its inner as the leaf search and override it below for the non-leaf case.
   DecomposeAndScheduleOptions opts = DecomposeAndScheduleOptions::Make(
       st, mf, lis, seed_occupancy, subgraph_formation, outer_policy,
-      outer_search);
+      outer_search, outer_timeout_ms, outer_fallback_ms, inner_search,
+      inner_timeout_ms, inner_fallback_ms);
 
   // Leaf: a (sub)graph with at most target_subgraph_size scheduling units is
   // exactly what mincut would refuse to split (k < 2), so schedule it
-  // directly with the continuous leaf search rather than decomposing.
+  // directly with the inner search rather than decomposing.
   const int leaf_size = subgraph_formation.min_cut.target_subgraph_size;
   if (graph.NumSchedulingUnits() <= leaf_size) {
     return opts.inner_search(graph);
   }
 
-  // Non-leaf: recurse on each subgraph instead of leaf-searching it. Each
-  // subgraph is strictly smaller than `graph` (mincut yields k >= 2 parts),
-  // so the recursion terminates at the leaf size. ScheduleSubgraph runs this
-  // inner search on each extracted subgraph before the level's outer search,
-  // so the schedule is built bottom-up. Deeper levels order subgraph
-  // interiors, so they always use continuous BFS-DP+DFS — (outer_policy,
-  // outer_search) is an outermost-only, region-level concept (see header).
-  opts.inner_search = [&st, &mf, &lis, seed_occupancy,
-                       subgraph_formation](ScheduleGraph &sub) -> SearchResult {
-    return RecursiveDecomposeAndSchedule(sub, st, mf, lis, seed_occupancy,
-                                         subgraph_formation,
-                                         OccupancyPolicy::kContinuousOccupancy,
-                                         Search::kBfsDpDfs);
+  // Non-leaf: recurse on each subgraph. A deeper level's "outer" search is
+  // really inner work (it orders a subgraph's interior), so it uses the INNER
+  // config: strategy inner_search, budgets inner_timeout_ms/inner_fallback_ms,
+  // objective the hardcoded continuous occupancy. Only the outermost level uses
+  // (outer_policy, outer_search, outer_timeout). ScheduleSubgraph runs this
+  // inner search on each extracted subgraph before the level's outer search, so
+  // the schedule is built bottom-up.
+  opts.inner_search = [&st, &mf, &lis, seed_occupancy, subgraph_formation,
+                       inner_search, inner_timeout_ms,
+                       inner_fallback_ms](ScheduleGraph &sub) -> SearchResult {
+    return RecursiveDecomposeAndSchedule(
+        sub, st, mf, lis, seed_occupancy, subgraph_formation,
+        /*outer_policy=*/OccupancyPolicy::kContinuousOccupancy,
+        /*outer_search=*/inner_search,
+        /*outer_timeout_ms=*/inner_timeout_ms,
+        /*outer_fallback_ms=*/inner_fallback_ms, inner_search, inner_timeout_ms,
+        inner_fallback_ms);
   };
   return DecomposeAndSchedule(graph, st, mf, opts);
 }

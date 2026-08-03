@@ -52,7 +52,14 @@ inline constexpr unsigned kAboveHardwareMaxOccupancy = 11;
 /// historical default instead formed dom-tree subgraphs.
 struct OccupancyConfig {
   FormationConfig formation; // strategy + mode + min-cut settings
+  // For a flat (non-decompose) run this is the whole search; for decompose it
+  // is the OUTER (among-subgraphs) search.
   Search search = Search::kDfs;
+  // The INNER (within-subgraph "make") search used by decompose. Default kDfs
+  // (DFS-only make, comparable to Hier-Plain). occupancy.inner_search=bfsdp+dfs
+  // selects the historical behavior (BFS-DP first, DFS on timeout). Ignored
+  // when decompose is off.
+  Search inner_search = Search::kDfs;
   // Spill-aware by default: continuous occupancy with VGPR spill area as a
   // same-score tiebreak. Requires search=dfs (the default above); a config
   // that switches to BFS-DP must also set a non-refine policy.
@@ -110,6 +117,26 @@ struct OccupancyConfig {
   }
   std::optional<int64_t> FallbackTimeoutOrUnlimited() const {
     int ms = GetFallbackTimeoutMs();
+    return ms == 0 ? std::nullopt : std::optional<int64_t>(ms);
+  }
+
+  // Decompose-only: budgets for the INNER (within-subgraph "make") search,
+  // separate from the outer/flat search above. occupancy.inner_search.timeout
+  // is the primary; occupancy.inner_search.fallback_timeout is the DFS backup
+  // when inner_search is bfsdp+dfs (nullopt = same as inner_timeout_ms). 0 =
+  // "no timeout". Default 5000 matches the historical per-subgraph make budget.
+  int inner_timeout_ms = 5000;
+  std::optional<int> inner_fallback_timeout_ms;
+
+  int GetInnerFallbackTimeoutMs() const {
+    return inner_fallback_timeout_ms.value_or(inner_timeout_ms);
+  }
+  std::optional<int64_t> InnerSearchTimeoutOrUnlimited() const {
+    return inner_timeout_ms == 0 ? std::nullopt
+                                 : std::optional<int64_t>(inner_timeout_ms);
+  }
+  std::optional<int64_t> InnerFallbackTimeoutOrUnlimited() const {
+    int ms = GetInnerFallbackTimeoutMs();
     return ms == 0 ? std::nullopt : std::optional<int64_t>(ms);
   }
 };

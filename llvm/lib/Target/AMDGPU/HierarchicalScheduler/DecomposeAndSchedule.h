@@ -26,7 +26,9 @@
 #include "HierarchicalConfig.h" // OccupancyPolicy, Search
 #include "SearchResult.h"
 #include "SubgraphFormation.h"
+#include <cstdint>
 #include <functional>
+#include <optional>
 
 namespace llvm {
 
@@ -114,8 +116,13 @@ struct DecomposeAndScheduleOptions {
       const LiveIntervals &lis,
       int seed_occupancy,
       const FormationConfig &subgraph_formation,
-      OccupancyPolicy outer_policy = OccupancyPolicy::kIntegerOccupancy,
-      Search outer_search = Search::kBfsDpDfs);
+      OccupancyPolicy outer_policy,
+      Search outer_search,
+      std::optional<int64_t> outer_timeout_ms,
+      std::optional<int64_t> outer_fallback_ms,
+      Search inner_search,
+      std::optional<int64_t> inner_timeout_ms,
+      std::optional<int64_t> inner_fallback_ms);
 };
 
 /// Form subgraphs in `graph`, schedule each in isolation, lock the
@@ -134,13 +141,13 @@ SearchResult DecomposeAndSchedule(
 /// parts per level) and recursing, until a subgraph has at most
 /// `min_cut.target_subgraph_size` scheduling units — a leaf, scheduled
 /// directly by the continuous BFS-DP+DFS search. Each non-leaf level's
-/// inner search recurses. `outer_policy` and `outer_search` apply to
-/// the OUTERMOST level only. Deeper recursion always uses
-/// (kContinuousOccupancy, kBfsDpDfs); the other modes are region-level
-/// constructs that don't apply below the top. Because
-/// DecomposeAndSchedule schedules each subgraph's interior before the
-/// level's outer runs, the schedule is built bottom-up. Leaves are
-/// always continuous.
+/// inner search recurses. `outer_*` apply to the OUTERMOST level only. Deeper
+/// recursion's "outer" is really inner work (it schedules within a subgraph),
+/// so every nested level and every leaf uses the INNER config: strategy
+/// `inner_search`, budgets `inner_timeout_ms`/`inner_fallback_ms`, and a
+/// hardcoded continuous-occupancy objective. Because DecomposeAndSchedule
+/// schedules each subgraph's interior before the level's outer runs, the
+/// schedule is built bottom-up.
 SearchResult RecursiveDecomposeAndSchedule(
     ScheduleGraph &graph,
     const GCNSubtarget &st,
@@ -149,7 +156,12 @@ SearchResult RecursiveDecomposeAndSchedule(
     int seed_occupancy,
     const FormationConfig &subgraph_formation,
     OccupancyPolicy outer_policy,
-    Search outer_search);
+    Search outer_search,
+    std::optional<int64_t> outer_timeout_ms,
+    std::optional<int64_t> outer_fallback_ms,
+    Search inner_search,
+    std::optional<int64_t> inner_timeout_ms,
+    std::optional<int64_t> inner_fallback_ms);
 
 }  // namespace hierarchical_scheduler
 }  // namespace llvm
