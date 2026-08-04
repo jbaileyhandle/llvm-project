@@ -29,7 +29,7 @@ SearchResult BfsDpSearch::Run() {
     schedule = dag_.GetScheduleConstructor();
   }
   // Build runs the (score-bound-pruned) partition dag to
-  // exhaustion unless the settings.timeout_ms budget fired.
+  // exhaustion unless the settings.timeout_us budget fired.
   // kTimedOut when it did — BFS-DP has no complete schedule to
   // salvage mid-search, so `schedule` is empty there too.
   // Otherwise kFullyExplored, whether or not a schedule was found

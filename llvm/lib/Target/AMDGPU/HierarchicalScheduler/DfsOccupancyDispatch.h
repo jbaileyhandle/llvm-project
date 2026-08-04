@@ -30,7 +30,7 @@ class LiveIntervals;
 namespace hierarchical_scheduler {
 
 /// Construct the occupancy DfsSearch whose policy matches `policy` over
-/// `graph` (per-region budget `timeout_ms`), run it, tag the result winner
+/// `graph` (per-region budget `timeout_us`), run it, tag the result winner
 /// "dfs", and return it. `after_run(search, result)` runs once after Run()
 /// while the typed search object is still alive: the flat path uses it to
 /// print post-schedule info (PrintDfsPostScheduleInfo is a file-local template
@@ -44,7 +44,7 @@ template <typename AfterRunFn>
 SearchResult RunOccupancyDfs(OccupancyPolicy policy, ScheduleGraph &graph,
                              const GCNSubtarget &st, const MachineFunction &mf,
                              const LiveIntervals &lis,
-                             std::optional<int64_t> timeout_ms,
+                             std::optional<int64_t> timeout_us,
                              AfterRunFn after_run) {
   auto run_one = [&](auto search) -> SearchResult {
     SearchResult result = search.Run();
@@ -55,17 +55,17 @@ SearchResult RunOccupancyDfs(OccupancyPolicy policy, ScheduleGraph &graph,
   switch (policy) {
   case OccupancyPolicy::kContinuousOccupancy:
     return run_one(DfsSearch<DfsMaximizeContinuousOccupancyPolicy>(
-        graph, st, mf, lis, timeout_ms));
+        graph, st, mf, lis, timeout_us));
   case OccupancyPolicy::kIntegerOccupancy:
     return run_one(DfsSearch<DfsMaximizeIntegerOccupancyPolicy>(
-        graph, st, mf, lis, timeout_ms));
+        graph, st, mf, lis, timeout_us));
   case OccupancyPolicy::kIntegerOccupancyRefineSpillArea:
     return run_one(DfsSearch<DfsMaximizeIntegerOccupancyRefineSpillAreaPolicy>(
-        graph, st, mf, lis, timeout_ms));
+        graph, st, mf, lis, timeout_us));
   case OccupancyPolicy::kContinuousOccupancyRefineSpillArea:
     return run_one(
         DfsSearch<DfsMaximizeContinuousOccupancyRefineSpillAreaPolicy>(
-            graph, st, mf, lis, timeout_ms));
+            graph, st, mf, lis, timeout_us));
   }
   llvm_unreachable("unhandled OccupancyPolicy");
 }

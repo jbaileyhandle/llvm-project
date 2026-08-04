@@ -3512,7 +3512,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   // sound, so this finds the global optimum.
   DfsSearch<BfsDpVsDfsShakedownOraclePolicy> dfs_search(
       graph, st, mf, lis,
-      /*timeout_ms=*/std::nullopt);
+      /*timeout_us=*/std::nullopt);
   dfs_search.EnableTestModeForTest(vgpr_deltas);
   ScheduleConstructor dfs_best = std::move(*dfs_search.Run().schedule);
   int dfs_continuous =
@@ -3533,7 +3533,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
   // DFS variant with history pruning off — isolates score-bound prune.
   DfsSearch<BfsDpVsDfsShakedownOracleNoHistoryPolicy> dfs_no_history(
       graph, st, mf, lis,
-      /*timeout_ms=*/std::nullopt);
+      /*timeout_us=*/std::nullopt);
   dfs_no_history.EnableTestModeForTest(vgpr_deltas);
   dfs_no_history.Run();
   llvm::outs() << "    DFS oracle (no history pruning): schedule_calls="
@@ -5719,9 +5719,9 @@ void RunDecomposeAndScheduleFactoryShakedown(const GCNSubtarget &st,
       FormationConfig{SubgraphFormationStrategy::kDomTree},
       /*outer_policy=*/OccupancyPolicy::kIntegerOccupancy,
       /*outer_search=*/Search::kBfsDpDfs,
-      /*outer_timeout_ms=*/5000, /*outer_fallback_ms=*/5000,
+      /*outer_timeout_us=*/5000000, /*outer_fallback_us=*/5000000,
       /*inner_search=*/Search::kBfsDpDfs,
-      /*inner_timeout_ms=*/5000, /*inner_fallback_ms=*/5000);
+      /*inner_timeout_us=*/5000000, /*inner_fallback_us=*/5000000);
 
   SearchResult result = DecomposeAndSchedule(*graph, st, mf, opts);
 
@@ -6799,7 +6799,7 @@ void RunEffectiveTimeoutShakedown() {
   {
     OccupancyConfig occ;
     occ.decompose = false;
-    occ.time_per_instr_ms = 5;
+    occ.time_per_instr_us = 5;
     check("occ plain 5*100 = 500",
           occ.EffectiveTimeout(100, flat) == std::optional<int64_t>(500));
   }
@@ -6808,20 +6808,20 @@ void RunEffectiveTimeoutShakedown() {
   {
     OccupancyConfig occ;
     occ.decompose = true;
-    occ.time_per_instr_ms = 4;
+    occ.time_per_instr_us = 4;
     check("occ decompose ceil(4/2)*100 = 200",
           occ.EffectiveTimeout(100, flat) == std::optional<int64_t>(200));
-    occ.time_per_instr_ms = 5;
+    occ.time_per_instr_us = 5;
     check("occ decompose ceil(5/2)*100 = 300",
           occ.EffectiveTimeout(100, flat) == std::optional<int64_t>(300));
-    occ.time_per_instr_ms = 1;
+    occ.time_per_instr_us = 1;
     check("occ decompose ceil(1/2)*100 = 100 (no round-to-0)",
           occ.EffectiveTimeout(100, flat) == std::optional<int64_t>(100));
   }
   // Occupancy: zero product -> nullopt (unlimited), not a 0 timeout.
   {
     OccupancyConfig occ;
-    occ.time_per_instr_ms = 5;
+    occ.time_per_instr_us = 5;
     check("occ size 0 -> nullopt",
           occ.EffectiveTimeout(0, flat) == std::nullopt);
   }
@@ -6829,7 +6829,7 @@ void RunEffectiveTimeoutShakedown() {
   {
     LengthConfig len;
     check("len unset -> flat", len.EffectiveTimeout(100, flat) == flat);
-    len.time_per_instr_ms = 5;
+    len.time_per_instr_us = 5;
     check("len 5*100 = 500",
           len.EffectiveTimeout(100, flat) == std::optional<int64_t>(500));
     check("len size 0 -> nullopt",

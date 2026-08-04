@@ -22,6 +22,14 @@ uint16_t clcltBitsNeededToHoldNum(uint64_t value);
 // Returns the time that has passed since the start of the process, in
 // milliseconds.
 Milliseconds GetProcessorTime();
+//========================================================================================
+// jbaile
+//========================================================================================
+// Same clock as GetProcessorTime(), but reported in microseconds. The underlying
+// high_resolution_clock is nanosecond-capable; the per-instruction time-budget path
+// uses this so that sub-millisecond region budgets are enforced rather than truncated.
+Microseconds GetProcessorTimeMicros();
+//========================================================================================
 // Returns a reference to an object that is supposed to initialized with the
 // start time of the process
 extern std::chrono::high_resolution_clock::time_point startTime;
@@ -43,6 +51,16 @@ inline Milliseconds Utilities::GetProcessorTime() {
   std::chrono::duration<double, std::milli> elapsed = currentTime - startTime;
   return elapsed.count();
 }
+
+//========================================================================================
+// jbaile
+//========================================================================================
+inline Microseconds Utilities::GetProcessorTimeMicros() {
+  auto currentTime = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double, std::micro> elapsed = currentTime - startTime;
+  return elapsed.count();
+}
+//========================================================================================
 
 } // namespace opt_sched
 } // namespace llvm

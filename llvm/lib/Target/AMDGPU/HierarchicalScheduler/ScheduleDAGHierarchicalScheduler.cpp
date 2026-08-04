@@ -782,10 +782,10 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
           // primary timeout when set. The fallback is the BFS-DP DFS-rescue
           // budget, which never runs under a per-instruction budget (that
           // requires dfs), so it stays the flat value.
-          /*primary_timeout_ms=*/
+          /*primary_timeout_us=*/
           occupancy_config.EffectiveTimeout(
               graph.Size(), occupancy_config.SearchTimeoutOrUnlimited()),
-          /*fallback_timeout_ms=*/occupancy_config.FallbackTimeoutOrUnlimited(),
+          /*fallback_timeout_us=*/occupancy_config.FallbackTimeoutOrUnlimited(),
           /*seed_bfs=*/
           [&](BfsDpSearch &bfs) {
             bfs.SetInitialBestScore(region.GetOriginalRegisterOnlyOccupancy());

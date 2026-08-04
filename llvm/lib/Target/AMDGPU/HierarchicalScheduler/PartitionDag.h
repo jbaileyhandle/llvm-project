@@ -130,7 +130,7 @@ class PartitionDag {
   ///       distinguished by within-bracket pressure.
   /// Any other metric fatal-errors at construction.
   ///
-  /// `settings.timeout_ms` is the per-region wall-clock budget; see
+  /// `settings.timeout_us` is the per-region wall-clock budget; see
   /// Build() for what happens when it fires and BfsDpSettings for
   /// the value's meaning.
   ///
@@ -153,7 +153,7 @@ class PartitionDag {
   ///   - the score-bound prune (see SetInitialBestScore)
   ///     eliminated every path to the sink — no schedule strictly
   ///     beats the seed, and sink_ stays null;
-  ///   - the per-region timeout (settings.timeout_ms) was exhausted
+  ///   - the per-region timeout (settings.timeout_us) was exhausted
   ///     before the BFS drained — TimedOut() returns true,
   ///     distinguishing this from the prune case.
   ///
@@ -216,7 +216,7 @@ class PartitionDag {
   /// unless a seed score has been set.
   int GetPruneCount() const { return prune_count_; }
 
-  /// True iff Build() stopped early because the settings.timeout_ms
+  /// True iff Build() stopped early because the settings.timeout_us
   /// budget was exhausted before the BFS drained. False when no
   /// timeout was set, or the search completed within budget —
   /// whether it reached the sink or the score-bound prune emptied
@@ -378,7 +378,7 @@ class PartitionDag {
   /// sentinel means no seed → prune never fires.
   int initial_best_score_ = INT_MIN;
 
-  /// Set by Build() when the timeout_ms_ budget was exhausted
+  /// Set by Build() when the timeout_us_ budget was exhausted
   /// before the BFS drained. Read by TimedOut().
   bool timed_out_ = false;
 };

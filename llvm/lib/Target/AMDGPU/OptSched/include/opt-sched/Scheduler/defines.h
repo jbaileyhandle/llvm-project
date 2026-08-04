@@ -22,6 +22,15 @@ namespace opt_sched {
 // The standard time unit.
 typedef int64_t Milliseconds;
 
+//========================================================================================
+// jbaile
+//========================================================================================
+// A finer time unit than Milliseconds, used by the per-instruction scheduling-time
+// budget so that sub-millisecond per-region budgets can be represented and enforced
+// (the millisecond truncation in GetProcessorTime() would otherwise floor them away).
+typedef int64_t Microseconds;
+//========================================================================================
+
 // Instruction count.
 typedef int InstCount;
 

@@ -221,20 +221,22 @@ void ApplyOccupancyKey(StringRef key, StringRef val, OccupancyConfig &c) {
     c.optimize_every_region_past_occupancy_target = ParseBool(scope, key, val);
     return;
   }
+  // These *.timeout keys are given in microseconds (the search's internal unit),
+  // consistent with the misched time_per_instr_*_us settings.
   if (key == "search.timeout") {
-    c.timeout_ms = ParseInt(scope, key, val);
+    c.timeout_us = ParseInt(scope, key, val);
     return;
   }
   if (key == "search.fallback_timeout") {
-    c.fallback_timeout_ms = ParseInt(scope, key, val);
+    c.fallback_timeout_us = ParseInt(scope, key, val);
     return;
   }
   if (key == "inner_search.timeout") {
-    c.inner_timeout_ms = ParseInt(scope, key, val);
+    c.inner_timeout_us = ParseInt(scope, key, val);
     return;
   }
   if (key == "inner_search.fallback_timeout") {
-    c.inner_fallback_timeout_ms = ParseInt(scope, key, val);
+    c.inner_fallback_timeout_us = ParseInt(scope, key, val);
     return;
   }
   UnknownKey(scope, key);
@@ -249,8 +251,9 @@ void ApplyLengthKey(StringRef key, StringRef val, LengthConfig &c) {
     c.policy = ParseEnum(kLengthPolicies, scope, key, val);
     return;
   }
+  // length.search.timeout is given in microseconds (see ApplyOccupancyKey).
   if (key == "search.timeout") {
-    c.timeout_ms = ParseInt(scope, key, val);
+    c.timeout_us = ParseInt(scope, key, val);
     return;
   }
   UnknownKey(scope, key);
@@ -282,28 +285,28 @@ std::optional<PresetPairs> GetPreset(StringRef name) {
     return PresetPairs{{"formation", "none"},
                        {"search", "bfsdp"},
                        {"decompose", "off"},
-                       {"search.timeout", "10000"}};
+                       {"search.timeout", "10000000"}}; // 10s in us
   }
   if (name == "decompose-mincut") {
     return PresetPairs{{"decompose", "on"},
                        {"formation", "mincut"},
                        {"search", "bfsdp+dfs"},
                        {"mode", "serialized"},
-                       {"search.timeout", "5000"}};
+                       {"search.timeout", "5000000"}}; // 5s in us
   }
   if (name == "decompose-mincut-interleave") {
     return PresetPairs{{"decompose", "on"},
                        {"formation", "mincut"},
                        {"search", "dfs"},
                        {"mode", "interleaved"},
-                       {"search.timeout", "5000"}};
+                       {"search.timeout", "5000000"}}; // 5s in us
   }
   if (name == "decompose-domtree") {
     return PresetPairs{{"decompose", "on"},
                        {"formation", "domtree"},
                        {"search", "dfs"},
                        {"mode", "serialized"},
-                       {"search.timeout", "5000"}};
+                       {"search.timeout", "5000000"}}; // 5s in us
   }
   if (name == "max-length") {
     return PresetPairs{{"formation", "none"}, {"policy", "max"}};
@@ -429,17 +432,17 @@ void ValidateOccupancy(const OccupancyConfig &c) {
     report_fatal_error(
         "misched.txt: occupancy.decompose_max_parts must be >= 2");
   }
-  if (c.fallback_timeout_ms.has_value() && c.search != Search::kBfsDpDfs) {
+  if (c.fallback_timeout_us.has_value() && c.search != Search::kBfsDpDfs) {
     report_fatal_error("misched.txt: occupancy.search.fallback_timeout "
                        "requires search=bfsdp+dfs");
   }
-  // Timeouts are wall-clock budgets in ms: 0 means "no timeout" (run to
+  // Timeouts are wall-clock budgets in us: 0 means "no timeout" (run to
   // completion); a negative budget is meaningless.
-  if (c.timeout_ms < 0) {
+  if (c.timeout_us < 0) {
     report_fatal_error("misched.txt: occupancy.search.timeout must be "
                        ">= 0 (0 = no timeout)");
   }
-  if (c.fallback_timeout_ms.has_value() && *c.fallback_timeout_ms < 0) {
+  if (c.fallback_timeout_us.has_value() && *c.fallback_timeout_us < 0) {
     report_fatal_error("misched.txt: occupancy.search.fallback_timeout "
                        "must be >= 0 (0 = no timeout)");
   }
@@ -526,37 +529,37 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   // mirror them into the pass they drive (occupancy / length).
   const MachineInstrSchedulerConfig::GlobalSettings &global_settings =
       cfg.GetGlobalSettings();
-  hs.occupancy.time_per_instr_ms = global_settings.time_per_instr_occupancy_ms;
-  hs.length.time_per_instr_ms = global_settings.time_per_instr_length_ms;
+  hs.occupancy.time_per_instr_us = global_settings.time_per_instr_occupancy_us;
+  hs.length.time_per_instr_us = global_settings.time_per_instr_length_us;
 
   // The per-instruction occupancy budget only supports plain and single-level
   // decompose, all-DFS, and cannot coexist with an explicit flat timeout.
-  if (hs.occupancy.time_per_instr_ms.has_value()) {
+  if (hs.occupancy.time_per_instr_us.has_value()) {
     if (hs.occupancy.search != Search::kDfs) {
-      report_fatal_error("misched.txt: time_per_instr_occupancy_ms requires "
+      report_fatal_error("misched.txt: time_per_instr_occupancy_us requires "
                          "occupancy.search=dfs");
     }
     if (hs.occupancy.decompose &&
         hs.occupancy.inner_search != Search::kDfs) {
-      report_fatal_error("misched.txt: time_per_instr_occupancy_ms requires "
+      report_fatal_error("misched.txt: time_per_instr_occupancy_us requires "
                          "occupancy.inner_search=dfs");
     }
     if (hs.occupancy.decompose_recursive) {
-      report_fatal_error("misched.txt: time_per_instr_occupancy_ms is not "
+      report_fatal_error("misched.txt: time_per_instr_occupancy_us is not "
                          "supported with occupancy.decompose_recursive");
     }
     if (hs.occupancy.timeout_explicitly_set) {
-      report_fatal_error("misched.txt: set either time_per_instr_occupancy_ms "
+      report_fatal_error("misched.txt: set either time_per_instr_occupancy_us "
                          "or occupancy.search.timeout, not both");
     }
     if (hs.occupancy.inner_timeout_explicitly_set) {
-      report_fatal_error("misched.txt: set either time_per_instr_occupancy_ms "
+      report_fatal_error("misched.txt: set either time_per_instr_occupancy_us "
                          "or occupancy.inner_search.timeout, not both");
     }
   }
-  if (hs.length.time_per_instr_ms.has_value() &&
+  if (hs.length.time_per_instr_us.has_value() &&
       hs.length.timeout_explicitly_set) {
-    report_fatal_error("misched.txt: set either time_per_instr_length_ms or "
+    report_fatal_error("misched.txt: set either time_per_instr_length_us or "
                        "length.search.timeout, not both");
   }
 
@@ -602,15 +605,15 @@ std::string HierarchicalConfig::ToString() const {
      << " mode=" << EnumName(kScheduleModes, occupancy.formation.mode)
      << " ratio=" << occupancy.formation.min_cut.imbalance_ratio
      << " target_size=" << occupancy.formation.min_cut.target_subgraph_size
-     << " timeout_ms=" << occupancy.timeout_ms
-     << " fallback_timeout_ms=" << occupancy.GetFallbackTimeoutMs()
-     << (occupancy.fallback_timeout_ms.has_value() ? "" : " (=timeout)")
-     << " inner_timeout_ms=" << occupancy.inner_timeout_ms
-     << " inner_fallback_timeout_ms=" << occupancy.GetInnerFallbackTimeoutMs()
-     << (occupancy.inner_fallback_timeout_ms.has_value() ? "" : " (=inner_timeout)")
-     << " time_per_instr_ms="
-     << (occupancy.time_per_instr_ms.has_value()
-             ? std::to_string(*occupancy.time_per_instr_ms)
+     << " timeout_us=" << occupancy.timeout_us
+     << " fallback_timeout_us=" << occupancy.GetFallbackTimeoutUs()
+     << (occupancy.fallback_timeout_us.has_value() ? "" : " (=timeout)")
+     << " inner_timeout_us=" << occupancy.inner_timeout_us
+     << " inner_fallback_timeout_us=" << occupancy.GetInnerFallbackTimeoutUs()
+     << (occupancy.inner_fallback_timeout_us.has_value() ? "" : " (=inner_timeout)")
+     << " time_per_instr_us="
+     << (occupancy.time_per_instr_us.has_value()
+             ? std::to_string(*occupancy.time_per_instr_us)
              : "off")
      << "\n";
   os << "\tlength: formation="
@@ -619,9 +622,9 @@ std::string HierarchicalConfig::ToString() const {
      << " ratio=" << length.formation.min_cut.imbalance_ratio
      << " target_size=" << length.formation.min_cut.target_subgraph_size
      << " policy=" << EnumName(kLengthPolicies, length.policy)
-     << " timeout_ms=" << length.timeout_ms << " time_per_instr_ms="
-     << (length.time_per_instr_ms.has_value()
-             ? std::to_string(*length.time_per_instr_ms)
+     << " timeout_us=" << length.timeout_us << " time_per_instr_us="
+     << (length.time_per_instr_us.has_value()
+             ? std::to_string(*length.time_per_instr_us)
              : "off")
      << "\n";
   os << "\tglobals: malicious=" << (malicious ? "on" : "off")

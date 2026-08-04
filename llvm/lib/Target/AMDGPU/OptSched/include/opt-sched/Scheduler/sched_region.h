@@ -81,7 +81,8 @@ public:
 
   // TODO(max): Document.
   virtual FUNC_RESULT
-  FindOptimalSchedule(Milliseconds rgnTimeout, Milliseconds lngthTimeout,
+  // jbaile: rgnTimeout_us / lngthTimeout_us are microseconds
+  FindOptimalSchedule(Microseconds rgnTimeout_us, Microseconds lngthTimeout_us,
                       bool &isHurstcOptml, InstCount &bestCost,
                       InstCount &bestSchedLngth, InstCount &hurstcCost,
                       InstCount &hurstcSchedLngth, InstSchedule *&bestSched,
@@ -243,8 +244,10 @@ protected:
   void UseFileBounds_();
 
   // Top-level function for enumerative scheduling
-  FUNC_RESULT Optimize_(Milliseconds startTime, Milliseconds rgnTimeout,
-                        Milliseconds lngthTimeout);
+  // jbaile: startTime is ms (reporting); startTime_us/rgnTimeout_us/lngthTimeout_us
+  // are microseconds (deadline base + region budgets).
+  FUNC_RESULT Optimize_(Milliseconds startTime, Microseconds startTime_us,
+                        Microseconds rgnTimeout_us, Microseconds lngthTimeout_us);
   // TODO(max): Document.
   void CmputLwrBounds_(bool useFileBounds);
   // TODO(max): Document.
@@ -269,11 +272,13 @@ protected:
   // TODO(max): Document.
   virtual void CmputSchedUprBound_() = 0;
   // TODO(max): Document.
-  virtual Enumerator *AllocEnumrtr_(Milliseconds timeout) = 0;
+  virtual Enumerator *AllocEnumrtr_(Microseconds timeout_us) = 0; // jbaile: us
   // Wrapper for the enumerator
-  virtual FUNC_RESULT Enumerate_(Milliseconds startTime,
-                                 Milliseconds rgnTimeout,
-                                 Milliseconds lngthTimeout) = 0;
+  // jbaile: startTime_us is the microsecond deadline base;
+  // rgnTimeout_us/lngthTimeout_us are region budgets in microseconds.
+  virtual FUNC_RESULT Enumerate_(Microseconds startTime_us,
+                                 Microseconds rgnTimeout_us,
+                                 Microseconds lngthTimeout_us) = 0;
   // TODO(max): Document.
   virtual void FinishHurstc_() = 0;
   // TODO(max): Document.

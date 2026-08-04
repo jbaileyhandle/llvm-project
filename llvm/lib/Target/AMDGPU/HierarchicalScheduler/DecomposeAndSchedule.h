@@ -118,11 +118,11 @@ struct DecomposeAndScheduleOptions {
       const FormationConfig &subgraph_formation,
       OccupancyPolicy outer_policy,
       Search outer_search,
-      std::optional<int64_t> outer_timeout_ms,
-      std::optional<int64_t> outer_fallback_ms,
+      std::optional<int64_t> outer_timeout_us,
+      std::optional<int64_t> outer_fallback_us,
       Search inner_search,
-      std::optional<int64_t> inner_timeout_ms,
-      std::optional<int64_t> inner_fallback_ms);
+      std::optional<int64_t> inner_timeout_us,
+      std::optional<int64_t> inner_fallback_us);
 };
 
 /// Form subgraphs in `graph`, schedule each in isolation, lock the
@@ -144,7 +144,7 @@ SearchResult DecomposeAndSchedule(
 /// inner search recurses. `outer_*` apply to the OUTERMOST level only. Deeper
 /// recursion's "outer" is really inner work (it schedules within a subgraph),
 /// so every nested level and every leaf uses the INNER config: strategy
-/// `inner_search`, budgets `inner_timeout_ms`/`inner_fallback_ms`, and a
+/// `inner_search`, budgets `inner_timeout_us`/`inner_fallback_us`, and a
 /// hardcoded continuous-occupancy objective. Because DecomposeAndSchedule
 /// schedules each subgraph's interior before the level's outer runs, the
 /// schedule is built bottom-up.
@@ -157,11 +157,11 @@ SearchResult RecursiveDecomposeAndSchedule(
     const FormationConfig &subgraph_formation,
     OccupancyPolicy outer_policy,
     Search outer_search,
-    std::optional<int64_t> outer_timeout_ms,
-    std::optional<int64_t> outer_fallback_ms,
+    std::optional<int64_t> outer_timeout_us,
+    std::optional<int64_t> outer_fallback_us,
     Search inner_search,
-    std::optional<int64_t> inner_timeout_ms,
-    std::optional<int64_t> inner_fallback_ms);
+    std::optional<int64_t> inner_timeout_us,
+    std::optional<int64_t> inner_fallback_us);
 
 }  // namespace hierarchical_scheduler
 }  // namespace llvm

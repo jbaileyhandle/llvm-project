@@ -1277,22 +1277,23 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
 
   //==========================================================
   // jbaile - per-instruction wall-clock budget for the host ACO loop.
-  // From misched (time_per_instr_{occupancy,length}_ms): occupancy value for the
+  // From misched (time_per_instr_{occupancy,length}_us): occupancy value for the
   // first (OCC) pass, length value for the second (ILP) pass. When set, the host
   // loop below runs to this deadline instead of stopping after noImprovementMax
   // stalled iterations -- the lower-bound-optimal early break still applies, so
   // ACO never spins after finding a provably optimal schedule. count_ is the
   // region's instruction count (GetInstCnt), matching how BnB scales its
-  // per-instruction timeout. Only the host loop honors this; the DEV_ACO device
-  // path is left unchanged.
+  // per-instruction timeout. The budget is in microseconds (no floor): a
+  // sub-millisecond total budget is enforced against GetProcessorTimeMicros().
+  // Only the host loop honors this; the DEV_ACO device path is left unchanged.
   //==========================================================
-  const std::optional<int> aco_time_per_instr_ms = IsFirst
-      ? mis_config.GetGlobalSettings().time_per_instr_occupancy_ms
-      : mis_config.GetGlobalSettings().time_per_instr_length_ms;
-  const bool aco_use_time_budget = aco_time_per_instr_ms.has_value();
-  const Milliseconds aco_time_budget_ms =
+  const std::optional<int> aco_time_per_instr_us = IsFirst
+      ? mis_config.GetGlobalSettings().time_per_instr_occupancy_us
+      : mis_config.GetGlobalSettings().time_per_instr_length_us;
+  const bool aco_use_time_budget = aco_time_per_instr_us.has_value();
+  const Microseconds aco_time_budget_us =
       aco_use_time_budget
-          ? (Milliseconds)aco_time_per_instr_ms.value() * (Milliseconds)count_
+          ? (Microseconds)aco_time_per_instr_us.value() * (Microseconds)count_
           : 0;
   //==========================================================
 
@@ -1466,8 +1467,9 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
     Logger::Info("Running host ACO with %d ants per iteration", numThreads_);
     //==========================================================
     // jbaile - wall-clock start for the optional per-instruction time budget.
+    // Microseconds so sub-millisecond budgets are enforced without truncation.
     //==========================================================
-    const Milliseconds aco_start_ms = Utilities::GetProcessorTime();
+    const Microseconds aco_start_us = Utilities::GetProcessorTimeMicros();
     //==========================================================
     InstCount RPTarget;
     if (!((BBWithSpill *)rgn_)->needsSLIL()) {
@@ -1486,13 +1488,29 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
     // The lower-bound-optimal early break inside the loop still applies.
     //==========================================================
     while (aco_use_time_budget
-               ? (Utilities::GetProcessorTime() - aco_start_ms < aco_time_budget_ms)
+               ? (Utilities::GetProcessorTimeMicros() - aco_start_us < aco_time_budget_us)
                : (noImprovement < noImprovementMax)) {
     //==========================================================
       // dbgs() << "\t\t====> Another iteration of ACO beginning. noImprovement = " << noImprovement << ", noImprovementMax = " << noImprovementMax << ", RPTarget = " << RPTarget << "\n";
       iterations++;
       iterationBest = nullptr;
       for (int i = 0; i < numThreads_; i++) {
+        //==========================================================
+        // jbaile - honor the wall-clock budget at per-ant granularity, not just
+        // between iterations. One iteration is numThreads_ ants (thousands), so
+        // checking only at the outer loop overshoots a tight budget by a whole
+        // iteration -- seconds on a large region. Checking per ant bounds the
+        // overshoot to a single FindOneSchedule (O(region)), comparable to the
+        // per-node budget checks in BnB and the Hierarchical searches. The
+        // ants already built this iteration are still folded into bestSchedule
+        // below, so partial work is not wasted.
+        //==========================================================
+        if (aco_use_time_budget &&
+            Utilities::GetProcessorTimeMicros() - aco_start_us >=
+                aco_time_budget_us) {
+          break;
+        }
+        //==========================================================
         InstSchedule *schedule = FindOneSchedule(RPTarget);
 
         #ifdef CHECK_DIFFERENT_SCHEDULES

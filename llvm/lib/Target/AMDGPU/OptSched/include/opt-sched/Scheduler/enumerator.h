@@ -521,7 +521,7 @@ protected:
   void PrintLog_();
 
   FUNC_RESULT FindFeasibleSchedule_(InstSchedule *sched, InstCount trgtLngth,
-                                    Milliseconds deadline);
+                                    Microseconds deadline_us); // jbaile: us
 
   // Virtual Functions
   virtual bool WasObjctvMet_() = 0;
@@ -541,7 +541,8 @@ public:
   Enumerator(DataDepGraph *dataDepGraph, MachineModel *machMdl,
              InstCount schedUprBound, int16_t sigHashSize,
              SchedPriorities prirts, Pruning PruningStrategy,
-             bool SchedForRPOnly, bool enblStallEnum, Milliseconds timeout,
+             bool SchedForRPOnly, bool enblStallEnum,
+             Microseconds timeout_us, // jbaile: us
              InstCount preFxdInstCnt = 0,
              SchedInstruction *preFxdInsts[] = NULL);
   __host__
@@ -615,7 +616,7 @@ public:
                    InstCount schedUprBound, int16_t sigHashSize,
                    SchedPriorities prirts, Pruning PruningStrategy,
                    bool SchedForRPOnly, bool enblStallEnum,
-                   Milliseconds timeout, InstCount preFxdInstCnt = 0,
+                   Microseconds timeout_us, InstCount preFxdInstCnt = 0, // jbaile: us
                    SchedInstruction *preFxdInsts[] = NULL);
   __host__
   virtual ~LengthEnumerator();
@@ -625,7 +626,7 @@ public:
   // Given a schedule with some instructions possibly fixed, find a
   // feasible schedule of the given target length if possible
   FUNC_RESULT FindFeasibleSchedule(InstSchedule *sched, InstCount trgtLngth,
-                                   Milliseconds deadline);
+                                   Microseconds deadline_us); // jbaile: us
   bool IsCostEnum();
 };
 /*****************************************************************************/
@@ -667,7 +668,8 @@ public:
                        InstCount schedUprBound, int16_t sigHashSize,
                        SchedPriorities prirts, Pruning PruningStrategy,
                        bool SchedForRPOnly, bool enblStallEnum,
-                       Milliseconds timeout, SPILL_COST_FUNCTION spillCostFunc,
+                       Microseconds timeout_us, // jbaile: us
+                       SPILL_COST_FUNCTION spillCostFunc,
                        InstCount preFxdInstCnt = 0,
                        SchedInstruction *preFxdInsts[] = NULL);
   __host__
@@ -679,7 +681,7 @@ public:
   // feasible schedule of the given target length if possible
   FUNC_RESULT FindFeasibleSchedule(InstSchedule *sched, InstCount trgtLngth,
                                    SchedRegion *rgn, int costLwrBound,
-                                   Milliseconds deadline);
+                                   Microseconds deadline_us); // jbaile: us
   bool IsCostEnum();
   SPILL_COST_FUNCTION GetSpillCostFunc() { return spillCostFunc_; }
   inline InstCount GetBestCost() { return GetBestCost_(); }

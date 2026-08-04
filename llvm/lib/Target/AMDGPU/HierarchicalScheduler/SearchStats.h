@@ -96,6 +96,15 @@ struct DualRunAndLifetimeStopwatch {
                std::chrono::steady_clock::now() - lifetime_start)
         .count();
   }
+
+  // Microsecond-resolution lifetime elapsed, used to enforce the per-region
+  // search budget: sub-millisecond per-instruction budgets must be honored
+  // rather than truncated to whole milliseconds.
+  int64_t LifetimeElapsedUs() const {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now() - lifetime_start)
+        .count();
+  }
 };
 
 } // namespace hierarchical_scheduler

@@ -450,7 +450,7 @@ bool DfsMinimizeLengthRefineIlpPolicy::ShouldEndSearch(
   // makes further refinement worthless. ILP can in principle
   // keep improving until every producer is fully saturated, and
   // we have no cheap test for that. Always return false; DfsSearch's
-  // per-region timeout (its ctor `timeout_ms` argument) is the
+  // per-region timeout (its ctor `timeout_us` argument) is the
   // only stopping condition for refine-ILP at length floor.
   // Above floor, we'd want to keep going for length improvement
   // anyway, so the answer is uniformly false.

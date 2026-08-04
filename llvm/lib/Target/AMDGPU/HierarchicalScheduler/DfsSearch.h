@@ -73,25 +73,24 @@ namespace hierarchical_scheduler {
 template <typename Policy>
 class DfsSearch {
  public:
-  // timeout_ms is the per-region wall-clock budget; nullopt disables
-  // the timeout entirely (used by shakedown oracles that need
-  // exhaustive search). Default 10000 (10s). Pass explicitly when a
-  // different budget is wanted (DecomposeAndScheduleOptions::Make
-  // uses 1s for the inner DFS fallback to match the inner BFS-DP
-  // budget).
+  // timeout_us is the per-region wall-clock budget in microseconds; nullopt
+  // disables the timeout entirely (used by shakedown oracles that need
+  // exhaustive search). Default 10000000 (10s). Microseconds so sub-millisecond
+  // per-instruction budgets are enforced without truncation. Pass explicitly
+  // when a different budget is wanted.
   //
   // Subgraph formation is not the search's concern: the pass forms (per
   // its configured strategy) before constructing the search, which then
   // runs over the already-formed graph.
   DfsSearch(ScheduleGraph &graph, const GCNSubtarget &st,
             const MachineFunction &mf, const LiveIntervals &lis,
-            std::optional<int64_t> timeout_ms = std::optional<int64_t>(10000))
+            std::optional<int64_t> timeout_us = std::optional<int64_t>(10000000))
       // best_schedule_constructor_ reads graph.GetInputScheduleConstructor()
       // — the input snapshot captured in BuildFromSUnits Phase 4 and never
       // re-derived, so it stays a valid (unconstrained) baseline to beat.
       : mf_(&mf),
         lis_(&lis),
-        timeout_ms_(timeout_ms),
+        timeout_us_(timeout_us),
         // DfsSearch uses the default (nullopt) recipe arg so its SC
         // has all trackers on. Two reasons:
         //   - Per-region telemetry reads length and ILP from best
@@ -241,7 +240,7 @@ class DfsSearch {
   }
 
   // True iff the region-level deadline (set in the ctor's
-  // timeout_ms argument past construction time) has been reached
+  // timeout_us argument past construction time) has been reached
   // at some point during this DfsSearch's lifetime, and a Recurse
   // aborted as a result. Sticky once set. The
   // single-bool shape is correct for this concept: once the
@@ -262,7 +261,7 @@ class DfsSearch {
   //                     target). The policy decided the current best
   //                     is good enough; could have kept going but
   //                     saw no point.
-  //   kTimedOut:        the region budget (the ctor's timeout_ms
+  //   kTimedOut:        the region budget (the ctor's timeout_us
   //                     argument) was exhausted before search
   //                     completed and before the
   //                     policy declared success. Returned best is
@@ -445,8 +444,8 @@ class DfsSearch {
   bool EndSearchIfTimedOut() {
     // nullopt = timeout disabled (e.g., shakedown oracles where any
     // early exit would yield a suboptimal reference answer).
-    if (!timeout_ms_.has_value() ||
-        timing_.LifetimeElapsedMs() < *timeout_ms_) {
+    if (!timeout_us_.has_value() ||
+        timing_.LifetimeElapsedUs() < *timeout_us_) {
       return false;
     }
     region_timed_out_ = true;
@@ -557,7 +556,7 @@ class DfsSearch {
   // Read by EndSearchIfTimedOut on every Recurse() entry. Set at
   // construction and never mutated thereafter — declared const so
   // that's enforced by the compiler.
-  const std::optional<int64_t> timeout_ms_;
+  const std::optional<int64_t> timeout_us_;
 
   // Mutable search state; Schedule/Unschedule walk every branch.
   ScheduleConstructor working_schedule_constructor_;

@@ -36,7 +36,7 @@ class BfsDpSearch {
   /// schedule carries the recovered schedule when the dag reached
   /// the sink; it is empty when the score-bound prune (see
   /// SetInitialBestScore) eliminated every path, and also when the
-  /// settings.timeout_ms budget fired before the BFS drained.
+  /// settings.timeout_us budget fired before the BFS drained.
   /// termination_cause is kTimedOut in that timeout case and
   /// kFullyExplored otherwise — BFS-DP has no ShouldEndSearch /
   /// policy hook, so kPolicySatisfied never occurs.

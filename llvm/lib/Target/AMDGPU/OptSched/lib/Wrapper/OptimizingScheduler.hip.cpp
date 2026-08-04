@@ -714,14 +714,22 @@ void ScheduleDAGOptSched::schedule() {
   FUNC_RESULT Rslt;
   bool FilterByPerp = schedIni.GetBool("FILTER_BY_PERP");
 
-  int CurrentRegionTimeout = RegionTimeout;
-  int CurrentLengthTimeout = LengthTimeout;
+  //======================================================================================
+  // jbaile
+  //======================================================================================
+  // Microseconds. int64 (Microseconds) because the per-instruction path multiplies by
+  // the region's instruction count, which can exceed the range of a 32-bit product for
+  // large regions. No flooring: a sub-millisecond total budget stays sub-millisecond and
+  // is enforced against GetProcessorTimeMicros() in the enumerator.
+  Microseconds CurrentRegionTimeout_us = RegionTimeout;
+  Microseconds CurrentLengthTimeout_us = LengthTimeout;
   if (IsTimeoutPerInst) {
     // Re-calculate timeout values if timeout setting is per instruction
     // because we want a unique value per DAG size
-    CurrentRegionTimeout = RegionTimeout * SUnits.size();
-    CurrentLengthTimeout = LengthTimeout * SUnits.size();
+    CurrentRegionTimeout_us = (Microseconds)RegionTimeout * SUnits.size();
+    CurrentLengthTimeout_us = (Microseconds)LengthTimeout * SUnits.size();
   }
+  //======================================================================================
 
   // Used for two-pass-optsched to alter upper bound value.
   if (SecondPass)
@@ -740,7 +748,7 @@ void ScheduleDAGOptSched::schedule() {
   }
 
   // Schedule region.
-  Rslt = region->FindOptimalSchedule(CurrentRegionTimeout, CurrentLengthTimeout,
+  Rslt = region->FindOptimalSchedule(CurrentRegionTimeout_us, CurrentLengthTimeout_us,
                                      IsEasy, NormBestCost, BestSchedLngth,
                                      NormHurstcCost, HurstcSchedLngth, Sched,
                                      FilterByPerp, blocksToKeep(schedIni), depth);
@@ -925,12 +933,22 @@ void ScheduleDAGOptSched::loadOptSchedConfig() {
   SecondPassEnumPriorities =
       parseHeuristic(schedIni.GetString("SECOND_PASS_ENUM_HEURISTIC"));
   SCF = parseSpillCostFunc();
-  RegionTimeout = schedIni.GetInt("REGION_TIMEOUT");
-  FirstPassRegionTimeout = schedIni.GetInt("FIRST_PASS_REGION_TIMEOUT");
-  SecondPassRegionTimeout = schedIni.GetInt("SECOND_PASS_REGION_TIMEOUT");
-  LengthTimeout = schedIni.GetInt("LENGTH_TIMEOUT");
-  FirstPassLengthTimeout = schedIni.GetInt("FIRST_PASS_LENGTH_TIMEOUT");
-  SecondPassLengthTimeout = schedIni.GetInt("SECOND_PASS_LENGTH_TIMEOUT");
+  //======================================================================================
+  // jbaile
+  //======================================================================================
+  // Timeouts are carried internally in microseconds so the per-instruction budget can
+  // express and enforce sub-millisecond region budgets. The sched.ini values are in
+  // milliseconds, so scale them by 1000 on read. This is behavior-neutral for the
+  // default path: the deadline machinery (bb_spill / enumerator) now works in
+  // microseconds against GetProcessorTimeMicros(), so 5 ms reads as 5000 us and
+  // produces the same wall-clock deadline as before.
+  RegionTimeout = schedIni.GetInt("REGION_TIMEOUT") * 1000;
+  FirstPassRegionTimeout = schedIni.GetInt("FIRST_PASS_REGION_TIMEOUT") * 1000;
+  SecondPassRegionTimeout = schedIni.GetInt("SECOND_PASS_REGION_TIMEOUT") * 1000;
+  LengthTimeout = schedIni.GetInt("LENGTH_TIMEOUT") * 1000;
+  FirstPassLengthTimeout = schedIni.GetInt("FIRST_PASS_LENGTH_TIMEOUT") * 1000;
+  SecondPassLengthTimeout = schedIni.GetInt("SECOND_PASS_LENGTH_TIMEOUT") * 1000;
+  //======================================================================================
   if (schedIni.GetString("TIMEOUT_PER") == "INSTR")
     IsTimeoutPerInst = true;
   else
@@ -963,7 +981,7 @@ void ScheduleDAGOptSched::loadOptSchedConfig() {
       OccupancyLimit = func_config->optsched_occupancy_limit_.value();
   }
 
-  // Per-instruction scheduling time budget from misched (time_per_instr_*_ms).
+  // Per-instruction scheduling time budget from misched (time_per_instr_*_us).
   // Overrides the sched.ini timeouts so OptSched and the HierarchicalScheduler
   // can be compared at equal wall-clock effort. Occupancy budget -> first (OCC)
   // pass, length budget -> second (ILP) pass. We set only the FIRST_PASS_*/
@@ -971,23 +989,24 @@ void ScheduleDAGOptSched::loadOptSchedConfig() {
   // (our setup); the plain REGION_/LENGTH_TIMEOUT fields are overwritten by the
   // per-pass swap before use, so touching them here would be dead. Within a
   // pass, region and length get the same value so REGION is the single binding
-  // total-time budget. Any per-instr value forces TIMEOUT_PER=INSTR (the ms are
+  // total-time budget. Any per-instr value forces TIMEOUT_PER=INSTR (the us are
   // scaled by the region's instruction count where the region is scheduled).
-  // This only sets the BnB enumerator's deadlines; ACO reads the same setting
-  // itself (its host loop is iteration-bounded, so it needs a separate
+  // The value is already microseconds (matching the internal unit), so no scaling
+  // here. This only sets the BnB enumerator's deadlines; ACO reads the same
+  // setting itself (its host loop is iteration-bounded, so it needs a separate
   // deadline -- see aco.hip.cpp).
   const MachineInstrSchedulerConfig::GlobalSettings &global_settings =
       mis_config.GetGlobalSettings();
-  if (global_settings.time_per_instr_occupancy_ms.has_value()) {
-      int occ_ms = global_settings.time_per_instr_occupancy_ms.value();
-      FirstPassRegionTimeout = occ_ms;
-      FirstPassLengthTimeout = occ_ms;
+  if (global_settings.time_per_instr_occupancy_us.has_value()) {
+      int occ_us = global_settings.time_per_instr_occupancy_us.value();
+      FirstPassRegionTimeout = occ_us;
+      FirstPassLengthTimeout = occ_us;
       IsTimeoutPerInst = true;
   }
-  if (global_settings.time_per_instr_length_ms.has_value()) {
-      int len_ms = global_settings.time_per_instr_length_ms.value();
-      SecondPassRegionTimeout = len_ms;
-      SecondPassLengthTimeout = len_ms;
+  if (global_settings.time_per_instr_length_us.has_value()) {
+      int len_us = global_settings.time_per_instr_length_us.value();
+      SecondPassRegionTimeout = len_us;
+      SecondPassLengthTimeout = len_us;
       IsTimeoutPerInst = true;
   }
   //======================================================================================

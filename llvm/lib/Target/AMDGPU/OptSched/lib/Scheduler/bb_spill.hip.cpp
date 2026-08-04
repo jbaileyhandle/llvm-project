@@ -1053,7 +1053,7 @@ void BBWithSpill::FinishOptml_() {
 }
 /*****************************************************************************/
 
-Enumerator *BBWithSpill::AllocEnumrtr_(Milliseconds timeout) {
+Enumerator *BBWithSpill::AllocEnumrtr_(Microseconds timeout_us) { // jbaile: us
   bool enblStallEnum = enblStallEnum_;
   /*  if (!dataDepGraph_->IncludesUnpipelined()) {
       enblStallEnum = false;
@@ -1062,27 +1062,33 @@ Enumerator *BBWithSpill::AllocEnumrtr_(Milliseconds timeout) {
   enumrtr_ = new LengthCostEnumerator(
       dataDepGraph_, machMdl_, schedUprBound_, GetSigHashSize(),
       GetEnumPriorities(), GetPruningStrategy(), SchedForRPOnly_, enblStallEnum,
-      timeout, GetSpillCostFunc(), 0, NULL);
+      timeout_us, GetSpillCostFunc(), 0, NULL);
 
   return enumrtr_;
 }
 /*****************************************************************************/
 
-FUNC_RESULT BBWithSpill::Enumerate_(Milliseconds startTime,
-                                    Milliseconds rgnTimeout,
-                                    Milliseconds lngthTimeout) {
+//========================================================================================
+// jbaile: deadlines are microseconds so sub-millisecond region budgets are enforced.
+// startTime_us is the microsecond deadline base captured in FindOptimalSchedule at the
+// same instant as the ms enumStart, so the enforced window matches the previous behavior
+// for the default (millisecond) path while staying precise below a millisecond.
+//========================================================================================
+FUNC_RESULT BBWithSpill::Enumerate_(Microseconds startTime_us,
+                                    Microseconds rgnTimeout_us,
+                                    Microseconds lngthTimeout_us) {
   InstCount trgtLngth;
   FUNC_RESULT rslt = RES_SUCCESS;
   int iterCnt = 0;
   int costLwrBound = 0;
   bool timeout = false;
 
-  Milliseconds rgnDeadline, lngthDeadline;
-  rgnDeadline =
-      (rgnTimeout == INVALID_VALUE) ? INVALID_VALUE : startTime + rgnTimeout;
-  lngthDeadline =
-      (rgnTimeout == INVALID_VALUE) ? INVALID_VALUE : startTime + lngthTimeout;
-  assert(lngthDeadline <= rgnDeadline);
+  Microseconds rgnDeadline_us, lngthDeadline_us;
+  rgnDeadline_us =
+      (rgnTimeout_us == INVALID_VALUE) ? INVALID_VALUE : startTime_us + rgnTimeout_us;
+  lngthDeadline_us =
+      (rgnTimeout_us == INVALID_VALUE) ? INVALID_VALUE : startTime_us + lngthTimeout_us;
+  assert(lngthDeadline_us <= rgnDeadline_us);
 
   for (trgtLngth = schedLwrBound_; trgtLngth <= schedUprBound_; trgtLngth++) {
     InitForSchdulng();
@@ -1090,13 +1096,13 @@ FUNC_RESULT BBWithSpill::Enumerate_(Milliseconds startTime,
     Logger::Info("Enumerating at target length %d", trgtLngth);
     //#endif
     rslt = enumrtr_->FindFeasibleSchedule(enumCrntSched_, trgtLngth, this,
-                                          costLwrBound, lngthDeadline);
+                                          costLwrBound, lngthDeadline_us);
     if (rslt == RES_TIMEOUT)
       timeout = true;
     HandlEnumrtrRslt_(rslt, trgtLngth);
 
     if (GetBestCost() == 0 || rslt == RES_ERROR ||
-        (lngthDeadline == rgnDeadline && rslt == RES_TIMEOUT) ||
+        (lngthDeadline_us == rgnDeadline_us && rslt == RES_TIMEOUT) ||
         (rslt == RES_SUCCESS && IsSecondPass())) {
 
       // If doing two pass optsched and on the second pass then terminate if a
@@ -1121,9 +1127,9 @@ FUNC_RESULT BBWithSpill::Enumerate_(Milliseconds startTime,
 
     iterCnt++;
     costLwrBound += 1;
-    lngthDeadline = Utilities::GetProcessorTime() + lngthTimeout;
-    if (lngthDeadline > rgnDeadline)
-      lngthDeadline = rgnDeadline;
+    lngthDeadline_us = Utilities::GetProcessorTimeMicros() + lngthTimeout_us;
+    if (lngthDeadline_us > rgnDeadline_us)
+      lngthDeadline_us = rgnDeadline_us;
   }
 
 #ifdef IS_DEBUG_ITERS

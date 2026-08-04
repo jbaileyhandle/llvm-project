@@ -96,72 +96,76 @@ struct OccupancyConfig {
   // direction).
   bool optimize_every_region_past_occupancy_target = false;
 
-  // Per-region wall-clock budget, ms (occupancy.search.timeout), for the
+  // Per-region wall-clock budget, us (occupancy.search.timeout), for the
   // PRIMARY search whichever it is: flat BFS-DP, flat DFS, and the BFS-DP of
   // bfsdp+dfs. 0 means "no timeout" — run the search to completion. 10s default.
-  int timeout_ms = 10000;
+  // The config key is given in milliseconds and scaled to microseconds on parse;
+  // the search carries the budget in microseconds so sub-millisecond
+  // per-instruction budgets are enforced without truncation.
+  int timeout_us = 10000000;
   /// Budget for the DFS BACKUP in bfsdp+dfs (occupancy.search.fallback_timeout),
-  /// ms. nullopt means "same as timeout_ms"; 0 means "no timeout".
-  std::optional<int> fallback_timeout_ms;
+  /// us. nullopt means "same as timeout_us"; 0 means "no timeout".
+  std::optional<int> fallback_timeout_us;
 
-  /// Effective fallback budget in ms (explicit value, else the primary); 0 is
+  /// Effective fallback budget in us (explicit value, else the primary); 0 is
   /// "no timeout". Used for display.
-  int GetFallbackTimeoutMs() const {
-    return fallback_timeout_ms.value_or(timeout_ms);
+  int GetFallbackTimeoutUs() const {
+    return fallback_timeout_us.value_or(timeout_us);
   }
 
   /// Primary / fallback budgets as the search classes' optional<int64_t>, where
   /// a config value of 0 maps to nullopt ("run to completion").
   std::optional<int64_t> SearchTimeoutOrUnlimited() const {
-    return timeout_ms == 0 ? std::nullopt : std::optional<int64_t>(timeout_ms);
+    return timeout_us == 0 ? std::nullopt : std::optional<int64_t>(timeout_us);
   }
   std::optional<int64_t> FallbackTimeoutOrUnlimited() const {
-    int ms = GetFallbackTimeoutMs();
-    return ms == 0 ? std::nullopt : std::optional<int64_t>(ms);
+    int us = GetFallbackTimeoutUs();
+    return us == 0 ? std::nullopt : std::optional<int64_t>(us);
   }
 
   // Decompose-only: budgets for the INNER (within-subgraph "make") search,
   // separate from the outer/flat search above. occupancy.inner_search.timeout
   // is the primary; occupancy.inner_search.fallback_timeout is the DFS backup
-  // when inner_search is bfsdp+dfs (nullopt = same as inner_timeout_ms). 0 =
-  // "no timeout". Default 5000 matches the historical per-subgraph make budget.
-  int inner_timeout_ms = 5000;
-  std::optional<int> inner_fallback_timeout_ms;
+  // when inner_search is bfsdp+dfs (nullopt = same as inner_timeout_us). 0 =
+  // "no timeout". Default 5s matches the historical per-subgraph make budget.
+  int inner_timeout_us = 5000000;
+  std::optional<int> inner_fallback_timeout_us;
 
-  int GetInnerFallbackTimeoutMs() const {
-    return inner_fallback_timeout_ms.value_or(inner_timeout_ms);
+  int GetInnerFallbackTimeoutUs() const {
+    return inner_fallback_timeout_us.value_or(inner_timeout_us);
   }
   std::optional<int64_t> InnerSearchTimeoutOrUnlimited() const {
-    return inner_timeout_ms == 0 ? std::nullopt
-                                 : std::optional<int64_t>(inner_timeout_ms);
+    return inner_timeout_us == 0 ? std::nullopt
+                                 : std::optional<int64_t>(inner_timeout_us);
   }
   std::optional<int64_t> InnerFallbackTimeoutOrUnlimited() const {
-    int ms = GetInnerFallbackTimeoutMs();
-    return ms == 0 ? std::nullopt : std::optional<int64_t>(ms);
+    int us = GetInnerFallbackTimeoutUs();
+    return us == 0 ? std::nullopt : std::optional<int64_t>(us);
   }
 
-  // Per-instruction occupancy-search budget (ms/instruction), mirrored from the
-  // misched global time_per_instr_occupancy_ms. When set, overrides the flat
+  // Per-instruction occupancy-search budget (us/instruction), mirrored from the
+  // misched global time_per_instr_occupancy_us. When set, overrides the flat
   // search.timeout config; disallowed alongside an explicit flat timeout, a
   // non-dfs search, or recursive decompose (all enforced in Build).
-  std::optional<int> time_per_instr_ms;
+  std::optional<int> time_per_instr_us;
   // Whether the flat search.timeout / inner_search.timeout were set as explicit
   // user keys (not via a preset). Only the explicit form conflicts with a
   // per-instruction budget.
   bool timeout_explicitly_set = false;
   bool inner_timeout_explicitly_set = false;
 
-  /// Effective search timeout over `graph_size` nodes: the per-instruction
+  /// Effective search timeout (us) over `graph_size` nodes: the per-instruction
   /// budget when set (halved under decompose, since each instruction is
   /// scheduled twice -- inner make + outer), else `flat`. nullopt = unlimited.
+  /// No floor: a sub-millisecond total budget stays sub-millisecond.
   std::optional<int64_t> EffectiveTimeout(int graph_size,
                                           std::optional<int64_t> flat) const {
-    if (!time_per_instr_ms.has_value()) {
+    if (!time_per_instr_us.has_value()) {
       return flat;
     }
-    int rate = decompose ? (*time_per_instr_ms + 1) / 2 : *time_per_instr_ms;
-    int64_t ms = static_cast<int64_t>(rate) * static_cast<int64_t>(graph_size);
-    return ms <= 0 ? std::nullopt : std::optional<int64_t>(ms);
+    int rate_us = decompose ? (*time_per_instr_us + 1) / 2 : *time_per_instr_us;
+    int64_t us = static_cast<int64_t>(rate_us) * static_cast<int64_t>(graph_size);
+    return us <= 0 ? std::nullopt : std::optional<int64_t>(us);
   }
 };
 
@@ -177,34 +181,35 @@ struct LengthConfig {
   // the length pass is DFS-only regardless.)
   LengthPolicy policy = LengthPolicy::kMinBoundedSpillSignals;
 
-  // Per-region wall-clock budget, ms (length.search.timeout), for each length
+  // Per-region wall-clock budget, us (length.search.timeout), for each length
   // DFS phase. 0 means "no timeout". DFS-only, so there is no fallback budget.
   // 10s default matches the historical DfsSearch default the length pass used.
-  int timeout_ms = 10000;
+  // The config key is given in milliseconds and scaled to microseconds on parse.
+  int timeout_us = 10000000;
   // Whether length.search.timeout was set as an explicit user key (conflicts
   // with a per-instruction budget). No preset sets it, so any set is explicit;
   // tracked the same way as the occupancy timeouts for consistency.
   bool timeout_explicitly_set = false;
 
   std::optional<int64_t> SearchTimeoutOrUnlimited() const {
-    return timeout_ms == 0 ? std::nullopt : std::optional<int64_t>(timeout_ms);
+    return timeout_us == 0 ? std::nullopt : std::optional<int64_t>(timeout_us);
   }
 
-  // Per-instruction length-search budget (ms/instruction), mirrored from the
-  // misched global time_per_instr_length_ms. The length pass is not
+  // Per-instruction length-search budget (us/instruction), mirrored from the
+  // misched global time_per_instr_length_us. The length pass is not
   // hierarchical, so the full rate applies (no halving).
-  std::optional<int> time_per_instr_ms;
+  std::optional<int> time_per_instr_us;
 
-  /// Effective length-search timeout over `graph_size` nodes: the
-  /// per-instruction budget (full rate) when set, else `flat`.
+  /// Effective length-search timeout (us) over `graph_size` nodes: the
+  /// per-instruction budget (full rate) when set, else `flat`. No floor.
   std::optional<int64_t> EffectiveTimeout(int graph_size,
                                           std::optional<int64_t> flat) const {
-    if (!time_per_instr_ms.has_value()) {
+    if (!time_per_instr_us.has_value()) {
       return flat;
     }
-    int64_t ms = static_cast<int64_t>(*time_per_instr_ms) *
+    int64_t us = static_cast<int64_t>(*time_per_instr_us) *
                  static_cast<int64_t>(graph_size);
-    return ms <= 0 ? std::nullopt : std::optional<int64_t>(ms);
+    return us <= 0 ? std::nullopt : std::optional<int64_t>(us);
   }
 };
 

@@ -138,9 +138,11 @@ private:
                        InstCount &execCost, bool trackCnflcts);
 
   void CmputSchedUprBound_();
-  Enumerator *AllocEnumrtr_(Milliseconds timeout);
-  FUNC_RESULT Enumerate_(Milliseconds startTime, Milliseconds rgnDeadline,
-                         Milliseconds lngthDeadline);
+  Enumerator *AllocEnumrtr_(Microseconds timeout_us); // jbaile: us
+  // jbaile: startTime_us is the microsecond deadline base;
+  // rgnTimeout_us/lngthTimeout_us are region budgets in microseconds.
+  FUNC_RESULT Enumerate_(Microseconds startTime_us, Microseconds rgnTimeout_us,
+                         Microseconds lngthTimeout_us);
   void SetupForSchdulng_();
   void FinishHurstc_();
   void FinishOptml_();

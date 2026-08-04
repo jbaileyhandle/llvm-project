@@ -79,9 +79,12 @@ class MachineInstrSchedulerConfig {
             // equal). A region's budget is this value times its instruction
             // count. Consumed by OptSched (BnB region/length timeouts; ACO host
             // loop deadline) and the HierarchicalScheduler (per-region search
-            // timeout). unset = leave each scheduler's own default in place.
-            std::optional<int> time_per_instr_occupancy_ms;
-            std::optional<int> time_per_instr_length_ms;
+            // timeout). Microseconds so that sub-millisecond per-region budgets
+            // can be expressed and enforced (the schedulers carry the budget in
+            // microseconds internally). unset = leave each scheduler's own
+            // default in place.
+            std::optional<int> time_per_instr_occupancy_us;
+            std::optional<int> time_per_instr_length_us;
             // Name of an alternate target sched (timing) model to swap in, e.g.
             // "fast_memory". Interpreted by the target (AMDGPU); unknown names are
             // rejected there, not here.

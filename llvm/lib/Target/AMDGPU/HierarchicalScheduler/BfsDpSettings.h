@@ -6,7 +6,7 @@
 // inject, only scalar configuration, so this is a settings struct
 // rather than a template policy. A default-constructed
 // BfsDpSettings{} is the neutral configuration (no timeout); the
-// occupancy pass sets timeout_ms from occupancy.search.timeout.
+// occupancy pass sets timeout_us from occupancy.search.timeout.
 //
 //===----------------------------------------------------------------------===//
 
@@ -35,21 +35,21 @@ struct BfsDpSettings {
   ScoreRecipe recipe = score_recipes::kMaximizeRegisterOccupancy;
 
   /// Per-region wall-clock budget for PartitionDag::Build(), in
-  /// milliseconds. nullopt (the default) means no timeout — Build
+  /// microseconds. nullopt (the default) means no timeout — Build
   /// runs the score-bound-pruned search to exhaustion. Shakedowns
   /// omit it so the search runs to completion: the BFS-DP-vs-DFS
   /// comparison needs the exhaustive result, and a timeout could
   /// abort Build with no schedule at all.
-  std::optional<int64_t> timeout_ms = std::nullopt;
+  std::optional<int64_t> timeout_us = std::nullopt;
 
   /// BFS-DP settings for the occupancy pass: maximize register occupancy under
-  /// `policy`'s metric (continuous score vs integer level), with `timeout_ms`
+  /// `policy`'s metric (continuous score vs integer level), with `timeout_us`
   /// (nullopt = no timeout). Flat BFS-DP and decompose-outer share this; the
   /// refine-spill-area policies are DFS-only, so they can't reach here.
   static BfsDpSettings ForOccupancy(OccupancyPolicy policy,
-                                    std::optional<int64_t> timeout_ms) {
+                                    std::optional<int64_t> timeout_us) {
     BfsDpSettings settings;
-    settings.timeout_ms = timeout_ms;
+    settings.timeout_us = timeout_us;
     switch (policy) {
     case OccupancyPolicy::kContinuousOccupancy:
       settings.recipe =

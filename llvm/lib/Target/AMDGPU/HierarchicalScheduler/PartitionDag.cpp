@@ -43,12 +43,12 @@ bool PartitionDag::Build() {
   }
 
   // Absolute wall-clock deadline for this Build. nullopt when the
-  // ctor was given no timeout_ms — the per-expansion check below
+  // ctor was given no timeout_us — the per-expansion check below
   // is gated on it, so an unset budget runs the BFS to exhaustion.
   std::optional<std::chrono::steady_clock::time_point> deadline;
-  if (settings_.timeout_ms) {
+  if (settings_.timeout_us) {
     deadline = std::chrono::steady_clock::now() +
-               std::chrono::milliseconds(*settings_.timeout_ms);
+               std::chrono::microseconds(*settings_.timeout_us);
   }
 
   // Two rolling layers — current = the level we're expanding now,

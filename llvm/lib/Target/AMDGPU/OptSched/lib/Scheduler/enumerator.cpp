@@ -436,10 +436,15 @@ Enumerator::Enumerator(DataDepGraph *dataDepGraph, MachineModel *machMdl,
                        InstCount schedUprBound, int16_t sigHashSize,
                        SchedPriorities prirts, Pruning PruningStrategy,
                        bool SchedForRPOnly, bool enblStallEnum,
-                       Milliseconds timeout, InstCount preFxdInstCnt,
+                       Microseconds timeout_us, InstCount preFxdInstCnt, // jbaile: us
                        SchedInstruction *preFxdInsts[])
     : ConstrainedScheduler(dataDepGraph, machMdl, schedUprBound) {
-  memAllocBlkSize_ = (int)timeout / TIMEOUT_TO_MEMBLOCK_RATIO;
+  //====================================================================================
+  // jbaile: memAllocBlkSize_ is a heuristic derived from the timeout in *milliseconds*.
+  // The timeout is now carried in microseconds, so divide back to ms here to keep this
+  // allocation-sizing heuristic behavior-neutral.
+  //====================================================================================
+  memAllocBlkSize_ = (int)(timeout_us / 1000) / TIMEOUT_TO_MEMBLOCK_RATIO;
   assert(preFxdInstCnt >= 0);
 
   if (memAllocBlkSize_ > MAX_MEMBLOCK_SIZE) {
@@ -877,7 +882,10 @@ void AppendAndCheckSuffixSchedules(
 
 FUNC_RESULT Enumerator::FindFeasibleSchedule_(InstSchedule *sched,
                                               InstCount trgtLngth,
-                                              Milliseconds deadline) {
+                                              //================================
+                                              // jbaile
+                                              //================================
+                                              Microseconds deadline_us) {
   EnumTreeNode *nxtNode = NULL;
   bool allNodesExplrd = false;
   bool foundFsblBrnch = false;
@@ -898,7 +906,12 @@ FUNC_RESULT Enumerator::FindFeasibleSchedule_(InstSchedule *sched,
 #endif
 
   while (!(allNodesExplrd || WasObjctvMet_())) {
-    if (deadline != INVALID_VALUE && Utilities::GetProcessorTime() > deadline) {
+    //====================================================================================
+    // jbaile: microsecond-resolution deadline so sub-millisecond per-region budgets are
+    // enforced (GetProcessorTime() truncates to whole ms and would floor them away).
+    //====================================================================================
+    if (deadline_us != INVALID_VALUE &&
+        Utilities::GetProcessorTimeMicros() > deadline_us) {
       isTimeout = true;
       break;
     }
@@ -1867,10 +1880,10 @@ __host__
 LengthEnumerator::LengthEnumerator(
     DataDepGraph *dataDepGraph, MachineModel *machMdl, InstCount schedUprBound,
     int16_t sigHashSize, SchedPriorities prirts, Pruning PruningStrategy,
-    bool SchedForRPOnly, bool enblStallEnum, Milliseconds timeout,
+    bool SchedForRPOnly, bool enblStallEnum, Microseconds timeout_us, // jbaile: us
     InstCount preFxdInstCnt, SchedInstruction *preFxdInsts[])
     : Enumerator(dataDepGraph, machMdl, schedUprBound, sigHashSize, prirts,
-                 PruningStrategy, SchedForRPOnly, enblStallEnum, timeout,
+                 PruningStrategy, SchedForRPOnly, enblStallEnum, timeout_us,
                  preFxdInstCnt, preFxdInsts) {
   SetupAllocators_();
   tmpHstryNode_ = new HistEnumTreeNode;
@@ -1917,8 +1930,9 @@ bool LengthEnumerator::IsCostEnum() { return false; }
 
 FUNC_RESULT LengthEnumerator::FindFeasibleSchedule(InstSchedule *sched,
                                                    InstCount trgtLngth,
-                                                   Milliseconds deadline) {
-  return FindFeasibleSchedule_(sched, trgtLngth, deadline);
+                                                   // jbaile: deadline_us (microseconds)
+                                                   Microseconds deadline_us) {
+  return FindFeasibleSchedule_(sched, trgtLngth, deadline_us);
 }
 /*****************************************************************************/
 
@@ -1957,11 +1971,11 @@ __host__
 LengthCostEnumerator::LengthCostEnumerator(
     DataDepGraph *dataDepGraph, MachineModel *machMdl, InstCount schedUprBound,
     int16_t sigHashSize, SchedPriorities prirts, Pruning PruningStrategy,
-    bool SchedForRPOnly, bool enblStallEnum, Milliseconds timeout,
+    bool SchedForRPOnly, bool enblStallEnum, Microseconds timeout_us, // jbaile: us
     SPILL_COST_FUNCTION spillCostFunc, InstCount preFxdInstCnt,
     SchedInstruction *preFxdInsts[])
     : Enumerator(dataDepGraph, machMdl, schedUprBound, sigHashSize, prirts,
-                 PruningStrategy, SchedForRPOnly, enblStallEnum, timeout,
+                 PruningStrategy, SchedForRPOnly, enblStallEnum, timeout_us,
                  preFxdInstCnt, preFxdInsts) {
   SetupAllocators_();
 
@@ -2034,10 +2048,11 @@ FUNC_RESULT LengthCostEnumerator::FindFeasibleSchedule(InstSchedule *sched,
                                                        InstCount trgtLngth,
                                                        SchedRegion *rgn,
                                                        int costLwrBound,
-                                                       Milliseconds deadline) {
+                                                       // jbaile: microseconds
+                                                       Microseconds deadline_us) {
   rgn_ = rgn;
   costLwrBound_ = costLwrBound;
-  FUNC_RESULT rslt = FindFeasibleSchedule_(sched, trgtLngth, deadline);
+  FUNC_RESULT rslt = FindFeasibleSchedule_(sched, trgtLngth, deadline_us);
 
 #ifdef IS_DEBUG_TRACE_ENUM
   stats::costChecksPerLength.Record(costChkCnt_);

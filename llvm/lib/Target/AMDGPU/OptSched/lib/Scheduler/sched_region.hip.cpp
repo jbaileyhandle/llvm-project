@@ -143,12 +143,12 @@ void SchedRegion::CmputAbslutUprBound_() {
   abslutSchedUprBound_ = dataDepGraph_->GetAbslutSchedUprBound();
 }
 
-static bool isBbEnabled(Config &schedIni, Milliseconds rgnTimeout) {
+static bool isBbEnabled(Config &schedIni, Microseconds rgnTimeout_us) { // jbaile: us
   bool EnableBbOpt = schedIni.GetBool("ENUM_ENABLED");
   if (!EnableBbOpt)
     return false;
 
-  if (rgnTimeout <= 0) {
+  if (rgnTimeout_us <= 0) {
     Logger::Info("Disabling enumerator becuase region timeout is set to zero.");
     return false;
   }
@@ -184,7 +184,8 @@ static void dumpDDG(DataDepGraph *DDG, llvm::StringRef DDGDumpPath,
 }
 
 FUNC_RESULT SchedRegion::FindOptimalSchedule(
-    Milliseconds rgnTimeout, Milliseconds lngthTimeout, bool &isLstOptml,
+    // jbaile: rgnTimeout_us / lngthTimeout_us are microseconds
+    Microseconds rgnTimeout_us, Microseconds lngthTimeout_us, bool &isLstOptml,
     InstCount &bestCost, InstCount &bestSchedLngth, InstCount &hurstcCost,
     InstCount &hurstcSchedLngth, InstSchedule *&bestSched, bool filterByPerp,
     const BLOCKS_TO_KEEP blocksToKeep, unsigned loopDepth) {
@@ -228,7 +229,7 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
   Config &schedIni = SchedulerOptions::getInstance();
   bool HeuristicSchedulerEnabled = schedIni.GetBool("HEUR_ENABLED");
   bool AcoSchedulerEnabled = schedIni.GetBool("ACO_ENABLED");
-  bool BbSchedulerEnabled = isBbEnabled(schedIni, rgnTimeout);
+  bool BbSchedulerEnabled = isBbEnabled(schedIni, rgnTimeout_us);
   unsigned long randSeed = (unsigned long) schedIni.GetInt("RANDOM_SEED");
   bool devACOEnabled = schedIni.GetBool("DEV_ACO");
   int numBlocks;
@@ -716,9 +717,15 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
   // Step #4: Find the optimal schedule if the heuristc and ACO was not optimal
   if (BbSchedulerEnabled) {
     Milliseconds enumStart = Utilities::GetProcessorTime();
+    //==================================================================================
+    // jbaile: microsecond-precise deadline base, captured at the same instant as the
+    // millisecond enumStart (which stays for ms reporting), and threaded to Optimize_/
+    // Enumerate_ so sub-millisecond region budgets are enforced without truncation.
+    //==================================================================================
+    Microseconds enumStart_us = Utilities::GetProcessorTimeMicros();
     if (!isLstOptml) {
       dataDepGraph_->SetHard(true);
-      rslt = Optimize_(enumStart, rgnTimeout, lngthTimeout);
+      rslt = Optimize_(enumStart, enumStart_us, rgnTimeout_us, lngthTimeout_us);
       Milliseconds enumTime = Utilities::GetProcessorTime() - enumStart;
 
       // TODO: Implement this stat for ACO also.
@@ -734,7 +741,7 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
         enumBestSched_->Print(Logger::GetLogStream(), "Optimal");
 #endif
       }
-    } else if (rgnTimeout == 0) {
+    } else if (rgnTimeout_us == 0) {
       Logger::Info(
           "Bypassing optimal scheduling due to zero time limit with cost %d",
           bestCost_);
@@ -743,7 +750,7 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
                    bestSchedLngth_, bestCost_);
     }
 
-    if (rgnTimeout != 0) {
+    if (rgnTimeout_us != 0) {
       bool optimalSchedule = isLstOptml || (rslt == RES_SUCCESS);
       Logger::Info("Best schedule for DAG %s has cost %d and length %d. The "
                    "schedule is %s",
@@ -887,7 +894,7 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
     }
   }
   {
-    if (spillCostFunc_ == SCF_SLIL && rgnTimeout != 0) {
+    if (spillCostFunc_ == SCF_SLIL && rgnTimeout_us != 0) {
       // costLwrBound_: static lower bound
       // bestCost_: total cost of the best schedule relative to static lower
       // bound
@@ -947,8 +954,15 @@ FUNC_RESULT SchedRegion::FindOptimalSchedule(
 }
 
 FUNC_RESULT SchedRegion::Optimize_(Milliseconds startTime,
-                                   Milliseconds rgnTimeout,
-                                   Milliseconds lngthTimeout) {
+                                   //================================================
+                                   // jbaile: startTime_us is the microsecond deadline
+                                   // base; rgnTimeout_us/lngthTimeout_us are the region
+                                   // budgets in microseconds. startTime (ms) is kept for
+                                   // the ms wall-time reporting below.
+                                   //================================================
+                                   Microseconds startTime_us,
+                                   Microseconds rgnTimeout_us,
+                                   Microseconds lngthTimeout_us) {
   Enumerator *enumrtr;
   FUNC_RESULT rslt = RES_SUCCESS;
 
@@ -956,8 +970,8 @@ FUNC_RESULT SchedRegion::Optimize_(Milliseconds startTime,
   enumBestSched_ = AllocNewSched_();
 
   InstCount initCost = bestCost_;
-  enumrtr = AllocEnumrtr_(lngthTimeout);
-  rslt = Enumerate_(startTime, rgnTimeout, lngthTimeout);
+  enumrtr = AllocEnumrtr_(lngthTimeout_us);
+  rslt = Enumerate_(startTime_us, rgnTimeout_us, lngthTimeout_us);
 
   Milliseconds solnTime = Utilities::GetProcessorTime() - startTime;
 

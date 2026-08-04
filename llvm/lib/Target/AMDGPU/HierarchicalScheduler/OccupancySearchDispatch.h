@@ -44,14 +44,14 @@ namespace hierarchical_scheduler {
 class ScheduleGraph;
 
 /// Run the occupancy search named by `kind` over `graph`, returning its result.
-///   kDfs        : DFS only (RunOccupancyDfs), budget `primary_timeout_ms`.
-///   kBfsDp      : BFS-DP only, budget `primary_timeout_ms`.
-///   kBfsDpDfs   : BFS-DP (budget `primary_timeout_ms`); if it produced no
+///   kDfs        : DFS only (RunOccupancyDfs), budget `primary_timeout_us`.
+///   kBfsDp      : BFS-DP only, budget `primary_timeout_us`.
+///   kBfsDpDfs   : BFS-DP (budget `primary_timeout_us`); if it produced no
 ///                 schedule because it timed out, DFS rescues (budget
-///                 `fallback_timeout_ms`), carrying BFS-DP's stats onto the DFS
+///                 `fallback_timeout_us`), carrying BFS-DP's stats onto the DFS
 ///                 result row.
-/// `primary_timeout_ms` is the budget for whichever search runs first (DFS for
-/// kDfs, BFS-DP otherwise); `fallback_timeout_ms` is the rescue DFS's budget,
+/// `primary_timeout_us` is the budget for whichever search runs first (DFS for
+/// kDfs, BFS-DP otherwise); `fallback_timeout_us` is the rescue DFS's budget,
 /// used only by kBfsDpDfs. `policy` drives both halves
 /// (BfsDpSettings::ForOccupancy for BFS-DP, RunOccupancyDfs for DFS). `seed_bfs`
 /// configures BFS-DP's initial best score; `bfs_after_run` / `dfs_after_run` are
@@ -61,23 +61,23 @@ SearchResult RunOccupancySearch(Search kind, OccupancyPolicy policy,
                                 ScheduleGraph &graph, const GCNSubtarget &st,
                                 const MachineFunction &mf,
                                 const LiveIntervals &lis,
-                                std::optional<int64_t> primary_timeout_ms,
-                                std::optional<int64_t> fallback_timeout_ms,
+                                std::optional<int64_t> primary_timeout_us,
+                                std::optional<int64_t> fallback_timeout_us,
                                 SeedFn seed_bfs, BfsAfterRunFn bfs_after_run,
                                 DfsAfterRunFn dfs_after_run) {
-  auto run_dfs = [&](std::optional<int64_t> timeout_ms) -> SearchResult {
-    return RunOccupancyDfs(policy, graph, st, mf, lis, timeout_ms,
+  auto run_dfs = [&](std::optional<int64_t> timeout_us) -> SearchResult {
+    return RunOccupancyDfs(policy, graph, st, mf, lis, timeout_us,
                            dfs_after_run);
   };
 
   switch (kind) {
   case Search::kDfs: {
-    return run_dfs(primary_timeout_ms);
+    return run_dfs(primary_timeout_us);
   }
   case Search::kBfsDp:
   case Search::kBfsDpDfs: {
     BfsDpSearch bfs(&graph, &st, &mf,
-                    BfsDpSettings::ForOccupancy(policy, primary_timeout_ms));
+                    BfsDpSettings::ForOccupancy(policy, primary_timeout_us));
     seed_bfs(bfs);
     SearchResult bfs_result = bfs.Run();
     // Fraction of the graph's layers BFS-DP reached; kept on the row whether or
@@ -102,7 +102,7 @@ SearchResult RunOccupancySearch(Search kind, OccupancyPolicy policy,
       bfs_result.winner = "input";
       return bfs_result;
     }
-    SearchResult dfs_result = run_dfs(fallback_timeout_ms);
+    SearchResult dfs_result = run_dfs(fallback_timeout_us);
     // Keep BFS-DP's throughput on the row even though DFS won.
     dfs_result.bfs_pct = bfs_result.bfs_pct;
     dfs_result.bfs_ms = bfs_result.bfs_ms;
