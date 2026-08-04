@@ -37,6 +37,14 @@ class MachineInstrSchedulerConfig {
             // LICM hoists loop-invariant values, lengthening live ranges and
             // raising register pressure. Consumed in LICM.cpp.
             bool disable_licm = false;
+            // Disable memory-op clustering for every scheduler. All of them
+            // (MaxOccupancy pre-RA, the shared post-RA pass, OptSched, and the
+            // HierarchicalScheduler) build their load/store cluster edges through
+            // createLoad/StoreClusterDAGMutation, so gating those factories on
+            // this flag turns clustering off uniformly. Consumed in
+            // MachineScheduler.cpp. (Note: MaxILP adds no cluster mutation
+            // pre-RA, so only its post-RA schedule is affected.)
+            bool disable_mem_clustering = false;
             // OptSched (AcoOptSched, BnbOptSched).
             bool run_on_all_functions = false;
             bool run_regardless_of_heuristic_outcome = false;

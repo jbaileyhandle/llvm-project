@@ -2199,18 +2199,41 @@ public:
 
 namespace llvm {
 
+//========================================================================================
+// jbaile
+//========================================================================================
+// The misched.txt `disable_mem_clustering` flag turns memory-op clustering off
+// for every scheduler at once: they all build cluster edges through these two
+// factories, so returning nullptr here (as EnableMemOpCluster already does)
+// suppresses the edges everywhere. GetConfig() is a global singleton this file
+// already consumes elsewhere.
+static bool MemClusteringDisabledByMisched() {
+  return MachineInstrSchedulerConfig::GetConfig().GetFlags().disable_mem_clustering;
+}
+//========================================================================================
+
 std::unique_ptr<ScheduleDAGMutation>
 createLoadClusterDAGMutation(const TargetInstrInfo *TII,
                              const TargetRegisterInfo *TRI) {
-  return EnableMemOpCluster ? std::make_unique<LoadClusterMutation>(TII, TRI)
-                            : nullptr;
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  return (EnableMemOpCluster && !MemClusteringDisabledByMisched())
+             ? std::make_unique<LoadClusterMutation>(TII, TRI)
+             : nullptr;
+  //========================================================================================
 }
 
 std::unique_ptr<ScheduleDAGMutation>
 createStoreClusterDAGMutation(const TargetInstrInfo *TII,
                               const TargetRegisterInfo *TRI) {
-  return EnableMemOpCluster ? std::make_unique<StoreClusterMutation>(TII, TRI)
-                            : nullptr;
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  return (EnableMemOpCluster && !MemClusteringDisabledByMisched())
+             ? std::make_unique<StoreClusterMutation>(TII, TRI)
+             : nullptr;
+  //========================================================================================
 }
 
 } // end namespace llvm
