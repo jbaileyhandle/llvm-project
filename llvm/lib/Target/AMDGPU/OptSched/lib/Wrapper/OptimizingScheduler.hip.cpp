@@ -962,6 +962,34 @@ void ScheduleDAGOptSched::loadOptSchedConfig() {
       // setting it anyway
       OccupancyLimit = func_config->optsched_occupancy_limit_.value();
   }
+
+  // Per-instruction scheduling time budget from misched (time_per_instr_*_ms).
+  // Overrides the sched.ini timeouts so OptSched and the HierarchicalScheduler
+  // can be compared at equal wall-clock effort. Occupancy budget -> first (OCC)
+  // pass, length budget -> second (ILP) pass. We set only the FIRST_PASS_*/
+  // SECOND_PASS_* fields, which are the ones actually used with USE_TWO_PASS
+  // (our setup); the plain REGION_/LENGTH_TIMEOUT fields are overwritten by the
+  // per-pass swap before use, so touching them here would be dead. Within a
+  // pass, region and length get the same value so REGION is the single binding
+  // total-time budget. Any per-instr value forces TIMEOUT_PER=INSTR (the ms are
+  // scaled by the region's instruction count where the region is scheduled).
+  // This only sets the BnB enumerator's deadlines; ACO reads the same setting
+  // itself (its host loop is iteration-bounded, so it needs a separate
+  // deadline -- see aco.hip.cpp).
+  const MachineInstrSchedulerConfig::GlobalSettings &global_settings =
+      mis_config.GetGlobalSettings();
+  if (global_settings.time_per_instr_occupancy_ms.has_value()) {
+      int occ_ms = global_settings.time_per_instr_occupancy_ms.value();
+      FirstPassRegionTimeout = occ_ms;
+      FirstPassLengthTimeout = occ_ms;
+      IsTimeoutPerInst = true;
+  }
+  if (global_settings.time_per_instr_length_ms.has_value()) {
+      int len_ms = global_settings.time_per_instr_length_ms.value();
+      SecondPassRegionTimeout = len_ms;
+      SecondPassLengthTimeout = len_ms;
+      IsTimeoutPerInst = true;
+  }
   //======================================================================================
 }
 

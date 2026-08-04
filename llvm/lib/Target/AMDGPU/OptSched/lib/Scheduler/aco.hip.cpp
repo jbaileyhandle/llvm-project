@@ -7,6 +7,7 @@
 #include "opt-sched/Scheduler/sched_region.h"
 #include "opt-sched/Scheduler/bb_spill.h"
 #include "opt-sched/Scheduler/dev_defines.h"
+#include "opt-sched/Scheduler/utilities.h"
 // #include <thrust/functional.h>
 #include <hip/hip_cooperative_groups.h>
 #include "llvm/ADT/STLExtras.h"
@@ -1274,6 +1275,27 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
   if (dev_AcoSchdulr)
     dev_AcoSchdulr->noImprovementMax = noImprovementMax;
 
+  //==========================================================
+  // jbaile - per-instruction wall-clock budget for the host ACO loop.
+  // From misched (time_per_instr_{occupancy,length}_ms): occupancy value for the
+  // first (OCC) pass, length value for the second (ILP) pass. When set, the host
+  // loop below runs to this deadline instead of stopping after noImprovementMax
+  // stalled iterations -- the lower-bound-optimal early break still applies, so
+  // ACO never spins after finding a provably optimal schedule. count_ is the
+  // region's instruction count (GetInstCnt), matching how BnB scales its
+  // per-instruction timeout. Only the host loop honors this; the DEV_ACO device
+  // path is left unchanged.
+  //==========================================================
+  const std::optional<int> aco_time_per_instr_ms = IsFirst
+      ? mis_config.GetGlobalSettings().time_per_instr_occupancy_ms
+      : mis_config.GetGlobalSettings().time_per_instr_length_ms;
+  const bool aco_use_time_budget = aco_time_per_instr_ms.has_value();
+  const Milliseconds aco_time_budget_ms =
+      aco_use_time_budget
+          ? (Milliseconds)aco_time_per_instr_ms.value() * (Milliseconds)count_
+          : 0;
+  //==========================================================
+
   // compute the relative maximum score inverse
   ScRelMax = rgn_->GetHeuristicCost();
 
@@ -1442,6 +1464,11 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
 
   } else { // Run ACO on cpu
     Logger::Info("Running host ACO with %d ants per iteration", numThreads_);
+    //==========================================================
+    // jbaile - wall-clock start for the optional per-instruction time budget.
+    //==========================================================
+    const Milliseconds aco_start_ms = Utilities::GetProcessorTime();
+    //==========================================================
     InstCount RPTarget;
     if (!((BBWithSpill *)rgn_)->needsSLIL()) {
       RPTarget = bestSchedule->GetSpillCost();
@@ -1453,7 +1480,15 @@ FUNC_RESULT ACOScheduler::FindSchedule(InstSchedule *schedule_out,
       std::unordered_map<string, int> schedMap;
       int diffSchedCount = 0;
     #endif
-    while (noImprovement < noImprovementMax) {
+    //==========================================================
+    // jbaile - with a per-instruction time budget set, run to the wall-clock
+    // deadline instead of stopping after noImprovementMax stalled iterations.
+    // The lower-bound-optimal early break inside the loop still applies.
+    //==========================================================
+    while (aco_use_time_budget
+               ? (Utilities::GetProcessorTime() - aco_start_ms < aco_time_budget_ms)
+               : (noImprovement < noImprovementMax)) {
+    //==========================================================
       // dbgs() << "\t\t====> Another iteration of ACO beginning. noImprovement = " << noImprovement << ", noImprovementMax = " << noImprovementMax << ", RPTarget = " << RPTarget << "\n";
       iterations++;
       iterationBest = nullptr;

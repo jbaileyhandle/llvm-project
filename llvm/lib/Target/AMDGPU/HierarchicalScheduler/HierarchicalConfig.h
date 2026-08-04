@@ -139,6 +139,30 @@ struct OccupancyConfig {
     int ms = GetInnerFallbackTimeoutMs();
     return ms == 0 ? std::nullopt : std::optional<int64_t>(ms);
   }
+
+  // Per-instruction occupancy-search budget (ms/instruction), mirrored from the
+  // misched global time_per_instr_occupancy_ms. When set, overrides the flat
+  // search.timeout config; disallowed alongside an explicit flat timeout, a
+  // non-dfs search, or recursive decompose (all enforced in Build).
+  std::optional<int> time_per_instr_ms;
+  // Whether the flat search.timeout / inner_search.timeout were set as explicit
+  // user keys (not via a preset). Only the explicit form conflicts with a
+  // per-instruction budget.
+  bool timeout_explicitly_set = false;
+  bool inner_timeout_explicitly_set = false;
+
+  /// Effective search timeout over `graph_size` nodes: the per-instruction
+  /// budget when set (halved under decompose, since each instruction is
+  /// scheduled twice -- inner make + outer), else `flat`. nullopt = unlimited.
+  std::optional<int64_t> EffectiveTimeout(int graph_size,
+                                          std::optional<int64_t> flat) const {
+    if (!time_per_instr_ms.has_value()) {
+      return flat;
+    }
+    int rate = decompose ? (*time_per_instr_ms + 1) / 2 : *time_per_instr_ms;
+    int64_t ms = static_cast<int64_t>(rate) * static_cast<int64_t>(graph_size);
+    return ms <= 0 ? std::nullopt : std::optional<int64_t>(ms);
+  }
 };
 
 /// Length-pass configuration. Fixed algorithm (DFS), so no `search` /
@@ -152,6 +176,36 @@ struct LengthConfig {
   // push VGPR spill area above the input schedule's. (No search constraint —
   // the length pass is DFS-only regardless.)
   LengthPolicy policy = LengthPolicy::kMinBoundedSpillSignals;
+
+  // Per-region wall-clock budget, ms (length.search.timeout), for each length
+  // DFS phase. 0 means "no timeout". DFS-only, so there is no fallback budget.
+  // 10s default matches the historical DfsSearch default the length pass used.
+  int timeout_ms = 10000;
+  // Whether length.search.timeout was set as an explicit user key (conflicts
+  // with a per-instruction budget). No preset sets it, so any set is explicit;
+  // tracked the same way as the occupancy timeouts for consistency.
+  bool timeout_explicitly_set = false;
+
+  std::optional<int64_t> SearchTimeoutOrUnlimited() const {
+    return timeout_ms == 0 ? std::nullopt : std::optional<int64_t>(timeout_ms);
+  }
+
+  // Per-instruction length-search budget (ms/instruction), mirrored from the
+  // misched global time_per_instr_length_ms. The length pass is not
+  // hierarchical, so the full rate applies (no halving).
+  std::optional<int> time_per_instr_ms;
+
+  /// Effective length-search timeout over `graph_size` nodes: the
+  /// per-instruction budget (full rate) when set, else `flat`.
+  std::optional<int64_t> EffectiveTimeout(int graph_size,
+                                          std::optional<int64_t> flat) const {
+    if (!time_per_instr_ms.has_value()) {
+      return flat;
+    }
+    int64_t ms = static_cast<int64_t>(*time_per_instr_ms) *
+                 static_cast<int64_t>(graph_size);
+    return ms <= 0 ? std::nullopt : std::optional<int64_t>(ms);
+  }
 };
 
 /// The HierarchicalScheduler's whole typed configuration, built once at

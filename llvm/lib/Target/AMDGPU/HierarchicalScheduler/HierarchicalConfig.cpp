@@ -249,6 +249,10 @@ void ApplyLengthKey(StringRef key, StringRef val, LengthConfig &c) {
     c.policy = ParseEnum(kLengthPolicies, scope, key, val);
     return;
   }
+  if (key == "search.timeout") {
+    c.timeout_ms = ParseInt(scope, key, val);
+    return;
+  }
   UnknownKey(scope, key);
 }
 
@@ -339,6 +343,15 @@ void BuildOccupancy(const std::map<std::string, std::string> *kv,
   if (kv) {
     for (const auto &p : *kv) {
       if (p.first != "preset") {
+        // Track explicit (non-preset) flat-timeout keys: only these conflict
+        // with a per-instruction budget (a preset-supplied timeout is a default
+        // the per-instruction budget silently overrides).
+        if (p.first == "search.timeout") {
+          c.timeout_explicitly_set = true;
+        }
+        if (p.first == "inner_search.timeout") {
+          c.inner_timeout_explicitly_set = true;
+        }
         ApplyOccupancyKey(p.first, p.second, c);
       }
     }
@@ -355,6 +368,11 @@ void BuildLength(const std::map<std::string, std::string> *kv, LengthConfig &c) 
   if (kv) {
     for (const auto &p : *kv) {
       if (p.first != "preset") {
+        // Explicit (non-preset) flat timeout conflicts with a per-instruction
+        // budget (see BuildOccupancy).
+        if (p.first == "search.timeout") {
+          c.timeout_explicitly_set = true;
+        }
         ApplyLengthKey(p.first, p.second, c);
       }
     }
@@ -504,6 +522,44 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   hs.skip_occupancy_pass = flags.skip_occupancy_pass;
   hs.skip_length_pass = flags.skip_length_pass;
 
+  // Per-instruction scheduling-time budgets are unscoped global settings;
+  // mirror them into the pass they drive (occupancy / length).
+  const MachineInstrSchedulerConfig::GlobalSettings &global_settings =
+      cfg.GetGlobalSettings();
+  hs.occupancy.time_per_instr_ms = global_settings.time_per_instr_occupancy_ms;
+  hs.length.time_per_instr_ms = global_settings.time_per_instr_length_ms;
+
+  // The per-instruction occupancy budget only supports plain and single-level
+  // decompose, all-DFS, and cannot coexist with an explicit flat timeout.
+  if (hs.occupancy.time_per_instr_ms.has_value()) {
+    if (hs.occupancy.search != Search::kDfs) {
+      report_fatal_error("misched.txt: time_per_instr_occupancy_ms requires "
+                         "occupancy.search=dfs");
+    }
+    if (hs.occupancy.decompose &&
+        hs.occupancy.inner_search != Search::kDfs) {
+      report_fatal_error("misched.txt: time_per_instr_occupancy_ms requires "
+                         "occupancy.inner_search=dfs");
+    }
+    if (hs.occupancy.decompose_recursive) {
+      report_fatal_error("misched.txt: time_per_instr_occupancy_ms is not "
+                         "supported with occupancy.decompose_recursive");
+    }
+    if (hs.occupancy.timeout_explicitly_set) {
+      report_fatal_error("misched.txt: set either time_per_instr_occupancy_ms "
+                         "or occupancy.search.timeout, not both");
+    }
+    if (hs.occupancy.inner_timeout_explicitly_set) {
+      report_fatal_error("misched.txt: set either time_per_instr_occupancy_ms "
+                         "or occupancy.inner_search.timeout, not both");
+    }
+  }
+  if (hs.length.time_per_instr_ms.has_value() &&
+      hs.length.timeout_explicitly_set) {
+    report_fatal_error("misched.txt: set either time_per_instr_length_ms or "
+                       "length.search.timeout, not both");
+  }
+
   // Cross-global invariant: the subgraph-DAG dump targets real region
   // graphs (it derives identity and target info from real instructions),
   // while shakedowns exercise synthetic test graphs that have none.
@@ -552,13 +608,22 @@ std::string HierarchicalConfig::ToString() const {
      << " inner_timeout_ms=" << occupancy.inner_timeout_ms
      << " inner_fallback_timeout_ms=" << occupancy.GetInnerFallbackTimeoutMs()
      << (occupancy.inner_fallback_timeout_ms.has_value() ? "" : " (=inner_timeout)")
+     << " time_per_instr_ms="
+     << (occupancy.time_per_instr_ms.has_value()
+             ? std::to_string(*occupancy.time_per_instr_ms)
+             : "off")
      << "\n";
   os << "\tlength: formation="
      << EnumName(kFormationStrategies, length.formation.strategy)
      << " mode=" << EnumName(kScheduleModes, length.formation.mode)
      << " ratio=" << length.formation.min_cut.imbalance_ratio
      << " target_size=" << length.formation.min_cut.target_subgraph_size
-     << " policy=" << EnumName(kLengthPolicies, length.policy) << "\n";
+     << " policy=" << EnumName(kLengthPolicies, length.policy)
+     << " timeout_ms=" << length.timeout_ms << " time_per_instr_ms="
+     << (length.time_per_instr_ms.has_value()
+             ? std::to_string(*length.time_per_instr_ms)
+             : "off")
+     << "\n";
   os << "\tglobals: malicious=" << (malicious ? "on" : "off")
      << " run_shakedowns=" << (run_shakedowns ? "on" : "off")
      << " dump_subgraph_dag=" << (dump_subgraph_dag ? "on" : "off")

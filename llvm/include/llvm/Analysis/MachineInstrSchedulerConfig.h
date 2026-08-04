@@ -64,6 +64,16 @@ class MachineInstrSchedulerConfig {
             std::optional<int> unroll_threshold;
             std::optional<int> partial_unroll_threshold;
             std::optional<int> runtime_unroll_factor;
+            // Per-instruction scheduling time budget (ms per instruction in a
+            // region), applied to BOTH OptSched and the HierarchicalScheduler so
+            // the two can be compared given equal wall-clock effort. Separate
+            // knobs for the occupancy pass and the length pass (usually set
+            // equal). A region's budget is this value times its instruction
+            // count. Consumed by OptSched (BnB region/length timeouts; ACO host
+            // loop deadline) and the HierarchicalScheduler (per-region search
+            // timeout). unset = leave each scheduler's own default in place.
+            std::optional<int> time_per_instr_occupancy_ms;
+            std::optional<int> time_per_instr_length_ms;
             // Name of an alternate target sched (timing) model to swap in, e.g.
             // "fast_memory". Interpreted by the target (AMDGPU); unknown names are
             // rejected there, not here.

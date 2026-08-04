@@ -6778,6 +6778,65 @@ void RunEffectiveAndTargetLimitHelpersShakedown(
   tr.ClearTargetAndFloorOverridesForTest();
 }
 
+// Unit-checks the per-instruction budget arithmetic in
+// OccupancyConfig/LengthConfig::EffectiveTimeout: full rate for plain occupancy
+// and length, half rate (rounded up) for decompose occupancy, the flat fallback
+// when no per-instruction budget is set, and nullopt (unlimited) on a zero
+// product rather than a 0 timeout. Pure config math, so no scheduling needed.
+void RunEffectiveTimeoutShakedown() {
+  llvm::outs() << "  RunEffectiveTimeoutShakedown:\n";
+  auto check = [](StringRef desc, bool ok) {
+    llvm::outs() << "    " << desc << ": " << (ok ? "PASS" : "FAIL") << "\n";
+  };
+  const std::optional<int64_t> flat = std::optional<int64_t>(9999);
+
+  // Occupancy: no per-instruction budget -> returns the flat fallback.
+  {
+    OccupancyConfig occ;
+    check("occ unset -> flat", occ.EffectiveTimeout(100, flat) == flat);
+  }
+  // Occupancy plain (decompose off): full rate * size.
+  {
+    OccupancyConfig occ;
+    occ.decompose = false;
+    occ.time_per_instr_ms = 5;
+    check("occ plain 5*100 = 500",
+          occ.EffectiveTimeout(100, flat) == std::optional<int64_t>(500));
+  }
+  // Occupancy decompose: half rate (ceil) * size -- each instruction scheduled
+  // twice (inner make + outer).
+  {
+    OccupancyConfig occ;
+    occ.decompose = true;
+    occ.time_per_instr_ms = 4;
+    check("occ decompose ceil(4/2)*100 = 200",
+          occ.EffectiveTimeout(100, flat) == std::optional<int64_t>(200));
+    occ.time_per_instr_ms = 5;
+    check("occ decompose ceil(5/2)*100 = 300",
+          occ.EffectiveTimeout(100, flat) == std::optional<int64_t>(300));
+    occ.time_per_instr_ms = 1;
+    check("occ decompose ceil(1/2)*100 = 100 (no round-to-0)",
+          occ.EffectiveTimeout(100, flat) == std::optional<int64_t>(100));
+  }
+  // Occupancy: zero product -> nullopt (unlimited), not a 0 timeout.
+  {
+    OccupancyConfig occ;
+    occ.time_per_instr_ms = 5;
+    check("occ size 0 -> nullopt",
+          occ.EffectiveTimeout(0, flat) == std::nullopt);
+  }
+  // Length: full rate always (not hierarchical, no halving); flat when unset.
+  {
+    LengthConfig len;
+    check("len unset -> flat", len.EffectiveTimeout(100, flat) == flat);
+    len.time_per_instr_ms = 5;
+    check("len 5*100 = 500",
+          len.EffectiveTimeout(100, flat) == std::optional<int64_t>(500));
+    check("len size 0 -> nullopt",
+          len.EffectiveTimeout(0, flat) == std::nullopt);
+  }
+}
+
 } // namespace
 
 // The only class-member shakedown entry point. All the per-shakedown
@@ -6785,6 +6844,7 @@ void RunEffectiveAndTargetLimitHelpersShakedown(
 // standalone shakedowns and the per-region batch.
 void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   llvm::outs() << "RunAllShakedowns:\n";
+  RunEffectiveTimeoutShakedown();
 
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());

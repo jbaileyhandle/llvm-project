@@ -776,9 +776,16 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForMaximumOccupancy(
                                                 subgraph_formation.min_cut),
           subgraph_formation.mode);
       search_result = RunOccupancySearch(
-          occupancy_config.search, occupancy_config.policy, graph, st, MF, *LIS,
-          occupancy_config.SearchTimeoutOrUnlimited(),
-          occupancy_config.FallbackTimeoutOrUnlimited(),
+          /*kind=*/occupancy_config.search,
+          /*policy=*/occupancy_config.policy, graph, st, /*mf=*/MF, /*lis=*/*LIS,
+          // Per-instruction budget (region_size * rate) overrides the flat
+          // primary timeout when set. The fallback is the BFS-DP DFS-rescue
+          // budget, which never runs under a per-instruction budget (that
+          // requires dfs), so it stays the flat value.
+          /*primary_timeout_ms=*/
+          occupancy_config.EffectiveTimeout(
+              graph.Size(), occupancy_config.SearchTimeoutOrUnlimited()),
+          /*fallback_timeout_ms=*/occupancy_config.FallbackTimeoutOrUnlimited(),
           /*seed_bfs=*/
           [&](BfsDpSearch &bfs) {
             bfs.SetInitialBestScore(region.GetOriginalRegisterOnlyOccupancy());
@@ -1057,8 +1064,13 @@ static void RunIterativeLengthMinPhase(
 
   // Runs over the already-formed graph: formation happened once for the
   // whole region (in ScheduleRegionForLengthPass) before either phase
-  // started; the searches never form.
-  DfsSearch<Policy> iter_search(graph, st, mf, lis);
+  // started; the searches never form. Budget: per-instruction (region_size *
+  // rate) when set, else the flat length.search.timeout.
+  const LengthConfig &length_config = HierarchicalConfig::Get().length;
+  DfsSearch<Policy> iter_search(
+      graph, st, mf, lis,
+      length_config.EffectiveTimeout(graph.Size(),
+                                     length_config.SearchTimeoutOrUnlimited()));
 
   // Default outcome before any iteration runs:
   //   - "input_optimal" when the loop range is empty (input_length
@@ -1146,8 +1158,13 @@ static void RunPlainLengthMinPhase(
     ScheduleConstructor &best_schedule_constructor,
     bool &any_timed_out, int64_t &dfs_ms, int64_t &dfs_steps) {
   // Runs over the already-formed graph (formation done once per region
-  // by ScheduleRegionForLengthPass).
-  DfsSearch<Policy> plain_search(graph, st, mf, lis);
+  // by ScheduleRegionForLengthPass). Budget: per-instruction when set, else
+  // the flat length.search.timeout.
+  const LengthConfig &length_config = HierarchicalConfig::Get().length;
+  DfsSearch<Policy> plain_search(
+      graph, st, mf, lis,
+      length_config.EffectiveTimeout(graph.Size(),
+                                     length_config.SearchTimeoutOrUnlimited()));
   int plain_target =
       best_schedule_constructor.GetLengthTracker().GetCurrentCycle();
   plain_search.ResetForReuse(plain_target);
@@ -1227,8 +1244,12 @@ static void RunMaximizeLengthForRegion(
   PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
 
   // Runs over the already-formed graph (formation done once per region
-  // above).
-  DfsSearch<DfsMaximizeLengthPolicy> plain_search(graph, st, mf, lis);
+  // above). Budget: per-instruction when set, else the flat length.search.timeout.
+  const LengthConfig &length_config = HierarchicalConfig::Get().length;
+  DfsSearch<DfsMaximizeLengthPolicy> plain_search(
+      graph, st, mf, lis,
+      length_config.EffectiveTimeout(graph.Size(),
+                                     length_config.SearchTimeoutOrUnlimited()));
   // Don't call ResetForReuse — the default requested_target_length_
   // (INT_MAX) is the right value for length-max (no upper bound on
   // achievable length, beyond what dominance + timeout enforce).

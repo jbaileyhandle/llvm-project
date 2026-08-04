@@ -75,8 +75,17 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
   opts.inner_search = [&st, &mf, &lis, inner_search, inner_timeout_ms,
                        inner_fallback_ms](ScheduleGraph &sub) -> SearchResult {
     return RunOccupancySearch(
-        inner_search, OccupancyPolicy::kContinuousOccupancy, sub, st, mf, lis,
-        inner_timeout_ms, inner_fallback_ms,
+        /*kind=*/inner_search,
+        /*policy=*/OccupancyPolicy::kContinuousOccupancy, sub, st, /*mf=*/mf,
+        /*lis=*/lis,
+        // Per-instruction budget (subgraph_size * rate, halved for decompose)
+        // overrides the flat inner timeout when set. The fallback is the
+        // BFS-DP DFS-rescue budget, never used under a per-instruction budget
+        // (dfs-only), so it stays flat.
+        /*primary_timeout_ms=*/
+        HierarchicalConfig::Get().occupancy.EffectiveTimeout(sub.Size(),
+                                                             inner_timeout_ms),
+        /*fallback_timeout_ms=*/inner_fallback_ms,
         /*seed_bfs=*/[](BfsDpSearch &) {},
         /*bfs_after_run=*/[](BfsDpSearch &, SearchResult &) {},
         /*dfs_after_run=*/[](auto &, SearchResult &) {});
@@ -91,8 +100,14 @@ DecomposeAndScheduleOptions DecomposeAndScheduleOptions::Make(
     const bool outer_continuous =
         outer_policy == OccupancyPolicy::kContinuousOccupancy;
     return RunOccupancySearch(
-        outer_search, outer_policy, g, st, mf, lis, outer_timeout_ms,
-        outer_fallback_ms,
+        /*kind=*/outer_search, /*policy=*/outer_policy, g, st, /*mf=*/mf,
+        /*lis=*/lis,
+        // Per-instruction budget (region_size * rate, halved for decompose)
+        // overrides the flat outer timeout when set; fallback stays flat.
+        /*primary_timeout_ms=*/
+        HierarchicalConfig::Get().occupancy.EffectiveTimeout(g.Size(),
+                                                             outer_timeout_ms),
+        /*fallback_timeout_ms=*/outer_fallback_ms,
         /*seed_bfs=*/
         [&](BfsDpSearch &bfs) {
           if (outer_continuous) {
