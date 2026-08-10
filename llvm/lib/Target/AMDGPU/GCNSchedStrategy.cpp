@@ -728,6 +728,12 @@ static unsigned GetEffectiveMaxWavesPerEU(const MachineFunction &MF,
   unsigned attribute_max = MFI.getMaxWavesPerEU();
   const MachineInstrSchedulerConfig &config =
       MachineInstrSchedulerConfig::GetConfig();
+  // Opt out of the per-kernel clamp: return the raw attribute max so the two
+  // MaxOccupancy reschedule callers ratchet occupancy up to the attribute max as
+  // usual, ignoring any misched `kernel .../<min>,<max>` max.
+  if (config.GetFlags().disable_max_occ_effective_max_waves_cap) {
+    return attribute_max;
+  }
   if (config.HasConfig() && config.HasFunctionConfig(MF.getFunction())) {
     const MachineInstrSchedulerConfig::FunctionConfig *function_config =
         config.GetFunctionConfigFromMangledFunctionSignature(

@@ -45,6 +45,18 @@ class MachineInstrSchedulerConfig {
             // MachineScheduler.cpp. (Note: MaxILP adds no cluster mutation
             // pre-RA, so only its post-RA schedule is affected.)
             bool disable_mem_clustering = false;
+            // Per-kernel occupancy target, MaxOccupancy side: when a
+            // `kernel d/<sig>/<min>,<max>` line supplies a `max`, MaxOccupancy's
+            // occupancy-raising reschedule stages (the UnclusteredHighRP bump and
+            // the PreRARemat init cap -- the only callers of
+            // GetEffectiveMaxWavesPerEU) clamp to that max so they will not
+            // ratchet occupancy above the configured target. Set this flag to
+            // skip that clamp: GetEffectiveMaxWavesPerEU returns the raw attribute
+            // max, so those stages maximize occupancy up to the attribute max as
+            // usual. Scoped to those two sites only -- the MFI-ctor cap, the
+            // MaxOccupancy factory, and Hierarchical's ApplyOccupancyTargetCap are
+            // unaffected. Consumed in GCNSchedStrategy.cpp.
+            bool disable_max_occ_effective_max_waves_cap = false;
             // OptSched (AcoOptSched, BnbOptSched).
             bool run_on_all_functions = false;
             bool run_regardless_of_heuristic_outcome = false;
