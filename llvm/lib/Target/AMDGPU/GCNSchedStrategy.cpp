@@ -710,6 +710,39 @@ bool GCNSchedStage::initGCNSchedStage() {
   return true;
 }
 
+//========================================================================================
+// jbaile
+//========================================================================================
+// The occupancy ceiling for MaxOccupancy's occupancy-raising reschedule stages.
+// Normally this is MFI.getMaxWavesPerEU() -- the amdgpu-waves-per-eu attribute
+// max (defaulting to the hardware max when the attribute is absent). When a
+// misched per-kernel config supplies a `max` (a `kernel d/<sig>/<min>,<max>`
+// line), we clamp the ceiling to that value so the reschedule stages will not
+// ratchet occupancy above the configured target. We deliberately do this here
+// instead of writing the max to the attribute, because writing the attribute max
+// pads reserved registers and caps launched waves (see
+// AMDGPUOccupancyAttributesGuide levers 3 and 4). Returns the attribute max
+// unchanged when no misched `max` is configured for this function.
+static unsigned GetEffectiveMaxWavesPerEU(const MachineFunction &MF,
+                                          const SIMachineFunctionInfo &MFI) {
+  unsigned attribute_max = MFI.getMaxWavesPerEU();
+  const MachineInstrSchedulerConfig &config =
+      MachineInstrSchedulerConfig::GetConfig();
+  if (config.HasConfig() && config.HasFunctionConfig(MF.getFunction())) {
+    const MachineInstrSchedulerConfig::FunctionConfig *function_config =
+        config.GetFunctionConfigFromMangledFunctionSignature(
+            MF.getFunction().getName());
+    if (function_config != nullptr &&
+        function_config->max_waves_per_eu_.has_value()) {
+      return std::min(
+          attribute_max,
+          static_cast<unsigned>(*function_config->max_waves_per_eu_));
+    }
+  }
+  return attribute_max;
+}
+//========================================================================================
+
 bool UnclusteredHighRPStage::initGCNSchedStage() {
   if (DisableUnclusterHighRP)
     return false;
@@ -728,8 +761,15 @@ bool UnclusteredHighRPStage::initGCNSchedStage() {
   // stage. Temporarily increase occupancy target in the region.
   S.SGPRLimitBias = S.HighRPSGPRBias;
   S.VGPRLimitBias = S.HighRPVGPRBias;
-  if (MFI.getMaxWavesPerEU() > DAG.MinOccupancy)
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Clamp the ratchet ceiling to any misched per-kernel `max` so this stage will
+  // not push occupancy above the configured target.
+  if (GetEffectiveMaxWavesPerEU(MF, MFI) > DAG.MinOccupancy) {
     MFI.increaseOccupancy(MF, ++DAG.MinOccupancy);
+  }
+  //========================================================================================
 
   LLVM_DEBUG(
       dbgs()
@@ -765,9 +805,21 @@ bool PreRARematStage::initGCNSchedStage() {
 
   const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
   // Check maximum occupancy
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Also stop when a misched per-kernel `max` caps occupancy at or below the
+  // current minimum: rematerializing to raise occupancy past the configured
+  // target is exactly what we want to prevent. Because we early-return before
+  // sinkTriviallyRematInsts (called below) runs, its `++DAG.MinOccupancy` can
+  // never exceed the cap -- this stage only proceeds when the cap is strictly
+  // above the current minimum.
   if (ST.computeOccupancy(MF.getFunction(), MFI.getLDSSize()) ==
-      DAG.MinOccupancy)
+          DAG.MinOccupancy ||
+      GetEffectiveMaxWavesPerEU(MF, MFI) <= DAG.MinOccupancy) {
     return false;
+  }
+  //========================================================================================
 
   // FIXME: This pass will invalidate cached MBBLiveIns for regions
   // inbetween the defs and region we sinked the def to. Cached pressure

@@ -73,11 +73,21 @@ public:
     return original_register_only_occupancy_;
   }
 
+  // Whether the region's input schedule is in the spill regime: its peak VGPR
+  // or SGPR pressure exceeds the register budget at the launch occupancy floor
+  // (getMinWavesPerEU), so it would spill to fit even the minimum occupancy.
+  // Mirrors GCNRegisterTracker::IsPeakInSpillRegime, computed at construction
+  // from the same recorded peak pressure -- a stable scalar like the occupancy
+  // above. The occupancy pass uses it to avoid skipping a spilling region even
+  // when its occupancy is already at the kernel ceiling.
+  bool IsOriginalInSpillRegime() const { return original_in_spill_regime_; }
+
 private:
   MachineBasicBlock::iterator begin_;
   MachineBasicBlock::iterator end_;
   GCNRegPressure original_peak_pressure_;
   int original_register_only_occupancy_ = 0;
+  bool original_in_spill_regime_ = false;
 };
 
 } // namespace hierarchical_scheduler

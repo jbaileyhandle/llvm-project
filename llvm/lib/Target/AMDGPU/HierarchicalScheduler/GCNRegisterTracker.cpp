@@ -548,14 +548,26 @@ unsigned GCNRegisterTracker::GetLaunchFloorClampedRegisterOnlyOccupancy() const 
   return std::max(GetRegisterOnlyOccupancy(), GetLaunchOccupancyFloor());
 }
 
+bool GCNRegisterTracker::IsVGPRInSpillRegime(const GCNSubtarget &st,
+                                             unsigned launch_floor,
+                                             const GCNRegPressure &pressure) {
+  return pressure.getVGPRNum(st.hasGFX90AInsts()) >
+         st.getMaxNumVGPRs(launch_floor);
+}
+
+bool GCNRegisterTracker::IsSGPRInSpillRegime(const GCNSubtarget &st,
+                                             unsigned launch_floor,
+                                             const GCNRegPressure &pressure) {
+  return pressure.getSGPRNum() >
+         st.getMaxNumSGPRs(launch_floor, /*Addressable=*/true);
+}
+
 bool GCNRegisterTracker::IsCurVGPRInSpillRegime() const {
-  return cur_pressure_.getVGPRNum(st_->hasGFX90AInsts()) >
-         st_->getMaxNumVGPRs(GetLaunchOccupancyFloor());
+  return IsVGPRInSpillRegime(*st_, GetLaunchOccupancyFloor(), cur_pressure_);
 }
 
 bool GCNRegisterTracker::IsCurSGPRInSpillRegime() const {
-  return cur_pressure_.getSGPRNum() >
-         st_->getMaxNumSGPRs(GetLaunchOccupancyFloor(), /*Addressable=*/true);
+  return IsSGPRInSpillRegime(*st_, GetLaunchOccupancyFloor(), cur_pressure_);
 }
 
 bool GCNRegisterTracker::IsCurInSpillRegime() const {
@@ -563,13 +575,11 @@ bool GCNRegisterTracker::IsCurInSpillRegime() const {
 }
 
 bool GCNRegisterTracker::IsPeakVGPRInSpillRegime() const {
-  return max_pressure_.getVGPRNum(st_->hasGFX90AInsts()) >
-         st_->getMaxNumVGPRs(GetLaunchOccupancyFloor());
+  return IsVGPRInSpillRegime(*st_, GetLaunchOccupancyFloor(), max_pressure_);
 }
 
 bool GCNRegisterTracker::IsPeakSGPRInSpillRegime() const {
-  return max_pressure_.getSGPRNum() >
-         st_->getMaxNumSGPRs(GetLaunchOccupancyFloor(), /*Addressable=*/true);
+  return IsSGPRInSpillRegime(*st_, GetLaunchOccupancyFloor(), max_pressure_);
 }
 
 bool GCNRegisterTracker::IsPeakInSpillRegime() const {

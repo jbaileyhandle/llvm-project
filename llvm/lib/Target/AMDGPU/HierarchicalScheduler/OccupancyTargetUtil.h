@@ -19,6 +19,8 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_OCCUPANCYTARGETUTIL_H
 
 #include "SIMachineFunctionInfo.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 
@@ -44,6 +46,35 @@ inline void LimitOccupancyAboveFloor(SIMachineFunctionInfo &mfi, int limit) {
   }
   mfi.limitOccupancy(
       std::max(static_cast<unsigned>(limit), mfi.getMinWavesPerEU()));
+}
+
+/// Lower MFI's occupancy to a per-kernel `target`, but FAIL LOUDLY if `target`
+/// is below the kernel's launch occupancy floor (getMinWavesPerEU). A below-floor
+/// target is an occupancy the kernel can never run at unless its min waves-per-eu
+/// is also lowered -- a misched config contradiction, not something to silently
+/// clamp. This is the shared entry point for applying a per-kernel `<min>,<max>`
+/// occupancy target across the schedulers that honor one (MaxOccupancy,
+/// HierarchicalScheduler), so both reject a below-floor request identically.
+/// Contrast LimitOccupancyAboveFloor, which clamps up to the floor and is for the
+/// running per-region occupancy ratchet, not a target.
+///
+/// `target` is `int` to match the project's int-typed call sites; a target of
+/// zero or less is not a real occupancy and is a caller bug (fatal).
+/// `function_name` is only used in the diagnostic.
+inline void LimitTargetOccupancy(SIMachineFunctionInfo &mfi, int target,
+                                 StringRef function_name) {
+  if (target <= 0) {
+    report_fatal_error("LimitTargetOccupancy: occupancy target must be "
+                       "positive");
+  }
+  unsigned floor = mfi.getMinWavesPerEU();
+  if (static_cast<unsigned>(target) < floor) {
+    report_fatal_error(Twine("misched.txt: occupancy target (") + Twine(target) +
+                       ") for '" + function_name +
+                       "' is below the kernel's launch occupancy floor (" +
+                       Twine(floor) + "); lower the min too (e.g. `<max>,<max>`)");
+  }
+  mfi.limitOccupancy(static_cast<unsigned>(target));
 }
 
 } // namespace hierarchical_scheduler

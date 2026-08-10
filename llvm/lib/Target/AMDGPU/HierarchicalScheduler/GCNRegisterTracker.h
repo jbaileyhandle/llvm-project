@@ -234,6 +234,24 @@ public:
   /// "this schedule has spilled (on either track) at some point."
   bool IsPeakInSpillRegime() const;
 
+  /// Static spill-regime predicates on an arbitrary GCNRegPressure. Same test
+  /// as the instance methods above (peak/cur exceeds the register budget at the
+  /// occupancy floor), but on a caller-supplied pressure so code holding a
+  /// recorded peak -- e.g. RegionInfo::GetOriginalPeakPressure() -- can ask the
+  /// question without constructing a tracker over a graph. `launch_floor` is the
+  /// occupancy floor whose register budget is the spill threshold
+  /// (getMaxNum{V,S}GPRs(launch_floor)); the instance methods pass their own
+  /// pressure and GetLaunchOccupancyFloor() and delegate here.
+  static bool IsVGPRInSpillRegime(const GCNSubtarget &st, unsigned launch_floor,
+                                  const GCNRegPressure &pressure);
+  static bool IsSGPRInSpillRegime(const GCNSubtarget &st, unsigned launch_floor,
+                                  const GCNRegPressure &pressure);
+  static bool IsInSpillRegime(const GCNSubtarget &st, unsigned launch_floor,
+                              const GCNRegPressure &pressure) {
+    return IsVGPRInSpillRegime(st, launch_floor, pressure) ||
+           IsSGPRInSpillRegime(st, launch_floor, pressure);
+  }
+
   /// Peak VGPR count seen so far (max_pressure_'s VGPR count, with the
   /// gfx90a-aware accounting baked in). Convenience accessor that hides
   /// the st_->hasGFX90AInsts() call sites need to make through

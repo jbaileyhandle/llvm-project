@@ -12,6 +12,12 @@
 #include "SIRegisterInfo.h"
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "Utils/AMDGPUBaseInfo.h"
+//========================================================================================
+// jbaile
+//========================================================================================
+#include "HierarchicalScheduler/OccupancyTargetUtil.h"
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+//========================================================================================
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -63,6 +69,29 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const Function &F,
   WavesPerEU = ST.getWavesPerEU(F);
 
   Occupancy = ST.computeOccupancy(F, getLDSSize());
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // A misched per-kernel `<min>,<max>` max is the scheduling occupancy target.
+  // Apply it here, at the single point where occupancy is born, so every consumer
+  // (MaxOccupancy, HierarchicalScheduler, and setInitialOccupancy /
+  // resetInitialOccupancy) sees the same value. The max is deliberately NOT written
+  // to amdgpu-waves-per-eu (that pads reserved registers and caps launched waves) --
+  // this steers scheduling only. The separate min IS an attribute (the
+  // register-allocator floor), applied by SetFunctionWavesPerEUAttributeBasedOnConfig.
+  // LimitTargetOccupancy validates the target (positive, at/above the launch floor)
+  // and only lowers.
+  const MachineInstrSchedulerConfig &mis_config =
+      MachineInstrSchedulerConfig::GetConfig();
+  if (mis_config.HasConfig() && mis_config.HasFunctionConfig(F)) {
+    const MachineInstrSchedulerConfig::FunctionConfig *func_config =
+        mis_config.GetFunctionConfigFromMangledFunctionSignature(F.getName());
+    if (func_config != nullptr && func_config->max_waves_per_eu_.has_value()) {
+      hierarchical_scheduler::LimitTargetOccupancy(
+          *this, *func_config->max_waves_per_eu_, F.getName());
+    }
+  }
+  //========================================================================================
   CallingConv::ID CC = F.getCallingConv();
 
   VRegFlags.reserve(1024);

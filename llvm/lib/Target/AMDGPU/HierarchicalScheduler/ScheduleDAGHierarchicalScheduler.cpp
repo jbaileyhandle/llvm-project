@@ -88,14 +88,24 @@ void ScheduleDAGHierarchicalScheduler::schedule() {
                << " sgpr=" << rp.getSGPRNum() << "\n";
 }
 
-// Sort `regions_` ascending by the integer occupancy implied by each
-// region's original peak pressure. See the header for rationale and the
-// stable-sort justification.
+// Sort `regions_` ascending by the integer occupancy implied by each region's
+// original peak pressure, breaking ties so spill-regime regions come before
+// non-spill regions at the same occupancy. The occupancy pass processes
+// hardest-first and breaks at the first region that is at/above the kernel
+// ceiling AND not in the spill regime; ordering spill-regime regions first at a
+// given occupancy ensures the pass never breaks while a spill-regime region is
+// still ahead of it in the list. See the header for the stable-sort rationale.
 void ScheduleDAGHierarchicalScheduler::SortRegionsByOriginalRegisterOnlyOccupancyAscending() {
   std::stable_sort(regions_.begin(), regions_.end(),
                    [](const RegionInfo &a, const RegionInfo &b) {
-                     return a.GetOriginalRegisterOnlyOccupancy() <
-                            b.GetOriginalRegisterOnlyOccupancy();
+                     if (a.GetOriginalRegisterOnlyOccupancy() !=
+                         b.GetOriginalRegisterOnlyOccupancy()) {
+                       return a.GetOriginalRegisterOnlyOccupancy() <
+                              b.GetOriginalRegisterOnlyOccupancy();
+                     }
+                     // Tie on occupancy: spill-regime regions first.
+                     return a.IsOriginalInSpillRegime() &&
+                            !b.IsOriginalInSpillRegime();
                    });
 }
 
@@ -275,21 +285,20 @@ GetPerKernelOccupancyTarget(const MachineFunction &mf) {
   return func_config->max_waves_per_eu_;
 }
 
-// Compute the occupancy pass's starting ceiling and publish it to MFI. After
-// resetInitialOccupancy the MFI occupancy is the structural maximum
-// (arch ∩ LDS ∩ launch bounds, ignoring registers); this lowers it by whichever
-// occupancy-target caps are configured, taking the tightest:
-//   - occupancy.max_occ_above_input=X : min(structural_max, input_occ + X),
-//     where input_occ is the min original register-only occupancy over all
-//     regions (the function's input occupancy);
-//   - a misched per-kernel `max`      : that absolute target.
-// The final ceiling is clamped up to the launch floor (getMinWavesPerEU, which a
-// misched `min` may have lowered) and written to MFI, so the occupancy pass and
-// the length pass both see it. The DFS occupancy policy and decompose's outer DFS
-// honor the lowered target (BFS-DP maximizes regardless), so the caps pair with
-// DFS. See OccupancyConfig.
-static int ApplyOccupancyTargetCap(const MachineFunction &mf,
-                                   SIMachineFunctionInfo &mfi,
+// Compute the occupancy pass's starting ceiling and publish it to MFI. The
+// starting point is MFI's current occupancy: the structural maximum
+// (arch ∩ LDS ∩ launch bounds, ignoring registers) UNLESS a misched per-kernel
+// `<min>,<max>` target lowered it at MFI construction. That per-kernel target is
+// therefore already reflected in `ceiling` here and needs no separate handling.
+// This additionally applies the occupancy.max_occ_above_input=X cap:
+// min(current, input_occ + X), where input_occ is the min original register-only
+// occupancy over all regions (the function's input occupancy). The final ceiling
+// is clamped up to the launch floor (getMinWavesPerEU, which a misched `min` may
+// have lowered) and written to MFI, so the occupancy pass and the length pass both
+// see it. The DFS occupancy policy and decompose's outer DFS honor the lowered
+// target (BFS-DP maximizes regardless). See OccupancyConfig.
+static int ApplyOccupancyTargetCap(SIMachineFunctionInfo &mfi,
+                                   const MachineFunction &mf,
                                    ArrayRef<RegionInfo> regions) {
   int ceiling = static_cast<int>(mfi.getOccupancy());
   const OccupancyConfig &occ_cfg = HierarchicalConfig::Get().occupancy;
@@ -307,14 +316,18 @@ static int ApplyOccupancyTargetCap(const MachineFunction &mf,
   }
 
   // Cap: a misched per-kernel `max` lowers the ceiling to that absolute target.
+  // With the MaxOccupancy pre-pass now honoring the same cap, MFI already sits at
+  // this target by the time we get here, so this is a self-contained re-assertion
+  // rather than the sole enforcement point.
   if (std::optional<int> per_kernel_target = GetPerKernelOccupancyTarget(mf)) {
     ceiling = std::min(ceiling, *per_kernel_target);
     llvm::outs() << "\t(per-kernel occupancy target: " << *per_kernel_target
-                 << " -> ceiling " << ceiling << ")\n";
+                 << ")\n";
   }
 
   // Clamp up to the launch floor and publish to MFI. A no-op when no cap lowered
-  // the ceiling below the structural max (limitOccupancy only ever lowers).
+  // the ceiling below the current occupancy (limitOccupancy only ever lowers).
+  // input_occ + X is always at or above the floor, so nothing here goes below it.
   LimitOccupancyAboveFloor(mfi, ceiling);
   return ceiling;
 }
@@ -334,7 +347,15 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
   int configured_limit = static_cast<int>(mfi_->getOccupancy());
   int non_register =
       GCNRegisterTracker::ComputeNonRegisterOccupancy(st, MF);
-  if (configured_limit != non_register) {
+  // Normally this is the structural max. A per-kernel `<min>,<max>` target is
+  // honored by the MaxOccupancy pre-pass that runs first and lowers MFI to it, so
+  // the expected baseline is that target when one is set. Anything else means MFI
+  // was lowered without a matching reset.
+  std::optional<int> per_kernel_target = GetPerKernelOccupancyTarget(MF);
+  int expected_limit = per_kernel_target.has_value()
+                           ? std::min(non_register, *per_kernel_target)
+                           : non_register;
+  if (configured_limit != expected_limit) {
     report_fatal_error(
         "RunMaximizeOccupancyPass: MFI->getOccupancy() disagrees with "
         "ComputeNonRegisterOccupancy — something lowered the MFI value "
@@ -354,7 +375,7 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
       HierarchicalConfig::Get()
               .occupancy.optimize_every_region_past_occupancy_target
           ? static_cast<int>(kAboveHardwareMaxOccupancy)
-          : ApplyOccupancyTargetCap(MF, *mfi_, regions_);
+          : ApplyOccupancyTargetCap(*mfi_, MF, regions_);
 
   // Per-pass counters. `attempted` is regions where DFS actually ran
   // (i.e., not short-circuited by the "already at kernel ceiling"
@@ -370,25 +391,30 @@ void ScheduleDAGHierarchicalScheduler::RunMaximizeOccupancyPass() {
     int original_register_only_occupancy =
         region.GetOriginalRegisterOnlyOccupancy();
 
-    // Stop when this region's original register-only occupancy is
-    // already at or above the running kernel ceiling. Ascending
-    // iteration guarantees every later region's original is >= this one's,
-    // so their achievable occupancies are also >= kernel_occupancy_so_far,
-    // and no further work can raise the kernel above the value already
-    // pinned by an earlier region.
+    // Stop when this region's original register-only occupancy is already at or
+    // above the running kernel ceiling AND its input schedule is not in the
+    // spill regime. Ascending iteration -- with spill-regime regions ordered
+    // first at each occupancy (see the sort) -- guarantees every later region is
+    // also at/above the ceiling and non-spilling, so none can raise the kernel
+    // occupancy, and none has spill to relieve: no further work can help.
     //
-    // On the first iteration, kernel_occupancy_so_far ==
-    // configured_limit, so this also catches the case where region 0's
-    // occupancy is already maxed out by the ceiling set by other factors
-    // (e.g. arch max / LDS / launch bounds).
-    if (original_register_only_occupancy >= kernel_occupancy_so_far) {
+    // A spill-regime region at/above the ceiling is deliberately NOT skipped:
+    // the occupancy search may still cut its register pressure / spill area even
+    // though its occupancy is pinned. The sort's spill-first tiebreak ensures
+    // every such region is reached and processed before this break fires.
+    //
+    // On the first iteration, kernel_occupancy_so_far == configured_limit, so
+    // this also catches the case where region 0's occupancy is already maxed out
+    // by other factors (e.g. arch max / LDS / launch bounds).
+    if (original_register_only_occupancy >= kernel_occupancy_so_far &&
+        !region.IsOriginalInSpillRegime()) {
       int num_skipped = static_cast<int>(regions_.size() - i);
       int total = static_cast<int>(regions_.size());
       int percent_skipped = (num_skipped * 100) / total;
       llvm::outs() << "\tregion[" << i << "]: SKIPPED (orig_reg_only="
                    << original_register_only_occupancy
                    << " >= kernel_so_far=" << kernel_occupancy_so_far
-                   << "; " << num_skipped << "/" << total
+                   << ", not in spill regime; " << num_skipped << "/" << total
                    << " remaining, " << percent_skipped << "%)\n";
       break;
     }

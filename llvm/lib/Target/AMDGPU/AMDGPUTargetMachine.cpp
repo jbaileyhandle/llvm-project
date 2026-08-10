@@ -30,6 +30,11 @@
 #include "R600MachineFunctionInfo.h"
 #include "R600TargetMachine.h"
 #include "SIMachineFunctionInfo.h"
+//========================================================================================
+// jbaile
+//========================================================================================
+#include "HierarchicalScheduler/OccupancyTargetUtil.h"
+//========================================================================================
 #include "SIMachineScheduler.h"
 #include "TargetInfo/AMDGPUTargetInfo.h"
 #include "Utils/AMDGPUBaseInfo.h"
@@ -456,9 +461,44 @@ static ScheduleDAGInstrs *createSIMachineScheduler(MachineSchedContext *C) {
   return new SIScheduleDAGMI(C);
 }
 
+//========================================================================================
+// jbaile
+//========================================================================================
+// Belt-and-suspenders: at MaxOccupancy scheduler construction, explicitly lower
+// MFI's occupancy target to a misched per-kernel `max` (a `kernel d/<sig>/<min>,<max>`
+// line). The SIMachineFunctionInfo constructor already applies the same cap, so in
+// the normal pipeline this is a no-op; it keeps the scheduler self-contained rather
+// than dependent on that constructor. This must run before GCNScheduleDAGMILive is
+// built, since the DAG captures StartingOccupancy from MFI at construction.
+// LimitTargetOccupancy only ever lowers, and fails loudly on a target <= 0 or below
+// the launch floor.
+static void ApplyMaxOccupancyPerKernelTarget(MachineFunction &MF) {
+  const MachineInstrSchedulerConfig &config =
+      MachineInstrSchedulerConfig::GetConfig();
+  if (!config.HasConfig() || !config.HasFunctionConfig(MF.getFunction())) {
+    return;
+  }
+  const MachineInstrSchedulerConfig::FunctionConfig *function_config =
+      config.GetFunctionConfigFromMangledFunctionSignature(
+          MF.getFunction().getName());
+  if (function_config == nullptr ||
+      !function_config->max_waves_per_eu_.has_value()) {
+    return;
+  }
+  hierarchical_scheduler::LimitTargetOccupancy(
+      *MF.getInfo<SIMachineFunctionInfo>(), *function_config->max_waves_per_eu_,
+      MF.getFunction().getName());
+}
+//========================================================================================
+
 static ScheduleDAGInstrs *
 createGCNMaxOccupancyMachineScheduler(MachineSchedContext *C) {
   const GCNSubtarget &ST = C->MF->getSubtarget<GCNSubtarget>();
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  ApplyMaxOccupancyPerKernelTarget(*C->MF);
+  //========================================================================================
   ScheduleDAGMILive *DAG =
     new GCNScheduleDAGMILive(C, std::make_unique<GCNMaxOccupancySchedStrategy>(C));
   DAG->addMutation(createLoadClusterDAGMutation(DAG->TII, DAG->TRI));

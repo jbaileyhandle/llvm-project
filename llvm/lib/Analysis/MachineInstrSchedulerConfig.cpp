@@ -483,26 +483,38 @@ void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Fu
     const std::optional<int> &min_override = config->min_waves_per_eu_;
     const std::optional<int> &max_override = config->max_waves_per_eu_;
 
-    // The `<min>,<max>` pair is a Hierarchical-scheduler directive. Only the min
-    // is expressed here, as an amdgpu-waves-per-eu attribute (a genuine occupancy
-    // floor). The max is the scheduler's internal occupancy target, consumed
-    // inside the Hierarchical scheduler and deliberately NOT written to the
-    // attribute: an attribute max pads reserved registers and caps the waves the
-    // runtime launches regardless of real register use, which is exactly what we
-    // want to avoid. So assert the pair only appears with HierarchicalScheduler.
-    if((min_override.has_value() || max_override.has_value()) &&
-       !IsHierarchicalScheduler()) {
-        report_fatal_error(Twine("misched.txt: `<min>,<max>` waves for '") +
-                           function.getName() +
-                           "' is only valid with HierarchicalScheduler");
+    // The `<min>,<max>` pair splits into two very different things.
+    //
+    // The MAX is a "don't optimize occupancy past this" ceiling. It is NEVER
+    // written to the amdgpu-waves-per-eu attribute: an attribute max pads reserved
+    // registers and caps the waves the runtime launches regardless of real
+    // register use, which is exactly what we want to avoid. Instead each scheduler
+    // consumes the max its own way, so only schedulers with a place to consume it
+    // support it; the rest must reject rather than silently ignore:
+    //   - MaxOccupancy: applied as the occupancy target at scheduler start
+    //     (createGCNMaxOccupancyMachineScheduler calls MFI->limitOccupancy(max)).
+    //   - HierarchicalScheduler: consumed internally (GetPerKernelOccupancyTarget).
+    //   - MaxIlp: ignored -- it does not hold an occupancy ceiling anyway.
+    if(max_override.has_value()) {
+        Scheduler scheduler = GetScheduler();
+        bool max_supported = scheduler == Scheduler::MaxOccupancy ||
+                             scheduler == Scheduler::HierarchicalScheduler ||
+                             scheduler == Scheduler::MaxIlp;
+        if(!max_supported) {
+            report_fatal_error(Twine("misched.txt: `<min>,<max>` max-waves for '") +
+                               function.getName() +
+                               "' is only supported with MaxOccupancy, "
+                               "HierarchicalScheduler, or MaxIlp");
+        }
     }
 
-    // Only the min touches the attribute. An unset min (the `0` sentinel) leaves
-    // the function's existing waves-per-eu alone. Write the min as a single value:
-    // amdgpu-waves-per-eu is positional, so a lone value is the min (first field)
-    // and the max stays at the hardware default -- never a cap. getWavesPerEU is
-    // patched to honor this min even below the flat-work-group-size floor for
-    // misched functions, so the requested floor is not silently discarded.
+    // The MIN is a genuine occupancy / register-allocator floor and is written to
+    // amdgpu-waves-per-eu for any scheduler (positional: a lone value is the min,
+    // so the max field stays at the hardware default -- never a cap, no padding).
+    // An unset min (the `0` sentinel) leaves the function's waves-per-eu alone.
+    // getWavesPerEU is patched (honor_misched_min) to keep a misched min even when
+    // it falls below the flat-work-group-size floor, instead of discarding it back
+    // to the default range.
     if(!min_override.has_value()) {
         return;
     }
