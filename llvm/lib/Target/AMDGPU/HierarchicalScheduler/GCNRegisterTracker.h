@@ -346,6 +346,14 @@ public:
   /// NoHistoryClone, like occ_area_.
   int64_t GetVGPRSpillArea() const { return vgpr_spill_area_; }
 
+  /// max(0, peak_VGPR - getMaxNumVGPRs(GetLaunchOccupancyFloor())): the
+  /// maximum number of VGPRs above the spill cap at any point in the
+  /// schedule -- the worst-case count of registers that must be spilled
+  /// at once, a proxy for scratch size. Peak-style (reads max_pressure_
+  /// like GetPeakVGPRNum), so no accumulator: it just subtracts the cap
+  /// from the peak. Backs ScoreDimension::kVgprSpillPeak.
+  unsigned GetPeakVGPRCountAboveSpillCap() const;
+
   /// Occupancy for this region, computed from scratch using
   /// GCNSubtarget::computeOccupancy() with this region's peak
   /// register pressure, the kernel's LDS usage, and the launch

@@ -675,6 +675,12 @@ unsigned GCNRegisterTracker::GetCurVGPRCountAboveSpillCap() const {
   return (cur > cap) ? (cur - cap) : 0;
 }
 
+unsigned GCNRegisterTracker::GetPeakVGPRCountAboveSpillCap() const {
+  int above = static_cast<int>(GetPeakVGPRNum()) -
+              static_cast<int>(st_->getMaxNumVGPRs(GetLaunchOccupancyFloor()));
+  return static_cast<unsigned>(std::max(above, 0));
+}
+
 unsigned GCNRegisterTracker::GetCurSGPRCountBelowSpillCap() const {
   unsigned cur = cur_pressure_.getSGPRNum();
   unsigned cap =
@@ -710,6 +716,9 @@ int GCNRegisterTracker::GetScalarScore(const ScoreRecipe &recipe) const {
     break;
   case ScoreDimension::kVgprSpillArea:
     raw = GetVGPRSpillArea();
+    break;
+  case ScoreDimension::kVgprSpillPeak:
+    raw = GetPeakVGPRCountAboveSpillCap();
     break;
   default:
     report_fatal_error(

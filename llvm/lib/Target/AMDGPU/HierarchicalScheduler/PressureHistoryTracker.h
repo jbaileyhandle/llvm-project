@@ -181,6 +181,7 @@ class PressureHistoryTracker {
     case ScoreDimension::kContinuousOccScore:
     case ScoreDimension::kContinuousOccArea:
     case ScoreDimension::kVgprSpillArea:
+    case ScoreDimension::kVgprSpillPeak:
       return true;
     case ScoreDimension::kScheduleLength:
     case ScoreDimension::kIlpScore:

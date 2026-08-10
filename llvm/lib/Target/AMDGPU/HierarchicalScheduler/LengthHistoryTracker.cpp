@@ -90,6 +90,9 @@ int64_t LengthHistoryTracker::GetDimRawValue(ScoreDimension dim) const {
                : 0;
   case ScoreDimension::kVgprSpillArea:
     return pressure_tracker_ ? pressure_tracker_->GetVGPRSpillArea() : 0;
+  case ScoreDimension::kVgprSpillPeak:
+    return pressure_tracker_ ? pressure_tracker_->GetPeakVGPRCountAboveSpillCap()
+                             : 0;
   case ScoreDimension::kIlpScore:
     return ilp_tracker_ ? ilp_tracker_->GetIlpScore() : 0;
   }

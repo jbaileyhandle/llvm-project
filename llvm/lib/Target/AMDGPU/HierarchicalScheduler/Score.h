@@ -58,6 +58,15 @@ enum class ScoreDimension {
   /// Min polarity to penalize spill-heavy schedules.
   kVgprSpillArea,
 
+  /// Peak (max over the schedule) VGPR count above the configured
+  /// spill cap (GCNRegisterTracker::GetPeakVGPRCountAboveSpillCap) --
+  /// the maximum number of registers that must be spilled at once, a
+  /// proxy for scratch size (unlike the area, which is register-cycles).
+  /// Peak-style, but the raw only GROWS over completion (peak pressure
+  /// is monotone non-decreasing), so use with Min polarity to penalize
+  /// the worst-case spill count.
+  kVgprSpillPeak,
+
   /// Schedule length in cycles (ScheduleLengthTracker::
   /// GetCurrentCycle). Sum-style.
   kScheduleLength,
@@ -108,10 +117,13 @@ struct MetricSlot {
         return pol == Polarity::kMaximize;
       case ScoreDimension::kContinuousOccArea:
       case ScoreDimension::kVgprSpillArea:
+      case ScoreDimension::kVgprSpillPeak:
       case ScoreDimension::kScheduleLength:
       case ScoreDimension::kIlpScore:
-        // Sum-style raw: only GROWS over completion. Canonical NI
-        // iff polarity is Minimize.
+        // Raw only GROWS over completion -- the sum-style dims by
+        // accumulation, kVgprSpillPeak because peak pressure is
+        // monotone non-decreasing. Canonical NI iff polarity is
+        // Minimize.
         return pol == Polarity::kMinimize;
     }
     return false;  // unreachable
@@ -183,6 +195,7 @@ struct ScoreRecipe {
     case ScoreDimension::kContinuousOccScore:
     case ScoreDimension::kContinuousOccArea:
     case ScoreDimension::kVgprSpillArea:
+    case ScoreDimension::kVgprSpillPeak:
       return true;
     case ScoreDimension::kScheduleLength:
     case ScoreDimension::kIlpScore:

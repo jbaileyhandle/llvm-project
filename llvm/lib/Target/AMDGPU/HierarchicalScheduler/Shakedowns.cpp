@@ -2015,6 +2015,7 @@ BuildLhtEntryForTest(const ScoreRecipe &recipe,
       break;
     case ScoreDimension::kRegisterOcc:
     case ScoreDimension::kContinuousOccArea:
+    case ScoreDimension::kVgprSpillPeak:
       llvm_unreachable(
           "BuildLhtEntryForTest: dim not exposed via LhtEntryInputs; "
           "extend the struct + this switch if a shakedown needs it");
@@ -4180,6 +4181,159 @@ void RunVGPRSpillAreaScoreDispatchShakedown(const MachineFunction &mf) {
   }
 }
 
+// Tests GCNRegisterTracker::GetPeakVGPRCountAboveSpillCap: unlike the
+// spill-area accumulator, this is a peak-style reading with no running
+// sum -- it is max(0, GetPeakVGPRNum - getMaxNumVGPRs(floor)), where
+// GetPeakVGPRNum reads the high-water mark max_pressure_. Verifies:
+//   - Forward: after each step, the peak-above-cap count equals
+//     max(0, running_peak - spill_cap), where running_peak is the max
+//     running VGPR over all steps so far -- computed directly from the
+//     deltas, independent of the tracker.
+//   - Reverse: Unschedule restores each step's saved max_pressure_, so
+//     the peak-above-cap count round-trips back to 0.
+//
+// Self-contained, parameter-independent: same BuildAreaTiebreakTestDAG,
+// floor override, and delta sequence as the spill-area accumulator
+// shakedown. The deltas push the running VGPR to a peak of 35 on step
+// B and hold the high-water mark there through the descent, so the
+// peak-above-cap count rises to 35-32=3 and stays until Unschedule
+// unwinds max_pressure_ below the cap.
+void RunVGPRSpillPeakAccessorShakedown(const MachineFunction &mf) {
+  llvm::outs() << "  VGPR-spill-peak accessor shakedown:\n";
+  const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
+
+  auto graph = ScheduleGraph::BuildAreaTiebreakTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+
+  GCNRegisterTracker tracker(*graph, mf);
+
+  // Force floor=8 -> spill_cap=getMaxNumVGPRs(8)=32 on gfx9, matching
+  // the spill-area accumulator shakedown so the deltas cross the cap.
+  constexpr unsigned kTestFloor = 8;
+  tracker.SetOccupancyFloorForTest(kTestFloor);
+  const unsigned spill_cap = st.getMaxNumVGPRs(kTestFloor);
+  llvm::outs() << "    floor=" << kTestFloor
+               << " vgpr spill cap=" << spill_cap << "\n";
+
+  // Same delta sequence as the accumulator shakedown. Running VGPR:
+  //   A(+10): 10  peak=10  above=0
+  //   B(+25): 35  peak=35  above=3
+  //   M(+0):  35  peak=35  above=3
+  //   X(-15): 20  peak=35  above=3   (high-water mark holds)
+  //   Y(-10): 10  peak=35  above=3
+  //   T(-10):  0  peak=35  above=3
+  std::vector<int> vgpr_deltas = {+10, +25, 0, -15, -10, -10};
+  tracker.EnableTestModeForTest(vgpr_deltas);
+
+  SmallVector<ScheduleNode *> nodes(graph->GetTopoOrder().begin(),
+                                    graph->GetTopoOrder().end());
+
+  // Forward: peak-above-cap must equal max(0, running_peak - spill_cap),
+  // where running_peak is the max running VGPR so far -- computed here
+  // from the deltas, independent of the tracker.
+  int running_vgpr = 0;
+  int running_peak = 0;
+  bool forward_ok = true;
+  for (ScheduleNode *node : nodes) {
+    tracker.Schedule(node);
+    running_vgpr += vgpr_deltas[node->GetTopoIndex()];
+    running_peak = std::max(running_peak, running_vgpr);
+    unsigned expected_peak =
+        (running_peak > static_cast<int>(spill_cap))
+            ? static_cast<unsigned>(running_peak - static_cast<int>(spill_cap))
+            : 0u;
+    if (tracker.GetPeakVGPRCountAboveSpillCap() != expected_peak) {
+      forward_ok = false;
+    }
+  }
+  llvm::outs() << "    forward peak-above-cap == max(0, peak - cap) (peak="
+               << tracker.GetPeakVGPRCountAboveSpillCap() << "): "
+               << (forward_ok ? "PASS\n" : "FAIL\n");
+
+  // Reverse: Unschedule restores saved max_pressure_ each step, so the
+  // peak-above-cap count must return to 0 once B is unwound.
+  bool reverse_ok = true;
+  for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
+    tracker.Unschedule(nodes[i]);
+  }
+  reverse_ok = tracker.GetPeakVGPRCountAboveSpillCap() == 0;
+  llvm::outs() << "    reverse peak-above-cap round-trips to 0: "
+               << (reverse_ok ? "PASS\n" : "FAIL\n");
+
+  tracker.ClearTargetAndFloorOverridesForTest();
+  if (!(forward_ok && reverse_ok)) {
+    report_fatal_error("VGPR-spill-peak accessor shakedown failed");
+  }
+}
+
+// Peak-metric analogue of RunVGPRSpillAreaScoreDispatchShakedown. Tests
+// the ScoreDimension::kVgprSpillPeak dispatch on
+// GCNRegisterTracker::GetScalarScore (the production single-slot path)
+// and ScheduleConstructor::GetScore (the SC-side GetScoreDimensionValue
+// dispatch). Verifies:
+//   - GetScalarScore for kVgprSpillPeak Min == -GetPeakVGPRCountAboveSpillCap.
+//   - GetScalarScore for kVgprSpillPeak Max == +GetPeakVGPRCountAboveSpillCap.
+//   - SC.GetScore on a kVgprSpillPeak Min recipe equals a Score built
+//     directly from -raw, exercising the SC-side dispatch end-to-end.
+//
+// Drives a known non-zero peak (raw=3) via the same floor override and
+// delta sequence, so the expected value is computable from the deltas.
+void RunVGPRSpillPeakScoreDispatchShakedown(const MachineFunction &mf) {
+  llvm::outs() << "  VGPR-spill-peak score-dispatch shakedown:\n";
+  const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
+
+  auto graph = ScheduleGraph::BuildAreaTiebreakTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPaths();
+
+  ScheduleConstructor sc(*graph, st, mf);
+  auto &tracker = sc.GetPressureTrackerForTest();
+
+  constexpr unsigned kTestFloor = 8;
+  tracker.SetOccupancyFloorForTest(kTestFloor);
+  std::vector<int> vgpr_deltas = {+10, +25, 0, -15, -10, -10};
+  tracker.EnableTestModeForTest(vgpr_deltas);
+
+  SmallVector<ScheduleNode *> nodes(graph->GetTopoOrder().begin(),
+                                    graph->GetTopoOrder().end());
+  for (ScheduleNode *node : nodes) {
+    sc.Schedule(node);
+  }
+
+  const int64_t raw_peak = tracker.GetPeakVGPRCountAboveSpillCap();
+  llvm::outs() << "    peak VGPRs above spill cap=" << raw_peak << "\n";
+
+  constexpr ScoreRecipe kSpillPeakMin{{
+      MetricSlot{ScoreDimension::kVgprSpillPeak, Polarity::kMinimize},
+  }};
+  constexpr ScoreRecipe kSpillPeakMax{{
+      MetricSlot{ScoreDimension::kVgprSpillPeak, Polarity::kMaximize},
+  }};
+
+  const int scalar_min = tracker.GetScalarScore(kSpillPeakMin);
+  const int scalar_max = tracker.GetScalarScore(kSpillPeakMax);
+  const Score sc_score_min = sc.GetScore(kSpillPeakMin);
+  const Score expected_score_min =
+      Score::Make({Score::Lower(raw_peak)});
+
+  bool min_ok = scalar_min == -static_cast<int>(raw_peak);
+  bool max_ok = scalar_max == static_cast<int>(raw_peak);
+  bool sc_ok = sc_score_min == expected_score_min;
+
+  llvm::outs() << "    GCNRegisterTracker::GetScalarScore Min == -raw: "
+               << (min_ok ? "PASS" : "FAIL") << "\n";
+  llvm::outs() << "    GCNRegisterTracker::GetScalarScore Max == +raw: "
+               << (max_ok ? "PASS" : "FAIL") << "\n";
+  llvm::outs() << "    ScheduleConstructor::GetScore Min == expected: "
+               << (sc_ok ? "PASS" : "FAIL") << "\n";
+
+  tracker.ClearTargetAndFloorOverridesForTest();
+  if (!(min_ok && max_ok && sc_ok)) {
+    report_fatal_error(
+        "VGPR-spill-peak score-dispatch shakedown failed");
+  }
+}
+
 // Tests GCNRegisterTracker::NoHistoryClone:
 //   1. Build a parent tracker with track_pressure_history=true,
 //      schedule a prefix of nodes so it has non-trivial
@@ -6021,6 +6175,9 @@ void RunPressureHistoryRoutingAndSoundnessShakedown() {
   check("DimHasPartitionDeterminedSuffix(kVgprSpillArea)=true",
         PressureHistoryTracker::DimHasPartitionDeterminedSuffix(
             ScoreDimension::kVgprSpillArea));
+  check("DimHasPartitionDeterminedSuffix(kVgprSpillPeak)=true",
+        PressureHistoryTracker::DimHasPartitionDeterminedSuffix(
+            ScoreDimension::kVgprSpillPeak));
   check("DimHasPartitionDeterminedSuffix(kScheduleLength)=false",
         !PressureHistoryTracker::DimHasPartitionDeterminedSuffix(
             ScoreDimension::kScheduleLength));
@@ -6878,6 +7035,8 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   RunOccupancyTargetUtilShakedown(MF);
   RunVGPRSpillAreaAccumulatorShakedown(MF);
   RunVGPRSpillAreaScoreDispatchShakedown(MF);
+  RunVGPRSpillPeakAccessorShakedown(MF);
+  RunVGPRSpillPeakScoreDispatchShakedown(MF);
 
   for (auto &region : regions_) {
     WithRegionGraph(region, [&](ScheduleGraph &graph) {
