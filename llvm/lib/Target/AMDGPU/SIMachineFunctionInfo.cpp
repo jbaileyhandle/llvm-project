@@ -91,6 +91,12 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const Function &F,
           *this, *func_config->max_waves_per_eu_, F.getName());
     }
   }
+  // Capture the pristine (target-limited) occupancy as the baseline the OptSched
+  // / HierarchicalScheduler second pass restores via resetInitialOccupancy. Set
+  // here, at the single point where occupancy is born and after any per-kernel
+  // target is applied, so initialOccupancy is always defined (it is assigned
+  // nowhere else) and already reflects the target.
+  initialOccupancy = Occupancy;
   //========================================================================================
   CallingConv::ID CC = F.getCallingConv();
 

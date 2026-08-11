@@ -470,7 +470,7 @@ private:
   // Current recorded maximum possible occupancy.
   unsigned Occupancy;
 
-  unsigned initialOccupancy;
+  unsigned initialOccupancy = 0;
 
   mutable std::optional<bool> UsesAGPRs;
 
@@ -1112,11 +1112,6 @@ public:
 
   // \returns true if a function needs or may need AGPRs.
   bool usesAGPRs(const MachineFunction &MF) const;
-
-  void setInitialOccupancy() {
-    if (initialOccupancy < Occupancy)
-      initialOccupancy = Occupancy;
-  }
 
   void resetInitialOccupancy(const MachineFunction &MF) {
     increaseOccupancy(MF, initialOccupancy);

@@ -50,36 +50,7 @@ const unsigned ScheduleMetrics::ScaleFactor = 100;
 
 GCNSchedStrategy::GCNSchedStrategy(const MachineSchedContext *C)
     : GenericScheduler(C), TargetOccupancy(0), MF(nullptr),
-      HasHighPressure(false) {
-
-         // jbaile config
-         //
-         // OptSched and HierarchicalScheduler both want to see the
-         // pristine pre-GCN-scheduler Occupancy so they can decide how
-         // much headroom exists. The first-pass GCN scheduler lowers
-         // Occupancy when it sees high-pressure regions, so by the
-         // time our second-pass scheduler runs it's too late to
-         // observe the original value. Capture it here, during the
-         // first pass's strategy construction, via
-         // SIMachineFunctionInfo::setInitialOccupancy; the second-
-         // pass scheduler later reads it back via resetInitialOccupancy.
-         //
-         // Without this, initialOccupancy stays at its
-         // default-initialized value and resetInitialOccupancy
-         // becomes a silent no-op — leaving the second-pass
-         // scheduler with whatever Occupancy the first pass lowered
-         // it to, which defeats the purpose.
-         const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
-         if(config.IsOptSched() || config.IsHierarchicalScheduler()) {
-             SIMachineFunctionInfo *MFI;
-             MFI =
-               const_cast<SIMachineFunctionInfo *>(C->MF->getInfo<SIMachineFunctionInfo>());
-             MFI->setInitialOccupancy();
-             #ifdef DEBUG_RESET_OCCUPANCY
-               printf("Occ before AMD: %d\n", MFI->getOccupancy());
-             #endif
-         }
-      }
+      HasHighPressure(false) {}
 
 void GCNSchedStrategy::initialize(ScheduleDAGMI *DAG) {
   GenericScheduler::initialize(DAG);
