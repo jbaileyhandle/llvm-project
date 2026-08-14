@@ -15,6 +15,8 @@
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Hashing.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -103,6 +105,17 @@ std::string SanitizeForFilename(StringRef s) {
             c == '_' || c == '-')
                ? c
                : '_';
+  }
+  // Cap the basename length. Heavily-templated kernels (rocprim / thrust) mangle
+  // to names far past a filesystem's 255-byte per-component limit, so the JSON
+  // open fails with ENAMETOOLONG and crashes the compiler. Truncate and append a
+  // hash of the *full* name, so distinct kernels still map to distinct files.
+  constexpr size_t kMaxBasenameLen = 200;
+  if (out.size() > kMaxBasenameLen) {
+    std::string suffix =
+        "_" + utohexstr(static_cast<uint64_t>(hash_value(s)), /*LowerCase=*/true);
+    out.resize(kMaxBasenameLen - suffix.size());
+    out += suffix;
   }
   return out;
 }
