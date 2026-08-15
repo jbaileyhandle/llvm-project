@@ -237,28 +237,45 @@ checkScheduling(region):
         RegionsWithMinOcc[region] = (occupancy(pressureAfter) == MinOccupancy)
         return
 
-    # Case B -- over the budget: occupancy may have to fall, and/or we may spill.
-    wavesAfter  = occupancy(pressureAfter)       # occupancy this schedule achieves
-    wavesBefore = occupancy(pressureBefore)      # occupancy the incoming order had
+    # Case B -- over CriticalLimits: this schedule can't hold the target occupancy.
+    wavesAfter  = occupancy(pressureAfter)       # occupancy the NEW order sustains
+    wavesBefore = occupancy(pressureBefore)      # occupancy the INCOMING order sustained
+
+    # Occupancy this region will really end up at. A worse new order (wavesAfter <
+    # wavesBefore) gets reverted at the bottom, so we'd realize wavesBefore; a good
+    # one is kept, realizing wavesAfter. The end result is the max either way.
     newOcc = max(wavesAfter, wavesBefore)
-    # getMinAllowedOccupancy() is the floor a region is allowed to fall to: the
-    # current occupancy for an ordinary function (so this branch cannot fire —
-    # occupancy is preserved), or 4 for a memory-bound / wave-limited one (see
-    # "The memory-bound occupancy drop" below).
+
+    # MinOccupancy = the target occupancy we're currently trying to hold for the
+    #   kernel (a running value, only ever ratcheted down).
+    # getMinAllowedOccupancy() = the lowest MinOccupancy is *allowed* to reach:
+    #   the current occupancy for an ordinary kernel (no drop permitted), or 4 for a
+    #   memory-bound / wave-limited one.
+    # So this fires only for a memory-bound OR wave-limited kernel: the new order
+    # sits below the target (wavesAfter < MinOccupancy) but not below what's permitted
+    # -- accept the drop rather than revert: fewer concurrent waves share the cache,
+    # avoiding the thrashing such kernels suffer at high occupancy.
+    # Taking wavesAfter lowers MinOccupancy below, which is what stops
+    # the revert. For an ordinary kernel the permitted low == the target, so the two
+    # conditions can't both hold and this never fires.
     if wavesAfter < wavesBefore and wavesAfter < MinOccupancy
                                 and wavesAfter >= getMinAllowedOccupancy():
         newOcc = wavesAfter
-    if newOcc < MinOccupancy:                    # the whole kernel's occupancy must drop
+
+    # Did this region drag the whole kernel's occupancy target down?
+    if newOcc < MinOccupancy:
         MinOccupancy = newOcc
         MFI.limitOccupancy(MinOccupancy)         # keep MFI in sync (only ever lowers)
-        RegionsWithMinOcc.reset()                # re-evaluate every region against the new minimum
+        RegionsWithMinOcc.reset()                # re-test every region against the lower bar
 
     if pressureAfter > AbsoluteMax:              # over getMaxNum*GPRs(MF): the allocator will spill
         RegionsWithExcessRP[region] = true
         RegionsWithHighRP[region]   = true
         RescheduleRegions[region]   = true
 
-    if shouldRevertScheduling(wavesAfter):       # worse than the incoming order? (per-stage test)
+    # The actual keep-or-undo. Reverting restores the incoming order (wavesBefore) --
+    # which is the assumption the max above was built on.
+    if shouldRevertScheduling(wavesAfter):       # per-stage test: occupancy dropped and/or spills
         revert to Unsched (the original order)
     else:
         record pressureAfter
@@ -298,9 +315,15 @@ total `InstCost`, then:
 
 - **memory-bound** — a block has dense global-memory access, or `MemInstCost`
   exceeds ~50% of `InstCost` (`amdgpu-membound-threshold`).
-- **wave-limited** — the same ratio, but with *indirect* and *large-stride*
-  accesses weighted 1000×, so cache-unfriendly access patterns dominate the
-  decision (`amdgpu-limit-wave-threshold`).
+- **wave-limited** — the same >50% test, but the numerator adds **1000×** the cost
+  of two cache-hostile access kinds (on top of their normal traffic): *indirect*
+  accesses, where the address is itself loaded from memory (`a[b[i]]`, pointer
+  chasing — unpredictable addresses), and *large-stride* accesses, where
+  consecutive accesses land far apart (`a[i+1000]` — a new cache line each time).
+  The 1000× weight means their *presence*, not their volume, decides it: even a
+  few trip the threshold, so a kernel whose access *pattern* thrashes the cache is
+  flagged even when its raw memory volume alone wouldn't be "memory-bound"
+  (`amdgpu-limit-wave-threshold`, `amdgpu-{indirect-access,large-stride}-weight`).
 
 Rationale, from that analysis's own comments: it flags kernels that "may benefit
 from limiting number of waves **to reduce cache thrashing**," noting that
@@ -312,16 +335,30 @@ is worth trading occupancy (down to 4) for an otherwise-better schedule. Ordinar
 compute-bound kernels keep their occupancy — a schedule that drops it is reverted.
 
 **What the three per-region bitsets mean:**
-- **`RegionsWithMinOcc[region]`** — is this region's occupancy exactly the current
-  kernel-wide `MinOccupancy`? i.e. is it one of the *bottleneck* regions. Only a
-  bottleneck region can raise the kernel's occupancy, so the reschedule stages
-  target these. It is reset whenever `MinOccupancy` drops, so every region is
-  re-classified against the new minimum.
-- **`RegionsWithHighRP[region]`** — scheduling this region touched a pressure
-  limit (`HasHighPressure`) or ended up over the hard ceiling. Marks it worth a
-  high-pressure retry.
+- **`RegionsWithMinOcc[region]`** — is this region's (register-only) occupancy
+  exactly the current kernel-wide `MinOccupancy`? i.e. is it one of the *bottleneck*
+  regions. Only a bottleneck region can raise the kernel's occupancy, so the
+  reschedule stages target these. Reset whenever `MinOccupancy` drops, so every
+  region is re-classified against the new minimum.
+- **`RegionsWithHighRP[region]`** — scheduling this region hit a pressure problem:
+  a candidate reached the **critical** limit (`getMaxNumVGPRs(TargetOccupancy)` — the
+  budget to *hold* the target occupancy) or the **excess** limit (`≈` the allocatable
+  register count — the *spill* line), setting `HasHighPressure`; or the finished
+  schedule went over the hard register ceiling. Sticky (only ever set true). Marks
+  the region worth a high-pressure retry.
 - **`RegionsWithExcessRP[region]`** — pressure exceeded `AbsoluteMax`: this region
   will spill.
+
+**`RegionsWithHighRP` ⊇ `RegionsWithMinOcc`** (essentially). `MinOccupancy` only ever
+falls below `TargetOccupancy`, and the critical limit is keyed to `TargetOccupancy`,
+so any region *at* `MinOccupancy` has pressure at/above that critical limit — it trips
+`HasHighPressure` by construction. The converse fails: a region can hit `HighRP` while
+finishing *above* the min occupancy (it recovered), or by nearing the *excess* (spill)
+line at any occupancy — so `HighRP` is the broad "had a pressure problem" set and
+`MinOcc` the narrow "is the occupancy bottleneck" subset. (The only `MinOcc`-not-`HighRP`
+slivers are the bias/`ErrorMargin` subtracted from the critical limit, and cross-stage
+timing — `MinOcc` is recomputed on a drop while `HighRP` is only refreshed when a region
+is actually rescheduled.)
 
 The revert test (`shouldRevertScheduling`,
 [:1164](../lib/Target/AMDGPU/GCNSchedStrategy.cpp)) is only reached in Case B; it
