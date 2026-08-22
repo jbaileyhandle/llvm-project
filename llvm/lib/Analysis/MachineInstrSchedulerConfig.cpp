@@ -10,6 +10,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <sstream>
@@ -48,6 +49,7 @@ namespace {
         {"scale_edge_latencies", &Flags::scale_edge_latencies},
         {"skip_occupancy_pass", &Flags::skip_occupancy_pass},
         {"skip_length_pass", &Flags::skip_length_pass},
+        {"length_ignore_occupancy", &Flags::length_ignore_occupancy},
     };
 
     // Return the binding for flag `name`, or nullptr if `name` is not a known
@@ -112,6 +114,40 @@ namespace {
             }
         }
         return nullptr;
+    }
+
+    // Parse a `<min>,<max>` waves pair -- the grammar shared by a per-kernel
+    // `kernel .../<min>,<max>` line's pair form and the global
+    // `all_kernels_occupancy = <min>,<max>` setting. Each entry is >= 0; the `0`
+    // sentinel preserves that bound (left unset in the output). Fatal error on a
+    // non-pair, a negative/non-integer entry, or min > max. `context` names the
+    // caller in error messages (e.g. the offending line).
+    void ParseWavesPair(StringRef spec, const Twine &context,
+                        std::optional<int> &min_waves,
+                        std::optional<int> &max_waves) {
+        SmallVector<StringRef, 2> wave_fields;
+        spec.split(wave_fields, ',');
+        int parsed_min = 0;
+        int parsed_max = 0;
+        if (wave_fields.size() != 2 ||
+            wave_fields[0].getAsInteger(10, parsed_min) || parsed_min < 0 ||
+            wave_fields[1].getAsInteger(10, parsed_max) || parsed_max < 0) {
+            report_fatal_error(context + ": invalid waves pair '" + spec +
+                               "' (expected `<min>,<max>` with each >= 0; 0 "
+                               "preserves that bound)");
+        }
+        // 0 = preserve => leave that bound unset.
+        if (parsed_min != 0) {
+            min_waves = parsed_min;
+        }
+        if (parsed_max != 0) {
+            max_waves = parsed_max;
+        }
+        if (min_waves.has_value() && max_waves.has_value() &&
+            *min_waves > *max_waves) {
+            report_fatal_error(context + ": min waves (" + Twine(*min_waves) +
+                               ") > max waves (" + Twine(*max_waves) + ")");
+        }
     }
 
     // Split a string according to whitespace
@@ -236,6 +272,16 @@ void MachineInstrSchedulerConfig::ApplySetting(llvm::StringRef key,
                                                llvm::StringRef value) {
     size_t dot = key.find('.');
     if (dot == StringRef::npos) {
+        // all_kernels_occupancy = <min>,<max>: a global occupancy default for
+        // every function, sharing the per-kernel `<min>,<max>` grammar. It is a
+        // pair, so it is parsed here rather than through the scalar int table;
+        // stored split into the two GlobalSettings bounds.
+        if (key == "all_kernels_occupancy") {
+            ParseWavesPair(value, "misched.txt: all_kernels_occupancy",
+                           global_settings_.all_kernels_min_waves,
+                           global_settings_.all_kernels_max_waves);
+            return;
+        }
         // Unscoped global setting -> its typed field (integer, then string).
         if (SetGlobalIntSettingIfKnown(key, value)) {
             return;
@@ -344,28 +390,9 @@ void MachineInstrSchedulerConfig::ParseKernelLine(const std::string &rest) {
             }
             optsched_occupancy_limit = parsed;
         } else if (wave_fields.size() == 2) {
-            int parsed_min = 0;
-            int parsed_max = 0;
-            if (wave_fields[0].getAsInteger(10, parsed_min) || parsed_min < 0 ||
-                wave_fields[1].getAsInteger(10, parsed_max) || parsed_max < 0) {
-                report_fatal_error(Twine("misched.txt: kernel line '") + rest +
-                                   "' has invalid waves pair '" + fields[2] +
-                                   "' (expected `<min>,<max>` with each >= 0; 0 "
-                                   "preserves that bound)");
-            }
-            // 0 = preserve => leave that override unset.
-            if (parsed_min != 0) {
-                min_waves = parsed_min;
-            }
-            if (parsed_max != 0) {
-                max_waves = parsed_max;
-            }
-            if (min_waves.has_value() && max_waves.has_value() &&
-                *min_waves > *max_waves) {
-                report_fatal_error(Twine("misched.txt: kernel line '") + rest +
-                                   "' has min waves (" + Twine(*min_waves) +
-                                   ") > max waves (" + Twine(*max_waves) + ")");
-            }
+            ParseWavesPair(fields[2],
+                           Twine("misched.txt: kernel line '") + rest + "'",
+                           min_waves, max_waves);
         } else {
             report_fatal_error(Twine("misched.txt: kernel line '") + rest +
                                "' has malformed waves field '" + fields[2] +
@@ -389,7 +416,25 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
     // line or a whitespace-separated list of option tokens (a scheduler name,
     // a bare flag, or a `<key>=<value>` setting). Options may be split across
     // any number of lines; exactly one scheduler name must appear.
-    std::ifstream misched_config_file("misched.txt");
+    //
+    // Config location: if the MISCHED_CONFIG_FILE environment variable is set,
+    // it must name a readable config file -- anything else (missing file, empty
+    // value) is a fatal error, so an intended config can never silently fail to
+    // apply. If unset, fall back to misched.txt in the compiler's CWD. The env
+    // var exists because the CWD lookup breaks under out-of-source builds:
+    // cmake runs the compiler from build/, not from the directory where the
+    // driver script wrote misched.txt. Environment propagates through the whole
+    // cmake/make/hipcc subprocess chain; CWD does not.
+    const char *env_config_path = ::getenv("MISCHED_CONFIG_FILE");
+    if (env_config_path != nullptr) {
+        std::ifstream probe(env_config_path);
+        if (!probe) {
+            report_fatal_error(Twine("MISCHED_CONFIG_FILE is set but not "
+                                     "readable: '") + env_config_path + "'");
+        }
+    }
+    std::ifstream misched_config_file(
+        env_config_path != nullptr ? env_config_path : "misched.txt");
     if (misched_config_file) {
         has_config_ = true;
 
@@ -419,6 +464,28 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
         if (!scheduler_set_) {
             report_fatal_error("misched.txt: no scheduler specified");
         }
+
+        // all_kernels_occupancy (a blanket occupancy default) is mutually
+        // exclusive with any per-kernel waves override: mixing a global default
+        // with a per-kernel `<min>,<max>` (or the single-value OptSched limit) is
+        // ambiguous. Checked after the full parse so it holds regardless of line
+        // order. A bare `kernel <m|d>/<sig>` with no waves field is fine -- it
+        // only registers the function and carries no override.
+        if (global_settings_.all_kernels_min_waves.has_value() ||
+            global_settings_.all_kernels_max_waves.has_value()) {
+            for (const auto &entry : demangled_func_signature_to_config_) {
+                const FunctionConfig &function_config = entry.second;
+                if (function_config.min_waves_per_eu_.has_value() ||
+                    function_config.max_waves_per_eu_.has_value() ||
+                    function_config.optsched_occupancy_limit_.has_value()) {
+                    report_fatal_error(
+                        Twine("misched.txt: all_kernels_occupancy cannot be "
+                              "combined with a per-kernel waves setting for '") +
+                        function_config.func_signature_ + "'");
+                }
+            }
+        }
+
         DebugPrint();
     }
 }
@@ -467,23 +534,34 @@ void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Fu
     if(IsOptSched()) {
         return;
     }
-    if(!HasFunctionConfig(function)) {
-        return;
-    }
-    const FunctionConfig *config = GetFunctionConfig(function);
+    // Resolve the effective occupancy bounds for this function: its per-kernel
+    // `kernel .../<min>,<max>` entry if it has one, otherwise the global
+    // all_kernels_occupancy default that applies to every function. The two are
+    // mutually exclusive by construction (rejected at parse time), so this is a
+    // plain either/or -- never a merge.
+    std::optional<int> min_override;
+    std::optional<int> max_override;
+    if (HasFunctionConfig(function)) {
+        const FunctionConfig *config = GetFunctionConfig(function);
 
-    // Reaching here means the configured scheduler is NOT OptSched (we returned
-    // above otherwise), so a single-value occupancy limit is a misuse: it is an
-    // OptSched-only input. Non-OptSched schedulers steer occupancy through
-    // amdgpu-waves-per-eu, which needs the explicit `<min>,<max>` pair form.
-    if(config->optsched_occupancy_limit_.has_value()) {
-        report_fatal_error(Twine("misched.txt: single-value waves for '") +
-                           function.getName() +
-                           "' is OptSched-only; use `<min>,<max>` instead");
-    }
+        // The configured scheduler is NOT OptSched (we returned above otherwise),
+        // so a single-value occupancy limit is a misuse: it is an OptSched-only
+        // input. Non-OptSched schedulers steer occupancy through
+        // amdgpu-waves-per-eu, which needs the explicit `<min>,<max>` pair form.
+        if(config->optsched_occupancy_limit_.has_value()) {
+            report_fatal_error(Twine("misched.txt: single-value waves for '") +
+                               function.getName() +
+                               "' is OptSched-only; use `<min>,<max>` instead");
+        }
 
-    const std::optional<int> &min_override = config->min_waves_per_eu_;
-    const std::optional<int> &max_override = config->max_waves_per_eu_;
+        min_override = config->min_waves_per_eu_;
+        max_override = config->max_waves_per_eu_;
+    } else {
+        // No per-kernel entry: fall back to the global default (each nullopt if
+        // all_kernels_occupancy was not set).
+        min_override = global_settings_.all_kernels_min_waves;
+        max_override = global_settings_.all_kernels_max_waves;
+    }
 
     // The `<min>,<max>` pair splits into two very different things.
     //
@@ -522,6 +600,19 @@ void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Fu
     }
     function.removeFnAttr(waves_per_eu_attr);
     function.addFnAttr(waves_per_eu_attr, std::to_string(*min_override));
+}
+
+std::optional<int>
+MachineInstrSchedulerConfig::GetEffectiveMaxWavesPerEUForFunction(
+    const Function &function) const {
+    // Per-kernel max wins when present; otherwise the global default. Mutually
+    // exclusive by construction, so this is a plain either/or.
+    if (const FunctionConfig *config = GetFunctionConfig(function)) {
+        if (config->max_waves_per_eu_.has_value()) {
+            return config->max_waves_per_eu_;
+        }
+    }
+    return global_settings_.all_kernels_max_waves;
 }
 
 MachineInstrSchedulerConfig::FunctionConfig::FunctionConfig(const std::string &demangled_signature,
@@ -581,6 +672,17 @@ std::string MachineInstrSchedulerConfig::ToString() const {
         if (const std::optional<std::string> &value = global_settings_.*(binding.field)) {
             setting_lines += "\t\t" + binding.name.str() + " = " + *value + "\n";
         }
+    }
+    // all_kernels_occupancy is a pair stored outside the scalar table; emit it in
+    // the same `<min>,<max>` form it was written (0 = an unset/preserved bound).
+    if (global_settings_.all_kernels_min_waves.has_value() ||
+        global_settings_.all_kernels_max_waves.has_value()) {
+        setting_lines +=
+            "\t\tall_kernels_occupancy = " +
+            std::to_string(global_settings_.all_kernels_min_waves.value_or(0)) +
+            "," +
+            std::to_string(global_settings_.all_kernels_max_waves.value_or(0)) +
+            "\n";
     }
     if (!setting_lines.empty()) {
         result += "\tGlobal settings:\n" + setting_lines;

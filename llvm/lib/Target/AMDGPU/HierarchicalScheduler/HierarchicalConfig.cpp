@@ -524,6 +524,12 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   hs.scale_edge_latencies = flags.scale_edge_latencies;
   hs.skip_occupancy_pass = flags.skip_occupancy_pass;
   hs.skip_length_pass = flags.skip_length_pass;
+  hs.length_ignore_occupancy = flags.length_ignore_occupancy;
+  // Ignoring the occupancy target in the length pass makes the maximize-occupancy
+  // pass pointless, so it implies skipping it.
+  if (hs.length_ignore_occupancy) {
+    hs.skip_occupancy_pass = true;
+  }
 
   // Per-instruction scheduling-time budgets are unscoped global settings;
   // mirror them into the pass they drive (occupancy / length).
@@ -634,6 +640,7 @@ std::string HierarchicalConfig::ToString() const {
      << " scale_edge_latencies=" << (scale_edge_latencies ? "on" : "off")
      << " skip_occupancy_pass=" << (skip_occupancy_pass ? "on" : "off")
      << " skip_length_pass=" << (skip_length_pass ? "on" : "off")
+     << " length_ignore_occupancy=" << (length_ignore_occupancy ? "on" : "off")
      << "\n";
   return os.str();
 }

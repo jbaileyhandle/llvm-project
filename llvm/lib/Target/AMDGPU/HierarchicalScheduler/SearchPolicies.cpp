@@ -1,6 +1,7 @@
 //===- SearchPolicies.cpp - Per-pass search policies ---------------------===//
 
 #include "SearchPolicies.h"
+#include "HierarchicalConfig.h"
 #include "IlpTracker.h"
 #include "ScheduleGraph.h"
 #include "SubgraphInfo.h"
@@ -337,8 +338,10 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
   // so the spill regime (where reg-only is inherently below the
   // structural floor) doesn't over-prune -- there, this gate stays
   // silent and Gate 2 / score-based dominance discriminate among
-  // spilling candidates.
-  if (!schedule_constructor.LaunchFloorClampedRegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
+  // spilling candidates. Skipped entirely under length_ignore_occupancy:
+  // the length pass then optimizes length without any occupancy prune.
+  if (!HierarchicalConfig::Get().length_ignore_occupancy &&
+      !schedule_constructor.LaunchFloorClampedRegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
     return true;
   }
 
@@ -432,6 +435,11 @@ bool DfsMinimizeLengthRefineOccupancyPolicy::ShouldEndSearch(
   if (best_length > floor) {
     return false;
   }
+  // Occupancy is being ignored: at length floor there is no occupancy target to
+  // refine toward, so the length goal is met -- end.
+  if (HierarchicalConfig::Get().length_ignore_occupancy) {
+    return true;
+  }
   // At length floor. End only if integer occupancy strictly
   // exceeds the function target — within-bracket continuous-
   // score refinement can't unlock anything more once we're
@@ -516,8 +524,9 @@ bool DfsMaximizeLengthPolicy::ShouldBoundSearch(
     std::optional<PressureHistoryTracker> & /*pressure_history*/) {
   // Gate 1: same as DfsMinimizeLengthPolicy -- effective occupancy
   // must meet target. Effective rather than raw register-only so the
-  // spill regime doesn't over-prune.
-  if (!schedule_constructor
+  // spill regime doesn't over-prune. Skipped under length_ignore_occupancy.
+  if (!HierarchicalConfig::Get().length_ignore_occupancy &&
+      !schedule_constructor
            .LaunchFloorClampedRegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
     return true;
   }

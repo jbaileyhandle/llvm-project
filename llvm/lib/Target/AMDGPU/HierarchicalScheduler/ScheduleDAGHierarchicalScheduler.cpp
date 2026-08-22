@@ -273,16 +273,12 @@ static std::optional<int>
 GetPerKernelOccupancyTarget(const MachineFunction &mf) {
   const MachineInstrSchedulerConfig &cfg =
       MachineInstrSchedulerConfig::GetConfig();
-  if (!cfg.HasConfig() || !cfg.HasFunctionConfig(mf.getFunction())) {
+  if (!cfg.HasConfig()) {
     return std::nullopt;
   }
-  const MachineInstrSchedulerConfig::FunctionConfig *func_config =
-      cfg.GetFunctionConfigFromMangledFunctionSignature(
-          mf.getFunction().getName());
-  if (func_config == nullptr) {
-    return std::nullopt;
-  }
-  return func_config->max_waves_per_eu_;
+  // Per-kernel `kernel .../<min>,<max>` max if present, else the global
+  // all_kernels_occupancy max (mutually exclusive; at most one is ever set).
+  return cfg.GetEffectiveMaxWavesPerEUForFunction(mf.getFunction());
 }
 
 // Compute the occupancy pass's starting ceiling and publish it to MFI. The

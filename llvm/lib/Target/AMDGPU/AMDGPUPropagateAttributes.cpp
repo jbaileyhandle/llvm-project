@@ -231,11 +231,18 @@ bool AMDGPUPropagateAttributes::process_misched_config_file(Module &M) {
   }
 
   if(mis_config.HasConfig()) {
+      // A global all_kernels_occupancy min applies to every function, so when it
+      // is set we must visit them all (not just those with a per-kernel entry).
+      // SetFunctionWavesPerEUAttributeBasedOnConfig resolves per-kernel-vs-global
+      // internally; here we only decide which functions to visit.
+      const bool apply_global_min =
+          mis_config.GetGlobalSettings().all_kernels_min_waves.has_value();
       // Update function attributes
       for (auto &F : M.functions()) {
 
-          // This function has a config in file
-          if(mis_config.HasFunctionConfig(F)) {
+          // Visit a function if it has an explicit per-kernel entry, or
+          // unconditionally when a global min applies to every function.
+          if(mis_config.HasFunctionConfig(F) || apply_global_min) {
               mis_config.SetFunctionWavesPerEUAttributeBasedOnConfig(F);
               changed = true;
           }

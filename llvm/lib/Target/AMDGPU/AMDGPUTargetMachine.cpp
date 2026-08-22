@@ -475,18 +475,13 @@ static ScheduleDAGInstrs *createSIMachineScheduler(MachineSchedContext *C) {
 static void ApplyMaxOccupancyPerKernelTarget(MachineFunction &MF) {
   const MachineInstrSchedulerConfig &config =
       MachineInstrSchedulerConfig::GetConfig();
-  if (!config.HasConfig() || !config.HasFunctionConfig(MF.getFunction())) {
-    return;
-  }
-  const MachineInstrSchedulerConfig::FunctionConfig *function_config =
-      config.GetFunctionConfigFromMangledFunctionSignature(
-          MF.getFunction().getName());
-  if (function_config == nullptr ||
-      !function_config->max_waves_per_eu_.has_value()) {
+  std::optional<int> max_waves =
+      config.GetEffectiveMaxWavesPerEUForFunction(MF.getFunction());
+  if (!max_waves.has_value()) {
     return;
   }
   hierarchical_scheduler::LimitTargetOccupancy(
-      *MF.getInfo<SIMachineFunctionInfo>(), *function_config->max_waves_per_eu_,
+      *MF.getInfo<SIMachineFunctionInfo>(), *max_waves,
       MF.getFunction().getName());
 }
 //========================================================================================

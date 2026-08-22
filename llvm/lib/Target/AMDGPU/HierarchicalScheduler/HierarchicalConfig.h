@@ -232,6 +232,10 @@ struct HierarchicalConfig {
   bool scale_edge_latencies = false; // scale edge latency by target occupancy
   bool skip_occupancy_pass = false;  // bypass RunMaximizeOccupancyPass entirely
   bool skip_length_pass = false;     // bypass RunLengthPass entirely
+  // Length pass ignores the occupancy target: the length DFS skips its
+  // occupancy prune ("Gate 1") so it optimizes length unconstrained by
+  // occupancy. Implies skip_occupancy_pass (set in Build).
+  bool length_ignore_occupancy = false;
 
   /// Build the typed config from the generic config's scoped settings.
   /// Per pass: built-in defaults -> named preset (if any) -> explicit

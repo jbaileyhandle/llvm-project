@@ -69,6 +69,15 @@ class MachineInstrSchedulerConfig {
             bool scale_edge_latencies = false;
             bool skip_occupancy_pass = false;
             bool skip_length_pass = false;
+            // HierarchicalScheduler length pass: ignore the occupancy target.
+            // The length DFS normally prunes any schedule whose register-only
+            // occupancy would fall below the function occupancy target ("Gate 1"
+            // in SearchPolicies.cpp); with this set, that gate is skipped so the
+            // length pass optimizes length unconstrained by occupancy (the
+            // spill-regression gates still apply). Implies skip_occupancy_pass:
+            // maximizing occupancy first is pointless when the length pass will
+            // ignore the target anyway. Consumed via HierarchicalConfig.
+            bool length_ignore_occupancy = false;
         };
 
         // Every unscoped global setting writable as `<name>=<value>` in
@@ -101,6 +110,19 @@ class MachineInstrSchedulerConfig {
             // "fast_memory". Interpreted by the target (AMDGPU); unknown names are
             // rejected there, not here.
             std::optional<std::string> timing_model;
+            // Global occupancy target applied to EVERY function, written as
+            // `all_kernels_occupancy = <min>,<max>` -- the same `<min>,<max>`
+            // grammar (and `0`-preserves-that-bound semantics) as a per-kernel
+            // `kernel .../<min>,<max>` line, but with no signature: the default
+            // for all functions. The min becomes an amdgpu-waves-per-eu floor on
+            // every function; the max becomes the occupancy ceiling each
+            // scheduler consumes its own way (MaxOccupancy / HierarchicalScheduler
+            // / MaxIlp). An explicit per-kernel `kernel` line overrides this
+            // global for that one function. unset = no global override. Parsed as
+            // a pair (not via the int table) so it shares the kernel-line waves
+            // grammar; stored split into the two bounds below.
+            std::optional<int> all_kernels_min_waves;
+            std::optional<int> all_kernels_max_waves;
         };
 
         // A class to represent per-function configuration info
@@ -153,6 +175,15 @@ class MachineInstrSchedulerConfig {
         // If there is a configuration for function, set waves per eu attribute
         // for the function based on the configuration
         void SetFunctionWavesPerEUAttributeBasedOnConfig(Function &function) const;
+
+        // Effective occupancy-max ceiling for `function`: its per-kernel
+        // `kernel .../<min>,<max>` max if it has one, otherwise the global
+        // all_kernels_occupancy max. The two are mutually exclusive (rejected at
+        // parse time), so at most one is ever set. Every occupancy-max consumer
+        // (the MFI-ctor cap, the MaxOccupancy target, Hierarchical's
+        // ApplyOccupancyTargetCap) routes through this so a global default reaches
+        // them all. nullopt = no ceiling configured.
+        std::optional<int> GetEffectiveMaxWavesPerEUForFunction(const Function &function) const;
 
         // Return the configured scheduler
         Scheduler GetScheduler() const;

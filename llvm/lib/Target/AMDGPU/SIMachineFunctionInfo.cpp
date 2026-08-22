@@ -83,13 +83,9 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const Function &F,
   // and only lowers.
   const MachineInstrSchedulerConfig &mis_config =
       MachineInstrSchedulerConfig::GetConfig();
-  if (mis_config.HasConfig() && mis_config.HasFunctionConfig(F)) {
-    const MachineInstrSchedulerConfig::FunctionConfig *func_config =
-        mis_config.GetFunctionConfigFromMangledFunctionSignature(F.getName());
-    if (func_config != nullptr && func_config->max_waves_per_eu_.has_value()) {
-      hierarchical_scheduler::LimitTargetOccupancy(
-          *this, *func_config->max_waves_per_eu_, F.getName());
-    }
+  if (std::optional<int> max_waves =
+          mis_config.GetEffectiveMaxWavesPerEUForFunction(F)) {
+    hierarchical_scheduler::LimitTargetOccupancy(*this, *max_waves, F.getName());
   }
   // Capture the pristine (target-limited) occupancy as the baseline the OptSched
   // / HierarchicalScheduler second pass restores via resetInitialOccupancy. Set

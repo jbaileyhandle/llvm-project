@@ -705,16 +705,9 @@ static unsigned GetEffectiveMaxWavesPerEU(const MachineFunction &MF,
   if (config.GetFlags().disable_max_occ_effective_max_waves_cap) {
     return attribute_max;
   }
-  if (config.HasConfig() && config.HasFunctionConfig(MF.getFunction())) {
-    const MachineInstrSchedulerConfig::FunctionConfig *function_config =
-        config.GetFunctionConfigFromMangledFunctionSignature(
-            MF.getFunction().getName());
-    if (function_config != nullptr &&
-        function_config->max_waves_per_eu_.has_value()) {
-      return std::min(
-          attribute_max,
-          static_cast<unsigned>(*function_config->max_waves_per_eu_));
-    }
+  if (std::optional<int> max_waves =
+          config.GetEffectiveMaxWavesPerEUForFunction(MF.getFunction())) {
+    return std::min(attribute_max, static_cast<unsigned>(*max_waves));
   }
   return attribute_max;
 }
