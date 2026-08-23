@@ -1476,38 +1476,45 @@ ScheduleDAGHierarchicalScheduler::ScheduleKernelForOccupancyTier(
 
   // Score at the ACTUAL occupancy — arithmetic on the recorded
   // numbers; raw length is occupancy-independent so nothing is
-  // re-measured. Per region, the two floors on wave-completion
-  // spacing from the model (docs/AMDGPUMinAdjustedLengthScheduler.md):
-  //   issue_slots     — the issue-port floor: every wave's
-  //                     instructions pass through the shared port,
-  //                     concurrency cannot reduce it;
-  //   residency_bound — the residency floor, ceil(raw_length/o): a
-  //                     wave holds a residency slot for its whole
-  //                     lifetime (stalls included), so o slots
-  //                     recycling every raw_length cycles finish at
-  //                     most one wave per raw_length/o cycles.
-  //                     Rounded UP to stay integral and conservative,
-  //                     via the ceiling-division idiom
-  //                     ceil(a/b) = (a + b - 1) / b for positive ints
-  //                     (integer division truncates; adding b - 1
-  //                     first pushes any nonzero remainder over).
-  // The larger floor is the region's cost; occupancy only pays while
-  // the residency floor binds, so the issue-bound count below is the
-  // model saying "occupancy irrelevant for these regions".
-  int issue_bound_regions = 0;
+  // re-measured. Sum across regions FIRST, then take one max: a wave
+  // flows through every region, and its stalls in one region are
+  // covered by other waves issuing from whatever region they are in —
+  // interleaved waves execute different regions at the same time, so
+  // per-region max would deny that cross-region coverage (see the
+  // scoring-granularity section of
+  // docs/AMDGPUMinAdjustedLengthScheduler.md). The two kernel-wide
+  // floors on wave-completion spacing:
+  //   issue_floor     — total instructions per wave: they all pass
+  //                     through the shared port; concurrency cannot
+  //                     reduce it;
+  //   residency_floor — ceil(total raw length / o): a wave holds a
+  //                     residency slot for its whole lifetime (summed
+  //                     region raw lengths, stalls included), so o
+  //                     slots finish at most one wave per lifetime/o
+  //                     cycles. Rounded UP via the ceiling-division
+  //                     idiom ceil(a/b) = (a+b-1)/b for positive ints
+  //                     (integer division truncates; adding b-1 first
+  //                     pushes any nonzero remainder over).
+  // The larger floor is the score; occupancy only pays while the
+  // residency floor binds, so the regime print below is the model
+  // saying whether occupancy matters for this kernel at all.
+  int64_t issue_floor = 0;
+  int64_t wave_lifetime = 0;
   for (const MinAdjustedLengthRegionSchedule &region_schedule :
        candidate.region_schedules) {
-    const int residency_bound =
-        (region_schedule.raw_length + candidate.actual_occupancy - 1) /
-        candidate.actual_occupancy;
-    if (region_schedule.issue_slots >= residency_bound) {
-      ++issue_bound_regions;
-    }
-    candidate.score_sum +=
-        std::max(region_schedule.issue_slots, residency_bound);
+    issue_floor += region_schedule.issue_slots;
+    wave_lifetime += region_schedule.raw_length;
   }
-  llvm::outs() << "\n\ttier " << tier << " scoring: issue_bound_regions="
-               << issue_bound_regions << "/" << regions_.size() << "\n";
+  const int64_t residency_floor =
+      (wave_lifetime + candidate.actual_occupancy - 1) /
+      candidate.actual_occupancy;
+  candidate.score_sum = std::max(issue_floor, residency_floor);
+  llvm::outs() << "\n\ttier " << tier << " scoring: issue_floor="
+               << issue_floor << " residency_floor=" << residency_floor
+               << " -> "
+               << (issue_floor >= residency_floor ? "issue-bound"
+                                                  : "latency-bound")
+               << "\n";
 
   return candidate;
 }

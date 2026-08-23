@@ -224,9 +224,11 @@ public:
   // every region for minimum RAW length under tier o's register budget
   // (divisor-1 graphs; the tier does not enter the search objective),
   // buffer without applying, and score each candidate at its ACTUAL
-  // occupancy with the steady-state time-per-wave model:
+  // occupancy with the steady-state time-per-wave model, summed
+  // across regions before the max (interleaved waves execute
+  // different regions at the same time, so coverage crosses regions):
   //
-  //   score = sum_r w_r * max(issue_slots_r, ceil(raw_length_r / o_act))
+  //   score = max(Σ_r issue_slots_r, ceil(Σ_r raw_length_r / o_act))
   //
   // Smallest score wins, ties to the higher actual occupancy; the
   // winner's schedules are committed and the occupancy target pinned
@@ -278,13 +280,16 @@ public:
     // min-length schedule may land in a higher bracket than it was
     // searched under.
     int actual_occupancy = 0;
-    // The candidate's score: sum over regions of
-    //   max(issue_slots, ceil(raw_length / actual_occupancy))
-    // — the steady-state time per wave. The first arm is the issue
-    // port's demand (occupancy cannot reduce it); the second is the
-    // wave's uncontended lifetime divided by the resident-wave count
-    // (Little's law on the residency slots). Whichever binds is the
-    // region's cost; occupancy only pays while the second arm binds.
+    // The candidate's score — the steady-state time per wave, with
+    // the sums taken across regions BEFORE the max (interleaved waves
+    // execute different regions at the same time, so one region's
+    // stalls are covered by other regions' issue work):
+    //   max(Σ issue_slots, ceil(Σ raw_length / actual_occupancy))
+    // The first arm is the wave's total issue-port demand (occupancy
+    // cannot reduce it); the second is the wave's total uncontended
+    // lifetime divided by the resident-wave count (Little's law on
+    // the residency slots). Occupancy only pays while the second arm
+    // binds.
     int64_t score_sum = 0;
     bool timed_out = false;
     std::vector<MinAdjustedLengthRegionSchedule> region_schedules;
@@ -302,13 +307,14 @@ public:
 
   // Per-region worker for ScheduleKernelForOccupancyTier: min-RAW-
   // length search the region (divisor-1 graph — the tier does not
-  // enter the search objective, since the score is monotone in raw
-  // length at any fixed tier), via the same two-phase length-min
-  // worker the length pass uses (plain min policy), seeded with the
-  // current MF order. The best schedule is returned in buffered form,
-  // NOT applied — every tier must search from the same input. The
-  // tier reaches the search only through the register budget: the
-  // caller must already have set MFI's occupancy target to it.
+  // enter the search objective; the score's lifetime sum decomposes
+  // over regions, so minimizing each region's raw length is optimal
+  // at every tier), via the same two-phase length-min worker the
+  // length pass uses (plain min policy), seeded with the current MF
+  // order. The best schedule is returned in buffered form, NOT
+  // applied — every tier must search from the same input. The tier
+  // reaches the search only through the register budget: the caller
+  // must already have set MFI's occupancy target to it.
   MinAdjustedLengthRegionSchedule SearchRegionAtOccupancyTier(
       RegionInfo &region);
 

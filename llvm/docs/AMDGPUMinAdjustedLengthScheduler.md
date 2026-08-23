@@ -18,14 +18,16 @@ budget). The pass chooses the schedule **and** the occupancy jointly, by
 scheduling the kernel once per reachable occupancy tier and committing the tier
 whose predicted time is smallest.
 
-The prediction is the score derived below:
+The prediction is the score derived below. The sums run across regions
+**before** the max is taken — see "Scoring granularity" for why:
 
 ```
-kernel time per wave  =  Σ_r  w_r · max( I_r , L_raw_r / o )
+kernel time per wave  =  max( Σ_r w_r·I_r ,  (Σ_r w_r·L_raw_r) / o )
 
 I_r     = region r's issue-slot demand (instruction count, flat model)
 L_raw_r = region r's raw schedule length: the wave's UNCONTENDED lifetime
-          (issue cycles + exposed latency stalls), divisor-1 lens
+          in that region (issue cycles + exposed latency stalls),
+          divisor-1 lens
 o       = resident waves per SIMD (the candidate's ACTUAL occupancy)
 w_r     = region weight (1, or a static hotness estimate)
 ```
@@ -120,15 +122,44 @@ Note the equivalent "coverage" form, sometimes more intuitive: with `B = L_raw
 other waves' issue work `(o−1)·I` covers your bubbles; only the uncovered
 remainder is machine idle.
 
+## Scoring granularity: sum across regions BEFORE the max
+
+The derivation above is about a wave's **whole life**, and a wave flows through
+every region. Applying the formula per region and summing —
+`Σ_r max(I_r, L_r/o)` — is a different (and wrong-by-default) model: it
+implicitly asserts that a region's stalls can only be covered by other waves
+executing *the same region*. In the machine, interleaved waves are at different
+points of the kernel at the same moment, so one region's stalls are covered by
+issue work from whatever regions the other waves are in.
+
+Concretely: region A = 1000 ALU ops, no stalls; region B = 10 ops plus a long
+load, raw length 2000. Per-region scoring gives B
+`max(10, 2000/o)` — a huge exposed stall, since B's own 10 instructions can't
+cover it — and calls the kernel latency-bound. Summed-first scoring at o=3
+gives `max(1010, 3000/3) = 1010`: B's stalls are fully covered by A's
+instructions, executed by other waves that are in A while this wave stalls in
+B. That is what actually happens when waves are spread through the kernel.
+
+The error is not just pessimism; it mis-ranks tiers. Per-region scoring
+overvalues anything that shrinks a stall-heavy region — including dropping to
+a lower tier for more registers — even when those stalls are already covered
+kernel-wide and the occupancy sacrifice buys nothing. Same failure direction
+as the per-edge lens, one level up.
+
+When per-region *would* be right: all resident waves in one workgroup with
+barriers re-syncing them — then waves do march through regions together and
+coverage really is region-local. That is the convoying caveat (see Assumptions)
+at kernel scope; the summed form is the deliberate default, revisit if
+barrier-heavy kernels underperform the model.
+
 ## Consequences for the algorithm
 
-1. **The tier does not enter the search objective.** For a fixed region, `I` is
-   schedule-invariant (same instructions in any order), so the score is
-   monotone in `L_raw`: the optimal schedule at every tier is the min-raw-length
-   schedule under that tier's register budget. Region graphs are built at
-   divisor 1; the tier enters only as the register budget (via the MFI
-   occupancy target the DFS policies read live) and in the cross-tier
-   arithmetic.
+1. **The tier does not enter the search objective.** `Σ I_r` is
+   schedule-invariant, and the lifetime sum `Σ L_raw_r` decomposes over
+   regions, so minimizing each region's raw length independently is optimal at
+   every tier. Region graphs are built at divisor 1; the tier enters only as
+   the register budget (via the MFI occupancy target the DFS policies read
+   live) and in the cross-tier arithmetic.
 
 2. **Scoring needs no re-measurement.** `L_raw` is occupancy-independent, so
    scoring a candidate at its actual occupancy is pure arithmetic on numbers
@@ -141,17 +172,19 @@ remainder is machine idle.
    the committed occupancy target both use the kernel-wide min over regions of
    each schedule's launch-floor-clamped all-factors occupancy.
 
-4. **The score saturates: feasibility targeting.** Once `L_raw ≤ o·I`, further
-   raw-length improvement moves the non-binding arm and is worthless. The
-   per-tier search should therefore first probe feasibility at target `o·I`
-   (region done at score `I` if reached) and only run an open-ended min-length
-   search when the probe fails. High tiers get cheap probes; low tiers do the
-   real work.
+4. **Saturation is kernel-wide only.** The score never goes below `Σ w·I`, and
+   any tier achieving `Σ w·L_raw ≤ o·Σ w·I` sits at that floor. There is NO
+   per-region saturation target — stopping a region's search at `o·I_r` would
+   forgo raw-length reductions that still pay whenever the kernel as a whole
+   is latency-bound. Every tier is searched fully; compile-time shortcuts
+   derived from saturation are deliberately not taken in this draft (constant
+   factors, and the full tier table is diagnostic output worth having while
+   the model is unvalidated).
 
-5. **Ties are common and meaningful.** Every issue-bound region scores `I` at
-   every tier — the model saying "occupancy is irrelevant here". Ties on the
-   kernel score go to the **higher actual occupancy**: more waves dampen the
-   damage of a latency mis-estimate, so the insurance is free.
+5. **Ties are common and meaningful.** Every tier whose candidate is
+   issue-bound scores `Σ w·I` — the model saying "occupancy is irrelevant for
+   this kernel". Ties go to the **higher actual occupancy**: more waves dampen
+   the damage of a latency mis-estimate, so the insurance is free.
 
 ## Robustness: the two-sided stress-lens tie-break (planned)
 
@@ -192,10 +225,10 @@ RunMinimizeAdjustedLengthPass:
         SetOccupancyTarget(o)                    # budget(o), read live by DFS policies
         for r in regions:
             sched[o][r] = min-raw-length search  # divisor-1 graph, seeded w/ MF order
-                                                  # (planned: feasibility probe at o·I first)
             record raw_length, issue_slots, achieved_occupancy
         actual[o] = min_r achieved_occupancy     # >= o, can exceed it
-        score[o]  = Σ_r w_r · max(issue_slots_r, ceil(raw_length_r / actual[o]))
+        score[o]  = max(Σ_r w_r·issue_slots_r,
+                        ceil(Σ_r w_r·raw_length_r / actual[o]))
     winner = argmin score, ties -> higher actual occupancy
     SetOccupancyTarget(actual[winner]); apply winner's buffered orders
 ```
