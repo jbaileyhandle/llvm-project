@@ -256,10 +256,16 @@ it.
 - **λ independent of o.** On bandwidth-bound kernels more waves raise real
   latency (queueing), so the `L_raw/o` arm is optimistic there. Parked with the
   empirical lat(O) work (forced-occupancy characterize runs).
-- **Region weights.** Loop trip counts are unknown at sched time; `w_r` is 1
-  (default) or MBFI's static relative-to-entry frequency (`region_weighting =
-  mbfi`) — the same profile-free estimate register allocation's spill weights
-  use. Either way a guess; PGO would make it real.
+- **Region weights.** Loop trip counts are unknown at sched time; `w_r` is the
+  estimated executions per wave, entering BOTH sums. Default:
+  `loop_weight_base ^ loop_depth` (`min_adjusted_length.region_weighting =
+  loop_depth`, base tunable via `min_adjusted_length.loop_weight_base`,
+  default 10) — chosen over MBFI's static frequencies because the base is
+  sweepable against measured GRBM and the resulting vote is auditable by hand,
+  where MBFI's profile-free guess (~31 per loop level) is neither; `none`
+  (all-1) is the opt-out. MBFI remains the upgrade path if PGO arrives or
+  branchy kernels are shown to mispick tiers. Any flavor is a guess; PGO would
+  make it real.
 - **Pre-RA pressure is an estimate** (inherited caveat — see the MaxOccupancy
   doc): a schedule the pass considers to fit at a tier can still spill at
   allocation.

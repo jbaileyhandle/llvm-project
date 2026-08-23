@@ -30,6 +30,7 @@
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineLoopInfo.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
@@ -1437,10 +1438,50 @@ ScheduleDAGHierarchicalScheduler::SearchRegionAtOccupancyTier(
   return result;
 }
 
+// See header. MLI is the ScheduleDAGInstrs member inherited through
+// ScheduleDAGMILive/ScheduleDAGMI, filled from the MachineSchedContext
+// by the MachineScheduler pass (which addRequired's MachineLoopInfo) —
+// never null when this scheduler is driven by the pass, so a null here
+// means a construction path that skipped the context, not a kernel
+// without loops.
+std::vector<int64_t>
+ScheduleDAGHierarchicalScheduler::ComputeMinAdjustedLengthRegionWeights()
+    const {
+  std::vector<int64_t> region_weights(regions_.size(), 1);
+  const MinAdjustedLengthConfig &config =
+      HierarchicalConfig::Get().min_adjusted_length_config;
+  if (config.region_weighting != RegionWeighting::kLoopDepth) {
+    return region_weights;
+  }
+  if (!MLI) {
+    report_fatal_error("ComputeMinAdjustedLengthRegionWeights: no "
+                       "MachineLoopInfo (scheduler constructed without a "
+                       "MachineSchedContext?)");
+  }
+
+  // Cap far below int64 overflow of the score sums; depths that deep
+  // carry no additional ranking information anyway.
+  constexpr int64_t kMaxRegionWeight = 1000000000000; // 10^12
+  llvm::outs() << "\tregion_weights (loop_depth, base="
+               << config.loop_weight_base << "):";
+  for (size_t i = 0; i < regions_.size(); ++i) {
+    const int depth =
+        static_cast<int>(MLI->getLoopDepth(regions_[i].GetBlock()));
+    int64_t weight = 1;
+    for (int d = 0; d < depth && weight < kMaxRegionWeight; ++d) {
+      weight *= config.loop_weight_base;
+    }
+    region_weights[i] = weight;
+    llvm::outs() << " [" << i << "] depth=" << depth << " w=" << weight;
+  }
+  llvm::outs() << "\n";
+  return region_weights;
+}
+
 // Per-tier worker. See header.
 ScheduleDAGHierarchicalScheduler::MinAdjustedLengthCandidate
 ScheduleDAGHierarchicalScheduler::ScheduleKernelForOccupancyTier(
-    int tier) {
+    int tier, ArrayRef<int64_t> region_weights) {
   // budget(tier): the length-min DFS policies read their register
   // budget from MFI's occupancy target live, so setting the target to
   // `tier` is what makes every region search prune schedules that
@@ -1482,7 +1523,9 @@ ScheduleDAGHierarchicalScheduler::ScheduleKernelForOccupancyTier(
   // interleaved waves execute different regions at the same time, so
   // per-region max would deny that cross-region coverage (see the
   // scoring-granularity section of
-  // docs/AMDGPUMinAdjustedLengthScheduler.md). The two kernel-wide
+  // docs/AMDGPUMinAdjustedLengthScheduler.md). Each region enters
+  // both sums times its weight — the estimated executions per wave
+  // (see ComputeMinAdjustedLengthRegionWeights). The two kernel-wide
   // floors on wave-completion spacing:
   //   issue_floor     — total instructions per wave: they all pass
   //                     through the shared port; concurrency cannot
@@ -1500,10 +1543,11 @@ ScheduleDAGHierarchicalScheduler::ScheduleKernelForOccupancyTier(
   // saying whether occupancy matters for this kernel at all.
   int64_t issue_floor = 0;
   int64_t wave_lifetime = 0;
-  for (const MinAdjustedLengthRegionSchedule &region_schedule :
-       candidate.region_schedules) {
-    issue_floor += region_schedule.issue_slots;
-    wave_lifetime += region_schedule.raw_length;
+  for (size_t i = 0; i < candidate.region_schedules.size(); ++i) {
+    const MinAdjustedLengthRegionSchedule &region_schedule =
+        candidate.region_schedules[i];
+    issue_floor += region_weights[i] * region_schedule.issue_slots;
+    wave_lifetime += region_weights[i] * region_schedule.raw_length;
   }
   const int64_t residency_floor =
       (wave_lifetime + candidate.actual_occupancy - 1) /
@@ -1537,12 +1581,15 @@ void ScheduleDAGHierarchicalScheduler::RunMinimizeAdjustedLengthPass() {
     return;
   }
 
+  const std::vector<int64_t> region_weights =
+      ComputeMinAdjustedLengthRegionWeights();
+
   std::optional<MinAdjustedLengthCandidate> best;
   for (int tier = top_tier; tier >= floor_tier; --tier) {
     llvm::outs() << "\n\t=== occupancy tier " << tier << " ===\n";
 
     MinAdjustedLengthCandidate candidate =
-        ScheduleKernelForOccupancyTier(tier);
+        ScheduleKernelForOccupancyTier(tier, region_weights);
     llvm::outs() << "\n\ttier " << tier
                  << " result: actual_occupancy=" << candidate.actual_occupancy
                  << " score_sum=" << candidate.score_sum
@@ -1606,7 +1653,7 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   // optimize the post-occupancy schedule, but min-adjusted-length also
   // owns the occupancy choice, so running the plain length pass too
   // would be redundant work under a stale lens.
-  if (HierarchicalConfig::Get().min_adjusted_length) {
+  if (HierarchicalConfig::Get().min_adjusted_length_config.enabled) {
     RunMinimizeAdjustedLengthPass();
   } else if (!HierarchicalConfig::Get().skip_length_pass) {
     RunLengthPass();

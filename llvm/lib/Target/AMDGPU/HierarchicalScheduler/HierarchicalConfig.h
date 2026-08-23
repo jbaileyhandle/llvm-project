@@ -213,6 +213,25 @@ struct LengthConfig {
   }
 };
 
+/// Config for the min-adjusted-length pass. `enabled` mirrors the bare
+/// `min_adjusted_length` flag; the other fields come from the
+/// `min_adjusted_length.*` scope.
+struct MinAdjustedLengthConfig {
+  // Run the pass (replaces the length pass; requires the occupancy
+  // pass — see RunMinimizeAdjustedLengthPass).
+  bool enabled = false;
+  // How regions are weighted inside both sums of the score
+  // (min_adjusted_length.region_weighting = none | loop_depth).
+  // Loop-depth weighting is the default: an unweighted sum lets long
+  // cold prologues outvote hot inner loops; `none` is the opt-out for
+  // experiments.
+  RegionWeighting region_weighting = RegionWeighting::kLoopDepth;
+  // The base K of the kLoopDepth weight K^depth
+  // (min_adjusted_length.loop_weight_base). Tunable stand-in for
+  // unknown trip counts; requires region_weighting=loop_depth.
+  int loop_weight_base = 10;
+};
+
 /// The HierarchicalScheduler's whole typed configuration, built once at
 /// scheduler init by Build(). Call sites read typed fields (e.g.
 /// `hs.occupancy.search == Search::kBfsDp`) instead of querying the generic
@@ -236,16 +255,11 @@ struct HierarchicalConfig {
   // occupancy prune ("Gate 1") so it optimizes length unconstrained by
   // occupancy. Implies skip_occupancy_pass (set in Build).
   bool length_ignore_occupancy = false;
-  // Replace the length pass with the min-adjusted-length pass
-  // (RunMinimizeAdjustedLengthPass): schedule the whole kernel once per
-  // reachable occupancy tier — each region min-length searched under that
-  // tier's register budget with edge latencies divided by the tier (the
-  // adjusted lens) — then commit the tier whose kernel-wide adjusted
-  // length sum is smallest and pin the occupancy target there. Requires
-  // the occupancy pass (it establishes the top tier and a schedule
-  // feasible at every tier), so incompatible with skip_occupancy_pass
-  // and length_ignore_occupancy (enforced in Build).
-  bool min_adjusted_length = false;
+  // The min-adjusted-length pass (see MinAdjustedLengthConfig and
+  // RunMinimizeAdjustedLengthPass). enabled requires the occupancy
+  // pass, so it is incompatible with skip_occupancy_pass and
+  // length_ignore_occupancy (enforced in Build).
+  MinAdjustedLengthConfig min_adjusted_length_config;
 
   /// Build the typed config from the generic config's scoped settings.
   /// Per pass: built-in defaults -> named preset (if any) -> explicit

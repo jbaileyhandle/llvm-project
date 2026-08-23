@@ -127,6 +127,11 @@ const EnumSpec<LengthPolicy> kLengthPolicies[] = {
     {"max", LengthPolicy::kMax},
 };
 
+const EnumSpec<RegionWeighting> kRegionWeightings[] = {
+    {"none", RegionWeighting::kNone},
+    {"loop_depth", RegionWeighting::kLoopDepth},
+};
+
 bool ParseBool(StringRef scope, StringRef key, StringRef v) {
   if (v == "true" || v == "on") {
     return true;
@@ -361,6 +366,50 @@ void BuildOccupancy(const std::map<std::string, std::string> *kv,
   }
 }
 
+// `base_explicitly_set` reports whether loop_weight_base appeared as an
+// explicit key: it is only meaningful under region_weighting=loop_depth,
+// and setting it while the weighting is none is a config contradiction —
+// validated by the caller after ALL keys are applied, so key order in
+// misched.txt doesn't matter.
+void ApplyMinAdjustedLengthKey(StringRef key, StringRef val,
+                               MinAdjustedLengthConfig &c,
+                               bool &base_explicitly_set) {
+  StringRef scope = "min_adjusted_length";
+  if (key == "region_weighting") {
+    c.region_weighting = ParseEnum(kRegionWeightings, scope, key, val);
+    return;
+  }
+  if (key == "loop_weight_base") {
+    c.loop_weight_base = ParseInt(scope, key, val);
+    base_explicitly_set = true;
+    return;
+  }
+  UnknownKey(scope, key);
+}
+
+// No presets for this scope — just the explicit keys.
+void BuildMinAdjustedLength(const std::map<std::string, std::string> *kv,
+                            MinAdjustedLengthConfig &c) {
+  bool base_explicitly_set = false;
+  if (kv) {
+    for (const auto &p : *kv) {
+      ApplyMinAdjustedLengthKey(p.first, p.second, c, base_explicitly_set);
+    }
+  }
+  if (base_explicitly_set &&
+      c.region_weighting != RegionWeighting::kLoopDepth) {
+    report_fatal_error(
+        "misched.txt: min_adjusted_length.loop_weight_base requires "
+        "region_weighting=loop_depth");
+  }
+  // A weight base below 1 would make deeper loops weigh LESS (or zero
+  // out); base 1 is the legitimate "depth-blind" corner.
+  if (c.loop_weight_base < 1) {
+    report_fatal_error(
+        "misched.txt: min_adjusted_length.loop_weight_base must be >= 1");
+  }
+}
+
 void BuildLength(const std::map<std::string, std::string> *kv, LengthConfig &c) {
   StringRef preset_name = GetPresetName(kv);
   if (!preset_name.empty()) {
@@ -488,12 +537,14 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   const std::map<std::string, std::map<std::string, std::string>> &scoped =
       cfg.GetAllScopedSettings();
 
-  // Reject unknown scopes up front. Only "occupancy" and "length" are known;
-  // the generic config only routes dotted "<scope>.<key>" settings into the
-  // scoped store (the global toggles are bare flags now).
+  // Reject unknown scopes up front. Only "occupancy", "length", and
+  // "min_adjusted_length" are known; the generic config only routes
+  // dotted "<scope>.<key>" settings into the scoped store (the global
+  // toggles are bare flags now).
   for (const auto &entry : scoped) {
     const std::string &scope = entry.first;
-    if (scope == "occupancy" || scope == "length") {
+    if (scope == "occupancy" || scope == "length" ||
+        scope == "min_adjusted_length") {
       continue;
     }
     report_fatal_error(Twine("misched.txt: unknownscope '") + scope +
@@ -510,6 +561,8 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
 
   BuildOccupancy(find_scope("occupancy"), hs.occupancy);
   BuildLength(find_scope("length"), hs.length);
+  BuildMinAdjustedLength(find_scope("min_adjusted_length"),
+                         hs.min_adjusted_length_config);
 
   ValidateOccupancy(hs.occupancy);
   ValidateLength(hs.length);
@@ -525,7 +578,7 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   hs.skip_occupancy_pass = flags.skip_occupancy_pass;
   hs.skip_length_pass = flags.skip_length_pass;
   hs.length_ignore_occupancy = flags.length_ignore_occupancy;
-  hs.min_adjusted_length = flags.min_adjusted_length;
+  hs.min_adjusted_length_config.enabled = flags.min_adjusted_length;
   // Ignoring the occupancy target in the length pass makes the maximize-occupancy
   // pass pointless, so it implies skipping it.
   if (hs.length_ignore_occupancy) {
@@ -538,7 +591,7 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   // tier and no feasible seed, so the combination is rejected rather than
   // silently sweeping from an unproven ceiling. length_ignore_occupancy
   // implies skip_occupancy_pass, so it is rejected transitively.
-  if (hs.min_adjusted_length && hs.skip_occupancy_pass) {
+  if (hs.min_adjusted_length_config.enabled && hs.skip_occupancy_pass) {
     report_fatal_error("misched.txt: min_adjusted_length requires the "
                        "occupancy pass (remove skip_occupancy_pass / "
                        "length_ignore_occupancy)");
@@ -654,7 +707,13 @@ std::string HierarchicalConfig::ToString() const {
      << " skip_occupancy_pass=" << (skip_occupancy_pass ? "on" : "off")
      << " skip_length_pass=" << (skip_length_pass ? "on" : "off")
      << " length_ignore_occupancy=" << (length_ignore_occupancy ? "on" : "off")
-     << " min_adjusted_length=" << (min_adjusted_length ? "on" : "off")
+     << "\n";
+  os << "\tmin_adjusted_length: enabled="
+     << (min_adjusted_length_config.enabled ? "on" : "off")
+     << " region_weighting="
+     << EnumName(kRegionWeightings,
+                 min_adjusted_length_config.region_weighting)
+     << " loop_weight_base=" << min_adjusted_length_config.loop_weight_base
      << "\n";
   return os.str();
 }

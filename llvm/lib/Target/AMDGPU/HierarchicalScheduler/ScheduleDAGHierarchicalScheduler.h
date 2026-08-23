@@ -295,15 +295,27 @@ public:
     std::vector<MinAdjustedLengthRegionSchedule> region_schedules;
   };
 
+  // Per-region weights for the min-adjusted-length score's sums — the
+  // pass's estimate of how many times a wave executes each region,
+  // applied to BOTH the issue floor and the lifetime. Returned vector
+  // is parallel to regions_. kLoopDepth (the default): weight =
+  // loop_weight_base ^ loop_depth(region's block), capped well below
+  // int64 overflow; kNone: every weight 1. Tier-invariant. Prints the
+  // weights so any tier vote can be audited by hand.
+  std::vector<int64_t> ComputeMinAdjustedLengthRegionWeights() const;
+
   // Per-tier worker for RunMinimizeAdjustedLengthPass. Sets MFI's
   // occupancy target to `tier` (SetOccupancyTarget, position-
   // independent; the DFS policies read their register budget from the
   // target live), then runs SearchRegionAtOccupancyTier on every
   // region, buffering each best order. Computes the candidate's
   // actual occupancy and its score — pure arithmetic over the
-  // recorded raw lengths and issue-slot counts (raw length is
-  // occupancy-independent, so nothing is re-measured; see score_sum).
-  MinAdjustedLengthCandidate ScheduleKernelForOccupancyTier(int tier);
+  // recorded raw lengths, issue-slot counts, and `region_weights`
+  // (parallel to regions_; see ComputeMinAdjustedLengthRegionWeights).
+  // Raw length is occupancy-independent, so nothing is re-measured
+  // (see score_sum).
+  MinAdjustedLengthCandidate ScheduleKernelForOccupancyTier(
+      int tier, ArrayRef<int64_t> region_weights);
 
   // Per-region worker for ScheduleKernelForOccupancyTier: min-RAW-
   // length search the region (divisor-1 graph — the tier does not

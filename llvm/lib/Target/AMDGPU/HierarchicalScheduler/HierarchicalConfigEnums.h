@@ -64,6 +64,22 @@ enum class LengthPolicy {
   kMax,
 };
 
+/// `min_adjusted_length.region_weighting` axis: how the min-adjusted-
+/// length pass weights each region inside BOTH sums of its score
+/// (issue floor and wave lifetime) — i.e., its estimate of how many
+/// times a wave executes the region.
+///   kNone      - every region weight 1 (trip-count-blind).
+///   kLoopDepth - weight = loop_weight_base ^ loop_depth(region): a
+///                tunable, auditable stand-in for unknown trip counts,
+///                so hot inner-loop regions outvote cold straight-line
+///                code in the tier decision. (A future `mbfi` value —
+///                MachineBlockFrequencyInfo static frequencies — is
+///                the upgrade path if PGO arrives or branchy kernels
+///                are shown to mispick tiers; deliberately not
+///                implemented while its ~31^depth guess would be both
+///                untunable and harder to audit than this one.)
+enum class RegionWeighting { kNone, kLoopDepth };
+
 } // namespace hierarchical_scheduler
 } // namespace llvm
 
