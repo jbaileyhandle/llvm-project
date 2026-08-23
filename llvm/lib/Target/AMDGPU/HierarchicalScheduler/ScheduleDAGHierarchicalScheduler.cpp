@@ -1411,11 +1411,11 @@ int ScheduleDAGHierarchicalScheduler::MeasureBufferedOrderLength(
 // heading the caller prints.
 ScheduleDAGHierarchicalScheduler::MinAdjustedLengthRegionSchedule
 ScheduleDAGHierarchicalScheduler::SearchRegionAtOccupancyTier(
-    RegionInfo &region, int tier) {
+    RegionInfo &region) {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
   MinAdjustedLengthRegionSchedule result;
-  WithRegionGraph(region, /*latency_divisor=*/tier,
+  WithRegionGraph(region, /*latency_divisor=*/1,
                   [&](ScheduleGraph &graph) {
     const ScheduleConstructor &input_sc =
         graph.GetInputScheduleConstructor();
@@ -1427,8 +1427,8 @@ ScheduleDAGHierarchicalScheduler::SearchRegionAtOccupancyTier(
         graph, st, MF, *LIS, input_sc, best_sc, timed_out, dfs_ms,
         dfs_steps);
     result.order = best_sc.GetInstrOrder();
-    result.adjusted_length =
-        best_sc.GetLengthTracker().GetCurrentCycle();
+    result.raw_length = best_sc.GetLengthTracker().GetCurrentCycle();
+    result.issue_slots = static_cast<int>(result.order.size());
     result.achieved_occupancy =
         best_sc.GetPressureTracker()
             .GetLaunchFloorClampedAllFactorsRegionOnlyOccupancy();
@@ -1459,7 +1459,7 @@ ScheduleDAGHierarchicalScheduler::ScheduleKernelForOccupancyTier(
     SubgraphDagDumpRegionScope region_scope(static_cast<int>(i));
 
     candidate.region_schedules.push_back(
-        SearchRegionAtOccupancyTier(regions_[i], tier));
+        SearchRegionAtOccupancyTier(regions_[i]));
     const MinAdjustedLengthRegionSchedule &region_schedule =
         candidate.region_schedules.back();
 
@@ -1474,23 +1474,40 @@ ScheduleDAGHierarchicalScheduler::ScheduleKernelForOccupancyTier(
                             region_schedule.achieved_occupancy);
   }
 
-  if (candidate.actual_occupancy != tier) {
-    // The schedules run at a different wave count than the lens they
-    // were searched under — re-measure every buffered order under the
-    // actual-occupancy divisor so the score reflects the latency
-    // hiding the schedules will really get.
-    for (size_t i = 0; i < regions_.size(); ++i) {
-      candidate.region_schedules[i].adjusted_length =
-          MeasureBufferedOrderLength(regions_[i],
-                                     candidate.region_schedules[i].order,
-                                     candidate.actual_occupancy);
-    }
-  }
-
+  // Score at the ACTUAL occupancy — arithmetic on the recorded
+  // numbers; raw length is occupancy-independent so nothing is
+  // re-measured. Per region, the two floors on wave-completion
+  // spacing from the model (docs/AMDGPUMinAdjustedLengthScheduler.md):
+  //   issue_slots     — the issue-port floor: every wave's
+  //                     instructions pass through the shared port,
+  //                     concurrency cannot reduce it;
+  //   residency_bound — the residency floor, ceil(raw_length/o): a
+  //                     wave holds a residency slot for its whole
+  //                     lifetime (stalls included), so o slots
+  //                     recycling every raw_length cycles finish at
+  //                     most one wave per raw_length/o cycles.
+  //                     Rounded UP to stay integral and conservative,
+  //                     via the ceiling-division idiom
+  //                     ceil(a/b) = (a + b - 1) / b for positive ints
+  //                     (integer division truncates; adding b - 1
+  //                     first pushes any nonzero remainder over).
+  // The larger floor is the region's cost; occupancy only pays while
+  // the residency floor binds, so the issue-bound count below is the
+  // model saying "occupancy irrelevant for these regions".
+  int issue_bound_regions = 0;
   for (const MinAdjustedLengthRegionSchedule &region_schedule :
        candidate.region_schedules) {
-    candidate.adjusted_length_sum += region_schedule.adjusted_length;
+    const int residency_bound =
+        (region_schedule.raw_length + candidate.actual_occupancy - 1) /
+        candidate.actual_occupancy;
+    if (region_schedule.issue_slots >= residency_bound) {
+      ++issue_bound_regions;
+    }
+    candidate.score_sum +=
+        std::max(region_schedule.issue_slots, residency_bound);
   }
+  llvm::outs() << "\n\ttier " << tier << " scoring: issue_bound_regions="
+               << issue_bound_regions << "/" << regions_.size() << "\n";
 
   return candidate;
 }
@@ -1521,21 +1538,19 @@ void ScheduleDAGHierarchicalScheduler::RunMinimizeAdjustedLengthPass() {
         ScheduleKernelForOccupancyTier(tier);
     llvm::outs() << "\n\ttier " << tier
                  << " result: actual_occupancy=" << candidate.actual_occupancy
-                 << " adjusted_length_sum=" << candidate.adjusted_length_sum
-                 << (candidate.actual_occupancy != tier ? " (re-measured)"
-                                                        : "")
+                 << " score_sum=" << candidate.score_sum
                  << (candidate.timed_out ? " timed_out" : "") << "\n";
 
     // Smallest score wins. Ties go to the higher ACTUAL occupancy —
     // insurance against latency misestimates, since more waves dampen
-    // a modeling error. Actual occupancy is not monotone in sweep
-    // order (a looser-budget search can land lower pressure by
-    // accident), so the tie-break compares explicitly; remaining ties
-    // keep the earlier candidate (higher searched tier) for
-    // determinism.
-    if (!best.has_value() ||
-        candidate.adjusted_length_sum < best->adjusted_length_sum ||
-        (candidate.adjusted_length_sum == best->adjusted_length_sum &&
+    // a modeling error; ties are common because issue-bound regions
+    // score issue_slots at every tier. Actual occupancy is not
+    // monotone in sweep order (a looser-budget search can land lower
+    // pressure by accident), so the tie-break compares explicitly;
+    // remaining ties keep the earlier candidate (higher searched
+    // tier) for determinism.
+    if (!best.has_value() || candidate.score_sum < best->score_sum ||
+        (candidate.score_sum == best->score_sum &&
          candidate.actual_occupancy > best->actual_occupancy)) {
       best = std::move(candidate);
     }
@@ -1555,7 +1570,7 @@ void ScheduleDAGHierarchicalScheduler::RunMinimizeAdjustedLengthPass() {
   llvm::outs() << "\n\tPASS RESULT: winner searched_occupancy_tier="
                << best->searched_occupancy_tier
                << " actual_occupancy=" << best->actual_occupancy
-               << " adjusted_length_sum=" << best->adjusted_length_sum
+               << " score_sum=" << best->score_sum
                << " (MFI->Occupancy now " << mfi_->getOccupancy() << ")\n";
 }
 

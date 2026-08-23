@@ -218,24 +218,26 @@ public:
   LengthRegionStats ScheduleRegionForLengthPass(RegionInfo &region);
 
   // The min-adjusted-length pass (misched.txt flag `min_adjusted_length`;
-  // replaces the length pass). For every reachable occupancy tier o —
-  // the post-occupancy-pass kernel ceiling down to the launch floor —
-  // schedule every region for minimum length with the tier threaded
-  // through both halves of the search: MFI's occupancy target is set
-  // to o (the DFS policies read their register budget from it live)
-  // and the region graphs are built with edge latencies divided by o
-  // (the adjusted lens, via WithRegionGraph's explicit divisor). Each
-  // tier's schedules are buffered, not applied, and scored by the sum
-  // of adjusted lengths measured at the tier's ACTUAL occupancy — the
-  // kernel-wide min of what the buffered schedules really achieve,
-  // which can sit above the searched tier since the budget only bounds
-  // pressure from above. The smallest score wins, ties going to the
-  // higher actual occupancy (insurance against latency misestimates).
-  // The winner's schedules are then committed and MFI's occupancy
-  // target is set to the winner's actual occupancy. Must run after
-  // RunMaximizeOccupancyPass: the ceiling it established is the top
-  // tier, and its committed schedules are a search seed feasible at
-  // every tier at or below it (enforced at config build time).
+  // replaces the length pass). Chooses the kernel's schedule and
+  // occupancy jointly: for every reachable occupancy tier o — the
+  // post-occupancy-pass ceiling down to the launch floor — schedule
+  // every region for minimum RAW length under tier o's register budget
+  // (divisor-1 graphs; the tier does not enter the search objective),
+  // buffer without applying, and score each candidate at its ACTUAL
+  // occupancy with the steady-state time-per-wave model:
+  //
+  //   score = sum_r w_r * max(issue_slots_r, ceil(raw_length_r / o_act))
+  //
+  // Smallest score wins, ties to the higher actual occupancy; the
+  // winner's schedules are committed and the occupancy target pinned
+  // at its actual occupancy. The derivation of the score (assembly-
+  // line/Little's-law model, why raw length replaced the per-edge
+  // divided lens, worked examples, assumptions) is recorded in
+  // llvm/docs/AMDGPUMinAdjustedLengthScheduler.md — read that before
+  // changing the objective. Must run after RunMaximizeOccupancyPass:
+  // its ceiling is the top tier and its committed schedules are a
+  // search seed feasible at every tier at or below it (enforced at
+  // config build time).
   void RunMinimizeAdjustedLengthPass();
 
   // One region's buffered schedule within a tier candidate. Produced
@@ -244,10 +246,16 @@ public:
     // The best order the tier's search found, held as MachineInstr*
     // (stable across the graph rebuilds between search and commit).
     std::vector<MachineInstr *> order;
-    // The order's schedule length in cycles of the candidate's scoring
-    // lens (search-tier divisor as produced; rewritten to the
-    // actual-occupancy divisor when the candidate is re-measured).
-    int adjusted_length = 0;
+    // The order's raw schedule length (divisor-1 lens): the wave's
+    // uncontended lifetime for this region, issue cycles plus exposed
+    // latency stalls. Occupancy-independent, so it is measured once at
+    // search time and the tier score is pure arithmetic on it.
+    int raw_length = 0;
+    // The region's issue-slot demand: its real-instruction count (one
+    // slot per instruction — the flat single-port model; per-category
+    // refinement is deferred). Schedule-order-independent; recorded
+    // here so scoring needs no graph access.
+    int issue_slots = 0;
     // The order's launch-floor-clamped all-factors occupancy — this
     // region's contribution to the candidate's kernel-wide min.
     int achieved_occupancy = 0;
@@ -260,8 +268,7 @@ public:
   // RunMinimizeAdjustedLengthPass. region_schedules is parallel to
   // regions_.
   struct MinAdjustedLengthCandidate {
-    // The tier the searches ran under: register budget and latency
-    // divisor both set from this value.
+    // The tier the searches ran under (sets the register budget).
     int searched_occupancy_tier = 0;
     // The kernel-wide occupancy the buffered schedules actually
     // achieve: min over regions of each schedule's launch-floor-clamped
@@ -271,9 +278,14 @@ public:
     // min-length schedule may land in a higher bracket than it was
     // searched under.
     int actual_occupancy = 0;
-    // The candidate's score: sum over regions of the region schedules'
-    // adjusted_length values.
-    int64_t adjusted_length_sum = 0;
+    // The candidate's score: sum over regions of
+    //   max(issue_slots, ceil(raw_length / actual_occupancy))
+    // — the steady-state time per wave. The first arm is the issue
+    // port's demand (occupancy cannot reduce it); the second is the
+    // wave's uncontended lifetime divided by the resident-wave count
+    // (Little's law on the residency slots). Whichever binds is the
+    // region's cost; occupancy only pays while the second arm binds.
+    int64_t score_sum = 0;
     bool timed_out = false;
     std::vector<MinAdjustedLengthRegionSchedule> region_schedules;
   };
@@ -283,21 +295,22 @@ public:
   // independent; the DFS policies read their register budget from the
   // target live), then runs SearchRegionAtOccupancyTier on every
   // region, buffering each best order. Computes the candidate's
-  // actual occupancy, and when it differs from `tier`, re-measures
-  // every region order under the actual-occupancy divisor so
-  // adjusted_length_sum reflects the latency hiding the schedules will
-  // really get.
+  // actual occupancy and its score — pure arithmetic over the
+  // recorded raw lengths and issue-slot counts (raw length is
+  // occupancy-independent, so nothing is re-measured; see score_sum).
   MinAdjustedLengthCandidate ScheduleKernelForOccupancyTier(int tier);
 
-  // Per-region worker for ScheduleKernelForOccupancyTier: min-length
-  // search the region under a graph built with latency divisor `tier`,
-  // via the same two-phase length-min worker the length pass uses
-  // (plain min policy), seeded with the current MF order. The best
-  // schedule is returned in buffered form, NOT applied — every tier
-  // must search from the same input. Assumes the caller already set
-  // MFI's occupancy target to `tier` (the search's register budget).
+  // Per-region worker for ScheduleKernelForOccupancyTier: min-RAW-
+  // length search the region (divisor-1 graph — the tier does not
+  // enter the search objective, since the score is monotone in raw
+  // length at any fixed tier), via the same two-phase length-min
+  // worker the length pass uses (plain min policy), seeded with the
+  // current MF order. The best schedule is returned in buffered form,
+  // NOT applied — every tier must search from the same input. The
+  // tier reaches the search only through the register budget: the
+  // caller must already have set MFI's occupancy target to it.
   MinAdjustedLengthRegionSchedule SearchRegionAtOccupancyTier(
-      RegionInfo &region, int tier);
+      RegionInfo &region);
 
   // Measure a buffered region order's schedule length under
   // `latency_divisor`: rebuild the region graph with that divisor and
