@@ -939,6 +939,34 @@ void GCNSubtarget::adjustSchedDependency(SUnit *Def, int DefOpIdx, SUnit *Use,
     Dep.setLatency(InstrInfo.getSchedModel().computeOperandLatency(
         DefI, DefOpIdx, UseI, UseOpIdx));
   }
+
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Per-class load-latency overrides from misched.txt (vmem_load_latency /
+  // smem_load_latency / lds_load_latency). Applied last so an override wins
+  // over the sched-model and bundle adjustments above. This hook is called
+  // for every data dependence in every ScheduleDAGInstrs-based scheduler, so
+  // the substitution reaches all pre-RA arms (and the post-RA pass) and the
+  // schedule-length analyzer uniformly. Producer-side classification, loads
+  // only: latency belongs to the defining memory instruction. VMEM covers
+  // FLAT too -- global_load is FLAT-encoded on gfx9.
+  {
+    const MachineInstrSchedulerConfig::GlobalSettings &settings =
+        MachineInstrSchedulerConfig::GetConfig().GetGlobalSettings();
+    std::optional<int> latency_override;
+    if (SIInstrInfo::isVMEM(*DefI) || SIInstrInfo::isFLAT(*DefI)) {
+      latency_override = settings.vmem_load_latency;
+    } else if (SIInstrInfo::isSMRD(*DefI)) {
+      latency_override = settings.smem_load_latency;
+    } else if (SIInstrInfo::isDS(*DefI)) {
+      latency_override = settings.lds_load_latency;
+    }
+    if (latency_override.has_value() && DefI->mayLoad()) {
+      Dep.setLatency(*latency_override);
+    }
+  }
+  //========================================================================================
 }
 
 namespace {

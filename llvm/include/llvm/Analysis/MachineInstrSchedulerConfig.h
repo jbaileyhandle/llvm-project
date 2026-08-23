@@ -106,6 +106,19 @@ class MachineInstrSchedulerConfig {
             // default in place.
             std::optional<int> time_per_instr_occupancy_us;
             std::optional<int> time_per_instr_length_us;
+            // Per-class load-latency overrides (cycles). Substituted into the
+            // dependence graph at GCNSubtarget::adjustSchedDependency, the one
+            // point every scheduler's buildSchedGraph passes through -- so an
+            // override applies uniformly to MaxOccupancy, MaxIlp, OptSched
+            // (ACO/BnB), the HierarchicalScheduler, and the schedule-length
+            // analyzer's lenses. Data-dependence edges whose producer is a
+            // load of the given class only; unset = the timing model's own
+            // latency stands. The eventual profile-feedback path (measured
+            // per-kernel VMEM latency fed back from the characterize runs)
+            // lands on these same knobs.
+            std::optional<int> vmem_load_latency;
+            std::optional<int> smem_load_latency;
+            std::optional<int> lds_load_latency;
             // Name of an alternate target sched (timing) model to swap in, e.g.
             // "fast_memory". Interpreted by the target (AMDGPU); unknown names are
             // rejected there, not here.

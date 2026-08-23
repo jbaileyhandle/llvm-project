@@ -80,6 +80,9 @@ namespace {
         {"runtime_unroll_factor", &GlobalSettings::runtime_unroll_factor},
         {"time_per_instr_occupancy_us", &GlobalSettings::time_per_instr_occupancy_us},
         {"time_per_instr_length_us", &GlobalSettings::time_per_instr_length_us},
+        {"vmem_load_latency", &GlobalSettings::vmem_load_latency},
+        {"smem_load_latency", &GlobalSettings::smem_load_latency},
+        {"lds_load_latency", &GlobalSettings::lds_load_latency},
     };
 
     // Return the binding for global setting `name`, or nullptr if `name` is not
