@@ -163,14 +163,19 @@ void ScheduleDAGHierarchicalScheduler::RunMaliciousScheduler() {
 void ScheduleDAGHierarchicalScheduler::WithRegionGraph(
     const RegionInfo &region,
     function_ref<void(ScheduleGraph &)> callback) {
+  WithRegionGraph(region, GetLatencyDivisorForScheduling(), callback);
+}
+
+void ScheduleDAGHierarchicalScheduler::WithRegionGraph(
+    const RegionInfo &region, int latency_divisor,
+    function_ref<void(ScheduleGraph &)> callback) {
   ProcessRegion(region, [&]() {
     buildSchedGraph(AA);
 
     const GCNSubtarget &st =
         static_cast<const GCNSubtarget &>(MF.getSubtarget());
     auto graph = ScheduleGraph::BuildFromSUnits(
-        SUnits, st, MF, *LIS, MF.getRegInfo(), region,
-        GetLatencyDivisorForScheduling());
+        SUnits, st, MF, *LIS, MF.getRegInfo(), region, latency_divisor);
 
     callback(*graph);
   });
@@ -209,36 +214,15 @@ void ScheduleDAGHierarchicalScheduler::InitFunction() {
   mfi_->resetInitialOccupancy(MF);
 }
 
-// Apply a schedule from a completed ScheduleConstructor. Extracts
-// the order, skips synthetic entry/exit nodes (null SUnit), and
-// delegates to the SUnit* overload. Group nodes are not expected
-// and trigger a fatal error — the flat-only ScheduleConstructor
-// should never produce them.
-// Materializes the SUnit* order from the ScheduleConstructor and
-// delegates to the vector<SUnit*> overload. This allocates an
-// intermediate vector, which could be avoided using LLVM's
-// make_filter_range + map_range to lazily iterate
-// sc.GetScheduleOrder() directly. Not worth it: we apply a
-// schedule at most once per region per pass, so the cost is
-// negligible.
+// Apply a schedule from a completed ScheduleConstructor: extract the
+// real-instruction order (GetInstrOrder skips synthetic entry/exit
+// and proxies) and delegate to the MachineInstr* overload. The
+// intermediate vector is negligible — a schedule is applied at most
+// once per region per pass.
 void ScheduleDAGHierarchicalScheduler::ApplyScheduleOrder(
     const RegionInfo &region,
     const ScheduleConstructor &sc) {
-  std::vector<SUnit *> sunit_order;
-  for (const ScheduleNode *node : sc.GetScheduleOrder()) {
-    // Subgraph proxies appear in schedule_order_ for scope-stack
-    // bookkeeping (start = push, end = pop) but don't correspond to
-    // any MachineInstr — filter them out here. Real instruction
-    // ordering lives entirely on the scheduling-unit nodes.
-    if (!node->IsSchedulingUnit()) {
-      continue;
-    }
-    SUnit *su = node->GetSUnit();
-    if (su) {
-      sunit_order.push_back(su);
-    }
-  }
-  ApplyScheduleOrder(region, sunit_order);
+  ApplyScheduleOrder(region, sc.GetInstrOrder());
 }
 
 // Stub pass: schedule every region in topo order and apply. Exercises
@@ -1404,6 +1388,177 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForLengthPass(
   return stats;
 }
 
+// Measure a buffered order under `latency_divisor`. See header. The
+// returned length is in the divisor's lens because the length tracker
+// counts cycles in the units of the graph's edge weights, and the graph
+// is built here with exactly that divisor.
+int ScheduleDAGHierarchicalScheduler::MeasureBufferedOrderLength(
+    const RegionInfo &region, const std::vector<MachineInstr *> &order,
+    int latency_divisor) {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+  int length = 0;
+  WithRegionGraph(region, latency_divisor, [&](ScheduleGraph &graph) {
+    length = graph.MakeConstructorForInstrOrder(order, st, MF)
+                 .GetLengthTracker()
+                 .GetCurrentCycle();
+  });
+  return length;
+}
+
+// Per-region worker for the tier sweep. See header. The length-min
+// worker's input:/phase blocks print at \t\t, nesting under the region
+// heading the caller prints.
+ScheduleDAGHierarchicalScheduler::MinAdjustedLengthRegionSchedule
+ScheduleDAGHierarchicalScheduler::SearchRegionAtOccupancyTier(
+    RegionInfo &region, int tier) {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+  MinAdjustedLengthRegionSchedule result;
+  WithRegionGraph(region, /*latency_divisor=*/tier,
+                  [&](ScheduleGraph &graph) {
+    const ScheduleConstructor &input_sc =
+        graph.GetInputScheduleConstructor();
+    ScheduleConstructor best_sc = input_sc;
+    bool timed_out = false;
+    int64_t dfs_ms = 0;
+    int64_t dfs_steps = 0;
+    RunMinimizeLengthForRegionWithPolicy<DfsMinimizeLengthPolicy>(
+        graph, st, MF, *LIS, input_sc, best_sc, timed_out, dfs_ms,
+        dfs_steps);
+    result.order = best_sc.GetInstrOrder();
+    result.adjusted_length =
+        best_sc.GetLengthTracker().GetCurrentCycle();
+    result.achieved_occupancy =
+        best_sc.GetPressureTracker()
+            .GetLaunchFloorClampedAllFactorsRegionOnlyOccupancy();
+    result.timed_out = timed_out;
+  });
+  return result;
+}
+
+// Per-tier worker. See header.
+ScheduleDAGHierarchicalScheduler::MinAdjustedLengthCandidate
+ScheduleDAGHierarchicalScheduler::ScheduleKernelForOccupancyTier(
+    int tier) {
+  // budget(tier): the length-min DFS policies read their register
+  // budget from MFI's occupancy target live, so setting the target to
+  // `tier` is what makes every region search prune schedules that
+  // would not fit at this tier. SetOccupancyTarget lands on `tier`
+  // regardless of where the previous tier left the target, so the
+  // sweep order doesn't matter.
+  SetOccupancyTarget(*mfi_, MF, tier);
+
+  MinAdjustedLengthCandidate candidate;
+  candidate.searched_occupancy_tier = tier;
+  candidate.actual_occupancy = tier;
+
+  for (size_t i = 0; i < regions_.size(); ++i) {
+    llvm::outs() << "\n\tregion[" << i
+                 << "]: instrs=" << regions_[i].GetNumInstrs() << "\n";
+    SubgraphDagDumpRegionScope region_scope(static_cast<int>(i));
+
+    candidate.region_schedules.push_back(
+        SearchRegionAtOccupancyTier(regions_[i], tier));
+    const MinAdjustedLengthRegionSchedule &region_schedule =
+        candidate.region_schedules.back();
+
+    candidate.timed_out |= region_schedule.timed_out;
+
+    // First region initializes the kernel-wide min (achieved occupancy
+    // is never below `tier`, so starting at `tier` would overshoot in
+    // the all-regions-above-tier case).
+    candidate.actual_occupancy =
+        (i == 0) ? region_schedule.achieved_occupancy
+                 : std::min(candidate.actual_occupancy,
+                            region_schedule.achieved_occupancy);
+  }
+
+  if (candidate.actual_occupancy != tier) {
+    // The schedules run at a different wave count than the lens they
+    // were searched under — re-measure every buffered order under the
+    // actual-occupancy divisor so the score reflects the latency
+    // hiding the schedules will really get.
+    for (size_t i = 0; i < regions_.size(); ++i) {
+      candidate.region_schedules[i].adjusted_length =
+          MeasureBufferedOrderLength(regions_[i],
+                                     candidate.region_schedules[i].order,
+                                     candidate.actual_occupancy);
+    }
+  }
+
+  for (const MinAdjustedLengthRegionSchedule &region_schedule :
+       candidate.region_schedules) {
+    candidate.adjusted_length_sum += region_schedule.adjusted_length;
+  }
+
+  return candidate;
+}
+
+// The min-adjusted-length pass driver. See header.
+void ScheduleDAGHierarchicalScheduler::RunMinimizeAdjustedLengthPass() {
+  // Tag any DumpSubgraphDag output from this pass (no-op unless the
+  // option is set).
+  SubgraphDagDumpPassScope dump_scope("min_adjusted_length");
+
+  const int top_tier = static_cast<int>(mfi_->getOccupancy());
+  const int floor_tier = static_cast<int>(mfi_->getMinWavesPerEU());
+
+  llvm::outs() << "\n=== Pass: MinimizeAdjustedLength === ("
+               << regions_.size() << " regions, tiers " << top_tier
+               << " down to " << floor_tier << ")\n";
+
+  if (regions_.empty()) {
+    llvm::outs() << "\tPASS RESULT: no regions, nothing to do\n";
+    return;
+  }
+
+  std::optional<MinAdjustedLengthCandidate> best;
+  for (int tier = top_tier; tier >= floor_tier; --tier) {
+    llvm::outs() << "\n\t=== occupancy tier " << tier << " ===\n";
+
+    MinAdjustedLengthCandidate candidate =
+        ScheduleKernelForOccupancyTier(tier);
+    llvm::outs() << "\n\ttier " << tier
+                 << " result: actual_occupancy=" << candidate.actual_occupancy
+                 << " adjusted_length_sum=" << candidate.adjusted_length_sum
+                 << (candidate.actual_occupancy != tier ? " (re-measured)"
+                                                        : "")
+                 << (candidate.timed_out ? " timed_out" : "") << "\n";
+
+    // Smallest score wins. Ties go to the higher ACTUAL occupancy —
+    // insurance against latency misestimates, since more waves dampen
+    // a modeling error. Actual occupancy is not monotone in sweep
+    // order (a looser-budget search can land lower pressure by
+    // accident), so the tie-break compares explicitly; remaining ties
+    // keep the earlier candidate (higher searched tier) for
+    // determinism.
+    if (!best.has_value() ||
+        candidate.adjusted_length_sum < best->adjusted_length_sum ||
+        (candidate.adjusted_length_sum == best->adjusted_length_sum &&
+         candidate.actual_occupancy > best->actual_occupancy)) {
+      best = std::move(candidate);
+    }
+  }
+
+  // Commit. Set MFI's occupancy target to the winner's actual
+  // occupancy, independent of wherever the sweep left it. Downstream
+  // consumers — the register allocator's pressure limits — read this
+  // target, which is what pins the kernel at the chosen occupancy.
+  SetOccupancyTarget(*mfi_, MF, best->actual_occupancy);
+  for (size_t i = 0; i < regions_.size(); ++i) {
+    ProcessRegion(regions_[i], [&]() {
+      ApplyScheduleOrder(regions_[i], best->region_schedules[i].order);
+    });
+  }
+
+  llvm::outs() << "\n\tPASS RESULT: winner searched_occupancy_tier="
+               << best->searched_occupancy_tier
+               << " actual_occupancy=" << best->actual_occupancy
+               << " adjusted_length_sum=" << best->adjusted_length_sum
+               << " (MFI->Occupancy now " << mfi_->getOccupancy() << ")\n";
+}
+
 // Main hierarchical scheduling path.
 void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   InitFunction();
@@ -1425,7 +1580,13 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
   if (!HierarchicalConfig::Get().skip_occupancy_pass) {
     RunMaximizeOccupancyPass();
   }
-  if (!HierarchicalConfig::Get().skip_length_pass) {
+  // The min-adjusted-length pass replaces the length pass: both
+  // optimize the post-occupancy schedule, but min-adjusted-length also
+  // owns the occupancy choice, so running the plain length pass too
+  // would be redundant work under a stale lens.
+  if (HierarchicalConfig::Get().min_adjusted_length) {
+    RunMinimizeAdjustedLengthPass();
+  } else if (!HierarchicalConfig::Get().skip_length_pass) {
     RunLengthPass();
   }
 }
@@ -1473,8 +1634,18 @@ void ScheduleDAGHierarchicalScheduler::EndRegion(const RegionInfo &region) {
 void ScheduleDAGHierarchicalScheduler::ApplyScheduleOrder(
     const RegionInfo &region,
     const std::vector<SUnit *> &scheduled_units) {
+  std::vector<MachineInstr *> instr_order;
+  instr_order.reserve(scheduled_units.size());
   for (SUnit *su : scheduled_units) {
-    MachineInstr *mi = su->getInstr();
+    instr_order.push_back(su->getInstr());
+  }
+  ApplyScheduleOrder(region, instr_order);
+}
+
+void ScheduleDAGHierarchicalScheduler::ApplyScheduleOrder(
+    const RegionInfo &region,
+    const std::vector<MachineInstr *> &scheduled_instrs) {
+  for (MachineInstr *mi : scheduled_instrs) {
     if (&*CurrentTop == mi) {
       // Already in the right position — just advance the cursor past it
       // (and past any debug instructions that follow).

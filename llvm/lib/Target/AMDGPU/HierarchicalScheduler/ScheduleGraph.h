@@ -874,6 +874,22 @@ public:
   ArrayRef<ScheduleNode> Nodes() const { return nodes_; }
   int Size() const { return static_cast<int>(nodes_.size()); }
 
+  /// The synthetic entry sentinel (null-SUnit scheduling unit that must
+  /// be scheduled first to release the graph's root nodes), recorded
+  /// when it is created — by CreateEntryAndExitNodes for flat region
+  /// graphs, by the boundary-node setup for subgraph graphs. A stored
+  /// pointer, not a nodes_ position: subgraph formation appends proxy
+  /// nodes after the sentinels, so positional lookups (e.g. "last two
+  /// nodes") break on formed graphs; this stays valid because
+  /// ReserveNodes guarantees pointer stability. Fatal error if the
+  /// graph was built without entry/exit (some test DAGs).
+  const ScheduleNode *GetEntryNode() const;
+
+  /// The synthetic exit sentinel (null-SUnit scheduling unit that
+  /// becomes ready last, once every instruction is scheduled). Same
+  /// storage and validity story as GetEntryNode.
+  const ScheduleNode *GetExitNode() const;
+
   /// Pre-extracted per-node register-operand info, indexed by
   /// topo_index. Populated by graph factories (BuildFromSUnits uses
   /// NodeRegInfoTable::BuildForGraph; test factories install an
@@ -1293,6 +1309,24 @@ public:
     return *input_schedule_constructor_;
   }
 
+  /// Build a fully-populated ScheduleConstructor that schedules this
+  /// graph's real-instruction nodes in the order given by `order` — the
+  /// caller-supplied counterpart of PopulateInputScheduleConstructor,
+  /// which replays the MF order. Used by the min-adjusted-length pass
+  /// to re-measure a buffered schedule under a different latency
+  /// divisor: the returned constructor's length tracker counts cycles
+  /// in the units of THIS graph's edge weights, so the caller picks the
+  /// lens via the divisor it built the graph with, not via anything
+  /// here.
+  ///
+  /// `order` must contain exactly this graph's real instructions (each
+  /// MachineInstr exactly once, in a valid topological order of the
+  /// graph) — fatal error otherwise. The entry/exit sentinels are
+  /// scheduled around the order internally.
+  ScheduleConstructor MakeConstructorForInstrOrder(
+      ArrayRef<MachineInstr *> order, const GCNSubtarget &st,
+      const MachineFunction &mf) const;
+
   /// Test-only: mutable handle on the input ScheduleConstructor.
   /// Shakedowns use this to poke per-tracker test-mode setters
   /// (e.g., GCNRegisterTracker::SetVGPRSpillAreaForTest) so the
@@ -1359,6 +1393,14 @@ private:
   /// include through NodeRegInfo.h, which itself needs ScheduleNode.
   /// Populated by SetNodeRegInfoTable, called from the factories.
   std::unique_ptr<NodeRegInfoTable> node_reg_info_table_;
+
+  /// The synthetic entry/exit sentinels, recorded when they are
+  /// created (CreateEntryAndExitNodes / the subgraph boundary setup).
+  /// Null until then — some test DAGs never create them. Stable across
+  /// later node appends because ReserveNodes guarantees nodes_ never
+  /// reallocates. Read via GetEntryNode/GetExitNode.
+  ScheduleNode *entry_node_ = nullptr;
+  ScheduleNode *exit_node_ = nullptr;
 
   /// Populated by ComputeTopologicalOrder. Empty == "not computed
   /// or invalidated since." IsTopoSorted() = !topo_order_.empty().

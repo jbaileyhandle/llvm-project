@@ -50,6 +50,7 @@ namespace {
         {"skip_occupancy_pass", &Flags::skip_occupancy_pass},
         {"skip_length_pass", &Flags::skip_length_pass},
         {"length_ignore_occupancy", &Flags::length_ignore_occupancy},
+        {"min_adjusted_length", &Flags::min_adjusted_length},
     };
 
     // Return the binding for flag `name`, or nullptr if `name` is not a known

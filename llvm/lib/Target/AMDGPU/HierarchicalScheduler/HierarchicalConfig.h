@@ -236,6 +236,16 @@ struct HierarchicalConfig {
   // occupancy prune ("Gate 1") so it optimizes length unconstrained by
   // occupancy. Implies skip_occupancy_pass (set in Build).
   bool length_ignore_occupancy = false;
+  // Replace the length pass with the min-adjusted-length pass
+  // (RunMinimizeAdjustedLengthPass): schedule the whole kernel once per
+  // reachable occupancy tier — each region min-length searched under that
+  // tier's register budget with edge latencies divided by the tier (the
+  // adjusted lens) — then commit the tier whose kernel-wide adjusted
+  // length sum is smallest and pin the occupancy target there. Requires
+  // the occupancy pass (it establishes the top tier and a schedule
+  // feasible at every tier), so incompatible with skip_occupancy_pass
+  // and length_ignore_occupancy (enforced in Build).
+  bool min_adjusted_length = false;
 
   /// Build the typed config from the generic config's scoped settings.
   /// Per pass: built-in defaults -> named preset (if any) -> explicit

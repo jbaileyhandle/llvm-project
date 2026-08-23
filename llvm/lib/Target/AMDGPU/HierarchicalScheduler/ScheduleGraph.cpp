@@ -948,6 +948,8 @@ void ScheduleGraph::CreateSubgraphBoundaryNodes(
       EmplaceNode(static_cast<SUnit *>(nullptr), "SubgraphEntry", this);
   ScheduleNode &exit =
       EmplaceNode(static_cast<SUnit *>(nullptr), "SubgraphExit", this);
+  entry_node_ = &entry;
+  exit_node_ = &exit;
   for (const auto &[reg, mask] : live_in) {
     entry.AddRegDef(Register(reg), mask);
   }
@@ -965,6 +967,22 @@ void ScheduleGraph::CreateSubgraphBoundaryNodes(
       AddEdge(&node, &exit, ScheduleEdge::kArtificial);
     }
   }
+}
+
+const ScheduleNode *ScheduleGraph::GetEntryNode() const {
+  if (!entry_node_) {
+    report_fatal_error("GetEntryNode: graph has no entry sentinel (built "
+                       "without CreateEntryAndExitNodes / boundary setup)");
+  }
+  return entry_node_;
+}
+
+const ScheduleNode *ScheduleGraph::GetExitNode() const {
+  if (!exit_node_) {
+    report_fatal_error("GetExitNode: graph has no exit sentinel (built "
+                       "without CreateEntryAndExitNodes / boundary setup)");
+  }
+  return exit_node_;
 }
 
 void ScheduleGraph::BuildSubgraphRegInfoTable(
@@ -997,17 +1015,14 @@ void ScheduleGraph::BuildSubgraphRegInfoTable(
 
 void ScheduleGraph::PopulateSubgraphInputScheduleConstructor(
     const GCNSubtarget &st, const MachineFunction &mf, int member_count) {
-  // nodes_ layout: [0 .. member_count-1] subgraph nodes in input
-  // order, [member_count] SubgraphEntry, [member_count+1] SubgraphExit.
-  ScheduleNode *entry = &nodes_[member_count];
-  ScheduleNode *exit = &nodes_[member_count + 1];
+  // nodes_ [0 .. member_count-1] are the subgraph nodes in input order.
   input_schedule_constructor_ =
       std::make_unique<ScheduleConstructor>(*this, st, mf);
-  input_schedule_constructor_->Schedule(entry);
+  input_schedule_constructor_->Schedule(GetEntryNode());
   for (int i = 0; i < member_count; ++i) {
     input_schedule_constructor_->Schedule(&nodes_[i]);
   }
-  input_schedule_constructor_->Schedule(exit);
+  input_schedule_constructor_->Schedule(GetExitNode());
 }
 
 std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildFromNodeSubset(
@@ -1138,31 +1153,13 @@ void ScheduleGraph::PopulateInputScheduleConstructor(
   input_schedule_constructor_ =
       std::make_unique<ScheduleConstructor>(*this, st, mf);
 
-  // nodes_ layout after Phase 1 + Phase 3:
-  //   [0 .. N-1] : real-instruction leaves (Phase 1 emplacement order
-  //                = current MF order)
-  //   [N]        : Entry  (Phase 3, null SUnit, has kArtificial edges
-  //                TO root leaves — root leaves need entry scheduled
-  //                first)
-  //   [N+1]      : Exit   (Phase 3, null SUnit, has kArtificial edges
-  //                FROM tail leaves — exit becomes ready once all its
-  //                predecessor leaves are scheduled)
-  //
   // For IsDone() (which requires every node in nodes_ to be
   // scheduled), the order is: Entry, then leaves in MF order, then
-  // Exit.
-  size_t n = nodes_.size();
-  if (n < 2) {
-    report_fatal_error("PopulateInputScheduleConstructor: nodes_.size() < 2 "
-                       "— Phase 3 (entry/exit) did not run");
-  }
-  ScheduleNode *entry_node = &nodes_[n - 2];
-  ScheduleNode *exit_node = &nodes_[n - 1];
-  if (entry_node->GetSUnit() || exit_node->GetSUnit()) {
-    report_fatal_error("PopulateInputScheduleConstructor: expected the last "
-                       "two nodes_ entries to be Phase 3 synthetic "
-                       "entry/exit (null SUnit)");
-  }
+  // Exit. Entry has kArtificial edges TO the root leaves (they need
+  // entry scheduled first); Exit has kArtificial edges FROM the tail
+  // leaves (it becomes ready once all its predecessors are scheduled).
+  const ScheduleNode *entry_node = GetEntryNode();
+  const ScheduleNode *exit_node = GetExitNode();
 
   // Schedule entry to release the root leaves.
   input_schedule_constructor_->Schedule(entry_node);
@@ -1216,6 +1213,38 @@ void ScheduleGraph::PopulateInputScheduleConstructor(
   VerifyInputScheduleMatchesMFOrder(region);
 }
 
+ScheduleConstructor ScheduleGraph::MakeConstructorForInstrOrder(
+    ArrayRef<MachineInstr *> order, const GCNSubtarget &st,
+    const MachineFunction &mf) const {
+  DenseMap<const MachineInstr *, const ScheduleNode *> instr_to_node;
+  for (const ScheduleNode &node : nodes_) {
+    if (node.IsRealInstruction()) {
+      instr_to_node[node.GetSUnit()->getInstr()] = &node;
+    }
+  }
+  if (order.size() != instr_to_node.size()) {
+    report_fatal_error("MakeConstructorForInstrOrder: order size does not "
+                       "match the graph's real-instruction count");
+  }
+
+  ScheduleConstructor sc(*this, st, mf);
+  sc.Schedule(GetEntryNode());
+  for (MachineInstr *mi : order) {
+    auto it = instr_to_node.find(mi);
+    if (it == instr_to_node.end()) {
+      report_fatal_error("MakeConstructorForInstrOrder: instruction in "
+                         "`order` is not one of this graph's real "
+                         "instructions");
+    }
+    // A duplicate in `order` (possible despite the size check when some
+    // other instruction is missing to make room) dies in Schedule()'s
+    // ready-list check: the second occurrence is no longer ready.
+    sc.Schedule(it->second);
+  }
+  sc.Schedule(GetExitNode());
+  return sc;
+}
+
 void ScheduleGraph::VerifyInputScheduleMatchesMFOrder(
     const RegionInfo &region) const {
   // Walk the schedule we built (skipping entry/exit) and the
@@ -1264,6 +1293,8 @@ void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
       EmplaceNode(static_cast<SUnit *>(nullptr), "Entry", this);
   ScheduleNode &exit_node =
       EmplaceNode(static_cast<SUnit *>(nullptr), "Exit", this);
+  entry_node_ = &entry_node;
+  exit_node_ = &exit_node;
 
   // Wire entry to all root nodes, exit from all leaf nodes.
   for (ScheduleNode &node : nodes_) {

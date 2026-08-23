@@ -48,6 +48,28 @@ inline void LimitOccupancyAboveFloor(SIMachineFunctionInfo &mfi, int limit) {
       std::max(static_cast<unsigned>(limit), mfi.getMinWavesPerEU()));
 }
 
+/// Set MFI's occupancy target to exactly `target`, clamped to the
+/// kernel's structural ceiling: reset the target up to the initial
+/// (pre-scheduler) occupancy, then lower it to `target`. Unlike
+/// limitOccupancy / increaseOccupancy — each of which only moves the
+/// target in one direction and silently no-ops otherwise — this lands
+/// on min(target, structural ceiling) regardless of where the target
+/// currently sits, so callers that revisit occupancy values in
+/// arbitrary order (the min-adjusted-length tier sweep: per-tier
+/// budgets, then the winner's commit) don't depend on the previous
+/// call's position. `target` must be positive (fatal otherwise); a
+/// target below the launch floor is the caller's bug to avoid — this
+/// helper does not clamp to the floor.
+inline void SetOccupancyTarget(SIMachineFunctionInfo &mfi,
+                               const MachineFunction &mf, int target) {
+  if (target <= 0) {
+    report_fatal_error("SetOccupancyTarget: occupancy target must be "
+                       "positive");
+  }
+  mfi.resetInitialOccupancy(mf);
+  mfi.limitOccupancy(static_cast<unsigned>(target));
+}
+
 /// Lower MFI's occupancy to a per-kernel `target`, but FAIL LOUDLY if `target`
 /// is below the kernel's launch occupancy floor (getMinWavesPerEU). A below-floor
 /// target is an occupancy the kernel can never run at unless its min waves-per-eu

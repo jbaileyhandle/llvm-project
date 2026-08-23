@@ -78,6 +78,16 @@ class MachineInstrSchedulerConfig {
             // maximizing occupancy first is pointless when the length pass will
             // ignore the target anyway. Consumed via HierarchicalConfig.
             bool length_ignore_occupancy = false;
+            // HierarchicalScheduler: replace the length pass with the
+            // min-adjusted-length pass. Every reachable occupancy tier o
+            // (the post-occupancy-pass kernel ceiling down to the launch
+            // floor) gets its own full schedule: each region min-length
+            // scheduled under tier o's register budget with edge latencies
+            // divided by o (the adjusted lens). The tier with the smallest
+            // kernel-wide adjusted length sum wins; its schedules are
+            // committed and the kernel occupancy target is set to that
+            // tier. Consumed via HierarchicalConfig.
+            bool min_adjusted_length = false;
         };
 
         // Every unscoped global setting writable as `<name>=<value>` in

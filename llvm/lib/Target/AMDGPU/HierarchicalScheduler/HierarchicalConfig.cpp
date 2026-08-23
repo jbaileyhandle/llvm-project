@@ -525,10 +525,23 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   hs.skip_occupancy_pass = flags.skip_occupancy_pass;
   hs.skip_length_pass = flags.skip_length_pass;
   hs.length_ignore_occupancy = flags.length_ignore_occupancy;
+  hs.min_adjusted_length = flags.min_adjusted_length;
   // Ignoring the occupancy target in the length pass makes the maximize-occupancy
   // pass pointless, so it implies skipping it.
   if (hs.length_ignore_occupancy) {
     hs.skip_occupancy_pass = true;
+  }
+  // The min-adjusted-length pass sweeps tiers from the post-occupancy-pass
+  // kernel ceiling down to the launch floor, seeding every tier's search
+  // with the occupancy pass's output (feasible at every tier at or below
+  // the ceiling). Without the occupancy pass there is no trustworthy top
+  // tier and no feasible seed, so the combination is rejected rather than
+  // silently sweeping from an unproven ceiling. length_ignore_occupancy
+  // implies skip_occupancy_pass, so it is rejected transitively.
+  if (hs.min_adjusted_length && hs.skip_occupancy_pass) {
+    report_fatal_error("misched.txt: min_adjusted_length requires the "
+                       "occupancy pass (remove skip_occupancy_pass / "
+                       "length_ignore_occupancy)");
   }
 
   // Per-instruction scheduling-time budgets are unscoped global settings;
@@ -641,6 +654,7 @@ std::string HierarchicalConfig::ToString() const {
      << " skip_occupancy_pass=" << (skip_occupancy_pass ? "on" : "off")
      << " skip_length_pass=" << (skip_length_pass ? "on" : "off")
      << " length_ignore_occupancy=" << (length_ignore_occupancy ? "on" : "off")
+     << " min_adjusted_length=" << (min_adjusted_length ? "on" : "off")
      << "\n";
   return os.str();
 }

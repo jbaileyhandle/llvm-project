@@ -243,6 +243,25 @@ public:
     return schedule_order_;
   }
 
+  /// The schedule order built so far, as MachineInstr pointers: the
+  /// real instructions of GetScheduleOrder(), skipping nodes that
+  /// carry no MachineInstr (synthetic entry/exit sentinels, subgraph
+  /// proxies). This is the form that survives graph rebuilds —
+  /// MachineInstr* is owned by the MachineFunction, while
+  /// ScheduleNode*/SUnit* die with the graph — so it is what callers
+  /// buffer when a schedule must outlive its graph (the
+  /// min-adjusted-length pass) or be applied to the MF
+  /// (ApplyScheduleOrder).
+  std::vector<MachineInstr *> GetInstrOrder() const {
+    std::vector<MachineInstr *> order;
+    for (const ScheduleNode *node : schedule_order_) {
+      if (node->IsRealInstruction()) {
+        order.push_back(node->GetSUnit()->getInstr());
+      }
+    }
+    return order;
+  }
+
   /// Access the underlying trackers for querying metrics.
   /// Test-only mutable access. Used by DfsSearch::EnableTestModeForTest
   /// to plumb GCNRegisterTracker::EnableTestModeForTest through.

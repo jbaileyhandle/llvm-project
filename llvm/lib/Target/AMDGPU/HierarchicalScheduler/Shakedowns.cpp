@@ -6578,7 +6578,8 @@ void RunDfsMaximizeIntegerOccupancyRefineSpillAreaPolicyShakedown(
   restore();
 }
 
-// ---- OccupancyTargetUtil: LimitOccupancyAboveFloor wrapper ----
+// ---- OccupancyTargetUtil: LimitOccupancyAboveFloor +
+// SetOccupancyTarget wrappers ----
 
 void RunOccupancyTargetUtilShakedown(const MachineFunction &mf) {
   llvm::outs() << "  OccupancyTargetUtil shakedown:\n";
@@ -6623,10 +6624,112 @@ void RunOccupancyTargetUtilShakedown(const MachineFunction &mf) {
   check("limit < floor: target clamped to floor",
         mfi->getOccupancy() == floor);
 
+  // ---- SetOccupancyTarget: position-independent reset + lower ----
+
+  // Case 4: raise from the floor back up — the movement direction
+  // limitOccupancy alone cannot do, and the reason the helper exists
+  // (the tier sweep revisits occupancy values in arbitrary order).
+  hierarchical_scheduler::SetOccupancyTarget(*mfi, mf,
+                                             static_cast<int>(saved_occ));
+  check("SetOccupancyTarget up from floor: target == requested",
+        mfi->getOccupancy() == saved_occ);
+
+  // Case 5: lower to the floor. Trivially passes when the function's
+  // ceiling already sits at the floor.
+  hierarchical_scheduler::SetOccupancyTarget(*mfi, mf,
+                                             static_cast<int>(floor));
+  check("SetOccupancyTarget down to floor: target == floor",
+        mfi->getOccupancy() == floor);
+
+  // Case 6: request above the structural ceiling -> clamped to the
+  // ceiling. Nothing has lowered occupancy at shakedown time (we run
+  // right after InitFunction's reset), so the ceiling is saved_occ.
+  hierarchical_scheduler::SetOccupancyTarget(
+      *mfi, mf, static_cast<int>(saved_occ) + 100);
+  check("SetOccupancyTarget above ceiling: clamped to ceiling",
+        mfi->getOccupancy() == saved_occ);
+
   // Restore.
   restore();
   check("MFI->Occupancy restored to saved value",
         mfi->getOccupancy() == saved_occ);
+}
+
+// ---- ScheduleGraph: sentinel accessors + instr-order replay ----
+
+// Verifies the building blocks of the min-adjusted-length pass's
+// buffer/re-measure cycle on a real region graph:
+//   - GetEntryNode/GetExitNode bracket the input schedule's order;
+//   - GetInstrOrder returns exactly the graph's real instructions;
+//   - MakeConstructorForInstrOrder over the input's own instr order
+//     reproduces the input constructor's length and peak pressure
+//     exactly (same graph, same order -> same tracker results).
+// Returns the input/replayed length so the caller can compare lenses
+// across graphs of the same region built with different divisors.
+int RunInstrOrderReplayShakedown(ScheduleGraph &graph,
+                                 const MachineFunction &mf,
+                                 const char *label) {
+  llvm::outs() << "  InstrOrderReplay shakedown (" << label << "):\n";
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(mf.getSubtarget());
+
+  auto check = [&](const char *desc, bool ok) {
+    llvm::outs() << "    " << desc << (ok ? "  PASS" : "  FAIL") << "\n";
+    if (!ok) {
+      report_fatal_error("InstrOrderReplay shakedown: failure");
+    }
+  };
+
+  const ScheduleConstructor &input_sc = graph.GetInputScheduleConstructor();
+  ArrayRef<const ScheduleNode *> input_order = input_sc.GetScheduleOrder();
+  check("input order non-empty", !input_order.empty());
+  check("entry sentinel is first in input order",
+        input_order.front() == graph.GetEntryNode());
+  check("exit sentinel is last in input order",
+        input_order.back() == graph.GetExitNode());
+
+  std::vector<MachineInstr *> instr_order = input_sc.GetInstrOrder();
+  int real_instruction_count = 0;
+  for (const ScheduleNode &node : graph.Nodes()) {
+    if (node.IsRealInstruction()) {
+      ++real_instruction_count;
+    }
+  }
+  check("GetInstrOrder size == real instruction count",
+        static_cast<int>(instr_order.size()) == real_instruction_count);
+
+  ScheduleConstructor replay =
+      graph.MakeConstructorForInstrOrder(instr_order, st, mf);
+  const int input_length = input_sc.GetLengthTracker().GetCurrentCycle();
+  check("replay length == input length",
+        replay.GetLengthTracker().GetCurrentCycle() == input_length);
+
+  const GCNRegPressure &input_peak =
+      input_sc.GetPressureTracker().GetPeakPressure();
+  const GCNRegPressure &replay_peak =
+      replay.GetPressureTracker().GetPeakPressure();
+  const bool unified_vgpr = st.hasGFX90AInsts();
+  check("replay peak VGPR == input peak VGPR",
+        replay_peak.getVGPRNum(unified_vgpr) ==
+            input_peak.getVGPRNum(unified_vgpr));
+  check("replay peak SGPR == input peak SGPR",
+        replay_peak.getSGPRNum() == input_peak.getSGPRNum());
+
+  return input_length;
+}
+
+// Companion check for RunInstrOrderReplayShakedown when it has been run
+// on the same region at two divisors: the same order over shrunken (or
+// equal) edge weights can never get longer, so adjusted must be <= raw.
+void CheckAdjustedLengthNotAboveRaw(int adjusted_length, int raw_length) {
+  const bool ok = adjusted_length <= raw_length;
+  llvm::outs() << "  InstrOrderReplay lens check: adjusted="
+               << adjusted_length << " raw=" << raw_length
+               << (ok ? "  PASS" : "  FAIL") << "\n";
+  if (!ok) {
+    report_fatal_error("InstrOrderReplay lens check: adjusted length "
+                       "exceeds raw length");
+  }
 }
 
 // ---- GCNRegisterTracker: effective occupancy + per-track helpers ----
@@ -6999,6 +7102,26 @@ void RunEffectiveTimeoutShakedown() {
 // The only class-member shakedown entry point. All the per-shakedown
 // helpers live in the anonymous namespace above. Orchestrates the
 // standalone shakedowns and the per-region batch.
+// See header. Divisor 4 stands in for "some adjusted lens" — any
+// value > 1 exercises the scaled-edge path.
+void ScheduleDAGHierarchicalScheduler::RunInstrOrderReplayShakedowns() {
+  if (regions_.empty()) {
+    return;
+  }
+
+  int raw_length = 0;
+  int adjusted_length = 0;
+  WithRegionGraph(regions_.front(), /*latency_divisor=*/1,
+                  [&](ScheduleGraph &graph) {
+    raw_length = RunInstrOrderReplayShakedown(graph, MF, "divisor=1");
+  });
+  WithRegionGraph(regions_.front(), /*latency_divisor=*/4,
+                  [&](ScheduleGraph &graph) {
+    adjusted_length = RunInstrOrderReplayShakedown(graph, MF, "divisor=4");
+  });
+  CheckAdjustedLengthNotAboveRaw(adjusted_length, raw_length);
+}
+
 void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   llvm::outs() << "RunAllShakedowns:\n";
   RunEffectiveTimeoutShakedown();
@@ -7064,4 +7187,6 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
       RunFormSubgraphsRealRegionSmokeTest(graph);
     });
   }
+
+  RunInstrOrderReplayShakedowns();
 }

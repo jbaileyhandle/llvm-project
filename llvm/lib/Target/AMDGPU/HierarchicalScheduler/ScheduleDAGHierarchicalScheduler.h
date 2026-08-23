@@ -21,6 +21,7 @@
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineScheduler.h"
+#include <optional>
 #include <type_traits>
 #include <vector>
 
@@ -83,9 +84,19 @@ public:
   // when the callback returns; anything the callback wants to
   // persist across calls must be saved in a form stable across
   // buildSchedGraph rebuilds (e.g., MachineInstr* rather than
-  // ScheduleNode* or SUnit*).
+  // ScheduleNode* or SUnit*). The graph's edge latency divisor is
+  // GetLatencyDivisorForScheduling()'s normal rule; delegates to the
+  // explicit-divisor overload below.
   void WithRegionGraph(
       const RegionInfo &region,
+      function_ref<void(ScheduleGraph &)> callback);
+
+  // Overload with an explicit edge latency divisor in place of the
+  // normal rule. The min-adjusted-length pass passes its tier here so
+  // each tier's graphs carry that tier's adjusted lens regardless of
+  // the scale_edge_latencies flag.
+  void WithRegionGraph(
+      const RegionInfo &region, int latency_divisor,
       function_ref<void(ScheduleGraph &)> callback);
 
   // The scheduling-view latency divisor passed to BuildFromSUnits: the
@@ -206,6 +217,98 @@ public:
   // the outer loop to aggregate.
   LengthRegionStats ScheduleRegionForLengthPass(RegionInfo &region);
 
+  // The min-adjusted-length pass (misched.txt flag `min_adjusted_length`;
+  // replaces the length pass). For every reachable occupancy tier o —
+  // the post-occupancy-pass kernel ceiling down to the launch floor —
+  // schedule every region for minimum length with the tier threaded
+  // through both halves of the search: MFI's occupancy target is set
+  // to o (the DFS policies read their register budget from it live)
+  // and the region graphs are built with edge latencies divided by o
+  // (the adjusted lens, via WithRegionGraph's explicit divisor). Each
+  // tier's schedules are buffered, not applied, and scored by the sum
+  // of adjusted lengths measured at the tier's ACTUAL occupancy — the
+  // kernel-wide min of what the buffered schedules really achieve,
+  // which can sit above the searched tier since the budget only bounds
+  // pressure from above. The smallest score wins, ties going to the
+  // higher actual occupancy (insurance against latency misestimates).
+  // The winner's schedules are then committed and MFI's occupancy
+  // target is set to the winner's actual occupancy. Must run after
+  // RunMaximizeOccupancyPass: the ceiling it established is the top
+  // tier, and its committed schedules are a search seed feasible at
+  // every tier at or below it (enforced at config build time).
+  void RunMinimizeAdjustedLengthPass();
+
+  // One region's buffered schedule within a tier candidate. Produced
+  // by SearchRegionAtOccupancyTier.
+  struct MinAdjustedLengthRegionSchedule {
+    // The best order the tier's search found, held as MachineInstr*
+    // (stable across the graph rebuilds between search and commit).
+    std::vector<MachineInstr *> order;
+    // The order's schedule length in cycles of the candidate's scoring
+    // lens (search-tier divisor as produced; rewritten to the
+    // actual-occupancy divisor when the candidate is re-measured).
+    int adjusted_length = 0;
+    // The order's launch-floor-clamped all-factors occupancy — this
+    // region's contribution to the candidate's kernel-wide min.
+    int achieved_occupancy = 0;
+    // The region's search hit its wall-clock budget.
+    bool timed_out = false;
+  };
+
+  // One occupancy tier's candidate kernel schedule, produced by
+  // ScheduleKernelForOccupancyTier and scored/committed by
+  // RunMinimizeAdjustedLengthPass. region_schedules is parallel to
+  // regions_.
+  struct MinAdjustedLengthCandidate {
+    // The tier the searches ran under: register budget and latency
+    // divisor both set from this value.
+    int searched_occupancy_tier = 0;
+    // The kernel-wide occupancy the buffered schedules actually
+    // achieve: min over regions of each schedule's launch-floor-clamped
+    // all-factors occupancy. Never below searched_occupancy_tier (the
+    // policy gate forbids dropping under the budget tier) but can be
+    // ABOVE it — the budget only bounds pressure from above, so a
+    // min-length schedule may land in a higher bracket than it was
+    // searched under.
+    int actual_occupancy = 0;
+    // The candidate's score: sum over regions of the region schedules'
+    // adjusted_length values.
+    int64_t adjusted_length_sum = 0;
+    bool timed_out = false;
+    std::vector<MinAdjustedLengthRegionSchedule> region_schedules;
+  };
+
+  // Per-tier worker for RunMinimizeAdjustedLengthPass. Sets MFI's
+  // occupancy target to `tier` (SetOccupancyTarget, position-
+  // independent; the DFS policies read their register budget from the
+  // target live), then runs SearchRegionAtOccupancyTier on every
+  // region, buffering each best order. Computes the candidate's
+  // actual occupancy, and when it differs from `tier`, re-measures
+  // every region order under the actual-occupancy divisor so
+  // adjusted_length_sum reflects the latency hiding the schedules will
+  // really get.
+  MinAdjustedLengthCandidate ScheduleKernelForOccupancyTier(int tier);
+
+  // Per-region worker for ScheduleKernelForOccupancyTier: min-length
+  // search the region under a graph built with latency divisor `tier`,
+  // via the same two-phase length-min worker the length pass uses
+  // (plain min policy), seeded with the current MF order. The best
+  // schedule is returned in buffered form, NOT applied — every tier
+  // must search from the same input. Assumes the caller already set
+  // MFI's occupancy target to `tier` (the search's register budget).
+  MinAdjustedLengthRegionSchedule SearchRegionAtOccupancyTier(
+      RegionInfo &region, int tier);
+
+  // Measure a buffered region order's schedule length under
+  // `latency_divisor`: rebuild the region graph with that divisor and
+  // replay the order through ScheduleGraph::MakeConstructorForInstrOrder.
+  // The MF order is untouched during the sweep, so the rebuilt graph
+  // has the same nodes and edges the tier's search saw — only the edge
+  // weights differ.
+  int MeasureBufferedOrderLength(const RegionInfo &region,
+                                 const std::vector<MachineInstr *> &order,
+                                 int latency_divisor);
+
   // Initialize per-function state. Called at the start of
   // RunHierarchicalScheduler / RunMaliciousScheduler. Stores mfi_
   // and resets occupancy to the pre-GCN-scheduler value.
@@ -222,6 +325,16 @@ private:
   // ExitSU, regions_).
   void RunAllShakedowns();
 
+  // Shakedown for the min-adjusted-length pass's building blocks
+  // (sentinel accessors, GetInstrOrder, MakeConstructorForInstrOrder):
+  // replays the first region's input order over graphs built at
+  // divisor 1 and at an adjusted divisor, checking each replay against
+  // its graph's input constructor and the adjusted length against the
+  // raw one. A member (defined in Shakedowns.cpp, like
+  // RunAllShakedowns) because it builds region graphs via
+  // WithRegionGraph.
+  void RunInstrOrderReplayShakedowns();
+
 protected:
   // Apply a computed schedule order to the given region. Physically moves
   // MachineInstrs to match the order given by |scheduled_units|.
@@ -234,14 +347,25 @@ protected:
       const RegionInfo &region,
       const std::vector<SUnit *> &scheduled_units);
 
-  // Overload: extract the order from a completed ScheduleConstructor.
-  // Walks sc.GetScheduleOrder(), skips ScheduleNodes whose SUnit is
-  // null (synthetic entry/exit nodes from our ScheduleGraph that
-  // don't correspond to real MachineInstrs), and delegates to the
-  // SUnit* overload above.
+  // Overload: extract the real-instruction order from a completed
+  // ScheduleConstructor (GetInstrOrder) and delegate to the
+  // MachineInstr* overload below.
   void ApplyScheduleOrder(
       const RegionInfo &region,
       const ScheduleConstructor &sc);
+
+  // Overload: apply an order held as MachineInstr pointers — the form
+  // the min-adjusted-length pass buffers per tier. A ScheduleConstructor
+  // cannot be buffered across regions/tiers: it is a view over a
+  // ScheduleGraph that WithRegionGraph destroys, and the graph's SUnit
+  // backpointers go stale on the next buildSchedGraph anyway.
+  // MachineInstr* is owned by the MachineFunction and survives every
+  // rebuild (see WithRegionGraph's persistence contract). This is the
+  // primitive that does the actual instruction moves; the SUnit*
+  // overload reduces to it.
+  void ApplyScheduleOrder(
+      const RegionInfo &region,
+      const std::vector<MachineInstr *> &scheduled_instrs);
 
   // Set up ScheduleDAGMILive state for the given region so that
   // moveInstruction() and other inherited methods work correctly.
