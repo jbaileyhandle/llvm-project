@@ -269,6 +269,24 @@ it.
 - **Pre-RA pressure is an estimate** (inherited caveat — see the MaxOccupancy
   doc): a schedule the pass considers to fit at a tier can still spill at
   allocation.
+- **The score is spill-blind, so the search must be spill-bounded.** Spill
+  instructions are inserted by the register allocator *after* scheduling:
+  they are not in the DAG, and neither `I` nor `L_raw` can price them. An
+  unbounded min-length search in the spill regime therefore "shortens"
+  schedules by stretching live ranges into spill cost the score cannot see
+  — measured as 2–3.4× GRBM regressions with spill counts tripling
+  (2026-08-24 sweep) before the per-tier search was switched to the
+  spill-bounded min policy (VGPR spill area capped at the input
+  baseline's, the length pass's own default). The bound never binds for
+  non-spilling regions.
+- **Spilling and tier choice cannot interact.** Register budgets grow as
+  occupancy drops, so `budget(floor)` is the largest budget any tier
+  offers; a kernel that spills exceeds it, hence exceeds every tier's
+  budget, and every spilling region's launch-floor-clamped occupancy is
+  the floor — so the kernel-wide actual occupancy is the floor for every
+  candidate and all tiers collapse to one effective choice. Spill trouble
+  is purely a schedule-quality issue at the floor, never a tier-decision
+  issue.
 
 ## Validation
 

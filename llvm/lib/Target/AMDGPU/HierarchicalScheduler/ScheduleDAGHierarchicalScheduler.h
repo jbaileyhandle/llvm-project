@@ -322,7 +322,9 @@ public:
   // enter the search objective; the score's lifetime sum decomposes
   // over regions, so minimizing each region's raw length is optimal
   // at every tier), via the same two-phase length-min worker the
-  // length pass uses (plain min policy), seeded with the current MF
+  // length pass uses, with the SPILL-BOUNDED min policy (spills are
+  // inserted by RA after scheduling, so the score cannot price them —
+  // see the comment at the call site), seeded with the current MF
   // order. The best schedule is returned in buffered form, NOT
   // applied — every tier must search from the same input. The tier
   // reaches the search only through the register budget: the caller

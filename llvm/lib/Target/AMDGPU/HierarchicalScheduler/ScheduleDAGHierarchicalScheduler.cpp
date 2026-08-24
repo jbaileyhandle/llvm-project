@@ -1424,7 +1424,18 @@ ScheduleDAGHierarchicalScheduler::SearchRegionAtOccupancyTier(
     bool timed_out = false;
     int64_t dfs_ms = 0;
     int64_t dfs_steps = 0;
-    RunMinimizeLengthForRegionWithPolicy<DfsMinimizeLengthPolicy>(
+    // Spill-BOUNDED length min, not plain min: spill instructions are
+    // inserted by the register allocator after scheduling, so they are
+    // not in the DAG and the length tracker cannot price them — an
+    // unbounded min-length search "shortens" spill-regime schedules by
+    // stretching live ranges into spill cost the score cannot see
+    // (measured: 2-3.4x GRBM regressions with spill counts tripling,
+    // 2026-08-24 sweep). Bounding VGPR spill area to the input
+    // baseline's, exactly as the length pass's default policy does,
+    // removes that blind spot; the bound never binds for non-spilling
+    // regions.
+    RunMinimizeLengthForRegionWithPolicy<
+        DfsMinimizeLengthBoundedSpillSignalsPolicy>(
         graph, st, MF, *LIS, input_sc, best_sc, timed_out, dfs_ms,
         dfs_steps);
     result.order = best_sc.GetInstrOrder();
