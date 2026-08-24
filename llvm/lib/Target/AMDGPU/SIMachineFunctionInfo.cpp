@@ -93,6 +93,11 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const Function &F,
   // target is applied, so initialOccupancy is always defined (it is assigned
   // nowhere else) and already reflects the target.
   initialOccupancy = Occupancy;
+  // Resolve this function's per-kernel load-latency overrides
+  // (`kernel_latencies` lines) once here, at construction;
+  // adjustSchedDependency reads the cached pointer per dependence edge.
+  kernelLatencyOverrides =
+      mis_config.GetKernelLatenciesForMangledFunctionSignature(F.getName());
   //========================================================================================
   CallingConv::ID CC = F.getCallingConv();
 

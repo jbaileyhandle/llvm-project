@@ -154,6 +154,74 @@ namespace {
         }
     }
 
+    // Parse a `vmem=N,smem=N,lds=N` per-kernel latency spec (each key
+    // optional, at least one required; values are latencies in cycles,
+    // >= 0). Writes each present key into the matching KernelLatencies
+    // field. Re-setting a field that is already set is a fatal error (the
+    // set-once rule): a line may fill any subset of the fields and later
+    // lines may fill the others, but an accidental duplicate fails loudly
+    // rather than silently winning. Fatal error on an unknown key or a
+    // malformed value. `context` names the offending line in error messages.
+    using KernelLatencies = MachineInstrSchedulerConfig::KernelLatencies;
+    void ParseLatencySpec(StringRef spec, const Twine &context,
+                          KernelLatencies &latencies) {
+        SmallVector<StringRef, 3> entries;
+        spec.split(entries, ',');
+        for (StringRef entry : entries) {
+            size_t eq = entry.find('=');
+            if (eq == StringRef::npos || eq == 0 || eq + 1 == entry.size()) {
+                report_fatal_error(context + ": malformed latency entry '" +
+                                   entry +
+                                   "' (expected `<vmem|smem|lds>=<cycles>`)");
+            }
+            StringRef key = entry.substr(0, eq);
+            StringRef value = entry.substr(eq + 1);
+            std::optional<int> *field = nullptr;
+            if (key == "vmem") {
+                field = &latencies.vmem_load_latency;
+            } else if (key == "smem") {
+                field = &latencies.smem_load_latency;
+            } else if (key == "lds") {
+                field = &latencies.lds_load_latency;
+            } else {
+                report_fatal_error(context + ": unknown latency key '" + key +
+                                   "' (expected vmem, smem, or lds)");
+            }
+            if (field->has_value()) {
+                report_fatal_error(context + ": latency '" + key +
+                                   "' is already set");
+            }
+            int parsed = 0;
+            if (value.getAsInteger(10, parsed) || parsed < 0) {
+                report_fatal_error(context + ": latency '" + key +
+                                   "' has invalid value '" + value +
+                                   "' (expected an integer >= 0)");
+            }
+            *field = parsed;
+        }
+    }
+
+    // Resolve the `<m|d>/<signature>` prefix shared by the per-function line
+    // kinds (`kernel`, `kernel_latencies`) to the demangled signature the
+    // per-function maps are keyed on. Fatal error on an empty signature or an
+    // unknown tag. `context` names the offending line in error messages.
+    std::string ResolveKernelSignature(StringRef tag, StringRef signature,
+                                       const Twine &context) {
+        if (signature.empty()) {
+            report_fatal_error(context + " has an empty signature");
+        }
+        if (tag == "d" || tag == "D") {
+            return signature.str();
+        }
+        if (tag == "m" || tag == "M") {
+            return MachineInstrSchedulerConfig::DemangleFunctionSignature(
+                signature.str());
+        }
+        report_fatal_error(context +
+                           " must start with 'm' (mangled) or 'd' (demangled), "
+                           "got '" + tag + "'");
+    }
+
     // Split a string according to whitespace
     // Return split strings as a vector
     std::vector<std::string> SplitByWhitespace(const std::string &input) {
@@ -352,23 +420,9 @@ void MachineInstrSchedulerConfig::ParseKernelLine(const std::string &rest) {
                            "' (expected `kernel <m|d>/<signature>/[waves]`)");
     }
 
-    StringRef tag = fields[0];
-    StringRef signature = fields[1];
-    if (signature.empty()) {
-        report_fatal_error(Twine("misched.txt: kernel line '") + rest +
-                           "' has an empty signature");
-    }
-
-    std::string demangled_func_signature;
-    if (tag == "d" || tag == "D") {
-        demangled_func_signature = signature.str();
-    } else if (tag == "m" || tag == "M") {
-        demangled_func_signature = DemangleFunctionSignature(signature.str());
-    } else {
-        report_fatal_error(Twine("misched.txt: kernel line '") + rest +
-                           "' must start with 'm' (mangled) or 'd' (demangled), got '" +
-                           tag + "'");
-    }
+    std::string demangled_func_signature = ResolveKernelSignature(
+        fields[0], fields[1],
+        Twine("misched.txt: kernel line '") + rest + "'");
 
     // The optional 3rd field is a per-function occupancy override, in one of two
     // mutually exclusive forms:
@@ -414,12 +468,37 @@ void MachineInstrSchedulerConfig::ParseKernelLine(const std::string &rest) {
                        min_waves, max_waves));
 }
 
+void MachineInstrSchedulerConfig::ParseKernelLatenciesLine(const std::string &rest) {
+    // Grammar: <m|d>/<signature>/<latency spec>. Split keeping empty fields
+    // so a missing field is rejected, not silently shifted into another
+    // position (same rationale as ParseKernelLine).
+    SmallVector<StringRef, 4> fields;
+    StringRef(rest).split(fields, '/');
+    if (fields.size() != 3) {
+        report_fatal_error(Twine("misched.txt: malformed kernel_latencies line '") +
+                           rest +
+                           "' (expected `kernel_latencies "
+                           "<m|d>/<signature>/vmem=N,smem=N,lds=N`)");
+    }
+
+    std::string demangled_func_signature = ResolveKernelSignature(
+        fields[0], fields[1],
+        Twine("misched.txt: kernel_latencies line '") + rest + "'");
+
+    // First sight of a kernel creates its (all-unset) entry; ParseLatencySpec
+    // then fills the named fields, rejecting a re-set of an already-set one.
+    ParseLatencySpec(
+        fields[2], Twine("misched.txt: kernel_latencies line '") + rest + "'",
+        demangled_func_signature_to_latencies_[demangled_func_signature]);
+}
+
 MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
     // misched.txt is a line-oriented, order-independent config. Each non-blank,
-    // non-comment line is either a `kernel <m|d>/<sig>/[waves]` per-function
-    // line or a whitespace-separated list of option tokens (a scheduler name,
-    // a bare flag, or a `<key>=<value>` setting). Options may be split across
-    // any number of lines; exactly one scheduler name must appear.
+    // non-comment line is a `kernel <m|d>/<sig>/[waves]` per-function line, a
+    // `kernel_latencies <m|d>/<sig>/vmem=N,smem=N,lds=N` per-function line, or
+    // a whitespace-separated list of option tokens (a scheduler name, a bare
+    // flag, or a `<key>=<value>` setting). Options may be split across any
+    // number of lines; exactly one scheduler name must appear.
     //
     // Config location: if the MISCHED_CONFIG_FILE environment variable is set,
     // it must name a readable config file -- anything else (missing file, empty
@@ -457,6 +536,12 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
                 // as `<m|d>/<signature>/[waves]`.
                 StringRef rest = (ws == StringRef::npos) ? StringRef() : trimmed.substr(ws).trim();
                 ParseKernelLine(rest.str());
+                continue;
+            }
+            if (first_word == "kernel_latencies") {
+                // Not whitespace-tokenized, for the same reason as `kernel`.
+                StringRef rest = (ws == StringRef::npos) ? StringRef() : trimmed.substr(ws).trim();
+                ParseKernelLatenciesLine(rest.str());
                 continue;
             }
 
@@ -509,6 +594,17 @@ const MachineInstrSchedulerConfig::FunctionConfig *MachineInstrSchedulerConfig::
 
 const MachineInstrSchedulerConfig::FunctionConfig *MachineInstrSchedulerConfig::GetFunctionConfigFromMangledFunctionSignature(const llvm::StringRef &mangled_signature) const {
     return GetFunctionConfigFromMangledFunctionSignature(mangled_signature.str());
+}
+
+const MachineInstrSchedulerConfig::KernelLatencies *
+MachineInstrSchedulerConfig::GetKernelLatenciesForMangledFunctionSignature(
+    llvm::StringRef mangled_signature) const {
+    std::string demangled_name = DemangleFunctionSignature(mangled_signature.str());
+    auto itr = demangled_func_signature_to_latencies_.find(demangled_name);
+    if (itr == demangled_func_signature_to_latencies_.end()) {
+        return nullptr;
+    }
+    return &itr->second;
 }
 
 bool MachineInstrSchedulerConfig::HasFunctionConfigForDemangledFunctionSignature(const std::string &demangled_signature) const {
@@ -707,6 +803,24 @@ std::string MachineInstrSchedulerConfig::ToString() const {
     // Per-func options
     for(const auto &signature_config : demangled_func_signature_to_config_) {
         result += signature_config.second.ToString();
+    }
+
+    // Per-kernel latency overrides
+    for (const auto &signature_latencies : demangled_func_signature_to_latencies_) {
+        const KernelLatencies &latencies = signature_latencies.second;
+        result += "\t" + signature_latencies.first + " latencies:\n";
+        if (latencies.vmem_load_latency.has_value()) {
+            result += "\t\tvmem_load_latency:" +
+                      std::to_string(*latencies.vmem_load_latency) + "\n";
+        }
+        if (latencies.smem_load_latency.has_value()) {
+            result += "\t\tsmem_load_latency:" +
+                      std::to_string(*latencies.smem_load_latency) + "\n";
+        }
+        if (latencies.lds_load_latency.has_value()) {
+            result += "\t\tlds_load_latency:" +
+                      std::to_string(*latencies.lds_load_latency) + "\n";
+        }
     }
 
     return result;

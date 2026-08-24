@@ -943,24 +943,39 @@ void GCNSubtarget::adjustSchedDependency(SUnit *Def, int DefOpIdx, SUnit *Use,
   //========================================================================================
   // jbaile
   //========================================================================================
-  // Per-class load-latency overrides from misched.txt (vmem_load_latency /
-  // smem_load_latency / lds_load_latency). Applied last so an override wins
+  // Per-class load-latency overrides from misched.txt: the global knobs
+  // (vmem_load_latency / smem_load_latency / lds_load_latency) and the
+  // per-kernel `kernel_latencies` lines, with a per-kernel value winning
+  // over the global knob for its class. Applied last so an override wins
   // over the sched-model and bundle adjustments above. This hook is called
   // for every data dependence in every ScheduleDAGInstrs-based scheduler, so
   // the substitution reaches all pre-RA arms (and the post-RA pass) and the
   // schedule-length analyzer uniformly. Producer-side classification, loads
   // only: latency belongs to the defining memory instruction. VMEM covers
-  // FLAT too -- global_load is FLAT-encoded on gfx9.
+  // FLAT too -- global_load is FLAT-encoded on gfx9. The per-kernel
+  // latencies were resolved once at SIMachineFunctionInfo construction;
+  // this hot path only reads the cached pointer.
   {
     const MachineInstrSchedulerConfig::GlobalSettings &settings =
         MachineInstrSchedulerConfig::GetConfig().GetGlobalSettings();
+    const MachineInstrSchedulerConfig::KernelLatencies *kernel_latencies =
+        DefI->getMF()->getInfo<SIMachineFunctionInfo>()->getKernelLatencyOverrides();
     std::optional<int> latency_override;
     if (SIInstrInfo::isVMEM(*DefI) || SIInstrInfo::isFLAT(*DefI)) {
-      latency_override = settings.vmem_load_latency;
+      latency_override =
+          (kernel_latencies && kernel_latencies->vmem_load_latency.has_value())
+              ? kernel_latencies->vmem_load_latency
+              : settings.vmem_load_latency;
     } else if (SIInstrInfo::isSMRD(*DefI)) {
-      latency_override = settings.smem_load_latency;
+      latency_override =
+          (kernel_latencies && kernel_latencies->smem_load_latency.has_value())
+              ? kernel_latencies->smem_load_latency
+              : settings.smem_load_latency;
     } else if (SIInstrInfo::isDS(*DefI)) {
-      latency_override = settings.lds_load_latency;
+      latency_override =
+          (kernel_latencies && kernel_latencies->lds_load_latency.has_value())
+              ? kernel_latencies->lds_load_latency
+              : settings.lds_load_latency;
     }
     if (latency_override.has_value() && DefI->mayLoad()) {
       Dep.setLatency(*latency_override);

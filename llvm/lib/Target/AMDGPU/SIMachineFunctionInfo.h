@@ -20,6 +20,7 @@
 #include "SIInstrInfo.h"
 #include "SIModeRegisterDefaults.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include "llvm/CodeGen/MIRYamlMapping.h"
 #include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/Support/raw_ostream.h"
@@ -471,6 +472,19 @@ private:
   unsigned Occupancy;
 
   unsigned initialOccupancy = 0;
+
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // This function's per-kernel load-latency overrides (misched.txt
+  // `kernel_latencies` lines), resolved once at construction. The consumer,
+  // GCNSubtarget::adjustSchedDependency, runs per dependence edge -- far too
+  // hot for the demangle + hash lookup the resolution needs -- so it reads
+  // this cached pointer instead. Points into MachineInstrSchedulerConfig's
+  // process-lifetime singleton (parsed once, never mutated after); nullptr =
+  // no overrides configured for this function.
+  const MachineInstrSchedulerConfig::KernelLatencies *kernelLatencyOverrides = nullptr;
+  //========================================================================================
 
   mutable std::optional<bool> UsesAGPRs;
 
@@ -1120,6 +1134,15 @@ public:
   unsigned getCurrentOccupancy() {
     return Occupancy;
   }
+
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  const MachineInstrSchedulerConfig::KernelLatencies *
+  getKernelLatencyOverrides() const {
+    return kernelLatencyOverrides;
+  }
+  //========================================================================================
 };
 
 } // end namespace llvm

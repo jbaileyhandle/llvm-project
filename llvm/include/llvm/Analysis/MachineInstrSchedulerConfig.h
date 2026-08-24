@@ -148,6 +148,27 @@ class MachineInstrSchedulerConfig {
             std::optional<int> all_kernels_max_waves;
         };
 
+        // Per-kernel load-latency overrides, from
+        // `kernel_latencies <m|d>/<sig>/vmem=N,smem=N,lds=N` lines. Each key
+        // is optional and defaults to unset (at least one per line); a line
+        // may fill any subset of the fields for its kernel, and re-setting a
+        // field that is already set for that kernel is a fatal error -- an
+        // accidental duplicate fails loudly rather than silently winning.
+        // Same units (cycles) and consumer
+        // (GCNSubtarget::adjustSchedDependency) as the GlobalSettings latency
+        // knobs: for that kernel a per-kernel value wins over the global
+        // knob, and an unset one falls back to it. Kept out of FunctionConfig
+        // deliberately -- "has a FunctionConfig entry" is OptSched's
+        // per-function opt-in and the fallback test for
+        // all_kernels_occupancy, and a latency-only entry must not perturb
+        // either. Intended source: measured per-kernel latencies fed back
+        // from the profiler's characterize runs.
+        struct KernelLatencies {
+            std::optional<int> vmem_load_latency;
+            std::optional<int> smem_load_latency;
+            std::optional<int> lds_load_latency;
+        };
+
         // A class to represent per-function configuration info
         class FunctionConfig {
             public:
@@ -194,6 +215,11 @@ class MachineInstrSchedulerConfig {
         // Return the FunctionConfig for the function with a given mangled signature
         // Return nullptr if not found
         const FunctionConfig *GetFunctionConfigFromMangledFunctionSignature(const llvm::StringRef &mangled_signature) const;
+
+        // Return the per-kernel latency overrides for the function with the
+        // given mangled signature, or nullptr if none were configured.
+        const KernelLatencies *GetKernelLatenciesForMangledFunctionSignature(
+            llvm::StringRef mangled_signature) const;
 
         // If there is a configuration for function, set waves per eu attribute
         // for the function based on the configuration
@@ -315,6 +341,11 @@ class MachineInstrSchedulerConfig {
         // after the leading `kernel` keyword).
         void ParseKernelLine(const std::string &rest);
 
+        // Parse a `kernel_latencies <m|d>/<signature>/vmem=N,smem=N,lds=N`
+        // per-function line (the text after the leading `kernel_latencies`
+        // keyword).
+        void ParseKernelLatenciesLine(const std::string &rest);
+
         // Map a scheduler-name token to the Scheduler enum, or
         // Scheduler::InvalidOption if it is not a scheduler name.
         static Scheduler GetSchedulerFromName(llvm::StringRef name);
@@ -323,6 +354,7 @@ class MachineInstrSchedulerConfig {
         Scheduler mi_scheduler_ = Scheduler::Default;
         bool scheduler_set_ = false;
         std::unordered_map<std::string, FunctionConfig> demangled_func_signature_to_config_;
+        std::unordered_map<std::string, KernelLatencies> demangled_func_signature_to_latencies_;
 
         // Typed boolean flags (the spelling -> field table is in the .cpp).
         Flags flags_;
