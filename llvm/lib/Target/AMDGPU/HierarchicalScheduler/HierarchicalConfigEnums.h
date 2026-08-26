@@ -80,6 +80,19 @@ enum class LengthPolicy {
 ///                untunable and harder to audit than this one.)
 enum class RegionWeighting { kNone, kLoopDepth };
 
+/// `min_adjusted_length.tie_break` axis: which occupancy tier wins when
+/// two tiers tie on the min-adjusted-length score. Ties are common —
+/// issue-bound regions score issue_slots at every tier — so this choice
+/// carries real weight.
+///   kHighestOccupancy - more waves dampen a latency misestimate
+///                       (insurance against model error).
+///   kLowestOccupancy  - fewer waves means a bigger per-wave register
+///                       budget, which lowers downstream register-
+///                       allocator pressure the score cannot see
+///                       (global live ranges spill without any region
+///                       exceeding its per-region budget).
+enum class TieBreak { kHighestOccupancy, kLowestOccupancy };
+
 } // namespace hierarchical_scheduler
 } // namespace llvm
 

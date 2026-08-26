@@ -230,6 +230,10 @@ struct MinAdjustedLengthConfig {
   // (min_adjusted_length.loop_weight_base). Tunable stand-in for
   // unknown trip counts; requires region_weighting=loop_depth.
   int loop_weight_base = 10;
+  // Which occupancy tier wins a score tie
+  // (min_adjusted_length.tie_break = highest_occupancy |
+  // lowest_occupancy). See TieBreak for the trade.
+  TieBreak tie_break = TieBreak::kHighestOccupancy;
 };
 
 /// The HierarchicalScheduler's whole typed configuration, built once at

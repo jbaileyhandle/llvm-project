@@ -183,8 +183,16 @@ barrier-heavy kernels underperform the model.
 
 5. **Ties are common and meaningful.** Every tier whose candidate is
    issue-bound scores `Σ w·I` — the model saying "occupancy is irrelevant for
-   this kernel". Ties go to the **higher actual occupancy**: more waves dampen
-   the damage of a latency mis-estimate, so the insurance is free.
+   this kernel". By default ties go to the **higher actual occupancy**: more
+   waves dampen the damage of a latency mis-estimate, so the insurance is
+   free. `min_adjusted_length.tie_break=lowest_occupancy` flips this: fewer
+   waves means a bigger per-wave register budget, which lowers downstream
+   register-allocator pressure the score cannot see (global live ranges spill
+   without any region exceeding its per-region budget — the rsbench class).
+   Note the tie-break compares ACTUAL occupancies, and searches at different
+   tiers often land the same actual occupancy with the same score, in which
+   case the two settings coincide; the flip only bites when tied scores carry
+   genuinely different actual brackets.
 
 ## Robustness: the two-sided stress-lens tie-break (planned)
 

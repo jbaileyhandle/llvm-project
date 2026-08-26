@@ -1606,17 +1606,27 @@ void ScheduleDAGHierarchicalScheduler::RunMinimizeAdjustedLengthPass() {
                  << " score_sum=" << candidate.score_sum
                  << (candidate.timed_out ? " timed_out" : "") << "\n";
 
-    // Smallest score wins. Ties go to the higher ACTUAL occupancy —
-    // insurance against latency misestimates, since more waves dampen
-    // a modeling error; ties are common because issue-bound regions
-    // score issue_slots at every tier. Actual occupancy is not
-    // monotone in sweep order (a looser-budget search can land lower
-    // pressure by accident), so the tie-break compares explicitly;
-    // remaining ties keep the earlier candidate (higher searched
-    // tier) for determinism.
+    // Smallest score wins. Score ties go to an ACTUAL-occupancy
+    // extreme chosen by min_adjusted_length.tie_break — ties are
+    // common because issue-bound regions score issue_slots at every
+    // tier, so this choice carries real weight. Higher occupancy is
+    // insurance against latency misestimates (more waves dampen a
+    // modeling error); lower occupancy grants the register allocator
+    // a bigger per-wave budget for costs this score cannot see
+    // (global live ranges spill without any region exceeding its
+    // per-region budget). Actual occupancy is not monotone in sweep
+    // order (a looser-budget search can land lower pressure by
+    // accident), so the tie-break compares explicitly; remaining
+    // exact ties keep the earlier candidate (higher searched tier)
+    // for determinism.
+    const bool prefer_lowest =
+        HierarchicalConfig::Get().min_adjusted_length_config.tie_break ==
+        TieBreak::kLowestOccupancy;
     if (!best.has_value() || candidate.score_sum < best->score_sum ||
         (candidate.score_sum == best->score_sum &&
-         candidate.actual_occupancy > best->actual_occupancy)) {
+         (prefer_lowest
+              ? candidate.actual_occupancy < best->actual_occupancy
+              : candidate.actual_occupancy > best->actual_occupancy))) {
       best = std::move(candidate);
     }
   }

@@ -132,6 +132,11 @@ const EnumSpec<RegionWeighting> kRegionWeightings[] = {
     {"loop_depth", RegionWeighting::kLoopDepth},
 };
 
+const EnumSpec<TieBreak> kTieBreaks[] = {
+    {"highest_occupancy", TieBreak::kHighestOccupancy},
+    {"lowest_occupancy", TieBreak::kLowestOccupancy},
+};
+
 bool ParseBool(StringRef scope, StringRef key, StringRef v) {
   if (v == "true" || v == "on") {
     return true;
@@ -382,6 +387,10 @@ void ApplyMinAdjustedLengthKey(StringRef key, StringRef val,
   if (key == "loop_weight_base") {
     c.loop_weight_base = ParseInt(scope, key, val);
     base_explicitly_set = true;
+    return;
+  }
+  if (key == "tie_break") {
+    c.tie_break = ParseEnum(kTieBreaks, scope, key, val);
     return;
   }
   UnknownKey(scope, key);
@@ -714,6 +723,8 @@ std::string HierarchicalConfig::ToString() const {
      << EnumName(kRegionWeightings,
                  min_adjusted_length_config.region_weighting)
      << " loop_weight_base=" << min_adjusted_length_config.loop_weight_base
+     << " tie_break=" << EnumName(kTieBreaks,
+                                  min_adjusted_length_config.tie_break)
      << "\n";
   return os.str();
 }
