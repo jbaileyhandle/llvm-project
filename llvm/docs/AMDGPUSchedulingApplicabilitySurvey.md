@@ -382,6 +382,257 @@ ML output, register-fat shaders.
   instruction scheduling buys on AMDGPU (the only published magnitudes
   come from evaluations this lab does not credit). The magnitude
   question is genuinely open.
-- Next step: map HeCBench against sections 2-5 (which benchmarks fall
-  in each class, exactly or approximately) — now meaningful because
-  these lists were derived blind.
+- HeCBench mapping against sections 2-5: done, section 8.
+
+## 8. HeCBench mapping (WORKING set, 2026-09-08)
+
+Mapping of the 356 benchmarks in gpu2_benchmarks'
+`hec_bench_all_WORKING` group onto the survey's categories. Method:
+name-based classification for the well-known ports, plus code
+inspection by four read-only agents (identification of ~55 opaque
+names; structural verification of library-vs-own-kernel, LDS-tile /
+barrier-loop patterns, items-per-thread register arrays, stencil
+order and register rotation). A ✓ marks code-verified structure.
+
+### 8.1 View 1: per-category listings
+
+#### Scheduling-leverage classes (section 5)
+
+**B1 low-occupancy dense-math tile kernels** (own kernel with
+register/LDS tiles): winograd✓ (four 4x4 register tiles, no LDS),
+dct8x8✓ (D[8] register butterflies + LDS transpose), hexciton✓
+(batched 7x7 complex commutator, register-blocked variants),
+ccsd-trpdrv✓ (16 scalar regs + wide FMA), gpp✓ (BerkeleyGW complex
+contraction, live accumulator arrays), mdh✓ (LDS atom tiles),
+quantAQLM✓ / quant3MatMul✓ (LDS-tiled quantized matvec),
+bezier-surface. EXCLUDED after code check: blas-gemm /
+blas-gemmBatched / blas-gemmStridedBatched / geam are hipBLAS library
+calls (no compiler-scheduled kernel); gemv, quantVLLM, quantBnB are
+streaming.
+
+**B2 barrier-lock-stepped LDS-pipelined kernels** (verified
+load-LDS/sync/compute/sync loops): lud✓, nw✓ (barrier per
+anti-diagonal), pathfinder✓, hotspot✓, lavaMD✓ (best non-LA example:
+per-neighbor-box tile loop), fwt✓, minimod✓ (3D LDS brick),
+stencil3d✓ (LDS plane rotation), stencil1d✓, laplace3d✓, adv✓
+(spectral element; largest combined LDS+register footprint in the
+set), tridiagonal✓ (PCR/cyclic kernels), tsa✓, merge✓, split✓,
+radixsort✓, sort✓, scan2✓, is✓, hybridsort✓ (bucket kernels), topk✓,
+mdh✓, quantAQLM✓, b+tree✓ (barrier-lockstepped WITHOUT a tile),
+reaction, asmooth. Incidental find: dct8x8's HIP port dropped the
+__syncthreads of the OpenCL original while still sharing an LDS
+transpose buffer — suspected upstream correctness bug.
+
+**B3 items-per-thread register-tiled primitives** (verified grain-size
+register arrays): segsort✓ (up to 32 keys/thread in scalarized
+registers — strongest case), warpsort✓ (T arr[N] + unroll, zero LDS),
+merge✓ (4/thread), sort✓ (4 keys + digit_counts[16]), split✓ /
+radixsort✓ (uint4), hybridsort✓ (float4 merge pass), topk✓ (hipcub
+items_per_thread), sc✓ (REGS-element tile across compaction phases).
+Not in class after check: scan2 (two scalars), bscan, histogram,
+bitonic-sort (1 elem/thread); scan3 and segment-reduce are
+thrust/hipCUB library calls.
+
+**B4 latency-bound independent-gather kernels**: xsbench, rsbench
+(the survey's literal proxy apps), tissue✓ (Green's-function table
+gather), compute-score✓ (bloom lookups, deliberate
+manual-vectorization register pressure), s8n✓ (neighborhood search
+with register arrays), henry✓, aidw✓, expdist (Kernel Tuner's own
+benchmark), tpacf, knn, degrid, car✓, all-pairs-distance, hausdorff,
+word2vec, mcpr✓ (w[21] live across the MC loop).
+
+**B5 data-dependent-fetch / traversal (shader-shaped)**: bh (tree
+traversal), b+tree, bsearch, quicksort, aobench (path tracer), grrt
+(GR ray integration), surfel✓ (ray-cast), face (cascade), eikonal,
+asmooth✓ (data-dependent radius loop), snake✓ (data-dependent while,
+~12 live regs), diamond✓ (HMM with large per-thread local arrays),
+wyllie (list ranking), sss✓, minimap2, particlefilter, fsm / grep
+(automata).
+
+**B6 high-order / wide-expression stencils**: fdtd3d✓ (radius-4
+register-rotation queue — the textbook member), wsm5✓ (~20 private
+column-length arrays — guaranteed spill class), sw4ck✓ (radius-2
+elastic; pressure from expression width — the literal kernel from
+AMD's ORNL deck), hypterm✓ (radius-4 monolithic flux expressions),
+rtm8✓ (dual 25-point), minimod✓, adv✓, tsa✓ (register arrays across
+timesteps). Streaming anti-side (verified radius-1
+load-compute-store): heat, heat2d, iso2dfd, burger, che, ace, plus
+d2q9-bgk / d3q19-bgk, lid-driven-cavity, hotspot3D✓ (small rolling
+registers), srad✓ (flat elementwise).
+
+**B7 per-thread carried-state evolution loops** (each thread advances
+its own state vector through an iteration — integration steps, path
+steps, particle histories — so a large live set persists across a long
+loop body; domains are examples, not the definition): s3d✓ (hundreds
+of live kinetics temporaries in one basic block — the classic),
+rushlarsen✓ (19 states, 474 straight-line double-precision lines,
+zero loops/barriers), cobahh✓ (7 states + 33 constants, expf chains),
+myocyte✓ (39 KB straight-line RHS launched nearly serially), goulash✓,
+lci✓, egs✓ (full particle struct live across the MC history loop),
+wsm5✓, pns✓, aop✓, feynman-kac, ising, vmc, mcmd, libor (MC
+forward-rate path evolution — the NVIDIA-case-study finance family),
+binomial, bonds✓ (per-bond cashflow-date loops with live leg state),
+gibbs (marginal: rejection-sampling loop carries RNG state but the
+live set is small). Reclassified out on structural grounds:
+black-scholes — closed-form per-element evaluation, no loop, no
+carried state; it belongs with the long-transcendental-chain
+elementwise batch below.
+
+**B8 crypto/hash**: aes, bitcracker, keccaktreehash, md5hash,
+murmurhash3, jenkins-hash, secp256k1, ecdh, mr✓ (Miller-Rabin powmod
+ladders), present, chacha20, ntt, crc64. Label honesty note: this is
+a DOMAIN class earned by the effort-inventory evidence (section 4's
+hand-asm record), not a structural one — its structural content (long
+fixed serial rounds, integer-heavy, little reorder freedom) is
+anti-class-adjacent for ordering leverage.
+
+#### General optimization-attention classes (section 1)
+
+GEMM family: the B1 list plus the three hipBLAS wrappers.
+Convolution: convolution1D/3D/Deformable/Separable, dwconv, winograd,
+vol2col, unfold. Attention / DL operators: attentionMultiHead,
+softmax, softmax-online, layernorm, rmsnorm, rotary, moe, moe-sum,
+gru, gelu, relu, swish, adam, adamw, crossEntropy, scel, logprob,
+perplexity, resnet-kernels, backprop, word2vec, wedford,
+rowwiseMoments, channelSum, zeropoint, quant*. FFT/transforms: fft,
+zmddft, dct8x8, fwt, hwt1d, ntt. Sparse LA: simpleSpmv, ge-spmm,
+sptrsv, spm, mmcsf, amgmk, miniFE, jacobi, lanczos, slu. Primitives:
+the B2/B3 lists plus histogram, bincount, filter, rfs, minmax,
+stddev, kurtosis, entropy. Factorizations: lud, gaussian, eigenvalue,
+determinant, tridiagonal, thomas. MD / N-body: md, lavaMD, nbody,
+minibude, testSNAP, haccmk, clenergy, sph, wlcpow, bh; lattice QCD:
+su3, dslash. Graph: bfs, sssp, page-rank, cc, mis, hbc,
+floydwarshall(2), tsp, streamcluster, kmeans. Ray/rendering: aobench,
+grrt, surfel, marchingCubes, voxelization, flame. Crypto/compression:
+the B8 list plus bwt, lzss, rle, ans, bitpacking, fpc, mtf, sa.
+Bioinformatics alignment (the Smith-Waterman case-study class): bsw,
+logan, extend2, minimap2, nw, phmm, snake, diamond. Image/DSP: ~30
+(bm3d, ced, opticalFlow, sad, seam-carving, debayer, hogbom, ddbp,
+...). Layout/elementwise: matrixT, tensorT, matrix-rotate, reverse2D,
+axpby, plus the long-transcendental-chain batch (fresnel✓, geodesic✓,
+qem✓, black-scholes — serial FP chains, closer to issue-bound
+controls).
+
+### 8.2 View 2: importance x leverage quadrants
+
+The two views measure different things — A membership = "stands in
+for a kernel class the world demonstrably invests optimization effort
+in" (relevance); B membership = "has the structural properties that
+give a compiler instruction scheduler something to do" (sensitivity)
+— and they dissociate in this set:
+
+| | in B (scheduling leverage) | not in B |
+|---|---|---|
+| **in A** | winograd, dct8x8, hexciton, segsort, fdtd3d, minibude, quantAQLM, ... — important AND schedulable; real-world competition is hand-tuned libraries | blas-gemm* (hipBLAS call: GEMM-class importance, zero compiler-scheduler surface); streaming DL elementwise (relu, mask, ...) |
+| **not in A** | s3d, rushlarsen, cobahh, sw4ck, wsm5, egs, myocyte, ... — no library or framework serves these; **the compiler's schedule is the only schedule they will ever get** | filler (projectile, overlay, ...) |
+
+The bottom-left quadrant (B without A) is the strategic one for
+compiler-scheduling research: structurally the same situation as the
+graphics-shader population of section 4 — too many, too churning, too
+niche to hand-tune — where a compiler improvement is the only possible
+delivery mechanism. The top-left quadrant is where wins are flashiest
+but benchmarked against Tensile-grade hand assembly.
+
+### 8.3 Practical notes
+
+- Many `-hip` directories pull kernel source from outside their own
+  directory (Makefile `-I ../<name>-cuda`, direct `../<name>-cuda/x.cu`
+  source paths, or `#include "../..."`). A full scan found 176 of the
+  356 WORKING benchmarks do this. It is BENIGN for our purposes — the
+  borrowed source still compiles through our toolchain as part of the
+  benchmark build — but tooling that globs `*-hip/**` for kernel
+  source silently misses those kernels.
+- Representatives per pattern, if picking few: grain-size register
+  arrays -> segsort, warpsort; barrier-tiled loop -> lavaMD, lud,
+  hotspot, fwt; heavy straight-line live state -> rushlarsen, s3d,
+  cobahh; register-rotation vs LDS-rotation stencil contrast pair ->
+  fdtd3d vs laplace3d/stencil3d.
+
+### 8.4 Compilability filter: library front-ends (2026-09-08 refinement)
+
+For compiler-scheduling experiments a benchmark is only usable if its
+HOT kernels are compiled from benchmark source by our compiler.
+Mechanical scan of all 356 WORKING benchmarks (own `__global__` count,
+external-source references, device-library usage) plus timed-path
+inspection of the mixed cases gives:
+
+**EXCLUDED — timed kernels are external library launches (11):**
+
+- blas-gemm, blas-gemmBatched, blas-gemmStridedBatched, geam — hipBLAS
+  is the timed path (blas-gemm's own naive kernel is not what is
+  measured).
+- determinant — hipsolver Cholesky (+ thrust).
+- scan3 — hipcub::DeviceScan / thrust::exclusive_scan; no own kernel.
+- segment-reduce — thrust::reduce_by_key; no own kernel.
+- scatterThrust — thrust::scatter; no own kernel.
+- coordinates — thrust::transform; no own kernel.
+- nonzero — timed regions are hipcub::DeviceReduce + DeviceSelect;
+  the only own kernel is a trivial index-writing epilogue.
+- remap — timed pipeline is thrust::sort_by_key + unique_by_key with
+  a small own gather kernel at the end.
+
+**MIXED — kept, with external stages to keep in mind:** sa (own
+skew-algorithm kernels interleaved with thrust::sort_by_key stages),
+ans and lzss (own compression kernels; one thrust/hipcub scan stage),
+tsne (27 own kernels; hipfft + thrust stages between them), ssim (own
+kernel; thrust final reduction). Verified own-kernel timed paths
+despite library mentions: convolution3D (miopen present but the timed
+loops launch its own conv3d_s1/s2/s3), sort (thrust::sort is a
+reference check only), ising (hiprand is host-side initialization).
+Header-only thrust types inside own kernels (su3's thrust::complex,
+rotary/rowwiseMoments tuples) are not library dependencies in this
+sense at all — that code compiles through our scheduler.
+
+Category-list impact: the B1 exclusions in 8.1 already covered the
+hipBLAS wrappers; additionally determinant leaves the factorization
+candidates and scan3 / segment-reduce / scatterThrust / coordinates /
+nonzero / remap leave the primitives/DL-op candidates.
+
+### 8.5 The shortlist: sched_shortlist_2026_09 (31 benchmarks)
+
+Registered as BenchmarkGroup `sched_shortlist_2026_09` in
+gpu2_benchmarks profile_in/benchmarks.json. Selection criteria, all
+from existing on-disk data (the 2026-08-07 -pm survey + accumulated
+timing history) unless noted:
+
+1. Important or representative — a member of the survey's leverage
+   classes (sections 2-5) or a key general-attention class (section 1).
+2. Median app runtime <= 60 s.
+3. GPU saturation >= 1.0 for at least one kernel at as-run problem
+   size (survey column; sat = launched waves / 2400-wave capacity).
+   Caveat: max-over-kernels, not hot-kernel-weighted.
+4. Hot kernels compiled from benchmark source (section 8.4 filter).
+5. Baseline build <= 120 s — informational, excluded nothing (worst:
+   segsort 43 s, hexciton 24 s). NOTE: baseline build time is a FLOOR;
+   search-based scheduler arms multiply it on big-single-region
+   kernels — measured: hexciton 6.6 s baseline -> 102 s under ACO
+   (July 2026 sweep). rushlarsen and testSNAP share the giant-region
+   shape and carry the same warning, unmeasured.
+6. Every category has at least 2 members.
+
+Full rebuild of all 31 at baseline: ~4.7 min. Summed app runtime:
+~7 min per arm.
+
+| Category | Picked | Excluded (reason; rescue prospect where relevant) |
+|---|---|---|
+| Dense math | winograd, quantAQLM, ccsd-trpdrv, hexciton (as `hexciton-hip_jbaile_num16384`: default NUM=2048 fills 13% of the machine; NUM=16384 measured sat~1.0 at 53 s wall) | blas-gemm/-Batched/-StridedBatched, geam (library front-ends); gpp (slow 276 s); mdh (slow 206 s); dct8x8 (cut: transform-tile covered by winograd AND suspected dropped-barrier bug, 8.1); quant3MatMul (cut: near-duplicate of quantAQLM); bezier-surface (sat 0.09; rescue unknown) |
+| Lock-stepped LDS / primitives | lavaMD, lud, adv, sort, segsort | Eligible, cut as redundant: pathfinder, hotspot, stencil1d, scan2, split, radixsort, fwt, hybridsort, b+tree, reaction, asmooth, minimod. Low-sat: is (0.43; has size classes — likely rescuable), merge (0.27), nw (0.85; wavefront-limited, partial). Slow: topk (99 s), stencil3d (123 s). No data: laplace3d, tridiagonal |
+| FFT / transforms | fft, zmddft | ntt (sat 0.13; small fixed input); hwt1d (not in leverage classes) |
+| Lattice QCD | su3, dslash | — (both picked) |
+| MD force | testSNAP, minibude | clenergy (eligible; cut: issue-wall control profile); md (sat 0.48), nbody (0.10), sph (0.08) — all default-size fills; input-size rescue plausible but unverified; haccmk (A-class member, not in leverage classes) |
+| Gather / MC transport | rsbench, xsbench | Eligible, cut as redundant: egs, pns, henry, tpacf, expdist, word2vec, knn, degrid, car, aidw, all-pairs-distance, hausdorff. Near-miss: tissue (sat 0.95; slight size bump likely rescues) |
+| Ray / traversal | aobench, quicksort | Eligible, cut: bsearch, eikonal, wyllie, particlefilter, fsm, sss. Low-sat: face (0.03; fixed cascade — hard), snake (0.39), minimap2 (0.75). Slow+low-sat: grrt (93 s, 0.10). No data: bh, grep, diamond, surfel |
+| Graphics-shaped | perlin, tonemapping | flame (sat 0.53; size is compile-time — source-edit rescue); voxelization (slow 140 s). No data: marchingCubes, dxtc2. STANDING GAP: HeCBench has no game-shader corpus (no culling, RT-payload, or SSR-shaped dependent-fetch kernels) — external-validity limit, not fixable by selection |
+| High-order stencil | sw4ck, rtm8 | hypterm (64 s — borderline, admit if the cap loosens); fdtd3d (sat 0.29; option-parser size flags — LIKELY RESCUABLE and the class's flagship register-rotation kernel: recommended follow-up); wsm5 (sat 0.05; fixed WRF slab — hard) |
+| Per-thread carried-state loops | cobahh, rushlarsen, libor | Eligible, cut: goulash, binomial, bonds, gibbs (marginal member). Low-sat: s3d (0.23; SHOC size classes — LIKELY RESCUABLE, the register-pressure classic: recommended follow-up), aop (0.41), vmc (0.93 near-miss), myocyte (0.00; near-serial launch — structurally hard), lci (0.00; single block by design — hard). Slow: feynman-kac (448 s), mcmd (129 s), ising (100 s) |
+| Large thread-local arrays | compute-score, tsa, mcpr | Eligible, cut: s8n, sc, goulash. wsm5 (the class's extreme member; sat 0.05 — hard, see stencil row). No data: diamond, tridiagonal (both would-be members — the one cheap -pm run below settles them). Never evaluated: crs (register-heavy erasure coding; not carried into the leverage classes — candidate for a future audit) |
+| Crypto / hash | keccaktreehash, md5hash | Eligible, cut: jenkins-hash, ecdh, murmurhash3, present. Near-miss: bitcracker (sat 0.98; larger dictionary trivially rescues). Low-sat small fixed inputs: mr (0.81), ntt (0.13), chacha20 (0.00), crc64 (0.20), secp256k1 (0.00). No data: aes |
+
+Cross-cutting follow-ups: (a) one -pm run over the 7 no-data
+benchmarks (aes, bh, diamond, grep, laplace3d, surfel, tridiagonal)
+classifies them — diamond and tridiagonal are would-be
+large-thread-local-array members; (b) size-flag rescues worth doing
+if their classes need depth: fdtd3d and s3d (both flagship class
+members, both likely one flag away); (c) attentionMultiHead remains
+the documented DL/attention gap — naive implementation AND sat 0.11,
+failing two criteria independently.
