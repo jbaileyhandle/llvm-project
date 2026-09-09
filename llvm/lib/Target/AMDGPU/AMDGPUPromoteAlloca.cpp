@@ -29,6 +29,11 @@
 #include "GCNSubtarget.h"
 #include "Utils/AMDGPUBaseInfo.h"
 #include "llvm/Analysis/CaptureTracking.h"
+//========================================================================================
+// jbaile
+//========================================================================================
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
+//========================================================================================
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/IR/IRBuilder.h"
@@ -337,15 +342,44 @@ bool AMDGPUPromoteAllocaImpl::tryPromoteAllocaToVector(AllocaInst &Alloca) {
                                       ArrayTy->getNumElements());
   }
 
-  // Use up to 1/4 of available register budget for vectorization.
-  unsigned Limit = PromoteAllocaToVectorLimit ? PromoteAllocaToVectorLimit * 8
-                                              : (MaxVGPRs * 32);
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // misched.txt `promote_alloca_max_words=N` supplies an absolute per-array
+  // cap in 32-bit words that replaces both stock gates: the
+  // quarter-of-MaxVGPRs size budget below and the fixed 16-element cap
+  // further down. One word occupies one VGPR when promoted, so N bounds the
+  // register cost of a promoted array directly, and it does not shift with
+  // launch bounds or occupancy pins the way MaxVGPRs does. N=0 disables
+  // promotion outright. Unset = stock policy, bit-for-bit.
+  const std::optional<int> max_words = MachineInstrSchedulerConfig::GetConfig()
+                                           .GetGlobalSettings()
+                                           .promote_alloca_max_words;
+  if (max_words) {
+    if (*max_words == 0) {
+      LLVM_DEBUG(dbgs() << "  promote_alloca_max_words=0: promotion off\n");
+      return false;
+    }
+    // Round up to whole words so e.g. a 40-bit array costs 2 words.
+    const uint64_t size_words = (DL->getTypeSizeInBits(AllocaTy) + 31) / 32;
+    if (size_words > static_cast<uint64_t>(*max_words)) {
+      LLVM_DEBUG(dbgs() << "  Alloca of " << size_words
+                        << " words exceeds promote_alloca_max_words="
+                        << *max_words << '\n');
+      return false;
+    }
+  } else {
+    // Use up to 1/4 of available register budget for vectorization.
+    unsigned Limit = PromoteAllocaToVectorLimit ? PromoteAllocaToVectorLimit * 8
+                                                : (MaxVGPRs * 32);
 
-  if (DL->getTypeSizeInBits(AllocaTy) * 4 > Limit) {
-    LLVM_DEBUG(dbgs() << "  Alloca too big for vectorization with " << MaxVGPRs
-                      << " registers available\n");
-    return false;
+    if (DL->getTypeSizeInBits(AllocaTy) * 4 > Limit) {
+      LLVM_DEBUG(dbgs() << "  Alloca too big for vectorization with "
+                        << MaxVGPRs << " registers available\n");
+      return false;
+    }
   }
+  //========================================================================================
 
   // FIXME: There is no reason why we can't support larger arrays, we
   // are just being conservative for now.
@@ -357,11 +391,23 @@ bool AMDGPUPromoteAllocaImpl::tryPromoteAllocaToVector(AllocaInst &Alloca) {
     return false;
   }
 
-  if (VectorTy->getNumElements() > 16 || VectorTy->getNumElements() < 2) {
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // promote_alloca_max_words sets its own size limit, so don't limit on
+  // element count when it is present. The >= 2 structural floor always
+  // applies.
+  if (!max_words && VectorTy->getNumElements() > 16) {
     LLVM_DEBUG(dbgs() << "  " << *VectorTy
                       << " has an unsupported number of elements\n");
     return false;
   }
+  if (VectorTy->getNumElements() < 2) {
+    LLVM_DEBUG(dbgs() << "  " << *VectorTy
+                      << " has an unsupported number of elements\n");
+    return false;
+  }
+  //========================================================================================
 
   std::map<GetElementPtrInst *, Value *> GEPVectorIdx;
   SmallVector<Instruction *> WorkList;

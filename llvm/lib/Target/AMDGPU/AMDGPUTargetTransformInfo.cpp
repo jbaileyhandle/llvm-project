@@ -154,6 +154,26 @@ void AMDGPUTTIImpl::getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
   unsigned ThresholdPrivate = UnrollThresholdPrivate;
   unsigned ThresholdLocal = UnrollThresholdLocal;
 
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // unroll_threshold_overrides_boosts: treat the configured unroll_threshold
+  // as an authoritative ceiling, the same way the amdgpu.loop.unroll.threshold
+  // metadata just below is treated. Clamping ThresholdPrivate/ThresholdLocal
+  // keeps the per-loop private/LDS boosts from raising UP.Threshold past the
+  // configured value, and since MaxBoost derives from these two, the
+  // UnrollThresholdIf escalation is capped transitively. The clamp only ever
+  // lowers, so configured values at or above the stock ceilings behave as if
+  // unclamped.
+  if (mi_config.GetFlags().unroll_threshold_overrides_boosts &&
+      unroll_settings.unroll_threshold) {
+    const unsigned threshold_ceiling =
+        static_cast<unsigned>(*unroll_settings.unroll_threshold);
+    ThresholdPrivate = std::min(ThresholdPrivate, threshold_ceiling);
+    ThresholdLocal = std::min(ThresholdLocal, threshold_ceiling);
+  }
+  //========================================================================================
+
   // If this loop has the amdgpu.loop.unroll.threshold metadata we will use the
   // provided threshold value as the default for Threshold
   if (MDNode *LoopUnrollThreshold =

@@ -35,6 +35,8 @@ namespace {
     const FlagBinding kFlagBindings[] = {
         {"disable_post_ra_scheduling", &Flags::disable_post_ra_scheduling},
         {"enable_runtime_unroll", &Flags::enable_runtime_unroll},
+        {"unroll_threshold_overrides_boosts",
+         &Flags::unroll_threshold_overrides_boosts},
         {"disable_licm", &Flags::disable_licm},
         {"disable_mem_clustering", &Flags::disable_mem_clustering},
         {"disable_max_occ_effective_max_waves_cap",
@@ -79,6 +81,7 @@ namespace {
         {"unroll_threshold", &GlobalSettings::unroll_threshold},
         {"partial_unroll_threshold", &GlobalSettings::partial_unroll_threshold},
         {"runtime_unroll_factor", &GlobalSettings::runtime_unroll_factor},
+        {"promote_alloca_max_words", &GlobalSettings::promote_alloca_max_words},
         {"time_per_instr_occupancy_us", &GlobalSettings::time_per_instr_occupancy_us},
         {"time_per_instr_length_us", &GlobalSettings::time_per_instr_length_us},
         {"vmem_load_latency", &GlobalSettings::vmem_load_latency},

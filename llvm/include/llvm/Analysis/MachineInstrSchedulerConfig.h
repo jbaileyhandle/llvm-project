@@ -33,6 +33,16 @@ class MachineInstrSchedulerConfig {
             // Generic / middle-end (any scheduler).
             bool disable_post_ra_scheduling = false;
             bool enable_runtime_unroll = false;
+            // Make `unroll_threshold=` an authoritative ceiling, not just a
+            // base: AMDGPU's getUnrollingPreferences raises UP.Threshold
+            // per-loop toward its private/LDS boost ceilings (2700/1000 by
+            // default), which would silently override any swept value below
+            // them. With this flag those ceilings are clamped down to the
+            // configured unroll_threshold -- the same treatment loops with
+            // explicit `amdgpu.loop.unroll.threshold` metadata already get.
+            // No effect unless unroll_threshold is also set. Consumed in
+            // AMDGPUTargetTransformInfo.cpp.
+            bool unroll_threshold_overrides_boosts = false;
             // Skip LICM on the device (AMDGPU) side -- an occupancy experiment:
             // LICM hoists loop-invariant values, lengthening live ranges and
             // raising register pressure. Consumed in LICM.cpp.
@@ -103,6 +113,14 @@ class MachineInstrSchedulerConfig {
             std::optional<int> unroll_threshold;
             std::optional<int> partial_unroll_threshold;
             std::optional<int> runtime_unroll_factor;
+            // Per-array cap, in 32-bit words, on alloca-to-register (vector)
+            // promotion in the AMDGPU backend. When set it REPLACES both stock
+            // gates in tryPromoteAllocaToVector: the quarter-of-MaxVGPRs size
+            // budget and the fixed 16-element cap. 0 disables promotion
+            // entirely; one word = one VGPR lane-slot, so the value is a direct
+            // register cost bound. unset = stock policy, bit-for-bit. Consumed
+            // in AMDGPUPromoteAlloca.cpp.
+            std::optional<int> promote_alloca_max_words;
             // Per-instruction scheduling time budget (ms per instruction in a
             // region), applied to BOTH OptSched and the HierarchicalScheduler so
             // the two can be compared given equal wall-clock effort. Separate
