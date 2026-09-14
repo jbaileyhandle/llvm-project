@@ -21,6 +21,8 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/NodeRegInfo.cpp
   HierarchicalScheduler/ScheduleLengthTracker.cpp
   HierarchicalScheduler/IlpTracker.cpp
+  HierarchicalScheduler/HwPipeClass.cpp
+  HierarchicalScheduler/PipeStalenessTracker.cpp
   HierarchicalScheduler/MaxScheduleCycleHeap.cpp
   HierarchicalScheduler/ScheduleConstructor.cpp
   HierarchicalScheduler/RegionInfo.cpp
