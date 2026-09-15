@@ -42,6 +42,8 @@
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <set>
 #include <vector>
@@ -4839,30 +4841,38 @@ void RunIlpTrackerShakedown(ScheduleGraph &graph,
 // Tests PipeStalenessTracker: drives Schedule/Unschedule across all
 // graph nodes in topo order. Verifies:
 //   - Initial state: credit 0, visible count 0, every tracked pipe's
-//     staleness reads 1 (= min(cap, 0 - (-1)), the region-entry
+//     staleness reads 1 (= min(gap 1, s_p >= 1), the region-entry
 //     rendezvous convention).
-//   - Pipe-classification buckets over the region (informational —
-//     no PASS/FAIL).
-//   - Per step: the credit delta produced by Schedule equals
-//     MarginalCreditForNode's prediction taken just before it
-//     (checked for every non-start-proxy node; start proxies are
-//     optimistic by contract, so their prediction is not an
-//     equality).
+//   - Pipe buckets (informational) and target spacings:
+//     GetDesirableSpacing must equal clamp(N/n_p, 1, ceiling)
+//     recomputed from the buckets (ceiling for absent pipes).
+//   - Per step, for every non-start-proxy node (start proxies are
+//     optimistic by contract): the credit delta produced by
+//     Schedule equals MarginalCreditForNode's prediction taken just
+//     before it, and RankKeyForNode equals
+//     raw_gap * (kFixedPointScale / s_p) from independent shadow
+//     bookkeeping.
 //   - Credit is monotone non-decreasing; every staleness snapshot
-//     entry stays in [1, cap] on the uniform tracker (a pipe reads
-//     exactly 1 right after issuing, and a never-issued pipe's
-//     gap-from-entry is always >= 1).
-//   - Options variants driven in lockstep: track_other_pipe=false
-//     keeps kOther staleness pinned at 0 and never out-earns the
-//     uniform tracker; a cap-2 tracker never out-earns the cap-8
-//     one (min(g, 2) <= min(g, 8) pointwise).
-//   - Final credit and visible count match an independent replay
-//     that recomputes both directly from IsPipeTrackingVisible /
-//     ClassifyHwPipe with its own last-issue bookkeeping (catches
-//     table or undo corruption in the tracker).
+//     entry stays in [1, s_p] per pipe on the uniform tracker.
+//   - GetFinalCreditUpperBound: starts at kFixedPointScale * N,
+//     never drops below the eventual final credit at any prefix,
+//     and equals the banked credit exactly at completion.
+//   - Options variants driven in lockstep:
+//       no_other:  kOther staleness pinned at 0; never out-earns
+//                  the uniform tracker (fewer credited
+//                  instructions, same tables);
+//       ceiling-2: never earns LESS than uniform — a smaller
+//                  ceiling only lowers s_p, and min(g, s)/s is
+//                  non-increasing in s, so every instruction's
+//                  credit fraction is >= uniform's;
+//       sqrt:      never earns less than uniform (linear) — same
+//                  s_p tables, sqrt(x) >= x on [0, 1].
+//   - Final credit and visible count match the shadow replay
+//     (independent last-issue bookkeeping + independently rebuilt
+//     linear credit formula — catches table or undo corruption).
 //   - Reverse Unschedule restores credit and the full staleness
 //     snapshot to each forward-step snapshot exactly.
-//   - Round-trip returns all three trackers to credit 0 / count 0
+//   - Round-trip returns all four trackers to credit 0 / count 0
 //     (fatal on failure).
 //
 // Drives the trackers directly (no ScheduleConstructor); topo order
@@ -4875,9 +4885,13 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
   no_other_options.track_other_pipe = false;
   PipeStalenessTracker no_other_tracker(graph, no_other_options);
 
-  PipeStalenessTracker::Options small_cap_options;
-  small_cap_options.staleness_cap = 2;
-  PipeStalenessTracker small_cap_tracker(graph, small_cap_options);
+  PipeStalenessTracker::Options small_ceiling_options;
+  small_ceiling_options.spacing_ceiling = 2;
+  PipeStalenessTracker small_ceiling_tracker(graph, small_ceiling_options);
+
+  PipeStalenessTracker::Options sqrt_options;
+  sqrt_options.curve = PipeStalenessTracker::CreditCurve::kSqrt;
+  PipeStalenessTracker sqrt_tracker(graph, sqrt_options);
 
   // --- Initial state ---
   bool initial_ok = tracker.GetIntermixCredit() == 0 &&
@@ -4893,9 +4907,11 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
   llvm::outs() << "\tPipeStalenessTracker initial state: "
                << (initial_ok ? "PASS\n" : "FAIL\n");
 
-  // --- Pipe-classification buckets (informational) ---
-  int pipe_counts[kNumHwPipes] = {0};
+  // --- Pipe buckets (informational) + target-spacing check ---
+  std::array<int, kNumHwPipes> pipe_counts;
+  pipe_counts.fill(0);
   int invisible_count = 0;
+  int total_visible = 0;
   for (const ScheduleNode &node : graph.Nodes()) {
     if (!node.IsRealInstruction()) {
       continue;
@@ -4906,41 +4922,102 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
       continue;
     }
     ++pipe_counts[static_cast<int>(ClassifyHwPipe(*mi))];
+    ++total_visible;
   }
+
+  int spacing_violations = 0;
+  std::array<int, kNumHwPipes> expected_spacing;
   llvm::outs() << "\tPipe buckets:";
   for (int pipe_index = 0; pipe_index < kNumHwPipes; ++pipe_index) {
-    llvm::outs() << " " << HwPipeName(static_cast<HwPipe>(pipe_index))
-                 << "=" << pipe_counts[pipe_index];
+    int expected = uniform_options.spacing_ceiling;
+    if (pipe_counts[pipe_index] > 0) {
+      expected = std::clamp(total_visible / pipe_counts[pipe_index], 1,
+                            uniform_options.spacing_ceiling);
+    }
+    expected_spacing[pipe_index] = expected;
+    if (tracker.GetDesirableSpacing(static_cast<HwPipe>(pipe_index)) !=
+        expected) {
+      ++spacing_violations;
+    }
+    llvm::outs() << " " << HwPipeName(static_cast<HwPipe>(pipe_index)) << "="
+                 << pipe_counts[pipe_index] << "(s=" << expected << ")";
   }
   llvm::outs() << " invisible=" << invisible_count << "\n";
+  llvm::outs() << "\tTarget spacing == clamp(N/n_p, 1, ceiling):"
+               << (spacing_violations == 0 ? "  PASS\n" : "  FAIL\n");
 
   // --- Forward pass ---
-  // credit_after[i] / snapshot_after[i] = tracker state after i
-  // nodes have been scheduled. Index 0 = empty state.
-  std::vector<int> credit_after;
+  // credit_after[i] / snapshot_after[i] / bound_after[i] = tracker
+  // state after i nodes have been scheduled. Index 0 = empty state.
+  //
+  // Shadow bookkeeping (independent last-issue positions + the
+  // credit formula reapplied from the spec) backs the per-step
+  // rank-key check and the end-of-pass replay comparison.
+  std::vector<int64_t> credit_after;
   std::vector<std::array<int, kNumHwPipes>> snapshot_after;
+  std::vector<int64_t> bound_after;
   credit_after.push_back(tracker.GetIntermixCredit());
   snapshot_after.push_back(tracker.GetStalenessSnapshot());
+  bound_after.push_back(tracker.GetFinalCreditUpperBound());
+
+  std::array<int, kNumHwPipes> shadow_last_issue;
+  shadow_last_issue.fill(-1);
+  int shadow_count = 0;
+  int64_t shadow_credit = 0;
 
   int prediction_violations = 0;
+  int rank_key_violations = 0;
   int monotonicity_violations = 0;
   int staleness_bounds_violations = 0;
-  int variant_dominance_violations = 0;
+  int variant_relation_violations = 0;
   int no_other_staleness_violations = 0;
 
   llvm::outs() << "\tPipe trace (topo order):\n";
   for (ScheduleNode *node : graph.GetTopoOrder()) {
-    const bool check_prediction = !node->IsSubgraphStartProxy();
+    const bool check_node = !node->IsSubgraphStartProxy();
     const int predicted_credit =
-        check_prediction ? tracker.MarginalCreditForNode(node) : 0;
-    const int credit_before = tracker.GetIntermixCredit();
+        check_node ? tracker.MarginalCreditForNode(node) : 0;
+    const int64_t rank_key = check_node ? tracker.RankKeyForNode(node) : 0;
+    const int64_t credit_before = tracker.GetIntermixCredit();
+
+    // Shadow classification of this node (mirrors the tracker's
+    // participation rule).
+    int shadow_pipe = -1;
+    if (node->IsRealInstruction()) {
+      const MachineInstr *mi = node->GetSUnit()->getInstr();
+      if (IsPipeTrackingVisible(*mi)) {
+        shadow_pipe = static_cast<int>(ClassifyHwPipe(*mi));
+      }
+    }
+
+    if (check_node && shadow_pipe >= 0) {
+      const int64_t raw_gap = shadow_count - shadow_last_issue[shadow_pipe];
+      const int64_t expected_rank =
+          raw_gap * (PipeStalenessTracker::kFixedPointScale /
+                     expected_spacing[shadow_pipe]);
+      if (rank_key != expected_rank) {
+        ++rank_key_violations;
+      }
+    }
 
     tracker.Schedule(node);
     no_other_tracker.Schedule(node);
-    small_cap_tracker.Schedule(node);
+    small_ceiling_tracker.Schedule(node);
+    sqrt_tracker.Schedule(node);
 
-    const int credit_delta = tracker.GetIntermixCredit() - credit_before;
-    if (check_prediction && credit_delta != predicted_credit) {
+    if (shadow_pipe >= 0) {
+      const int spacing = expected_spacing[shadow_pipe];
+      const int capped_gap =
+          std::min(shadow_count - shadow_last_issue[shadow_pipe], spacing);
+      shadow_credit += static_cast<int64_t>(std::lround(
+          static_cast<double>(PipeStalenessTracker::kFixedPointScale) *
+          static_cast<double>(capped_gap) / static_cast<double>(spacing)));
+      shadow_last_issue[shadow_pipe] = shadow_count;
+      ++shadow_count;
+    }
+
+    const int64_t credit_delta = tracker.GetIntermixCredit() - credit_before;
+    if (check_node && credit_delta != predicted_credit) {
       ++prediction_violations;
     }
     if (credit_delta < 0) {
@@ -4949,15 +5026,18 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
 
     const std::array<int, kNumHwPipes> snapshot =
         tracker.GetStalenessSnapshot();
-    for (int staleness : snapshot) {
-      if (staleness < 1 || staleness > uniform_options.staleness_cap) {
+    for (int pipe_index = 0; pipe_index < kNumHwPipes; ++pipe_index) {
+      if (snapshot[pipe_index] < 1 ||
+          snapshot[pipe_index] > expected_spacing[pipe_index]) {
         ++staleness_bounds_violations;
       }
     }
+
     if (no_other_tracker.GetIntermixCredit() > tracker.GetIntermixCredit() ||
-        small_cap_tracker.GetIntermixCredit() >
-            tracker.GetIntermixCredit()) {
-      ++variant_dominance_violations;
+        small_ceiling_tracker.GetIntermixCredit() <
+            tracker.GetIntermixCredit() ||
+        sqrt_tracker.GetIntermixCredit() < tracker.GetIntermixCredit()) {
+      ++variant_relation_violations;
     }
     if (no_other_tracker.GetStaleness(HwPipe::kOther) != 0) {
       ++no_other_staleness_violations;
@@ -4965,53 +5045,58 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
 
     credit_after.push_back(tracker.GetIntermixCredit());
     snapshot_after.push_back(snapshot);
+    bound_after.push_back(tracker.GetFinalCreditUpperBound());
     llvm::outs() << "\t\t" << node->ToString() << "  ->  "
                  << tracker.Describe() << "\n";
   }
 
   llvm::outs() << "\tMarginal-credit prediction == Schedule delta:"
                << (prediction_violations == 0 ? "  PASS\n" : "  FAIL\n");
+  llvm::outs() << "\tRank key == raw_gap * (scale / s_p):"
+               << (rank_key_violations == 0 ? "  PASS\n" : "  FAIL\n");
   llvm::outs() << "\tCredit monotonicity:"
                << (monotonicity_violations == 0 ? "  PASS\n" : "  FAIL\n");
-  llvm::outs() << "\tStaleness within [1, cap]:"
+  llvm::outs() << "\tStaleness within [1, s_p]:"
                << (staleness_bounds_violations == 0 ? "  PASS\n"
                                                     : "  FAIL\n");
-  llvm::outs() << "\tVariant dominance (no-other, cap-2 never out-earn):"
-               << (variant_dominance_violations == 0 ? "  PASS\n"
-                                                     : "  FAIL\n");
+  llvm::outs() << "\tVariant relations (no-other <=, ceiling-2 >=, sqrt >= "
+                  "uniform):"
+               << (variant_relation_violations == 0 ? "  PASS\n"
+                                                    : "  FAIL\n");
   llvm::outs() << "\tno-other kOther staleness pinned at 0:"
                << (no_other_staleness_violations == 0 ? "  PASS\n"
                                                       : "  FAIL\n");
 
-  // --- Independent replay ---
-  // Recompute credit and count straight from the classifier with
-  // separate last-issue bookkeeping; must match the tracker's
-  // fully-scheduled state.
-  int replay_credit = 0;
-  int replay_count = 0;
-  std::array<int, kNumHwPipes> replay_last_issue;
-  replay_last_issue.fill(-1);
-  for (ScheduleNode *node : graph.GetTopoOrder()) {
-    if (!node->IsRealInstruction()) {
-      continue;
+  // --- Final-credit upper bound ---
+  // Sound bound: at every prefix it must be >= the eventual final
+  // credit; at index 0 it is the perfect score scale * N; at
+  // completion (remaining = 0) it collapses to the banked credit.
+  const int64_t final_credit = tracker.GetIntermixCredit();
+  int bound_violations = 0;
+  for (int64_t bound : bound_after) {
+    if (bound < final_credit) {
+      ++bound_violations;
     }
-    const MachineInstr *mi = node->GetSUnit()->getInstr();
-    if (!IsPipeTrackingVisible(*mi)) {
-      continue;
-    }
-    const int pipe_index = static_cast<int>(ClassifyHwPipe(*mi));
-    replay_credit += std::min(replay_count - replay_last_issue[pipe_index],
-                              uniform_options.staleness_cap);
-    replay_last_issue[pipe_index] = replay_count;
-    ++replay_count;
   }
+  if (bound_after.front() !=
+      static_cast<int64_t>(PipeStalenessTracker::kFixedPointScale) *
+          total_visible) {
+    ++bound_violations;
+  }
+  if (bound_after.back() != final_credit) {
+    ++bound_violations;
+  }
+  llvm::outs() << "\tFinal-credit upper bound (sound, perfect at start, "
+                  "exact at completion):"
+               << (bound_violations == 0 ? "  PASS\n" : "  FAIL\n");
+
+  // --- Shadow replay comparison ---
   const bool replay_ok =
-      replay_credit == tracker.GetIntermixCredit() &&
-      replay_count == tracker.GetVisibleInstructionsIssuedCount();
-  llvm::outs() << "\tIndependent replay (credit " << replay_credit
-               << " vs " << tracker.GetIntermixCredit() << ", count "
-               << replay_count << " vs "
-               << tracker.GetVisibleInstructionsIssuedCount()
+      shadow_credit == tracker.GetIntermixCredit() &&
+      shadow_count == tracker.GetVisibleInstructionsIssuedCount();
+  llvm::outs() << "\tShadow replay (credit " << shadow_credit << " vs "
+               << tracker.GetIntermixCredit() << ", count " << shadow_count
+               << " vs " << tracker.GetVisibleInstructionsIssuedCount()
                << "):" << (replay_ok ? "  PASS\n" : "  FAIL\n");
 
   // --- Reverse pass ---
@@ -5025,7 +5110,9 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
     ScheduleNode *node = graph.GetTopoOrder()[i];
     tracker.Unschedule(node);
     no_other_tracker.Unschedule(node);
-    small_cap_tracker.Unschedule(node);
+    small_ceiling_tracker.Unschedule(node);
+    sqrt_tracker.Unschedule(node);
+
     const bool step_ok =
         tracker.GetIntermixCredit() == credit_after[i] &&
         tracker.GetStalenessSnapshot() == snapshot_after[i];
@@ -5045,8 +5132,10 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
       tracker.GetVisibleInstructionsIssuedCount() == 0 &&
       no_other_tracker.GetIntermixCredit() == 0 &&
       no_other_tracker.GetVisibleInstructionsIssuedCount() == 0 &&
-      small_cap_tracker.GetIntermixCredit() == 0 &&
-      small_cap_tracker.GetVisibleInstructionsIssuedCount() == 0;
+      small_ceiling_tracker.GetIntermixCredit() == 0 &&
+      small_ceiling_tracker.GetVisibleInstructionsIssuedCount() == 0 &&
+      sqrt_tracker.GetIntermixCredit() == 0 &&
+      sqrt_tracker.GetVisibleInstructionsIssuedCount() == 0;
   llvm::outs() << "\tRound-trip result: " << tracker.Describe()
                << (roundtrip_ok ? "  PASS" : "  FAIL") << "\n";
   if (!roundtrip_ok) {
