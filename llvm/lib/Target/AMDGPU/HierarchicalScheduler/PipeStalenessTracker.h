@@ -188,12 +188,26 @@
 // position ~s_p, back-loading exactly the rare-pipe instructions
 // that most need early placement.
 //
-// TODO: consider ALSO resetting every pipe to saturated right after
-// scheduling an s_barrier. s_barrier is the __syncthreads execution
-// rendezvous (all waves of the workgroup stall until all arrive),
-// it sits MID-region (not a scheduling boundary), and waves resume
-// from it in fresh convoys — the exact condition the entry
-// convention models.
+// Barrier reset (Options::reset_on_barrier, default true):
+// s_barrier is the __syncthreads execution rendezvous — all waves
+// of the workgroup stall at it until all arrive, then resume
+// together in fresh convoys, and it sits MID-region (not a
+// scheduling boundary). That is exactly the condition the
+// saturated-entry convention models, so scheduling an s_barrier
+// (after its own normal accounting — it is a kOther instruction
+// like any other) resets every pipe to saturated at the
+// post-barrier position: mixing right after a barrier is rewarded
+// like mixing at region entry.
+//
+// The reset does not disturb the dominance property below — it
+// tightens it. Comparing two same-set prefixes A and B under any
+// completion Q: without resets, the two runs' tracker states
+// converge pipe-by-pipe as each pipe first issues within Q; a
+// barrier in Q (same position in both runs — same scheduled set)
+// resets both to the SAME state, so they fully converge there at
+// the latest. Credits can differ only for a pipe's first issue in
+// Q occurring BEFORE Q's first barrier, where the monotone-in-
+// staleness argument applies unchanged.
 //
 // The kOther pipe (hardware's branch/export/internal categories +
 // unrecognized opcodes) is handled per Options::track_other_pipe:
@@ -286,6 +300,10 @@ class PipeStalenessTracker {
 
     // Sub-saturation ramp shape — see CreditCurve.
     CreditCurve curve = CreditCurve::kLinear;
+
+    // Reset every pipe to saturated after scheduling an s_barrier —
+    // see the barrier-reset section in the file comment.
+    bool reset_on_barrier = true;
   };
 
   /// Precomputes each node's pipe index, the per-pipe visible
@@ -325,6 +343,23 @@ class PipeStalenessTracker {
   /// it ends the search); at completion it equals GetIntermixCredit
   /// exactly. Intended as the search's branch-and-bound prune:
   /// bound <= best completed credit => this prefix cannot win.
+  ///
+  /// TODO(tighten if telemetry shows bound-limited searches): a
+  /// sound sharper bound exists. Per credited pipe p with r_p
+  /// remaining instructions, its remaining gaps fit in the budget
+  ///   B_p = R + staleness_p + barriers_remaining * s_p
+  /// (R = remaining visible instructions; the staleness term covers
+  /// the first gap reaching back into the prefix; the barrier term
+  /// covers mid-suffix resets re-saturating the pipe). Because the
+  /// credit curves are CONCAVE, credit under a gap-sum budget is
+  /// maximized by equal gaps, so pipe p's remaining credit is at
+  /// most r_p * table_p[min(s_p, ceil(B_p / r_p))]; sum over pipes
+  /// and add banked credit. This sees "tail crowding" — more
+  /// same-pipe instructions left than room to space them — which
+  /// the simple bound cannot. Needs per-pipe issued counters and a
+  /// barriers-remaining counter (both derivable, no undo storage),
+  /// costs ~kNumHwPipes divisions per query, and is valid ONLY for
+  /// concave curves (both current ones are).
   int64_t GetFinalCreditUpperBound() const {
     return intermix_credit_ +
            static_cast<int64_t>(kFixedPointScale) *
@@ -391,9 +426,18 @@ class PipeStalenessTracker {
 
  private:
   struct UndoRecord {
+    /// Kept only for the mutators-out-of-order fatal check in
+    /// Unschedule.
     int pipe_index;
-    int prior_last_issue_position;
+
     int credit;  // per-instruction, <= kFixedPointScale — int is safe
+
+    /// Full pre-Schedule last-issue state, restored wholesale by
+    /// Unschedule. Uniform for every record — plain instructions,
+    /// uncredited kOther, and barrier resets all undo the same
+    /// branch-free way (a handful of ints per record buys a single
+    /// restore mechanism instead of per-case ones).
+    std::array<int, kNumHwPipes> prior_last_issue_positions;
   };
 
   // ----- Construction helpers --------------------------------------------
@@ -437,6 +481,11 @@ class PipeStalenessTracker {
   /// Per-node pipe index (-1 = does not participate), indexed by
   /// topo index. Computed once at construction.
   std::vector<int> pipe_index_by_topo_index_;
+
+  /// Per-node wave-rendezvous flag (IsWaveRendezvous), indexed by
+  /// topo index. Drives the barrier reset when
+  /// Options::reset_on_barrier is set.
+  std::vector<bool> is_barrier_by_topo_index_;
 
   /// s_p per pipe — see GetDesirableSpacing.
   std::array<int, kNumHwPipes> desirable_spacing_by_pipe_;

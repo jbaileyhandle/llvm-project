@@ -133,6 +133,10 @@ HwPipe ClassifyHwPipe(const MachineInstr &mi) {
   return HwPipe::kOther;
 }
 
+bool IsWaveRendezvous(const MachineInstr &mi) {
+  return mi.getOpcode() == AMDGPU::S_BARRIER;
+}
+
 StringRef HwPipeName(HwPipe pipe) {
   switch (pipe) {
     case HwPipe::kValu: {

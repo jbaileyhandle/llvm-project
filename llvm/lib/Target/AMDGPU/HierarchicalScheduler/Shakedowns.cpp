@@ -4866,13 +4866,21 @@ void RunIlpTrackerShakedown(ScheduleGraph &graph,
 //                  non-increasing in s, so every instruction's
 //                  credit fraction is >= uniform's;
 //       sqrt:      never earns less than uniform (linear) — same
-//                  s_p tables, sqrt(x) >= x on [0, 1].
+//                  s_p tables, sqrt(x) >= x on [0, 1];
+//       no-reset:  reset_on_barrier=false; never out-earns the
+//                  default — a barrier reset only raises staleness
+//                  until each pipe's next issue, and credit is
+//                  monotone in staleness.
+//   - After scheduling an s_barrier, every pipe on the default
+//     tracker reads saturated staleness (the barrier reset). The
+//     barrier count is printed so a barrier-free region shows this
+//     check as vacuous rather than silently passing.
 //   - Final credit and visible count match the shadow replay
 //     (independent last-issue bookkeeping + independently rebuilt
 //     linear credit formula — catches table or undo corruption).
 //   - Reverse Unschedule restores credit and the full staleness
 //     snapshot to each forward-step snapshot exactly.
-//   - Round-trip returns all four trackers to credit 0 / count 0
+//   - Round-trip returns all five trackers to credit 0 / count 0
 //     (fatal on failure).
 //
 // Drives the trackers directly (no ScheduleConstructor); topo order
@@ -4892,6 +4900,10 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
   PipeStalenessTracker::Options sqrt_options;
   sqrt_options.curve = PipeStalenessTracker::CreditCurve::kSqrt;
   PipeStalenessTracker sqrt_tracker(graph, sqrt_options);
+
+  PipeStalenessTracker::Options no_reset_options;
+  no_reset_options.reset_on_barrier = false;
+  PipeStalenessTracker no_reset_tracker(graph, no_reset_options);
 
   // --- Initial state ---
   bool initial_ok = tracker.GetIntermixCredit() == 0 &&
@@ -4975,6 +4987,8 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
   int staleness_bounds_violations = 0;
   int variant_relation_violations = 0;
   int no_other_staleness_violations = 0;
+  int barrier_count = 0;
+  int post_barrier_reset_violations = 0;
 
   llvm::outs() << "\tPipe trace (topo order):\n";
   for (ScheduleNode *node : graph.GetTopoOrder()) {
@@ -4987,10 +5001,12 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
     // Shadow classification of this node (mirrors the tracker's
     // participation rule).
     int shadow_pipe = -1;
+    bool is_barrier = false;
     if (node->IsRealInstruction()) {
       const MachineInstr *mi = node->GetSUnit()->getInstr();
       if (IsPipeTrackingVisible(*mi)) {
         shadow_pipe = static_cast<int>(ClassifyHwPipe(*mi));
+        is_barrier = IsWaveRendezvous(*mi);
       }
     }
 
@@ -5008,6 +5024,17 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
     no_other_tracker.Schedule(node);
     small_ceiling_tracker.Schedule(node);
     sqrt_tracker.Schedule(node);
+    no_reset_tracker.Schedule(node);
+
+    if (is_barrier) {
+      ++barrier_count;
+      for (int pipe_index = 0; pipe_index < kNumHwPipes; ++pipe_index) {
+        if (tracker.GetStaleness(static_cast<HwPipe>(pipe_index)) !=
+            tracker.GetDesirableSpacing(static_cast<HwPipe>(pipe_index))) {
+          ++post_barrier_reset_violations;
+        }
+      }
+    }
 
     if (shadow_pipe >= 0) {
       const int spacing = expected_spacing[shadow_pipe];
@@ -5018,6 +5045,15 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
           static_cast<double>(capped_gap) / static_cast<double>(spacing)));
       shadow_last_issue[shadow_pipe] = shadow_count;
       ++shadow_count;
+
+      if (is_barrier) {
+        // Mirror the barrier reset: every pipe saturated at the
+        // post-barrier position.
+        for (int pipe_index = 0; pipe_index < kNumHwPipes; ++pipe_index) {
+          shadow_last_issue[pipe_index] =
+              shadow_count - expected_spacing[pipe_index];
+        }
+      }
     }
 
     const int64_t credit_delta = tracker.GetIntermixCredit() - credit_before;
@@ -5040,7 +5076,8 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
     if (no_other_tracker.GetIntermixCredit() > tracker.GetIntermixCredit() ||
         small_ceiling_tracker.GetIntermixCredit() <
             tracker.GetIntermixCredit() ||
-        sqrt_tracker.GetIntermixCredit() < tracker.GetIntermixCredit()) {
+        sqrt_tracker.GetIntermixCredit() < tracker.GetIntermixCredit() ||
+        no_reset_tracker.GetIntermixCredit() > tracker.GetIntermixCredit()) {
       ++variant_relation_violations;
     }
     if (no_other_tracker.GetStaleness(HwPipe::kOther) != 0) {
@@ -5069,6 +5106,10 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
                                                     : "  FAIL\n");
   llvm::outs() << "\tno-other kOther staleness pinned at 0:"
                << (no_other_staleness_violations == 0 ? "  PASS\n"
+                                                      : "  FAIL\n");
+  llvm::outs() << "\tBarriers seen: " << barrier_count
+               << "; post-barrier all pipes saturated:"
+               << (post_barrier_reset_violations == 0 ? "  PASS\n"
                                                       : "  FAIL\n");
 
   // --- Final-credit upper bound ---
@@ -5116,6 +5157,7 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
     no_other_tracker.Unschedule(node);
     small_ceiling_tracker.Unschedule(node);
     sqrt_tracker.Unschedule(node);
+    no_reset_tracker.Unschedule(node);
 
     const bool step_ok =
         tracker.GetIntermixCredit() == credit_after[i] &&
@@ -5139,7 +5181,9 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
       small_ceiling_tracker.GetIntermixCredit() == 0 &&
       small_ceiling_tracker.GetVisibleInstructionsIssuedCount() == 0 &&
       sqrt_tracker.GetIntermixCredit() == 0 &&
-      sqrt_tracker.GetVisibleInstructionsIssuedCount() == 0;
+      sqrt_tracker.GetVisibleInstructionsIssuedCount() == 0 &&
+      no_reset_tracker.GetIntermixCredit() == 0 &&
+      no_reset_tracker.GetVisibleInstructionsIssuedCount() == 0;
   llvm::outs() << "\tRound-trip result: " << tracker.Describe()
                << (roundtrip_ok ? "  PASS" : "  FAIL") << "\n";
   if (!roundtrip_ok) {

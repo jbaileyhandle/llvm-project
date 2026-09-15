@@ -67,7 +67,8 @@ std::vector<int> BuildCreditTable(int target_spacing,
 PipeStalenessTracker::PipeStalenessTracker(const ScheduleGraph &graph,
                                            const Options &options)
     : options_(options),
-      pipe_index_by_topo_index_(graph.Size(), kNoPipe) {
+      pipe_index_by_topo_index_(graph.Size(), kNoPipe),
+      is_barrier_by_topo_index_(graph.Size(), false) {
   ValidateConstructionPreconditions(graph);
 
   const std::array<int, kNumHwPipes> visible_count_by_pipe =
@@ -114,6 +115,10 @@ PipeStalenessTracker::ClassifyVisibleInstructions(const ScheduleGraph &graph) {
     const int pipe_index = static_cast<int>(ClassifyHwPipe(*mi));
     pipe_index_by_topo_index_[node.GetTopoIndex()] = pipe_index;
     visible_count_by_pipe[pipe_index] += 1;
+
+    if (IsWaveRendezvous(*mi)) {
+      is_barrier_by_topo_index_[node.GetTopoIndex()] = true;
+    }
   }
 
   return visible_count_by_pipe;
@@ -208,13 +213,12 @@ void PipeStalenessTracker::Schedule(const ScheduleNode *node) {
 
   UndoRecord undo;
   undo.pipe_index = pipe_index;
-  undo.prior_last_issue_position = last_issue_position_by_pipe_[pipe_index];
-  // 0 for an uncredited kOther instruction: it consumes a stream
-  // position (the bump below) but changes no credit and no
-  // last-issue entry, and its undo record records exactly that
-  // nothing-change (credit 0, last-issue value already in the
-  // table), keeping Unschedule branch-free.
+  undo.prior_last_issue_positions = last_issue_position_by_pipe_;
+  // Credit is 0 for an uncredited kOther instruction: it consumes a
+  // stream position (the bump below) but changes no credit and no
+  // last-issue entry.
   undo.credit = CreditForPipeIndex(pipe_index);
+  undo_stack_.push_back(undo);
 
   if (IsCreditedPipeIndex(pipe_index)) {
     intermix_credit_ += undo.credit;
@@ -222,8 +226,20 @@ void PipeStalenessTracker::Schedule(const ScheduleNode *node) {
         visible_instructions_issued_count_;
   }
 
-  undo_stack_.push_back(undo);
   visible_instructions_issued_count_ += 1;
+
+  if (options_.reset_on_barrier &&
+      is_barrier_by_topo_index_[node->GetTopoIndex()]) {
+    // Wave rendezvous: every pipe saturated at the post-barrier
+    // position (the same arithmetic as the region-entry
+    // convention), overwriting the barrier's own last-issue update
+    // above.
+    for (int reset_pipe = 0; reset_pipe < kNumHwPipes; ++reset_pipe) {
+      last_issue_position_by_pipe_[reset_pipe] =
+          visible_instructions_issued_count_ -
+          desirable_spacing_by_pipe_[reset_pipe];
+    }
+  }
 }
 
 void PipeStalenessTracker::Unschedule(const ScheduleNode *node) {
@@ -248,7 +264,7 @@ void PipeStalenessTracker::Unschedule(const ScheduleNode *node) {
 
   visible_instructions_issued_count_ -= 1;
   intermix_credit_ -= undo.credit;
-  last_issue_position_by_pipe_[pipe_index] = undo.prior_last_issue_position;
+  last_issue_position_by_pipe_ = undo.prior_last_issue_positions;
 }
 
 // ============================================================================

@@ -94,6 +94,14 @@ bool IsPipeTrackingVisible(const MachineInstr &mi);
 /// instructions where IsPipeTrackingVisible is true.
 HwPipe ClassifyHwPipe(const MachineInstr &mi);
 
+/// True iff `mi` is a workgroup-wide wave rendezvous: s_barrier, the
+/// __syncthreads execution barrier (every wave of the workgroup
+/// stalls until all arrive, then all resume together in fresh
+/// convoys). Not a scheduling boundary — it sits mid-region.
+/// Consumers modeling convoy freshness (PipeStalenessTracker's
+/// barrier reset) key off this.
+bool IsWaveRendezvous(const MachineInstr &mi);
+
 /// Short lowercase name for dumps/telemetry (e.g. "valu", "vmem").
 StringRef HwPipeName(HwPipe pipe);
 
