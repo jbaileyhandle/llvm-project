@@ -260,6 +260,87 @@ class DfsMinimizeLengthBoundedSpillSignalsPolicy
       std::optional<PressureHistoryTracker> &pressure_history);
 };
 
+// Policy for the pipe-mix pass: MAXIMIZE intermix credit
+// (PipeStalenessTracker's measure) for a single region, SUBJECT TO
+// the same feasibility gates the spill-bounded length policy runs —
+// schedule length within the driver's slack target, register-only
+// occupancy at or above the function target, and spill signals at
+// or below the input schedule's (shared gate helpers in the .cpp)
+// — plus the credit upper-bound prune.
+//
+// Recipe: kIntermixCredit (max) primary, kScheduleLength (min)
+// tie-break. Length present-but-not-primary has two machinery
+// consequences: DfsSearch holds the max-acceptable length at the
+// driver's slack target instead of tightening it to best.length - 1
+// (see RecomputeWorkingMaxScheduleCycles), and LengthHistoryTracker
+// auto-disables (IsApplicableToRecipe requires length-primary) — the
+// pipe-mix search runs without history dominance for now.
+class DfsMaximizeIntermixPolicy : public SearchPolicyBase {
+ public:
+  static constexpr ScoreRecipe kScoreRecipe{{
+      MetricSlot{ScoreDimension::kIntermixCredit, Polarity::kMaximize},
+      MetricSlot{ScoreDimension::kScheduleLength, Polarity::kMinimize},
+  }};
+
+  // Urgency cutoff for the ready-list sort, in cycles of deadline
+  // slack (max_schedule_cycle - current_cycle). Deliberately TIGHTER
+  // than the length pass's kIlpRelaxedSlackThreshold (8): the
+  // pipe-mix length bound already carries the driver's slack, so
+  // deadlines are softer, and a wide urgency band would let deadline
+  // ordering override overdueness — the objective this pass exists
+  // for.
+  static constexpr int kPipeMixUrgentSlackThreshold = 4;
+
+  // Two-level filter+sort (same level structure as the length
+  // policy; ranking keys from the pipe-staleness tracker):
+  //
+  //   Level 1 — no-stall candidates (effective min_schedule_cycle
+  //   <= current_cycle). Urgent candidates (deadline slack below
+  //   kPipeMixUrgentSlackThreshold) first, sorted by deadline
+  //   ascending; then relaxed candidates sorted by RankKeyForNode
+  //   (overdueness) DESCENDING, then node id ascending.
+  //
+  //   Level 2 — only when every candidate needs a stall: effective
+  //   min_schedule_cycle ascending (shortest stall first — idle
+  //   cycles only drain the length slack, they never earn credit),
+  //   then the relaxed chain above.
+  //
+  // Why node id is the within-pipe selector: overdueness is a
+  // per-PIPE key, so same-pipe candidates always tie on it — the
+  // key after it chooses WHICH instruction of the due pipe issues.
+  // Node id is the node's position in the schedule this pass took
+  // as input (the length pass's output), so following it preserves
+  // that pass's latency/ILP/pressure arrangement wherever mixing is
+  // indifferent. For the same reason, no other heuristic key ranks
+  // between overdueness and node id: ILP close-cost (tracker not
+  // constructed under this recipe), deadline (the urgent tier owns
+  // deadline pressure), and pressure proxies (hard-bounded by the
+  // prunes) would each override the length pass's arrangement on a
+  // weaker signal.
+  static void FilterAndSortReadyList(
+      const ScheduleConstructor &working,
+      SmallVectorImpl<const ScheduleNode *> &out);
+
+  // The inherited bounds (length-target infeasibility via the LB
+  // and per-node deadlines, occupancy floor, spill-regime and
+  // spill-area regression vs the input baseline) PLUS the credit
+  // prune: bound when working's GetFinalCreditUpperBound() cannot
+  // beat best's banked credit. Sound because the upper bound never
+  // underestimates any completion's final credit.
+  static bool ShouldBoundSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor,
+      std::optional<LengthHistoryTracker> &length_history,
+      std::optional<PressureHistoryTracker> &pressure_history);
+
+  // End the whole search once best — a COMPLETE schedule — has
+  // banked the perfect score (kFixedPointScale per visible
+  // instruction): no completion can beat it.
+  static bool ShouldEndSearch(
+      const ScheduleConstructor &schedule_constructor,
+      const ScheduleConstructor &best_schedule_constructor);
+};
+
 // Policy for DFS when the objective is to MAXIMIZE schedule length
 // for a single region, SUBJECT TO not dropping the region's
 // register-only occupancy below the function-wide ceiling. Useful as

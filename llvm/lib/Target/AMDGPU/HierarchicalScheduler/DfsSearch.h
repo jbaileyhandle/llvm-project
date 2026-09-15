@@ -421,6 +421,17 @@ class DfsSearch {
     if constexpr (!Policy::kScoreRecipe.HasDim(
                       ScoreDimension::kScheduleLength)) {
       return;
+    } else if constexpr (!Policy::kScoreRecipe.IsLengthPrimary()) {
+      // Length is a bounded FEASIBILITY dim, not the objective
+      // (e.g. the pipe-mix policy: credit-primary, length as
+      // tie-break within a slack target). The best schedule's
+      // length must NOT tighten the bound — a better-scoring
+      // completion may legitimately be LONGER than the current
+      // best, anywhere up to the driver's target. Best-improvement
+      // is enforced by the recipe's score comparison, not by the
+      // length bound.
+      working_schedule_constructor_.SetMaxAcceptableScheduleLength(
+          requested_target_length_);
     } else {
       int best_length = best_schedule_constructor_.GetScheduleLength();
       constexpr int kImprovementOffset =

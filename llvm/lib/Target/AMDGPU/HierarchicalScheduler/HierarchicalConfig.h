@@ -236,6 +236,69 @@ struct MinAdjustedLengthConfig {
   TieBreak tie_break = TieBreak::kHighestOccupancy;
 };
 
+/// Config for the pipe-mix pass (misched.txt flag
+/// `enable_pipe_mix_pass`; knobs in the `pipe_mix.*` scope). A third
+/// per-region search after the length pass: maximize intermix credit
+/// (PipeStalenessTracker's measure — every HW issue pipe's
+/// instructions spread evenly for co-issue) subject to a length
+/// slack over the input schedule, the occupancy target, and the
+/// input schedule's spill signals.
+struct PipeMixConfig {
+  // Run the pass. Set only from the bare `enable_pipe_mix_pass` flag
+  // in Build() — not independently configurable. Requires the length
+  // pass or min_adjusted_length to have produced the input schedule.
+  bool enabled = false;
+
+  // Allowed length regression over the input schedule, percent
+  // (pipe_mix.length_slack_percent): a region's search accepts
+  // schedules up to input_length * (100 + slack) / 100 cycles.
+  int length_slack_percent = 5;
+
+  // Cap on per-pipe target spacing (pipe_mix.spacing_ceiling), in
+  // visible-instruction positions; forwarded to
+  // PipeStalenessTracker::Options::spacing_ceiling. Legal range
+  // [1, PipeStalenessTracker::kMaxSpacingCeiling].
+  int spacing_ceiling = 16;
+
+  // Credit ramp shape (pipe_mix.curve = linear | sqrt); forwarded to
+  // PipeStalenessTracker::Options::curve.
+  PipeMixCurve curve = PipeMixCurve::kLinear;
+
+  // Whether kOther instructions earn credit (pipe_mix.track_other);
+  // forwarded to PipeStalenessTracker::Options::track_other_pipe.
+  bool track_other = true;
+
+  // Reset all pipes to saturated after scheduling an s_barrier
+  // (pipe_mix.reset_on_barrier); forwarded to
+  // PipeStalenessTracker::Options::reset_on_barrier.
+  bool reset_on_barrier = true;
+
+  // Per-region wall-clock budget, us (pipe_mix.search.timeout, given
+  // in microseconds like length.search.timeout). 0 = no timeout.
+  int timeout_us = 10000000;
+  // Whether pipe_mix.search.timeout was set explicitly (conflicts
+  // with the per-instruction budget).
+  bool timeout_explicitly_set = false;
+
+  std::optional<int64_t> SearchTimeoutOrUnlimited() const {
+    return timeout_us == 0 ? std::nullopt : std::optional<int64_t>(timeout_us);
+  }
+
+  // Per-instruction search budget (us/instruction), mirrored from
+  // the misched global time_per_instr_pipe_mix_us.
+  std::optional<int> time_per_instr_us;
+
+  /// Effective search timeout (us) over `graph_size` nodes: the
+  /// per-instruction budget when set, else `flat`. No floor.
+  std::optional<int64_t> EffectiveTimeout(int graph_size,
+                                          std::optional<int64_t> flat) const {
+    if (!time_per_instr_us.has_value()) {
+      return flat;
+    }
+    return static_cast<int64_t>(*time_per_instr_us) * graph_size;
+  }
+};
+
 /// The HierarchicalScheduler's whole typed configuration, built once at
 /// scheduler init by Build(). Call sites read typed fields (e.g.
 /// `hs.occupancy.search == Search::kBfsDp`) instead of querying the generic
@@ -264,6 +327,7 @@ struct HierarchicalConfig {
   // pass, so it is incompatible with skip_occupancy_pass and
   // length_ignore_occupancy (enforced in Build).
   MinAdjustedLengthConfig min_adjusted_length_config;
+  PipeMixConfig pipe_mix_config;
 
   /// Build the typed config from the generic config's scoped settings.
   /// Per pass: built-in defaults -> named preset (if any) -> explicit

@@ -1389,6 +1389,169 @@ ScheduleDAGHierarchicalScheduler::ScheduleRegionForLengthPass(
   return stats;
 }
 
+// Collect the per-region pipe-mix stats from the finished search:
+// lengths and credits off the input/result constructors, pressure
+// peaks and spill areas for the search_outcomes row, and the
+// search's timing/termination.
+static ScheduleDAGHierarchicalScheduler::PipeMixRegionStats
+BuildPipeMixRegionStats(const ScheduleGraph &graph,
+                        const ScheduleConstructor &input_schedule_constructor,
+                        const ScheduleConstructor &result,
+                        const DfsSearch<DfsMaximizeIntermixPolicy> &search,
+                        const GCNSubtarget &st) {
+  ScheduleDAGHierarchicalScheduler::PipeMixRegionStats stats;
+
+  stats.nodes = graph.Size();
+  stats.input_length =
+      input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
+  stats.output_length = result.GetLengthTracker().GetCurrentCycle();
+
+  stats.input_credit =
+      input_schedule_constructor.GetPipeStalenessTracker().GetIntermixCredit();
+  stats.output_credit = result.GetPipeStalenessTracker().GetIntermixCredit();
+  stats.perfect_credit = result.GetPipeStalenessTracker().GetPerfectCredit();
+
+  const GCNRegPressure &in =
+      input_schedule_constructor.GetPressureTracker().GetPeakPressure();
+  const GCNRegPressure &out = result.GetPressureTracker().GetPeakPressure();
+  stats.orig_vgpr = in.getVGPRNum(st.hasGFX90AInsts());
+  stats.orig_sgpr = in.getSGPRNum();
+  stats.fin_vgpr = out.getVGPRNum(st.hasGFX90AInsts());
+  stats.fin_sgpr = out.getSGPRNum();
+  stats.orig_spill_area =
+      input_schedule_constructor.GetPressureTracker().GetVGPRSpillArea();
+  stats.fin_spill_area = result.GetPressureTracker().GetVGPRSpillArea();
+
+  stats.timed_out = search.RegionTimedOut();
+  stats.dfs_ms = static_cast<int>(search.GetRegionElapsedMs());
+  stats.dfs_steps = static_cast<int>(search.ScheduleCallCount().lifetime);
+
+  return stats;
+}
+
+// Per-region worker for the pipe-mix pass. See header. Runs flat
+// (no subgraph formation) over the second pass's applied schedule:
+// the graph's input snapshot IS that schedule, and it seeds the
+// search's best, so the applied result is never worse on the
+// policy's score.
+ScheduleDAGHierarchicalScheduler::PipeMixRegionStats
+ScheduleDAGHierarchicalScheduler::ScheduleRegionForPipeMixPass(
+    RegionInfo &region) {
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+  const PipeMixConfig &config = HierarchicalConfig::Get().pipe_mix_config;
+
+  PipeMixRegionStats stats;
+
+  WithRegionGraph(region, [&](ScheduleGraph &graph) {
+    const ScheduleConstructor &input_schedule_constructor =
+        graph.GetInputScheduleConstructor();
+
+    PrintPreScheduleInfo(graph, input_schedule_constructor, st, "\t\t");
+
+    // Budget: per-instruction when set, else the flat
+    // pipe_mix.search.timeout.
+    DfsSearch<DfsMaximizeIntermixPolicy> search(
+        graph, st, MF, *LIS,
+        config.EffectiveTimeout(graph.Size(),
+                                config.SearchTimeoutOrUnlimited()));
+
+    // Slack target: completions are accepted up to (100 + slack)%
+    // of the input length (integer floor). The policy's recipe is
+    // not length-primary, so DfsSearch holds the bound at this
+    // target rather than tightening it to best.length - 1 (see
+    // RecomputeWorkingMaxScheduleCycles).
+    const int input_length =
+        input_schedule_constructor.GetLengthTracker().GetCurrentCycle();
+    const int target_length =
+        input_length * (100 + config.length_slack_percent) / 100;
+    search.ResetForReuse(target_length);
+
+    // DfsSearch::Run always populates SearchResult::schedule.
+    ScheduleConstructor result = std::move(*search.Run().schedule);
+
+    ApplyScheduleOrder(region, result);
+
+    stats = BuildPipeMixRegionStats(graph, input_schedule_constructor,
+                                    result, search, st);
+
+    const bool changed = input_schedule_constructor.GetScheduleOrder() !=
+                         result.GetScheduleOrder();
+    llvm::outs() << "\t\tpipe_mix_search:\n";
+    PrintDfsPostScheduleInfo(graph, result, search, st, changed, "\t\t\t");
+  });
+
+  return stats;
+}
+
+void ScheduleDAGHierarchicalScheduler::RunPipeMixPass() {
+  // Tag any DumpSubgraphDag output from this pass into the
+  // "pipe_mix" subdir (no-op unless the option is set).
+  SubgraphDagDumpPassScope dump_scope("pipe_mix");
+
+  llvm::outs() << "\n=== Pass: PipeMix === (" << regions_.size()
+               << " regions)\n";
+
+  int regions_improved = 0;
+  int regions_unchanged = 0;
+  int regions_at_perfect = 0;
+  int regions_timed_out = 0;
+
+  for (size_t i = 0; i < regions_.size(); ++i) {
+    llvm::outs() << "\n\tregion[" << i
+                 << "]: instrs=" << regions_[i].GetNumInstrs() << "\n";
+    SubgraphDagDumpRegionScope region_scope(static_cast<int>(i));
+    PipeMixRegionStats stats = ScheduleRegionForPipeMixPass(regions_[i]);
+
+    const bool improved = stats.output_credit > stats.input_credit;
+
+    SearchOutcome row;
+    row.function = MF.getName().str();
+    row.pass = "mix";
+    row.region = static_cast<int>(i);
+    row.slot = "region";
+    row.nodes = stats.nodes;
+    row.term_cause = stats.timed_out
+                         ? SearchTerminationCause::kTimedOut
+                         : SearchTerminationCause::kFullyExplored;
+    row.winner = "dfs";
+    row.dfs_ms = stats.dfs_ms;
+    row.dfs_steps = stats.dfs_steps;
+    row.orig_vgpr = stats.orig_vgpr;
+    row.orig_sgpr = stats.orig_sgpr;
+    row.fin_vgpr = stats.fin_vgpr;
+    row.fin_sgpr = stats.fin_sgpr;
+    row.orig_spill_area = stats.orig_spill_area;
+    row.fin_spill_area = stats.fin_spill_area;
+    row.orig_len = stats.input_length;
+    row.fin_len = stats.output_length;
+    row.improved = improved;
+    RecordSearchOutcome(row);
+
+    llvm::outs() << "\t\tcredit: input=" << stats.input_credit
+                 << " output=" << stats.output_credit
+                 << " perfect=" << stats.perfect_credit << "\n";
+
+    if (improved) {
+      ++regions_improved;
+    } else {
+      ++regions_unchanged;
+    }
+    if (stats.output_credit == stats.perfect_credit) {
+      ++regions_at_perfect;
+    }
+    if (stats.timed_out) {
+      ++regions_timed_out;
+    }
+  }
+
+  llvm::outs() << "\n\tPASS RESULT: regions=" << regions_.size()
+               << " improved=" << regions_improved
+               << " unchanged=" << regions_unchanged
+               << " at_perfect=" << regions_at_perfect
+               << " timed_out=" << regions_timed_out << "\n";
+}
+
 // Measure a buffered order under `latency_divisor`. See header. The
 // returned length is in the divisor's lens because the length tracker
 // counts cycles in the units of the graph's edge weights, and the graph
@@ -1678,6 +1841,11 @@ void ScheduleDAGHierarchicalScheduler::RunHierarchicalScheduler() {
     RunMinimizeAdjustedLengthPass();
   } else if (!HierarchicalConfig::Get().skip_length_pass) {
     RunLengthPass();
+  }
+  // The pipe-mix pass runs over whichever second pass's schedule was
+  // applied (config validation guarantees one of them ran).
+  if (HierarchicalConfig::Get().pipe_mix_config.enabled) {
+    RunPipeMixPass();
   }
 }
 

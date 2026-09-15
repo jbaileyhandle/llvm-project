@@ -98,6 +98,13 @@ class MachineInstrSchedulerConfig {
             // committed and the kernel occupancy target is set to that
             // tier. Consumed via HierarchicalConfig.
             bool min_adjusted_length = false;
+
+            // HierarchicalScheduler pipe-mix pass: after the length pass, a
+            // third per-region search maximizes intermix credit (spreading
+            // each HW issue pipe's instructions evenly for co-issue) subject
+            // to a length-slack, occupancy, and spill bound. Knobs live in
+            // the `pipe_mix.*` scope. Consumed via HierarchicalConfig.
+            bool enable_pipe_mix_pass = false;
         };
 
         // Every unscoped global setting writable as `<name>=<value>` in
@@ -134,6 +141,10 @@ class MachineInstrSchedulerConfig {
             // default in place.
             std::optional<int> time_per_instr_occupancy_us;
             std::optional<int> time_per_instr_length_us;
+            // Same per-instruction budget scheme for the pipe-mix pass
+            // (HierarchicalScheduler only). Conflicts with an explicit
+            // pipe_mix.search.timeout, same as the other two.
+            std::optional<int> time_per_instr_pipe_mix_us;
             // Per-class load-latency overrides (cycles). Substituted into the
             // dependence graph at GCNSubtarget::adjustSchedDependency, the one
             // point every scheduler's buildSchedGraph passes through -- so an

@@ -217,6 +217,40 @@ public:
   // the outer loop to aggregate.
   LengthRegionStats ScheduleRegionForLengthPass(RegionInfo &region);
 
+  // Aggregate stats returned by ScheduleRegionForPipeMixPass, used
+  // by RunPipeMixPass for its PASS RESULT line and search_outcomes
+  // rows.
+  struct PipeMixRegionStats {
+    int nodes = 0;
+    int input_length = 0;
+    int output_length = 0;
+    int64_t input_credit = 0;
+    int64_t output_credit = 0;
+    int64_t perfect_credit = 0;
+    bool timed_out = false;
+    int orig_vgpr = 0;
+    int orig_sgpr = 0;
+    int fin_vgpr = 0;
+    int fin_sgpr = 0;
+    int orig_spill_area = 0;
+    int fin_spill_area = 0;
+    int dfs_ms = 0;
+    int dfs_steps = 0;
+  };
+
+  // The pipe-mix pass (misched.txt flag `enable_pipe_mix_pass`;
+  // knobs in the pipe_mix.* scope). Runs after the second pass,
+  // taking its applied schedule as input; per region, maximizes
+  // intermix credit (PipeStalenessTracker's measure) within the
+  // configured length slack and the occupancy / spill bounds, and
+  // applies the search result (never worse than the input — the
+  // search seeds best with it). See DfsMaximizeIntermixPolicy.
+  void RunPipeMixPass();
+
+  // Per-region worker for RunPipeMixPass. Flat (no subgraph
+  // formation); slack target = input_length * (100 + slack) / 100.
+  PipeMixRegionStats ScheduleRegionForPipeMixPass(RegionInfo &region);
+
   // The min-adjusted-length pass (misched.txt flag `min_adjusted_length`;
   // replaces the length pass). Chooses the kernel's schedule and
   // occupancy jointly: for every reachable occupancy tier o — the

@@ -289,15 +289,21 @@ void DfsMinimizeLengthPolicy::FilterAndSortReadyList(
   }
 }
 
-bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
-    const ScheduleConstructor &schedule_constructor,
-    const ScheduleConstructor &best_schedule_constructor,
-    std::optional<LengthHistoryTracker> &length_history,
-    std::optional<PressureHistoryTracker> & /*pressure_history*/) {
+namespace {
+
+// Shared feasibility gates. Each policy's ShouldBoundSearch composes
+// these explicitly, so every check a policy runs is visible at its
+// call site (the pipe-mix policy runs the same gates as the
+// spill-bounded length policy WITHOUT the length-history prune,
+// which stays exclusive to length-primary policies).
+
+// No completion of the working schedule can honor the configured
+// max acceptable schedule length.
+bool BoundsOnLengthTarget(const ScheduleConstructor &schedule_constructor) {
   // Max acceptable schedule length is read straight from working's
-  // length tracker, which DfsSearch keeps in sync with
-  // min(requested_target_length, best.length - 1) at every event
-  // that changes either input. The aggregate-LB check below is the
+  // length tracker, which DfsSearch keeps in sync at every event
+  // that changes its inputs (see RecomputeWorkingMaxScheduleCycles
+  // for the per-policy rule). The aggregate-LB check below is the
   // coarse-grained complement to the per-node deadline check
   // implied by the tracker's GetMaxScheduleCycle table.
   const auto &length_tracker = schedule_constructor.GetLengthTracker();
@@ -329,63 +335,49 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
   // Either way, the named node can no longer be placed in time,
   // so no completion of the working schedule can honor the
   // configured max acceptable schedule length.
-  if (length_tracker.IsAnyMinScheduleCycleBeyondMaxScheduleCycle()) {
-    return true;
-  }
-
-  // Gate 1: effective occupancy (max of register-only and structural
-  // floor) must meet target. Effective rather than raw register-only
-  // so the spill regime (where reg-only is inherently below the
-  // structural floor) doesn't over-prune -- there, this gate stays
-  // silent and Gate 2 / score-based dominance discriminate among
-  // spilling candidates. Skipped entirely under length_ignore_occupancy:
-  // the length pass then optimizes length without any occupancy prune.
-  if (!HierarchicalConfig::Get().length_ignore_occupancy &&
-      !schedule_constructor.LaunchFloorClampedRegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget()) {
-    return true;
-  }
-
-  // Gate 2: no-spill regression. If the best schedule found so far
-  // is not spilling but this candidate has dropped into the spill
-  // regime, prune. Spill regime is monotone (pressure only grows,
-  // reg-only only drops), so this path can only get worse. Catches
-  // the boundary case where target == floor: Gate 1 stays silent
-  // (effective = floor = target), but we still want to keep the
-  // no-spill schedule we already have.
-  if (!best_schedule_constructor.GetPressureTracker().IsPeakInSpillRegime() &&
-      schedule_constructor.GetPressureTracker().IsPeakInSpillRegime()) {
-    return true;
-  }
-
-  // Mutating: records the current prefix in length_history when
-  // it is NOT dominated. See LengthHistoryTracker class comment.
-  if (length_history->IsDominatedElseInsert()) {
-    return true;
-  }
-  return false;
+  return length_tracker.IsAnyMinScheduleCycleBeyondMaxScheduleCycle();
 }
 
-bool DfsMinimizeLengthBoundedSpillSignalsPolicy::ShouldBoundSearch(
+// Effective occupancy (max of register-only and structural floor)
+// must meet target. Effective rather than raw register-only so the
+// spill regime (where reg-only is inherently below the structural
+// floor) doesn't over-prune -- there, this gate stays silent and the
+// spill gates / score-based dominance discriminate among spilling
+// candidates. Skipped entirely under length_ignore_occupancy: the
+// pass then optimizes without any occupancy prune. Sound: peak
+// register pressure is monotonically non-decreasing, so register-
+// only occupancy is monotonically non-increasing — once below the
+// target, no completion restores it.
+bool BoundsOnOccupancyFloor(const ScheduleConstructor &schedule_constructor) {
+  return !HierarchicalConfig::Get().length_ignore_occupancy &&
+         !schedule_constructor
+              .LaunchFloorClampedRegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget();
+}
+
+// No-spill regression vs the best schedule found so far. If best is
+// not spilling but this candidate has dropped into the spill regime,
+// prune. Spill regime is monotone (pressure only grows, reg-only
+// only drops), so this path can only get worse. Catches the boundary
+// case where target == floor: the occupancy-floor gate stays silent
+// (effective = floor = target), but we still want to keep the
+// no-spill schedule we already have.
+bool BoundsOnSpillRegimeRegression(
     const ScheduleConstructor &schedule_constructor,
-    const ScheduleConstructor &best_schedule_constructor,
-    std::optional<LengthHistoryTracker> &length_history,
-    std::optional<PressureHistoryTracker> &pressure_history) {
-  // Inherit base bounds first -- length deadline, occupancy floor,
-  // peak-spill-regime regression, length-history dominance. These
-  // catch most prunable prefixes; the spill-area gate below is the
-  // last line of defense for "spill exceeded input baseline."
-  if (DfsMinimizeLengthPolicy::ShouldBoundSearch(
-          schedule_constructor, best_schedule_constructor, length_history,
-          pressure_history)) {
-    return true;
-  }
-  // Spill-area hard ceiling against the input baseline. The input
-  // SC was built once when the graph was constructed
-  // (ScheduleGraph::PopulateInputScheduleConstructor) and lives on
-  // the graph. Each call walks SC -> graph -> input SC -> pressure
-  // tracker -> spill area field. If profiling shows this as a hot
-  // spot, lift the baseline to DfsSearch state at construction and
-  // plumb it through ShouldBoundSearch.
+    const ScheduleConstructor &best_schedule_constructor) {
+  return !best_schedule_constructor.GetPressureTracker()
+              .IsPeakInSpillRegime() &&
+         schedule_constructor.GetPressureTracker().IsPeakInSpillRegime();
+}
+
+// Spill-signal hard ceilings against the INPUT schedule's baseline.
+// The input SC was built once when the graph was constructed
+// (ScheduleGraph::PopulateInputScheduleConstructor) and lives on
+// the graph. Each call walks SC -> graph -> input SC -> pressure
+// tracker. If profiling shows this as a hot spot, lift the baseline
+// to DfsSearch state at construction and plumb it through
+// ShouldBoundSearch.
+bool BoundsOnSpillSignalsVsInput(
+    const ScheduleConstructor &schedule_constructor) {
   const auto &working_pressure = schedule_constructor.GetPressureTracker();
   const auto &input_pressure = schedule_constructor.GetGraph()
                                    .GetInputScheduleConstructor()
@@ -411,10 +403,242 @@ bool DfsMinimizeLengthBoundedSpillSignalsPolicy::ShouldBoundSearch(
   // Spill-area integral gate against the input baseline. Complements
   // the peak gates above by catching schedules that stay at the same
   // peak but spend more cycles in spill regime (peak * time area).
-  if (working_pressure.GetVGPRSpillArea() > input_pressure.GetVGPRSpillArea()) {
+  return working_pressure.GetVGPRSpillArea() >
+         input_pressure.GetVGPRSpillArea();
+}
+
+}  // namespace
+
+bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
+    const ScheduleConstructor &schedule_constructor,
+    const ScheduleConstructor &best_schedule_constructor,
+    std::optional<LengthHistoryTracker> &length_history,
+    std::optional<PressureHistoryTracker> & /*pressure_history*/) {
+  if (BoundsOnLengthTarget(schedule_constructor)) {
+    return true;
+  }
+  if (BoundsOnOccupancyFloor(schedule_constructor)) {
+    return true;
+  }
+  if (BoundsOnSpillRegimeRegression(schedule_constructor,
+                                    best_schedule_constructor)) {
+    return true;
+  }
+  // Mutating: records the current prefix in length_history when
+  // it is NOT dominated. See LengthHistoryTracker class comment.
+  // This policy's recipe is length-primary, so DfsSearch guarantees
+  // length_history is populated.
+  if (length_history->IsDominatedElseInsert()) {
     return true;
   }
   return false;
+}
+
+bool DfsMinimizeLengthBoundedSpillSignalsPolicy::ShouldBoundSearch(
+    const ScheduleConstructor &schedule_constructor,
+    const ScheduleConstructor &best_schedule_constructor,
+    std::optional<LengthHistoryTracker> &length_history,
+    std::optional<PressureHistoryTracker> &pressure_history) {
+  // Base bounds first -- length deadline, occupancy floor,
+  // peak-spill-regime regression, length-history dominance. These
+  // catch most prunable prefixes; the spill-signal gates below are
+  // the last line of defense for "spill exceeded input baseline."
+  if (DfsMinimizeLengthPolicy::ShouldBoundSearch(
+          schedule_constructor, best_schedule_constructor, length_history,
+          pressure_history)) {
+    return true;
+  }
+  return BoundsOnSpillSignalsVsInput(schedule_constructor);
+}
+
+namespace {
+
+// Sort key for the pipe-mix ready-list ranking. See the policy's
+// header comment for the key rationale (overdueness picks the pipe,
+// node id — the input schedule's order — picks the instruction
+// within the pipe).
+struct PipeMixSortKey {
+  int min_cycle;
+  int max_cycle;
+  int64_t overdueness;
+  int nid;
+  int topo;
+  bool is_urgent;
+};
+
+PipeMixSortKey BuildPipeMixSortKey(
+    const ScheduleNode *node, int current_cycle,
+    const ScheduleLengthTracker &length_tracker,
+    const PipeStalenessTracker &pipe_staleness_tracker) {
+  PipeMixSortKey key;
+  key.min_cycle = EffectiveMinScheduleCycle(node, length_tracker);
+  key.max_cycle = EffectiveMaxScheduleCycle(node, length_tracker);
+  key.overdueness = pipe_staleness_tracker.RankKeyForNode(node);
+  key.nid = EffectiveNodeNum(node);
+  key.topo = node->GetTopoIndex();
+  key.is_urgent =
+      key.max_cycle - current_cycle <
+      DfsMaximizeIntermixPolicy::kPipeMixUrgentSlackThreshold;
+  return key;
+}
+
+// Relaxed ordering: most-overdue pipe first; within a pipe (equal
+// overdueness), the input schedule's order. Topo is the final
+// deterministic tiebreak (EffectiveNodeNum returns 0 for null-SUnit
+// sentinels and empty proxies, so nid uniqueness is practical, not
+// structural — and std::sort is unstable).
+bool PipeMixRelaxedLess(const PipeMixSortKey &a, const PipeMixSortKey &b) {
+  if (a.overdueness != b.overdueness) {
+    return a.overdueness > b.overdueness;
+  }
+  return std::tie(a.nid, a.topo) < std::tie(b.nid, b.topo);
+}
+
+// No-stall tier ordering: urgent candidates (deadline slack below
+// the pipe-mix threshold) first, earliest deadline leading within
+// the urgent tier; relaxed candidates ranked by the relaxed chain.
+bool PipeMixNoStallLess(const PipeMixSortKey &a, const PipeMixSortKey &b) {
+  if (a.is_urgent != b.is_urgent) {
+    return a.is_urgent;
+  }
+  if (a.is_urgent && a.max_cycle != b.max_cycle) {
+    return a.max_cycle < b.max_cycle;
+  }
+  return PipeMixRelaxedLess(a, b);
+}
+
+// Forced-stall ordering: shortest stall first (idle cycles only
+// drain the length slack, they never earn credit), then the relaxed
+// chain.
+bool PipeMixForcedStallLess(const PipeMixSortKey &a,
+                            const PipeMixSortKey &b) {
+  if (a.min_cycle != b.min_cycle) {
+    return a.min_cycle < b.min_cycle;
+  }
+  return PipeMixRelaxedLess(a, b);
+}
+
+}  // namespace
+
+void DfsMaximizeIntermixPolicy::FilterAndSortReadyList(
+    const ScheduleConstructor &working,
+    SmallVectorImpl<const ScheduleNode *> &out) {
+  out.clear();
+  const ScheduleLengthTracker &length_tracker = working.GetLengthTracker();
+  ArrayRef<const ScheduleNode *> ready = working.GetReadyList();
+
+  // Precondition: the driver must have configured the slack target
+  // before ranking — the urgency tier and per-node deadlines read
+  // MaxScheduleCycle. DfsSearch wires this in its constructor
+  // before any Recurse fires, so this guard catches caller-order
+  // bugs rather than expected states.
+  if (!length_tracker.HasMaxAcceptableScheduleLength()) {
+    report_fatal_error(
+        "DfsMaximizeIntermixPolicy::FilterAndSortReadyList called "
+        "before SetMaxAcceptableScheduleLength — bound not "
+        "configured; sort would have no urgency basis");
+  }
+
+  // End-proxy short-circuit — same sole-entry invariant as the
+  // length policy.
+  for (const ScheduleNode *node : ready) {
+    if (node->IsSubgraphEndProxy()) {
+      if (ready.size() != 1) {
+        report_fatal_error(
+            "DfsMaximizeIntermixPolicy::FilterAndSortReadyList: end "
+            "proxy node " +
+            Twine(node->GetId()) + " is in a ready list of size " +
+            Twine(static_cast<int>(ready.size())) +
+            "; expected to be the sole entry");
+      }
+      out.push_back(node);
+      return;
+    }
+  }
+
+  int current_cycle = length_tracker.GetCurrentCycle();
+  const PipeStalenessTracker &pipe_staleness_tracker =
+      working.GetPipeStalenessTracker();
+
+  // Build a sort key for every ready candidate once; the
+  // comparators are pure permutations of these fields.
+  SmallVector<std::pair<const ScheduleNode *, PipeMixSortKey>, 64> keyed;
+  keyed.reserve(ready.size());
+  for (const ScheduleNode *node : ready) {
+    keyed.push_back({node, BuildPipeMixSortKey(node, current_cycle,
+                                               length_tracker,
+                                               pipe_staleness_tracker)});
+  }
+
+  // Partition: no-stall candidates first; if any exist, only that
+  // group goes into `out` — we never offer a forced-stall candidate
+  // when a no-stall one is available (a stall earns no credit and
+  // only drains the length slack). Otherwise the full list goes in,
+  // shortest stall outermost.
+  auto first_forced = std::partition(
+      keyed.begin(), keyed.end(), [current_cycle](const auto &entry) {
+        return entry.second.min_cycle <= current_cycle;
+      });
+
+  if (first_forced != keyed.begin()) {
+    std::sort(keyed.begin(), first_forced,
+              [](const auto &a, const auto &b) {
+                return PipeMixNoStallLess(a.second, b.second);
+              });
+    for (auto it = keyed.begin(); it != first_forced; ++it) {
+      out.push_back(it->first);
+    }
+    return;
+  }
+
+  std::sort(keyed.begin(), keyed.end(), [](const auto &a, const auto &b) {
+    return PipeMixForcedStallLess(a.second, b.second);
+  });
+  for (const auto &entry : keyed) {
+    out.push_back(entry.first);
+  }
+}
+
+bool DfsMaximizeIntermixPolicy::ShouldBoundSearch(
+    const ScheduleConstructor &schedule_constructor,
+    const ScheduleConstructor &best_schedule_constructor,
+    std::optional<LengthHistoryTracker> & /*length_history*/,
+    std::optional<PressureHistoryTracker> & /*pressure_history*/) {
+  // The shared feasibility gates, composed explicitly. No
+  // length-history prune: this recipe is not length-primary, so no
+  // history tracker exists.
+  if (BoundsOnLengthTarget(schedule_constructor)) {
+    return true;
+  }
+  if (BoundsOnOccupancyFloor(schedule_constructor)) {
+    return true;
+  }
+  if (BoundsOnSpillRegimeRegression(schedule_constructor,
+                                    best_schedule_constructor)) {
+    return true;
+  }
+  if (BoundsOnSpillSignalsVsInput(schedule_constructor)) {
+    return true;
+  }
+
+  // Credit branch-and-bound: prune when no completion of working
+  // can beat the best schedule's banked credit. Sound: the upper
+  // bound never underestimates a completion's final credit.
+  return schedule_constructor.GetPipeStalenessTracker()
+             .GetFinalCreditUpperBound() <=
+         best_schedule_constructor.GetPipeStalenessTracker()
+             .GetIntermixCredit();
+}
+
+bool DfsMaximizeIntermixPolicy::ShouldEndSearch(
+    const ScheduleConstructor & /*schedule_constructor*/,
+    const ScheduleConstructor &best_schedule_constructor) {
+  // Best is a COMPLETE schedule; at the region's perfect score no
+  // completion can beat it — stop searching.
+  const PipeStalenessTracker &best_pipe_staleness_tracker =
+      best_schedule_constructor.GetPipeStalenessTracker();
+  return best_pipe_staleness_tracker.GetIntermixCredit() ==
+         best_pipe_staleness_tracker.GetPerfectCredit();
 }
 
 bool DfsMinimizeLengthPolicy::ShouldEndSearch(

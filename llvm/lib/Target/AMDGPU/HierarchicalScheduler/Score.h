@@ -73,6 +73,11 @@ enum class ScoreDimension {
 
   /// Locked-in ILP score (IlpTracker::GetIlpScore). Sum-style.
   kIlpScore,
+
+  /// Banked pipe-intermix credit (PipeStalenessTracker::
+  /// GetIntermixCredit). Sum-style; higher = pipes spread more
+  /// evenly through the region.
+  kIntermixCredit,
 };
 
 /// Direction the raw value is "better." Score::Higher / Score::Lower
@@ -120,6 +125,7 @@ struct MetricSlot {
       case ScoreDimension::kVgprSpillPeak:
       case ScoreDimension::kScheduleLength:
       case ScoreDimension::kIlpScore:
+      case ScoreDimension::kIntermixCredit:
         // Raw only GROWS over completion -- the sum-style dims by
         // accumulation, kVgprSpillPeak because peak pressure is
         // monotone non-decreasing. Canonical NI iff polarity is
@@ -199,6 +205,7 @@ struct ScoreRecipe {
       return true;
     case ScoreDimension::kScheduleLength:
     case ScoreDimension::kIlpScore:
+    case ScoreDimension::kIntermixCredit:
       return false;
     }
     return false;

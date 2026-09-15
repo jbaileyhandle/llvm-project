@@ -137,6 +137,11 @@ const EnumSpec<TieBreak> kTieBreaks[] = {
     {"lowest_occupancy", TieBreak::kLowestOccupancy},
 };
 
+const EnumSpec<PipeMixCurve> kPipeMixCurves[] = {
+    {"linear", PipeMixCurve::kLinear},
+    {"sqrt", PipeMixCurve::kSqrt},
+};
+
 bool ParseBool(StringRef scope, StringRef key, StringRef v) {
   if (v == "true" || v == "on") {
     return true;
@@ -419,6 +424,50 @@ void BuildMinAdjustedLength(const std::map<std::string, std::string> *kv,
   }
 }
 
+void ApplyPipeMixKey(StringRef key, StringRef val, PipeMixConfig &c) {
+  StringRef scope = "pipe_mix";
+  if (key == "length_slack_percent") {
+    c.length_slack_percent = ParseInt(scope, key, val);
+    return;
+  }
+  if (key == "spacing_ceiling") {
+    c.spacing_ceiling = ParseInt(scope, key, val);
+    return;
+  }
+  if (key == "curve") {
+    c.curve = ParseEnum(kPipeMixCurves, scope, key, val);
+    return;
+  }
+  if (key == "track_other") {
+    c.track_other = ParseBool(scope, key, val);
+    return;
+  }
+  if (key == "reset_on_barrier") {
+    c.reset_on_barrier = ParseBool(scope, key, val);
+    return;
+  }
+  // pipe_mix.search.timeout is given in microseconds (see
+  // ApplyOccupancyKey). No presets exist for this scope, so any
+  // occurrence is an explicit user key.
+  if (key == "search.timeout") {
+    c.timeout_us = ParseInt(scope, key, val);
+    c.timeout_explicitly_set = true;
+    return;
+  }
+  UnknownKey(scope, key);
+}
+
+// No presets for this scope — just the explicit keys. Range and
+// cross-flag validation happens in Build() after the flag mirror.
+void BuildPipeMix(const std::map<std::string, std::string> *kv,
+                  PipeMixConfig &c) {
+  if (kv) {
+    for (const auto &p : *kv) {
+      ApplyPipeMixKey(p.first, p.second, c);
+    }
+  }
+}
+
 void BuildLength(const std::map<std::string, std::string> *kv, LengthConfig &c) {
   StringRef preset_name = GetPresetName(kv);
   if (!preset_name.empty()) {
@@ -539,46 +588,27 @@ void ValidateLength(const LengthConfig &c) {
   ValidateFormation("length", c.formation);
 }
 
-} // namespace
-
-HierarchicalConfig
-HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
-  const std::map<std::string, std::map<std::string, std::string>> &scoped =
-      cfg.GetAllScopedSettings();
-
-  // Reject unknown scopes up front. Only "occupancy", "length", and
-  // "min_adjusted_length" are known; the generic config only routes
-  // dotted "<scope>.<key>" settings into the scoped store (the global
-  // toggles are bare flags now).
+// Reject unknown scopes up front. The generic config only routes
+// dotted "<scope>.<key>" settings into the scoped store (the global
+// toggles are bare flags).
+void RejectUnknownScopes(
+    const std::map<std::string, std::map<std::string, std::string>> &scoped) {
   for (const auto &entry : scoped) {
     const std::string &scope = entry.first;
     if (scope == "occupancy" || scope == "length" ||
-        scope == "min_adjusted_length") {
+        scope == "min_adjusted_length" || scope == "pipe_mix") {
       continue;
     }
     report_fatal_error(Twine("misched.txt: unknownscope '") + scope +
                        "'");
   }
+}
 
-  auto find_scope =
-      [&](StringRef s) -> const std::map<std::string, std::string> * {
-    auto it = scoped.find(s.str());
-    return it == scoped.end() ? nullptr : &it->second;
-  };
-
-  HierarchicalConfig hs;
-
-  BuildOccupancy(find_scope("occupancy"), hs.occupancy);
-  BuildLength(find_scope("length"), hs.length);
-  BuildMinAdjustedLength(find_scope("min_adjusted_length"),
-                         hs.min_adjusted_length_config);
-
-  ValidateOccupancy(hs.occupancy);
-  ValidateLength(hs.length);
-
-  // Global toggles are bare flags on the generic config (their spelling ->
-  // field mapping and validation live there); mirror them into typed fields.
-  const MachineInstrSchedulerConfig::Flags &flags = cfg.GetFlags();
+// Global toggles are bare flags on the generic config (their spelling ->
+// field mapping and validation live there); mirror them into typed
+// fields, applying flag-implication rules.
+void MirrorFlags(const MachineInstrSchedulerConfig::Flags &flags,
+                 HierarchicalConfig &hs) {
   hs.malicious = flags.malicious;
   hs.run_shakedowns = flags.run_shakedowns;
   hs.dump_subgraph_dag = flags.dump_subgraph_dag;
@@ -588,11 +618,18 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   hs.skip_length_pass = flags.skip_length_pass;
   hs.length_ignore_occupancy = flags.length_ignore_occupancy;
   hs.min_adjusted_length_config.enabled = flags.min_adjusted_length;
+  hs.pipe_mix_config.enabled = flags.enable_pipe_mix_pass;
   // Ignoring the occupancy target in the length pass makes the maximize-occupancy
   // pass pointless, so it implies skipping it.
   if (hs.length_ignore_occupancy) {
     hs.skip_occupancy_pass = true;
   }
+}
+
+// Cross-pass / cross-toggle invariants, checked after every flag and
+// scoped key has been applied so key order in misched.txt does not
+// matter.
+void ValidatePassComposition(const HierarchicalConfig &hs) {
   // The min-adjusted-length pass sweeps tiers from the post-occupancy-pass
   // kernel ceiling down to the launch floor, seeding every tier's search
   // with the occupancy pass's output (feasible at every tier at or below
@@ -605,13 +642,52 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
                        "occupancy pass (remove skip_occupancy_pass / "
                        "length_ignore_occupancy)");
   }
+  // The pipe-mix pass searches within a slack of the input schedule
+  // the second pass produced; without a length pass (or its
+  // min-adjusted replacement) there is no such schedule to mix
+  // within.
+  if (hs.pipe_mix_config.enabled && hs.skip_length_pass &&
+      !hs.min_adjusted_length_config.enabled) {
+    report_fatal_error("misched.txt: enable_pipe_mix_pass requires the "
+                       "length pass or min_adjusted_length (remove "
+                       "skip_length_pass or enable min_adjusted_length)");
+  }
+  // The subgraph-DAG dump targets real region graphs (it derives
+  // identity and target info from real instructions), while shakedowns
+  // exercise synthetic test graphs that have none. Dumping during
+  // shakedowns is meaningless and unsupported, so the two toggles are
+  // mutually exclusive.
+  if (hs.dump_subgraph_dag && hs.run_shakedowns) {
+    report_fatal_error("misched.txt: dump_subgraph_dag and "
+                       "run_shakedowns cannot both be enabled; shakedowns "
+                       "operate on synthetic graphs that are not dumpable");
+  }
+}
 
-  // Per-instruction scheduling-time budgets are unscoped global settings;
-  // mirror them into the pass they drive (occupancy / length).
-  const MachineInstrSchedulerConfig::GlobalSettings &global_settings =
-      cfg.GetGlobalSettings();
+void ValidatePipeMix(const PipeMixConfig &c) {
+  if (c.length_slack_percent < 0) {
+    report_fatal_error(
+        "misched.txt: pipe_mix.length_slack_percent must be >= 0");
+  }
+  // 64 matches PipeStalenessTracker::kMaxSpacingCeiling (the tracker
+  // fatal-checks the same range at construction; this check exists to
+  // fail at config parse with the misched.txt spelling in the message).
+  if (c.spacing_ceiling < 1 || c.spacing_ceiling > 64) {
+    report_fatal_error(
+        "misched.txt: pipe_mix.spacing_ceiling must be in [1, 64]");
+  }
+}
+
+// Per-instruction scheduling-time budgets are unscoped global settings;
+// mirror them into the pass each drives, and reject combinations with
+// an explicit flat timeout (a budget and a flat timeout contradict).
+void MirrorAndValidateTimeBudgets(
+    const MachineInstrSchedulerConfig::GlobalSettings &global_settings,
+    HierarchicalConfig &hs) {
   hs.occupancy.time_per_instr_us = global_settings.time_per_instr_occupancy_us;
   hs.length.time_per_instr_us = global_settings.time_per_instr_length_us;
+  hs.pipe_mix_config.time_per_instr_us =
+      global_settings.time_per_instr_pipe_mix_us;
 
   // The per-instruction occupancy budget only supports plain and single-level
   // decompose, all-DFS, and cannot coexist with an explicit flat timeout.
@@ -643,17 +719,42 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
     report_fatal_error("misched.txt: set either time_per_instr_length_us or "
                        "length.search.timeout, not both");
   }
-
-  // Cross-global invariant: the subgraph-DAG dump targets real region
-  // graphs (it derives identity and target info from real instructions),
-  // while shakedowns exercise synthetic test graphs that have none.
-  // Dumping during shakedowns is meaningless and unsupported, so the two
-  // toggles are mutually exclusive.
-  if (hs.dump_subgraph_dag && hs.run_shakedowns) {
-    report_fatal_error("misched.txt: dump_subgraph_dag and "
-                       "run_shakedowns cannot both be enabled; shakedowns "
-                       "operate on synthetic graphs that are not dumpable");
+  if (hs.pipe_mix_config.time_per_instr_us.has_value() &&
+      hs.pipe_mix_config.timeout_explicitly_set) {
+    report_fatal_error("misched.txt: set either time_per_instr_pipe_mix_us "
+                       "or pipe_mix.search.timeout, not both");
   }
+}
+
+} // namespace
+
+HierarchicalConfig
+HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
+  const std::map<std::string, std::map<std::string, std::string>> &scoped =
+      cfg.GetAllScopedSettings();
+  RejectUnknownScopes(scoped);
+
+  auto find_scope =
+      [&](StringRef s) -> const std::map<std::string, std::string> * {
+    auto it = scoped.find(s.str());
+    return it == scoped.end() ? nullptr : &it->second;
+  };
+
+  HierarchicalConfig hs;
+
+  BuildOccupancy(find_scope("occupancy"), hs.occupancy);
+  BuildLength(find_scope("length"), hs.length);
+  BuildMinAdjustedLength(find_scope("min_adjusted_length"),
+                         hs.min_adjusted_length_config);
+  BuildPipeMix(find_scope("pipe_mix"), hs.pipe_mix_config);
+
+  ValidateOccupancy(hs.occupancy);
+  ValidateLength(hs.length);
+  ValidatePipeMix(hs.pipe_mix_config);
+
+  MirrorFlags(cfg.GetFlags(), hs);
+  ValidatePassComposition(hs);
+  MirrorAndValidateTimeBudgets(cfg.GetGlobalSettings(), hs);
 
   return hs;
 }
@@ -725,6 +826,19 @@ std::string HierarchicalConfig::ToString() const {
      << " loop_weight_base=" << min_adjusted_length_config.loop_weight_base
      << " tie_break=" << EnumName(kTieBreaks,
                                   min_adjusted_length_config.tie_break)
+     << "\n";
+  os << "\tpipe_mix: enabled=" << (pipe_mix_config.enabled ? "on" : "off")
+     << " length_slack_percent=" << pipe_mix_config.length_slack_percent
+     << " spacing_ceiling=" << pipe_mix_config.spacing_ceiling
+     << " curve=" << EnumName(kPipeMixCurves, pipe_mix_config.curve)
+     << " track_other=" << (pipe_mix_config.track_other ? "on" : "off")
+     << " reset_on_barrier="
+     << (pipe_mix_config.reset_on_barrier ? "on" : "off")
+     << " timeout_us=" << pipe_mix_config.timeout_us
+     << " time_per_instr_us="
+     << (pipe_mix_config.time_per_instr_us.has_value()
+             ? std::to_string(*pipe_mix_config.time_per_instr_us)
+             : "off")
      << "\n";
   return os.str();
 }

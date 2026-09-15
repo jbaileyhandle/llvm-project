@@ -335,14 +335,22 @@ class PipeStalenessTracker {
     return visible_instructions_issued_count_;
   }
 
+  /// The region's PERFECT score: kFixedPointScale per visible
+  /// instruction. A complete schedule whose banked credit equals
+  /// this has every instruction at its maximum — nothing can beat
+  /// it (the search's early-exit test).
+  int64_t GetPerfectCredit() const {
+    return static_cast<int64_t>(kFixedPointScale) * total_visible_count_;
+  }
+
   /// Upper bound on the final intermix credit of ANY completion of
   /// the current prefix: banked credit + kFixedPointScale * remaining
   /// visible instructions (every remaining instruction earning its
   /// maximum). Sound: never underestimates. At an empty prefix this
-  /// is the perfect score kFixedPointScale * N (a schedule reaching
-  /// it ends the search); at completion it equals GetIntermixCredit
-  /// exactly. Intended as the search's branch-and-bound prune:
-  /// bound <= best completed credit => this prefix cannot win.
+  /// equals GetPerfectCredit(); at completion it equals
+  /// GetIntermixCredit() exactly. Intended as the search's
+  /// branch-and-bound prune: bound <= best completed credit => this
+  /// prefix cannot win.
   ///
   /// TODO(tighten if telemetry shows bound-limited searches): a
   /// sound sharper bound exists. Per credited pipe p with r_p

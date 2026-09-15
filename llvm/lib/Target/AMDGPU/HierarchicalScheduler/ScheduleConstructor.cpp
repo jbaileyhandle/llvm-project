@@ -9,6 +9,7 @@
 #include "ScheduleConstructor.h"
 #include "GCNRegPressure.h"
 #include "GCNSubtarget.h"
+#include "HierarchicalConfig.h"
 #include "ScheduleGraph.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -18,6 +19,28 @@
 
 using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
+
+namespace {
+
+// Boundary adapter: PipeMixConfig is the pass's parse product (owned
+// by the config layer, carries pass-level knobs the tracker never
+// sees); PipeStalenessTracker::Options is the tracker's own
+// config-independent contract (shakedowns construct arbitrary
+// variants of it). Translate the tracker-relevant fields once per
+// tracker construction.
+PipeStalenessTracker::Options PipeStalenessOptionsFromConfig() {
+  const PipeMixConfig &c = HierarchicalConfig::Get().pipe_mix_config;
+  PipeStalenessTracker::Options options;
+  options.spacing_ceiling = c.spacing_ceiling;
+  options.track_other_pipe = c.track_other;
+  options.reset_on_barrier = c.reset_on_barrier;
+  options.curve = (c.curve == PipeMixCurve::kSqrt)
+                      ? PipeStalenessTracker::CreditCurve::kSqrt
+                      : PipeStalenessTracker::CreditCurve::kLinear;
+  return options;
+}
+
+}  // namespace
 
 // ============================================================================
 // Construction
@@ -59,6 +82,21 @@ ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
           (!recipe || recipe->IsLengthPrimary())
               ? std::make_optional<IlpTracker>(graph, pressure_tracker_)
               : std::nullopt),
+      //   pipe-staleness tracker: with a recipe, gated on the
+      //   kIntermixCredit dim like the others. In the recipe-less
+      //   "all trackers" set it is a COST EXCEPTION, not a
+      //   principle: unlike length/ILP (whose values every search's
+      //   telemetry prints), nothing outside the pipe-mix pass ever
+      //   reads credit, so when that pass is disabled the tracker
+      //   is omitted to keep its per-step work off every search's
+      //   hot path. Shape stays consistent per process (the flag is
+      //   fixed), so recipe-less copy-assignment is unaffected.
+      pipe_staleness_tracker_(
+          (recipe ? recipe->HasDim(ScoreDimension::kIntermixCredit)
+                  : HierarchicalConfig::Get().pipe_mix_config.enabled)
+              ? std::make_optional<PipeStalenessTracker>(
+                    graph, PipeStalenessOptionsFromConfig())
+              : std::nullopt),
       scheduled_set_tracker_(
           &graph,
           length_tracker_ ? &*length_tracker_ : nullptr) {
@@ -71,11 +109,12 @@ ScheduleConstructor ScheduleConstructor::NoHistoryClone() const {
   // own undo stacks but we haven't written NoHistoryClone equivalents
   // for them. Catch the misconfiguration loudly rather than silently
   // producing a clone with stale length/ILP state.
-  if (length_tracker_ || ilp_tracker_) {
+  if (length_tracker_ || ilp_tracker_ || pipe_staleness_tracker_) {
     report_fatal_error(
         "ScheduleConstructor::NoHistoryClone called on a constructor "
-        "whose recipe enables length or ILP tracking. Only the "
-        "pressure-only configuration (BFS-DP path) is supported.");
+        "whose recipe enables length, ILP, or pipe-staleness "
+        "tracking. Only the pressure-only configuration (BFS-DP "
+        "path) is supported.");
   }
   return ScheduleConstructor(*this, NoHistoryCloneTag{});
 }
@@ -289,6 +328,9 @@ GCNRegPressure ScheduleConstructor::ScheduleByIndex(int index) {
   if (ilp_tracker_) {
     ilp_tracker_->Schedule(node);
   }
+  if (pipe_staleness_tracker_) {
+    pipe_staleness_tracker_->Schedule(node);
+  }
   scheduled_set_tracker_.Schedule(node);
 
   // Erase from current scope's ready list FIRST. ready_list must
@@ -389,6 +431,9 @@ void ScheduleConstructor::Unschedule() {
   // for subgraph proxies — see each tracker's Unschedule.
   // length / ILP gated on the same flags as Schedule.
   scheduled_set_tracker_.Unschedule(node);
+  if (pipe_staleness_tracker_) {
+    pipe_staleness_tracker_->Unschedule(node);
+  }
   if (ilp_tracker_) {
     ilp_tracker_->Unschedule(node);
   }
@@ -457,6 +502,13 @@ ScheduleConstructor::GetScoreDimensionValue(ScoreDimension dim) const {
           "requires ILP tracking enabled");
     }
     return ilp_tracker_->GetIlpScore();
+  case ScoreDimension::kIntermixCredit:
+    if (!pipe_staleness_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::GetScoreDimensionValue: "
+          "kIntermixCredit requires pipe-staleness tracking enabled");
+    }
+    return pipe_staleness_tracker_->GetIntermixCredit();
   }
   llvm_unreachable("Unknown ScoreDimension");
 }

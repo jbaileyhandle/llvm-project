@@ -53,6 +53,7 @@ namespace {
         {"skip_length_pass", &Flags::skip_length_pass},
         {"length_ignore_occupancy", &Flags::length_ignore_occupancy},
         {"min_adjusted_length", &Flags::min_adjusted_length},
+        {"enable_pipe_mix_pass", &Flags::enable_pipe_mix_pass},
     };
 
     // Return the binding for flag `name`, or nullptr if `name` is not a known
@@ -84,6 +85,7 @@ namespace {
         {"promote_alloca_max_words", &GlobalSettings::promote_alloca_max_words},
         {"time_per_instr_occupancy_us", &GlobalSettings::time_per_instr_occupancy_us},
         {"time_per_instr_length_us", &GlobalSettings::time_per_instr_length_us},
+        {"time_per_instr_pipe_mix_us", &GlobalSettings::time_per_instr_pipe_mix_us},
         {"vmem_load_latency", &GlobalSettings::vmem_load_latency},
         {"smem_load_latency", &GlobalSettings::smem_load_latency},
         {"lds_load_latency", &GlobalSettings::lds_load_latency},

@@ -55,6 +55,7 @@
 
 #include "GCNRegisterTracker.h"
 #include "IlpTracker.h"
+#include "PipeStalenessTracker.h"
 #include "ScheduleGraph.h"
 #include "ScheduleLengthTracker.h"
 #include "Score.h"
@@ -292,6 +293,16 @@ public:
     }
     return *ilp_tracker_;
   }
+  /// Fatal error if pipe-staleness tracking was disabled at
+  /// construction (recipe has no kIntermixCredit dim).
+  const PipeStalenessTracker &GetPipeStalenessTracker() const {
+    if (!pipe_staleness_tracker_) {
+      report_fatal_error(
+          "ScheduleConstructor::GetPipeStalenessTracker called on a "
+          "constructor whose recipe has no kIntermixCredit dim");
+    }
+    return *pipe_staleness_tracker_;
+  }
 
   /// Set the maximum schedule length the search will accept for
   /// the next stretch of work on this constructor and populate the
@@ -473,6 +484,12 @@ private:
   /// has_value().
   std::optional<ScheduleLengthTracker> length_tracker_;
   std::optional<IlpTracker> ilp_tracker_;
+  /// With a recipe: built iff the recipe carries kIntermixCredit.
+  /// Recipe-less: built iff the pipe-mix pass is enabled — a cost
+  /// exception to the "all trackers" default (see the ctor comment).
+  /// Options come from HierarchicalConfig's pipe_mix scope at
+  /// construction.
+  std::optional<PipeStalenessTracker> pipe_staleness_tracker_;
   ScheduledSetTracker scheduled_set_tracker_;
 
   /// Nodes scheduled so far, in order.

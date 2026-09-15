@@ -93,6 +93,13 @@ enum class RegionWeighting { kNone, kLoopDepth };
 ///                       exceeding its per-region budget).
 enum class TieBreak { kHighestOccupancy, kLowestOccupancy };
 
+/// `pipe_mix.curve` axis: shape of the pipe-mix credit ramp below a
+/// pipe's target spacing (see PipeStalenessTracker::CreditCurve, which
+/// this maps onto 1:1).
+///   kLinear - credit proportional to capped staleness (default).
+///   kSqrt   - concave; strictly prefers even sub-saturation splits.
+enum class PipeMixCurve { kLinear, kSqrt };
+
 } // namespace hierarchical_scheduler
 } // namespace llvm
 
