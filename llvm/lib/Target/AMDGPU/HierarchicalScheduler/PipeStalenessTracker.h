@@ -64,8 +64,9 @@
 //
 // Scoring a schedule: walk the instructions in order, counting only
 // visible ones (position t). For an instruction on pipe p whose
-// previous same-pipe issue was at position l (l = -1 at region
-// entry):
+// previous same-pipe issue was at position l (l = -s_p at region
+// entry — every pipe enters saturated; see the boundary convention
+// below):
 //
 //     gap    = t - l
 //     credit = table_p[ min(gap, s_p) ]
@@ -172,11 +173,27 @@
 // copies) do not exist in the emitted stream and are fully ignored:
 // no position bump, no credit, no staleness effect.
 //
-// Region-start boundary convention: every pipe starts as if it had
-// just issued at position -1 (staleness grows from the region
-// entry). This treats the region entry as a rendezvous point rather
-// than granting free saturated credit to each pipe's first
-// instruction.
+// Region-start boundary convention: every pipe enters SATURATED —
+// as if its last issue were at position -s_p — so each pipe's FIRST
+// instruction earns full credit anywhere, and at entry every pipe
+// ranks exactly "due now". Consequence: the ideal mixing slots sit
+// at the region's BEGINNING (one instruction of each pipe early,
+// then steady spacing), with pipes draining freely toward the end
+// (no terminal-gap term charges the tail). Rationale: waves are
+// most PC-converged at region entry — a region is a block-level
+// window, and waves enter it from a common control-flow point — so
+// co-issue opportunity, and therefore mixing, is worth more early
+// in the region than late. The opposite convention (enter at
+// staleness 0) would push each pipe's first full-credit slot to
+// position ~s_p, back-loading exactly the rare-pipe instructions
+// that most need early placement.
+//
+// TODO: consider ALSO resetting every pipe to saturated right after
+// scheduling an s_barrier. s_barrier is the __syncthreads execution
+// rendezvous (all waves of the workgroup stall until all arrive),
+// it sits MID-region (not a scheduling boundary), and waves resume
+// from it in fresh convoys — the exact condition the entry
+// convention models.
 //
 // The kOther pipe (hardware's branch/export/internal categories +
 // unrecognized opcodes) is handled per Options::track_other_pipe:
@@ -434,8 +451,9 @@ class PipeStalenessTracker {
   /// single multiply.
   std::array<int, kNumHwPipes> rank_weight_by_pipe_;
 
-  /// Stream position of each pipe's most recent issue. -1 = not yet
-  /// issued in this region (the region-entry rendezvous convention).
+  /// Stream position of each pipe's most recent issue. Initialized
+  /// to -s_p per pipe (the saturated-entry boundary convention: a
+  /// pipe's first instruction earns full credit anywhere).
   std::array<int, kNumHwPipes> last_issue_position_by_pipe_;
 
   /// Total visible instructions in the region (N) — fixed at

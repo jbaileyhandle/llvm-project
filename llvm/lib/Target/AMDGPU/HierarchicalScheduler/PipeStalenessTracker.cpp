@@ -70,8 +70,6 @@ PipeStalenessTracker::PipeStalenessTracker(const ScheduleGraph &graph,
       pipe_index_by_topo_index_(graph.Size(), kNoPipe) {
   ValidateConstructionPreconditions(graph);
 
-  last_issue_position_by_pipe_.fill(-1);
-
   const std::array<int, kNumHwPipes> visible_count_by_pipe =
       ClassifyVisibleInstructions(graph);
 
@@ -150,6 +148,13 @@ void PipeStalenessTracker::DerivePerPipeScoring(
     // distinct). Divided once here; RankKeyForNode is then a single
     // multiply.
     rank_weight_by_pipe_[pipe_index] = kFixedPointScale / target_spacing;
+
+    // Saturated-entry boundary convention: every pipe enters the
+    // region as if its last issue were s_p positions back, so its
+    // FIRST instruction earns full credit anywhere and every pipe
+    // ranks "due now" at entry. See the header's boundary-
+    // convention section for the convergence rationale.
+    last_issue_position_by_pipe_[pipe_index] = -target_spacing;
   }
 }
 

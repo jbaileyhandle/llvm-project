@@ -4841,8 +4841,8 @@ void RunIlpTrackerShakedown(ScheduleGraph &graph,
 // Tests PipeStalenessTracker: drives Schedule/Unschedule across all
 // graph nodes in topo order. Verifies:
 //   - Initial state: credit 0, visible count 0, every tracked pipe's
-//     staleness reads 1 (= min(gap 1, s_p >= 1), the region-entry
-//     rendezvous convention).
+//     staleness reads s_p (the saturated-entry boundary convention:
+//     each pipe's first instruction earns full credit anywhere).
 //   - Pipe buckets (informational) and target spacings:
 //     GetDesirableSpacing must equal clamp(N/n_p, 1, ceiling)
 //     recomputed from the buckets (ceiling for absent pipes).
@@ -4897,7 +4897,8 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
   bool initial_ok = tracker.GetIntermixCredit() == 0 &&
                     tracker.GetVisibleInstructionsIssuedCount() == 0;
   for (int pipe_index = 0; pipe_index < kNumHwPipes; ++pipe_index) {
-    if (tracker.GetStaleness(static_cast<HwPipe>(pipe_index)) != 1) {
+    if (tracker.GetStaleness(static_cast<HwPipe>(pipe_index)) !=
+        tracker.GetDesirableSpacing(static_cast<HwPipe>(pipe_index))) {
       initial_ok = false;
     }
   }
@@ -4961,7 +4962,10 @@ void RunPipeStalenessTrackerShakedown(ScheduleGraph &graph) {
   bound_after.push_back(tracker.GetFinalCreditUpperBound());
 
   std::array<int, kNumHwPipes> shadow_last_issue;
-  shadow_last_issue.fill(-1);
+  for (int pipe_index = 0; pipe_index < kNumHwPipes; ++pipe_index) {
+    // Mirror the saturated-entry convention: last issue s_p back.
+    shadow_last_issue[pipe_index] = -expected_spacing[pipe_index];
+  }
   int shadow_count = 0;
   int64_t shadow_credit = 0;
 
