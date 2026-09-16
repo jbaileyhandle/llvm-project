@@ -91,18 +91,16 @@ class DfsSearch {
       : mf_(&mf),
         lis_(&lis),
         timeout_us_(timeout_us),
-        // DfsSearch uses the default (nullopt) recipe arg so its SC
-        // has all trackers on. Two reasons:
-        //   - Per-region telemetry reads length and ILP from best
-        //     after Run() returns, even for policies that don't
-        //     compare on those dims.
-        //   - `best_schedule_constructor_ = working_schedule_constructor_`
-        //     in Recurse requires both ends to share the same
-        //     tracker shape, and best is copy-constructed from the
-        //     full-featured input SC.
-        // Callers without those constraints can pass a recipe to
-        // get the recipe-driven lean tracker set.
-        working_schedule_constructor_(graph, st, mf),
+        // Working is shaped by the policy's recipe plus its declared
+        // extra needs: it carries exactly the trackers the policy
+        // compares, bounds, or sorts on — the search's hot path pays
+        // for nothing else. Consumers that want more are served by
+        // Run(), which calls PopulateAllTrackers on the outgoing
+        // result so every search returns a fully queryable schedule
+        // regardless of policy.
+        working_schedule_constructor_(graph, st, mf,
+                                      Policy::kScoreRecipe,
+                                      Policy::kExtraTrackers),
         best_schedule_constructor_(graph.GetInputScheduleConstructor()),
         // length_history_ / pressure_history_ are conditional on the
         // policy's recipe. Each tracker class exposes a static
@@ -123,7 +121,10 @@ class DfsSearch {
                       &working_schedule_constructor_.GetScheduledSetTracker(),
                       &working_schedule_constructor_.GetLengthTracker(),
                       &working_schedule_constructor_.GetPressureTracker(),
-                      &working_schedule_constructor_.GetIlpTracker(),
+                      // Nullable by LengthHistoryTracker's contract;
+                      // null for length-primary policies that don't
+                      // build an ILP tracker (the max-length policy).
+                      working_schedule_constructor_.GetIlpTrackerOrNull(),
                       Policy::kScoreRecipe)
                 : std::nullopt),
         pressure_history_(
@@ -185,6 +186,11 @@ class DfsSearch {
         working_schedule_constructor_.ScheduleCallCount().lifetime;
     Recurse();
     SearchResult result{best_schedule_constructor_, GetTerminationCause()};
+    // Every search returns a fully queryable schedule: backfill any
+    // tracker the policy's recipe didn't build. Applied to the
+    // outgoing copy, not best_ — internal state stays lean for
+    // further Run() calls.
+    result.schedule->PopulateAllTrackers();
     // Throughput telemetry: wall-clock and Schedule calls for this
     // Run(). Lifetime delta (not current_run) so it is correct even
     // if Run() is called more than once on this search.

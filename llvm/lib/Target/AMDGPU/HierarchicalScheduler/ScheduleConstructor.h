@@ -86,6 +86,38 @@ struct ScheduleConstructorOptions {
   bool track_pressure_history = false;
 };
 
+/// Tracker needs a search policy declares EXPLICITLY because they
+/// come from its bounds or its ready-list sort rather than its
+/// score recipe. The ScheduleConstructor enables the union of the
+/// recipe's dims and these. (The pressure tracker is unconditional
+/// and needs no declaring.) Policies expose this as a
+/// `kExtraTrackers` constant; SearchPolicyBase's default declares
+/// nothing.
+struct ExtraTrackerNeeds {
+  bool length = false;
+  bool ilp = false;
+  bool pipe_staleness = false;
+
+  /// Builder-style setters so declaration sites read as prose
+  /// (positional bool literals don't), e.g.
+  /// `ExtraTrackerNeeds{}.WithIlp()`.
+  constexpr ExtraTrackerNeeds WithLength() const {
+    ExtraTrackerNeeds needs = *this;
+    needs.length = true;
+    return needs;
+  }
+  constexpr ExtraTrackerNeeds WithIlp() const {
+    ExtraTrackerNeeds needs = *this;
+    needs.ilp = true;
+    return needs;
+  }
+  constexpr ExtraTrackerNeeds WithPipeStaleness() const {
+    ExtraTrackerNeeds needs = *this;
+    needs.pipe_staleness = true;
+    return needs;
+  }
+};
+
 class ScheduleConstructor {
 public:
   /// Construct from a graph and target info. The graph must outlive
@@ -121,13 +153,17 @@ public:
   ///     letting the policy override SC's ILP gate, or by promoting
   ///     "sort-time tracker dependencies" to a recipe annotation).
   ///
-  /// `options` carries the non-recipe knobs (today just
-  /// `track_pressure_history`); a default-constructed Options is
-  /// the right pick for nearly every caller.
+  /// `extra_trackers` declares trackers the caller's bounds or sort
+  /// need beyond the recipe's dims (policies expose theirs as
+  /// `Policy::kExtraTrackers`). `options` carries the non-recipe
+  /// knobs (today just `track_pressure_history`); a
+  /// default-constructed Options is the right pick for nearly every
+  /// caller.
   ScheduleConstructor(const ScheduleGraph &graph,
                       const GCNSubtarget &st,
                       const MachineFunction &mf,
                       std::optional<ScoreRecipe> recipe = std::nullopt,
+                      ExtraTrackerNeeds extra_trackers = {},
                       ScheduleConstructorOptions options = {});
 
   /// Return a fresh ScheduleConstructor whose live state (register
@@ -288,10 +324,16 @@ public:
     if (!ilp_tracker_) {
       report_fatal_error(
           "ScheduleConstructor::GetIlpTracker called on a "
-          "constructor whose recipe is not length-primary "
-          "(see ScheduleConstructor ctor doc for the ILP gating rule)");
+          "constructor built without an ILP tracker (recipe has no "
+          "kIlpScore dim and no extra_trackers.ilp declaration)");
     }
     return *ilp_tracker_;
+  }
+  /// The ILP tracker, or nullptr if this constructor was built
+  /// without one. For consumers whose contract tolerates absence
+  /// (the length-history tracker's nullable ILP dimension).
+  const IlpTracker *GetIlpTrackerOrNull() const {
+    return ilp_tracker_ ? &*ilp_tracker_ : nullptr;
   }
   /// Fatal error if pipe-staleness tracking was disabled at
   /// construction (recipe has no kIntermixCredit dim).
@@ -303,6 +345,22 @@ public:
     }
     return *pipe_staleness_tracker_;
   }
+
+  /// Construct and backfill every tracker this constructor was
+  /// built without, by folding the existing schedule order through
+  /// each new tracker's Schedule(). The order is one this
+  /// constructor already performed, so there is nothing to
+  /// re-validate — this just computes the missing trackers' state
+  /// for it. After the call, every tracker getter answers.
+  ///
+  /// For QUERYING finished schedules only (DfsSearch::Run calls it
+  /// on the outgoing result so every search returns a fully
+  /// queryable schedule): cross-tracker wiring is construction-time
+  /// only (the scheduled-set tracker's captured length-tracker
+  /// pointer, used for search-time frontier lower bounds, is not
+  /// retrofitted), so a backfilled constructor must not be used to
+  /// resume search.
+  void PopulateAllTrackers();
 
   /// Set the maximum schedule length the search will accept for
   /// the next stretch of work on this constructor and populate the
@@ -445,6 +503,27 @@ public:
   std::string Describe() const;
 
 private:
+  // ----- Tracker gating --------------------------------------------------
+  //
+  // Pressure is unconditional; the three below are gated. One rule,
+  // one helper per tracker: recipe absent -> build (the fully-
+  // queryable default used by input snapshots and
+  // PopulateAllTrackers results — never a search hot path; searches
+  // pass their policy's recipe); recipe present -> build iff the
+  // recipe declares the tracker's dim OR extra_trackers declares
+  // the need (a bounds/sort dependency that is not a score dim,
+  // e.g. the min-length policies' sort consulting ILP close-cost).
+  // Static: called from the constructor's init list.
+
+  static bool ShouldBuildLengthTracker(
+      const std::optional<ScoreRecipe> &recipe,
+      ExtraTrackerNeeds extra_trackers);
+  static bool ShouldBuildIlpTracker(const std::optional<ScoreRecipe> &recipe,
+                                    ExtraTrackerNeeds extra_trackers);
+  static bool ShouldBuildPipeStalenessTracker(
+      const std::optional<ScoreRecipe> &recipe,
+      ExtraTrackerNeeds extra_trackers);
+
   /// Tag type for the NoHistoryClone-private constructor below.
   struct NoHistoryCloneTag {};
 
@@ -475,6 +554,9 @@ private:
   int64_t GetScoreDimensionValue(ScoreDimension dim) const;
 
   const ScheduleGraph *graph_;
+  /// Retained for PopulateAllTrackers (a backfilled length tracker
+  /// needs the subtarget at construction).
+  const GCNSubtarget *st_;
   ScheduleConstructorOptions options_;
   GCNRegisterTracker pressure_tracker_;
   /// std::optional so we can decline to build a length/ILP tracker
@@ -484,11 +566,9 @@ private:
   /// has_value().
   std::optional<ScheduleLengthTracker> length_tracker_;
   std::optional<IlpTracker> ilp_tracker_;
-  /// With a recipe: built iff the recipe carries kIntermixCredit.
-  /// Recipe-less: built iff the pipe-mix pass is enabled — a cost
-  /// exception to the "all trackers" default (see the ctor comment).
-  /// Options come from HierarchicalConfig's pipe_mix scope at
-  /// construction.
+  /// Same recipe-driven gating as the length tracker: built iff
+  /// recipe absent or it carries kIntermixCredit. Options come from
+  /// HierarchicalConfig's pipe_mix scope at construction.
   std::optional<PipeStalenessTracker> pipe_staleness_tracker_;
   ScheduledSetTracker scheduled_set_tracker_;
 

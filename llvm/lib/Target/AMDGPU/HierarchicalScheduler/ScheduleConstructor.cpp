@@ -46,54 +46,50 @@ PipeStalenessTracker::Options PipeStalenessOptionsFromConfig() {
 // Construction
 // ============================================================================
 
+// See the header's tracker-gating comment for the shared rule.
+
+bool ScheduleConstructor::ShouldBuildLengthTracker(
+    const std::optional<ScoreRecipe> &recipe,
+    ExtraTrackerNeeds extra_trackers) {
+  return !recipe || recipe->HasDim(ScoreDimension::kScheduleLength) ||
+         extra_trackers.length;
+}
+
+bool ScheduleConstructor::ShouldBuildIlpTracker(
+    const std::optional<ScoreRecipe> &recipe,
+    ExtraTrackerNeeds extra_trackers) {
+  return !recipe || recipe->HasDim(ScoreDimension::kIlpScore) ||
+         extra_trackers.ilp;
+}
+
+bool ScheduleConstructor::ShouldBuildPipeStalenessTracker(
+    const std::optional<ScoreRecipe> &recipe,
+    ExtraTrackerNeeds extra_trackers) {
+  return !recipe || recipe->HasDim(ScoreDimension::kIntermixCredit) ||
+         extra_trackers.pipe_staleness;
+}
+
 ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
                                          const GCNSubtarget &st,
                                          const MachineFunction &mf,
                                          std::optional<ScoreRecipe> recipe,
+                                         ExtraTrackerNeeds extra_trackers,
                                          ScheduleConstructorOptions options)
     : graph_(&graph),
+      st_(&st),
       options_(options),
       pressure_tracker_(graph, mf, options.track_pressure_history),
-      // Tracker gating rules (see ctor doc for the rationale and
-      // caveats):
-      //   length tracker enabled iff recipe absent OR recipe
-      //   declares kScheduleLength.
-      //   ILP tracker enabled iff recipe absent OR recipe is
-      //   length-primary.
-      //
-      // The ILP rule is the load-bearing compromise: length-primary
-      // policies' ready-list sort heuristic consults the ILP tracker
-      // even when kIlpScore isn't a comparison slot. Tying ILP to
-      // IsLengthPrimary() covers that without forcing kIlpScore into
-      // recipes that don't compare on it -- at the cost of (a) a
-      // wasted ILP tracker for DfsMaximizeLengthPolicy (length-
-      // primary, doesn't use ILP for sort) and (b) zero coverage for
-      // a hypothetical future occupancy-primary policy that wants
-      // ILP in its sort. The current policy set fits this rule;
-      // adding a policy that breaks it means revisiting the gating
-      // (e.g., a per-policy "extra trackers" hook or a recipe
-      // annotation distinguishing comparison dims from sort
-      // dependencies).
+      // Tracker gating: see the ShouldBuild* helpers.
       length_tracker_(
-          (!recipe || recipe->HasDim(ScoreDimension::kScheduleLength))
+          ShouldBuildLengthTracker(recipe, extra_trackers)
               ? std::make_optional<ScheduleLengthTracker>(graph, st)
               : std::nullopt),
       ilp_tracker_(
-          (!recipe || recipe->IsLengthPrimary())
+          ShouldBuildIlpTracker(recipe, extra_trackers)
               ? std::make_optional<IlpTracker>(graph, pressure_tracker_)
               : std::nullopt),
-      //   pipe-staleness tracker: with a recipe, gated on the
-      //   kIntermixCredit dim like the others. In the recipe-less
-      //   "all trackers" set it is a COST EXCEPTION, not a
-      //   principle: unlike length/ILP (whose values every search's
-      //   telemetry prints), nothing outside the pipe-mix pass ever
-      //   reads credit, so when that pass is disabled the tracker
-      //   is omitted to keep its per-step work off every search's
-      //   hot path. Shape stays consistent per process (the flag is
-      //   fixed), so recipe-less copy-assignment is unaffected.
       pipe_staleness_tracker_(
-          (recipe ? recipe->HasDim(ScoreDimension::kIntermixCredit)
-                  : HierarchicalConfig::Get().pipe_mix_config.enabled)
+          ShouldBuildPipeStalenessTracker(recipe, extra_trackers)
               ? std::make_optional<PipeStalenessTracker>(
                     graph, PipeStalenessOptionsFromConfig())
               : std::nullopt),
@@ -101,6 +97,30 @@ ScheduleConstructor::ScheduleConstructor(const ScheduleGraph &graph,
           &graph,
           length_tracker_ ? &*length_tracker_ : nullptr) {
   InitReadyList();
+}
+
+void ScheduleConstructor::PopulateAllTrackers() {
+  if (!length_tracker_) {
+    length_tracker_.emplace(*graph_, *st_);
+    for (const ScheduleNode *node : schedule_order_) {
+      length_tracker_->Schedule(node);
+    }
+  }
+
+  if (!ilp_tracker_) {
+    ilp_tracker_.emplace(*graph_, pressure_tracker_);
+    for (const ScheduleNode *node : schedule_order_) {
+      ilp_tracker_->Schedule(node);
+    }
+  }
+
+  if (!pipe_staleness_tracker_) {
+    pipe_staleness_tracker_.emplace(*graph_,
+                                    PipeStalenessOptionsFromConfig());
+    for (const ScheduleNode *node : schedule_order_) {
+      pipe_staleness_tracker_->Schedule(node);
+    }
+  }
 }
 
 ScheduleConstructor ScheduleConstructor::NoHistoryClone() const {
@@ -125,6 +145,7 @@ ScheduleConstructor ScheduleConstructor::NoHistoryClone() const {
 ScheduleConstructor::ScheduleConstructor(const ScheduleConstructor &source,
                                          NoHistoryCloneTag)
     : graph_(source.graph_),
+      st_(source.st_),
       options_(source.options_),
       // pressure_tracker_ via its own NoHistoryClone — copies live
       // state without dragging undo_stack_ / pressure_history_. C++17

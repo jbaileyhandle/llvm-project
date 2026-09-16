@@ -28,6 +28,13 @@ class ScheduleNode;
 // doesn't override one gets the base's version.
 class SearchPolicyBase {
  public:
+  /// Trackers this policy's bounds or ready-list sort need beyond
+  /// its score recipe's dims (see ExtraTrackerNeeds). DfsSearch
+  /// passes this alongside kScoreRecipe when building its working
+  /// constructor. Default: nothing — for a policy whose recipe
+  /// covers everything it reads.
+  static constexpr ExtraTrackerNeeds kExtraTrackers{};
+ public:
   // Per-Recurse iteration shape and order. DfsSearch calls this
   // once at each Recurse() entry and iterates the resulting vector
   // via ScheduleConstructor::Schedule(node) — so a policy can:
@@ -67,6 +74,14 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
  public:
   static constexpr ScoreRecipe kScoreRecipe =
       score_recipes::kMinimizeScheduleLength;
+
+  /// The ready-list sort consults ILP close-cost (see BuildSortKey)
+  /// even though kIlpScore is not a comparison slot, so the ILP
+  /// tracker is declared as an explicit need. Inherited by the
+  /// min-length variants, which share the sort. (The max-length
+  /// policy's sort does not read ILP and declares nothing.)
+  static constexpr ExtraTrackerNeeds kExtraTrackers =
+      ExtraTrackerNeeds{}.WithIlp();
 
   // Override SearchPolicyBase: two-level filter+sort, modelled on
   // OptSched's cycle-by-cycle window-then-priority pattern.
