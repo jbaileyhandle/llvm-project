@@ -118,6 +118,24 @@ struct ExtraTrackerNeeds {
   }
 };
 
+/// Which history-dominance memo a search policy wants DfsSearch to
+/// run. Declared explicitly by each policy as a `kHistory` constant
+/// (SearchPolicyBase defaults to kNone) rather than inferred from
+/// the score recipe's shape — the recipe says what a search scores,
+/// not which pruning memo suits its search space. Enumerator names
+/// mirror the tracker classes they select.
+enum class HistoryKind {
+  /// No history pruning.
+  kNone,
+  /// ParetoHistoryTracker: per-partition Pareto frontier over the
+  /// recipe's score dims plus gated vector dims (frontier lower
+  /// bounds, open-producer ILP counts, pipe staleness).
+  kParetoHistoryTracker,
+  /// PressureHistoryTracker: per-partition scalar best-peak-score
+  /// memo for pressure-primary searches.
+  kPressureHistoryTracker,
+};
+
 class ScheduleConstructor {
 public:
   /// Construct from a graph and target info. The graph must outlive
@@ -334,6 +352,13 @@ public:
   /// (the length-history tracker's nullable ILP dimension).
   const IlpTracker *GetIlpTrackerOrNull() const {
     return ilp_tracker_ ? &*ilp_tracker_ : nullptr;
+  }
+  /// The pipe-staleness tracker, or nullptr if this constructor was
+  /// built without one. DfsSearch passes this to the
+  /// ParetoHistoryTracker constructor, which accepts null when the
+  /// recipe has no kIntermixCredit dim (staleness dimension off).
+  const PipeStalenessTracker *GetPipeStalenessTrackerOrNull() const {
+    return pipe_staleness_tracker_ ? &*pipe_staleness_tracker_ : nullptr;
   }
   /// Fatal error if pipe-staleness tracking was disabled at
   /// construction (recipe has no kIntermixCredit dim).

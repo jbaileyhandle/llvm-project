@@ -412,7 +412,7 @@ bool BoundsOnSpillSignalsVsInput(
 bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
-    std::optional<LengthHistoryTracker> &length_history,
+    std::optional<ParetoHistoryTracker> &length_history,
     std::optional<PressureHistoryTracker> & /*pressure_history*/) {
   if (BoundsOnLengthTarget(schedule_constructor)) {
     return true;
@@ -425,9 +425,9 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
     return true;
   }
   // Mutating: records the current prefix in length_history when
-  // it is NOT dominated. See LengthHistoryTracker class comment.
-  // This policy's recipe is length-primary, so DfsSearch guarantees
-  // length_history is populated.
+  // it is NOT dominated. See ParetoHistoryTracker class comment.
+  // This policy declares kHistory = kParetoHistoryTracker, so
+  // DfsSearch guarantees length_history is populated.
   if (length_history->IsDominatedElseInsert()) {
     return true;
   }
@@ -437,7 +437,7 @@ bool DfsMinimizeLengthPolicy::ShouldBoundSearch(
 bool DfsMinimizeLengthBoundedSpillSignalsPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
-    std::optional<LengthHistoryTracker> &length_history,
+    std::optional<ParetoHistoryTracker> &length_history,
     std::optional<PressureHistoryTracker> &pressure_history) {
   // Base bounds first -- length deadline, occupancy floor,
   // peak-spill-regime regression, length-history dominance. These
@@ -602,11 +602,9 @@ void DfsMaximizeIntermixPolicy::FilterAndSortReadyList(
 bool DfsMaximizeIntermixPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
-    std::optional<LengthHistoryTracker> & /*length_history*/,
+    std::optional<ParetoHistoryTracker> &length_history,
     std::optional<PressureHistoryTracker> & /*pressure_history*/) {
-  // The shared feasibility gates, composed explicitly. No
-  // length-history prune: this recipe is not length-primary, so no
-  // history tracker exists.
+  // The shared feasibility gates, composed explicitly.
   if (BoundsOnLengthTarget(schedule_constructor)) {
     return true;
   }
@@ -624,10 +622,22 @@ bool DfsMaximizeIntermixPolicy::ShouldBoundSearch(
   // Credit branch-and-bound: prune when no completion of working
   // can beat the best schedule's banked credit. Sound: the upper
   // bound never underestimates a completion's final credit.
-  return schedule_constructor.GetPipeStalenessTracker()
-             .GetFinalCreditUpperBound() <=
-         best_schedule_constructor.GetPipeStalenessTracker()
-             .GetIntermixCredit();
+  if (schedule_constructor.GetPipeStalenessTracker()
+          .GetFinalCreditUpperBound() <=
+      best_schedule_constructor.GetPipeStalenessTracker()
+          .GetIntermixCredit()) {
+    return true;
+  }
+
+  // Pareto history dominance, LAST: it both prunes and RECORDS the
+  // current prefix, so cheaper gates run first — a prefix the
+  // gates above rejected is never recorded, and the table only
+  // holds prefixes the search actually descended into. Entry dims
+  // for this policy: score [credit, length] plus the frontier-LB
+  // and per-pipe-staleness vectors (see ParetoHistoryTracker).
+  // This policy declares kHistory = kParetoHistoryTracker, so
+  // DfsSearch guarantees length_history is populated.
+  return length_history->IsDominatedElseInsert();
 }
 
 bool DfsMaximizeIntermixPolicy::ShouldEndSearch(
@@ -744,7 +754,7 @@ void DfsMaximizeLengthPolicy::FilterAndSortReadyList(
 bool DfsMaximizeLengthPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
-    std::optional<LengthHistoryTracker> &length_history,
+    std::optional<ParetoHistoryTracker> &length_history,
     std::optional<PressureHistoryTracker> & /*pressure_history*/) {
   // Gate 1: same as DfsMinimizeLengthPolicy -- effective occupancy
   // must meet target. Effective rather than raw register-only so the
@@ -838,7 +848,7 @@ void DfsMaximizeContinuousOccupancyPolicy::FilterAndSortReadyList(
 bool DfsMaximizeContinuousOccupancyPolicy::ShouldBoundSearch(
     const ScheduleConstructor &schedule_constructor,
     const ScheduleConstructor &best_schedule_constructor,
-    std::optional<LengthHistoryTracker> & /*length_history*/,
+    std::optional<ParetoHistoryTracker> & /*length_history*/,
     std::optional<PressureHistoryTracker> &pressure_history) {
   // Score-bound: working's score (on the bound-safe leading slots
   // of the bound recipe) is non-increasing as more nodes are

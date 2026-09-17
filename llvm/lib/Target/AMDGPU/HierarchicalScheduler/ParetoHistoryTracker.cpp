@@ -1,67 +1,68 @@
-//===- LengthHistoryTracker.cpp - Length history-based domination ---------===//
+//===- ParetoHistoryTracker.cpp - Length history-based domination ---------===//
 //
 // Implementation. See header for the contract.
 //
 //===----------------------------------------------------------------------===//
 
-#include "LengthHistoryTracker.h"
+#include "ParetoHistoryTracker.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 
 namespace llvm {
 namespace hierarchical_scheduler {
 
-LengthHistoryTracker::LengthHistoryTracker(
+ParetoHistoryTracker::ParetoHistoryTracker(
     const ScheduledSetTracker *scheduled_set_tracker,
     const ScheduleLengthTracker *length_tracker,
     const GCNRegisterTracker *pressure_tracker,
     const IlpTracker *ilp_tracker,
+    const PipeStalenessTracker *pipe_staleness_tracker,
     const ScoreRecipe &recipe)
     : scheduled_set_tracker_(scheduled_set_tracker),
       length_tracker_(length_tracker),
       pressure_tracker_(pressure_tracker),
       ilp_tracker_(ilp_tracker),
+      pipe_staleness_tracker_(pipe_staleness_tracker),
       recipe_(recipe),
+      include_length_dims_(recipe.HasDim(ScoreDimension::kScheduleLength)),
       include_ilp_dim_(recipe.HasDim(ScoreDimension::kIlpScore)),
+      include_staleness_dim_(recipe.HasDim(ScoreDimension::kIntermixCredit)),
       length_max_mode_(recipe.IsLengthMaxMode()) {
   if (scheduled_set_tracker_ == nullptr) {
     report_fatal_error(
-        "LengthHistoryTracker: scheduled_set_tracker must not be null");
+        "ParetoHistoryTracker: scheduled_set_tracker must not be null");
   }
-  if (length_tracker_ == nullptr) {
+  // Wiring check, not a recipe-shape gate: which searches run this
+  // tracker is declared by the policies' kHistory constants (read
+  // by DfsSearch). Here we only require the length tracker when
+  // the recipe actually has a length dim to read from it.
+  if (include_length_dims_ && length_tracker_ == nullptr) {
     report_fatal_error(
-        "LengthHistoryTracker: length_tracker must not be null");
-  }
-  // Recipe shape: DfsSearch already gates construction on
-  // IsApplicableToRecipe; the re-check here catches any other caller
-  // that bypassed the gate. See the predicate's doc for what's
-  // supported.
-  if (!IsApplicableToRecipe(recipe)) {
-    report_fatal_error(
-        "LengthHistoryTracker: recipe shape not supported "
-        "(see LengthHistoryTracker::IsApplicableToRecipe)");
+        "ParetoHistoryTracker: recipe has a kScheduleLength dim but "
+        "length_tracker is null");
   }
   // Length-max + ILP-dim is unsupported by design (see header).
   // Trip loudly on a stray configuration rather than silently
   // producing meaningless dominance results.
   if (length_max_mode_ && include_ilp_dim_) {
     report_fatal_error(
-        "LengthHistoryTracker: length_max_mode=true with "
+        "ParetoHistoryTracker: length_max_mode=true with "
         "include_ilp_dim=true is unsupported — length-max policies "
         "do not participate in ILP refinement here");
   }
-  // pressure_tracker_ and ilp_tracker_ may be null. When non-null
-  // and the corresponding gate is true, IsDominated /
-  // IsDominatedElseInsert populate the matching Entry fields from
-  // the tracker and dominance consults them. When null, the
-  // fields are populated with fallback values (typically 0 / empty)
-  // — useful for tests that use InsertEntryForTest to stage scores
-  // explicitly without driving the production query path.
-  // Production callers that opt into a gate are expected to supply
-  // the matching tracker; there's no runtime check for that
-  // misconfiguration since the sole production caller (DfsSearch)
-  // wires it consistently. Bitset-size >= 2 invariant is enforced
-  // by ScheduledSetTracker's ctor — no recheck here.
+  // pressure_tracker_, ilp_tracker_ and pipe_staleness_tracker_
+  // may be null. When non-null and the corresponding gate is true,
+  // IsDominated / IsDominatedElseInsert populate the matching
+  // Entry fields from the tracker and dominance consults them.
+  // When null, the fields are populated with fallback values
+  // (typically 0 / empty) — useful for tests that use
+  // InsertEntryForTest to stage scores explicitly without driving
+  // the production query path. Production callers that opt into a
+  // gate are expected to supply the matching tracker; there's no
+  // runtime check for that misconfiguration since the sole
+  // production caller (DfsSearch) wires it consistently.
+  // Bitset-size >= 2 invariant is enforced by ScheduledSetTracker's
+  // ctor — no recheck here.
 }
 
 // Per-dim dispatch from this tracker's bound trackers to the raw
@@ -73,7 +74,7 @@ LengthHistoryTracker::LengthHistoryTracker(
 // directly via InsertEntryForTest without driving the production
 // trackers; production callers (DfsSearch) wire all four trackers
 // consistently so the null path never fires.
-int64_t LengthHistoryTracker::GetDimRawValue(ScoreDimension dim) const {
+int64_t ParetoHistoryTracker::GetDimRawValue(ScoreDimension dim) const {
   switch (dim) {
   case ScoreDimension::kScheduleLength:
     return length_tracker_->GetCurrentCycle();
@@ -95,11 +96,15 @@ int64_t LengthHistoryTracker::GetDimRawValue(ScoreDimension dim) const {
                              : 0;
   case ScoreDimension::kIlpScore:
     return ilp_tracker_ ? ilp_tracker_->GetIlpScore() : 0;
+  case ScoreDimension::kIntermixCredit:
+    return pipe_staleness_tracker_
+               ? pipe_staleness_tracker_->GetIntermixCredit()
+               : 0;
   }
-  llvm_unreachable("LengthHistoryTracker::GetDimRawValue: unknown dim");
+  llvm_unreachable("ParetoHistoryTracker::GetDimRawValue: unknown dim");
 }
 
-LengthHistoryTracker::Entry LengthHistoryTracker::BuildQueryEntry() const {
+ParetoHistoryTracker::Entry ParetoHistoryTracker::BuildQueryEntry() const {
   // Walk recipe slots; for each populated slot, snapshot the raw
   // value from the matching tracker and pair it with the slot's
   // polarity. Score::Make applies polarity to produce the
@@ -114,22 +119,41 @@ LengthHistoryTracker::Entry LengthHistoryTracker::BuildQueryEntry() const {
                                  recipe_.slots[i]->pol};
   }
 
+  // frontier_lbs: length-axis vector dim, populated only when the
+  // recipe has a length dim. Otherwise leave empty.
+  SmallVector<FrontierLb, 16> frontier_lbs;
+  if (include_length_dims_) {
+    frontier_lbs = GetFrontierLbsSnapshot();
+  }
+
+  // pipe_staleness: credit-axis vector dim, populated only when
+  // the gate is on (and a tracker is available). Otherwise stays
+  // zero-filled.
+  std::array<uint8_t, kNumHwPipes> pipe_staleness{};
+  if (include_staleness_dim_ && pipe_staleness_tracker_ != nullptr) {
+    std::array<int, kNumHwPipes> snapshot =
+        pipe_staleness_tracker_->GetStalenessSnapshot();
+    for (int pipe_index = 0; pipe_index < kNumHwPipes; ++pipe_index) {
+      pipe_staleness[pipe_index] = static_cast<uint8_t>(snapshot[pipe_index]);
+    }
+  }
+
   // open_producer_inst_counts: vector ILP dim, populated only when
   // the gate is on (and a tracker is available). Otherwise leave
   // empty.
-  SmallVector<IlpTracker::OpenProducerInstCount, 16>
+  SmallVector<IlpTracker::OpenProducerInstCount, 0>
       open_producer_inst_counts;
   if (include_ilp_dim_ && ilp_tracker_ != nullptr) {
     open_producer_inst_counts =
         ilp_tracker_->GetOpenProducerInstCountsSnapshot();
   }
 
-  return Entry{Score::Make(inputs), GetFrontierLbsSnapshot(),
+  return Entry{Score::Make(inputs), std::move(frontier_lbs), pipe_staleness,
                std::move(open_producer_inst_counts)};
 }
 
 SmallVector<FrontierLb, 16>
-LengthHistoryTracker::GetFrontierLbsSnapshot() const {
+ParetoHistoryTracker::GetFrontierLbsSnapshot() const {
   SmallVector<FrontierLb, 16> result;
   const DenseMap<int, FrontierEntry> &frontier =
       scheduled_set_tracker_->GetFrontier();
@@ -147,7 +171,7 @@ LengthHistoryTracker::GetFrontierLbsSnapshot() const {
   return result;
 }
 
-bool LengthHistoryTracker::DoesDominate(const Entry &a,
+bool ParetoHistoryTracker::DoesDominate(const Entry &a,
                                         const Entry &b) const {
   // Scalar Pareto dominance: full Score.Dominates() over every
   // recipe slot. Polarity in each slot encodes direction --
@@ -161,19 +185,22 @@ bool LengthHistoryTracker::DoesDominate(const Entry &a,
   if (!a.score.Dominates(b.score)) {
     return false;
   }
-  // Frontier-LB parallel walk (length-axis vector). Direction
-  // follows length_max_mode_. Same-partition invariant (caller
-  // restricts to one DenseMap bucket) guarantees same length and
-  // same node_topo_idx ordering, so we can ignore node_topo_idx
-  // and compare only the LBs.
-  for (size_t i = 0; i < a.frontier_lbs.size(); ++i) {
-    if (length_max_mode_) {
-      if (a.frontier_lbs[i].lower_bound < b.frontier_lbs[i].lower_bound) {
-        return false;
-      }
-    } else {
-      if (a.frontier_lbs[i].lower_bound > b.frontier_lbs[i].lower_bound) {
-        return false;
+  // Frontier-LB parallel walk (length-axis vector). Gated on
+  // include_length_dims_ (recipe.HasDim(kScheduleLength)).
+  // Direction follows length_max_mode_. Same-partition invariant
+  // (caller restricts to one DenseMap bucket) guarantees same
+  // length and same node_topo_idx ordering, so we can ignore
+  // node_topo_idx and compare only the LBs.
+  if (include_length_dims_) {
+    for (size_t i = 0; i < a.frontier_lbs.size(); ++i) {
+      if (length_max_mode_) {
+        if (a.frontier_lbs[i].lower_bound < b.frontier_lbs[i].lower_bound) {
+          return false;
+        }
+      } else {
+        if (a.frontier_lbs[i].lower_bound > b.frontier_lbs[i].lower_bound) {
+          return false;
+        }
       }
     }
   }
@@ -207,10 +234,25 @@ bool LengthHistoryTracker::DoesDominate(const Entry &a,
       }
     }
   }
+  // Pipe-staleness vector dim: per-pipe capped staleness. Gated on
+  // include_staleness_dim_ (recipe.HasDim(kIntermixCredit)). Staler
+  // is better: capped staleness is the sufficient statistic for
+  // future credit (see PipeStalenessTracker.h), so a dominates b
+  // only if a is at least as stale on every pipe. This pairs with
+  // the credit slot already in a.score / b.score: together they
+  // capture both same-or-more banked credit and same-or-more
+  // future credit potential.
+  if (include_staleness_dim_) {
+    for (int pipe_index = 0; pipe_index < kNumHwPipes; ++pipe_index) {
+      if (a.pipe_staleness[pipe_index] < b.pipe_staleness[pipe_index]) {
+        return false;
+      }
+    }
+  }
   return true;
 }
 
-bool LengthHistoryTracker::IsDominated() const {
+bool ParetoHistoryTracker::IsDominated() const {
   // Lookup via view — no bitset copy.
   PartitionKeyView view = scheduled_set_tracker_->GetPartitionKeyView();
   auto it = table_.find_as(view);
@@ -226,7 +268,7 @@ bool LengthHistoryTracker::IsDominated() const {
   return false;
 }
 
-bool LengthHistoryTracker::IsDominatedElseInsert() {
+bool ParetoHistoryTracker::IsDominatedElseInsert() {
   PartitionKeyView view = scheduled_set_tracker_->GetPartitionKeyView();
   Entry query = BuildQueryEntry();
 
@@ -301,26 +343,26 @@ bool LengthHistoryTracker::IsDominatedElseInsert() {
   return false;
 }
 
-void LengthHistoryTracker::Reset() {
+void ParetoHistoryTracker::Reset() {
   table_.clear();
   total_entries_ = 0;
   prune_count_.ResetCurrentRun();
   memory_cap_hit_.ResetCurrentRun();
 }
 
-void LengthHistoryTracker::InsertEntryForTest(
+void ParetoHistoryTracker::InsertEntryForTest(
     const PartitionKey &key, Entry entry) {
   if (total_entries_ + 1 > kMaxEntries) {
     report_fatal_error(
-        "LengthHistoryTracker::InsertEntryForTest: would exceed "
+        "ParetoHistoryTracker::InsertEntryForTest: would exceed "
         "kMaxEntries");
   }
   table_[key].push_back(std::move(entry));
   ++total_entries_;
 }
 
-ArrayRef<LengthHistoryTracker::Entry>
-LengthHistoryTracker::GetBucketForTest(const PartitionKey &key) const {
+ArrayRef<ParetoHistoryTracker::Entry>
+ParetoHistoryTracker::GetBucketForTest(const PartitionKey &key) const {
   auto it = table_.find(key);
   if (it == table_.end()) {
     return {};
@@ -328,7 +370,7 @@ LengthHistoryTracker::GetBucketForTest(const PartitionKey &key) const {
   return it->second;
 }
 
-bool LengthHistoryTracker::IsDominatedByEntryForTest(
+bool ParetoHistoryTracker::IsDominatedByEntryForTest(
     const PartitionKey &key, const Entry &query) const {
   auto it = table_.find(key);
   if (it == table_.end()) {

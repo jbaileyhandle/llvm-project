@@ -667,7 +667,7 @@ public:
   ///   - Two orderings reach the same scheduled-set partition with
   ///     identical (end_cycle, frontier_lbs) state. The first-visited
   ///     ordering's entry dominates the second visit, so
-  ///     LengthHistoryTracker::IsDominatedElseInsert returns true and
+  ///     ParetoHistoryTracker::IsDominatedElseInsert returns true and
   ///     prune_count increments.
   ///
   /// Structure (4 nodes, 4 edges — a diamond with asymmetric latencies):

@@ -1,7 +1,7 @@
 //===- ScheduledSetTracker.h - Track scheduled-set state --------*- C++ -*-===//
 //
 // Self-contained snapshot of the partial-schedule state that the
-// history-based domination trackers (LengthHistoryTracker,
+// history-based domination trackers (ParetoHistoryTracker,
 // PressureHistoryTracker — separate files) consult. Lives on
 // ScheduleConstructor alongside ScheduleLengthTracker and
 // GCNRegisterTracker; receives Schedule/Unschedule notifications in
@@ -74,7 +74,7 @@ class ScheduleLengthTracker;
 /// Lives here (alongside ScheduledSetTracker) because it represents
 /// "this scheduled-set's identity" — produced by
 /// ScheduledSetTracker::GetPartitionKey() and consumed by the
-/// history trackers (LengthHistoryTracker, PressureHistoryTracker)
+/// history trackers (ParetoHistoryTracker, PressureHistoryTracker)
 /// as a DenseMap key.
 struct PartitionKey {
   uint32_t signature;
@@ -89,7 +89,7 @@ struct PartitionKey {
 ///
 /// Lifetime: the borrowed bitset must outlive the view. In the
 /// production path, the view is a transient local in
-/// LengthHistoryTracker / PressureHistoryTracker, dereferenced
+/// ParetoHistoryTracker / PressureHistoryTracker, dereferenced
 /// immediately by find_as.
 struct PartitionKeyView {
   uint32_t signature;

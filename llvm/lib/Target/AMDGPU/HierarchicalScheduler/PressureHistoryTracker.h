@@ -13,7 +13,7 @@
 // nodes (regardless of order).
 //
 // Per partition: a Pareto frontier of incomparable Score entries
-// (parallel to LengthHistoryTracker's design). Prefix A dominates
+// (parallel to ParetoHistoryTracker's design). Prefix A dominates
 // prefix B iff A.score.Dominates(B.score) -- every slot of A's
 // canonical Score is >= the corresponding slot of B's. Incomparable
 // entries (each better on some slot) both stay in the bucket. A
@@ -120,13 +120,13 @@ class PressureHistoryTracker {
   /// Type alias so the inline capacity is set in one place.
   using Bucket = SmallVector<Entry, 1>;
 
-  /// Routing predicate: does `recipe` route to PHT? Parallel to
-  /// LengthHistoryTracker::IsApplicableToRecipe -- each tracker
-  /// class declares which recipe shapes "belong" to it, and
-  /// DfsSearch reads these predicates at construction to decide
-  /// which tracker (if any) to build. PHT owns recipes whose
-  /// primary dim is computed by the register-pressure tracker; the
-  /// recipe-side check is ScoreRecipe::IsPressurePrimary().
+  /// True iff `recipe` has the shape PHT's prune is built for:
+  /// pressure-primary (primary dim computed by the register-
+  /// pressure tracker). Routing no longer happens here -- policies
+  /// declare their history tracker via kHistory and DfsSearch reads
+  /// that. This predicate remains as the ctor's guard against a
+  /// policy declaring kPressureHistoryTracker with a recipe of the
+  /// wrong shape.
   ///
   /// This is purely a routing check on the primary slot. It does
   /// NOT validate the full recipe -- a recipe that routes here but
@@ -262,7 +262,7 @@ class PressureHistoryTracker {
   /// Drop all recorded entries and clear the *.current_run
   /// counters and flags. Lifetime values persist. Useful for
   /// outer loops that re-use the tracker across multiple search
-  /// iterations (mirrors LengthHistoryTracker::Reset for API
+  /// iterations (mirrors ParetoHistoryTracker::Reset for API
   /// symmetry; the occupancy pass currently runs single-Run so
   /// doesn't exercise this, but provided so the trackers behave
   /// consistently).

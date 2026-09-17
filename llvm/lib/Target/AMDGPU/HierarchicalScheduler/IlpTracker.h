@@ -264,7 +264,7 @@ class IlpTracker {
   };
 
   /// Snapshot of currently open producers as (reg, inst_count)
-  /// pairs sorted by reg ascending. Used by LengthHistoryTracker
+  /// pairs sorted by reg ascending. Used by ParetoHistoryTracker
   /// to record per-open-producer issue positions in each entry,
   /// so dominance can do a parallel walk parallel to frontier_lbs.
   /// Same-partition entries have the same vreg set in the same

@@ -11,7 +11,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SEARCHPOLICIES_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SEARCHPOLICIES_H
 
-#include "LengthHistoryTracker.h"
+#include "ParetoHistoryTracker.h"
 #include "PressureHistoryTracker.h"
 #include "ScheduleConstructor.h"
 #include "SubgraphFormation.h"
@@ -34,6 +34,12 @@ class SearchPolicyBase {
   /// constructor. Default: nothing — for a policy whose recipe
   /// covers everything it reads.
   static constexpr ExtraTrackerNeeds kExtraTrackers{};
+
+  /// Which history-dominance memo DfsSearch should run for this
+  /// policy (see HistoryKind). Default: none. Concrete policies
+  /// override to opt in; DfsSearch selects and wires the matching
+  /// tracker from this constant alone.
+  static constexpr HistoryKind kHistory = HistoryKind::kNone;
  public:
   // Per-Recurse iteration shape and order. DfsSearch calls this
   // once at each Recurse() entry and iterates the resulting vector
@@ -82,6 +88,10 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   /// policy's sort does not read ILP and declares nothing.)
   static constexpr ExtraTrackerNeeds kExtraTrackers =
       ExtraTrackerNeeds{}.WithIlp();
+
+  /// Pareto history dominance over [length, frontier LBs, gated
+  /// ILP/occupancy dims]. Inherited by the min-length variants.
+  static constexpr HistoryKind kHistory = HistoryKind::kParetoHistoryTracker;
 
   // Override SearchPolicyBase: two-level filter+sort, modelled on
   // OptSched's cycle-by-cycle window-then-priority pattern.
@@ -140,7 +150,7 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   //       register-only occupancy is monotonically non-increasing.
   //       Once working drops below the function ceiling, no
   //       completion restores it.
-  //   (c) See LengthHistoryTracker class comment.
+  //   (c) See ParetoHistoryTracker class comment.
   //
   // SIDE EFFECT: when (c) does NOT prune, the current prefix is
   // recorded in `*length_history` for future-sibling comparison.
@@ -152,7 +162,7 @@ class DfsMinimizeLengthPolicy : public SearchPolicyBase {
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      std::optional<LengthHistoryTracker> &length_history,
+      std::optional<ParetoHistoryTracker> &length_history,
       std::optional<PressureHistoryTracker> &pressure_history);
 
   // End the search globally once best matches the graph-level length
@@ -208,7 +218,7 @@ class DfsMinimizeLengthRefineOccupancyPolicy
 //     tiebreaks length asc, then ILP desc, then occupancy desc.
 //   - kRefineIlpAtSameLength = true — relaxes the bound to allow
 //     same-length completions through, AND gates the
-//     LengthHistoryTracker's ILP dim (per-open-producer
+//     ParetoHistoryTracker's ILP dim (per-open-producer
 //     inst_counts and locked-in ILP score participate in
 //     dominance, so the search isn't pruned prematurely on
 //     paths that could refine ILP).
@@ -271,7 +281,7 @@ class DfsMinimizeLengthBoundedSpillSignalsPolicy
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      std::optional<LengthHistoryTracker> &length_history,
+      std::optional<ParetoHistoryTracker> &length_history,
       std::optional<PressureHistoryTracker> &pressure_history);
 };
 
@@ -284,18 +294,21 @@ class DfsMinimizeLengthBoundedSpillSignalsPolicy
 // — plus the credit upper-bound prune.
 //
 // Recipe: kIntermixCredit (max) primary, kScheduleLength (min)
-// tie-break. Length present-but-not-primary has two machinery
-// consequences: DfsSearch holds the max-acceptable length at the
+// tie-break. Length present-but-not-primary has one machinery
+// consequence: DfsSearch holds the max-acceptable length at the
 // driver's slack target instead of tightening it to best.length - 1
-// (see RecomputeWorkingMaxScheduleCycles), and LengthHistoryTracker
-// auto-disables (IsApplicableToRecipe requires length-primary) — the
-// pipe-mix search runs without history dominance for now.
+// (see RecomputeWorkingMaxScheduleCycles).
 class DfsMaximizeIntermixPolicy : public SearchPolicyBase {
  public:
   static constexpr ScoreRecipe kScoreRecipe{{
       MetricSlot{ScoreDimension::kIntermixCredit, Polarity::kMaximize},
       MetricSlot{ScoreDimension::kScheduleLength, Polarity::kMinimize},
   }};
+
+  /// Pareto history dominance. Dims follow this policy's recipe:
+  /// score [credit max, length min], plus the gated frontier-LB
+  /// and per-pipe staleness vectors.
+  static constexpr HistoryKind kHistory = HistoryKind::kParetoHistoryTracker;
 
   // Urgency cutoff for the ready-list sort, in cycles of deadline
   // slack (max_schedule_cycle - current_cycle). Deliberately TIGHTER
@@ -339,13 +352,15 @@ class DfsMaximizeIntermixPolicy : public SearchPolicyBase {
   // The inherited bounds (length-target infeasibility via the LB
   // and per-node deadlines, occupancy floor, spill-regime and
   // spill-area regression vs the input baseline) PLUS the credit
-  // prune: bound when working's GetFinalCreditUpperBound() cannot
-  // beat best's banked credit. Sound because the upper bound never
-  // underestimates any completion's final credit.
+  // prune (bound when working's GetFinalCreditUpperBound() cannot
+  // beat best's banked credit — sound because the upper bound
+  // never underestimates any completion's final credit) PLUS
+  // Pareto history dominance (kHistory above; runs last so only
+  // prefixes that survive the cheaper gates are recorded).
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      std::optional<LengthHistoryTracker> &length_history,
+      std::optional<ParetoHistoryTracker> &length_history,
       std::optional<PressureHistoryTracker> &pressure_history);
 
   // End the whole search once best — a COMPLETE schedule — has
@@ -363,14 +378,14 @@ class DfsMaximizeIntermixPolicy : public SearchPolicyBase {
 // the length-min objective.
 //
 // Inverts the length axis everywhere it appears (IsBetterThan via
-// kMetric, LengthHistoryTracker dominance via kLengthMaxMode), but
+// kMetric, ParetoHistoryTracker dominance via kLengthMaxMode), but
 // leaves pressure semantics unchanged: occupancy floor is still
 // enforced, pressure-history pruning would still use "lower peak
 // dominates" if enabled.
 //
 // Differences from DfsMinimizeLengthPolicy:
 //   - kMetric = kMaximizeScheduleLength (longer wins).
-//   - kLengthMaxMode = true (LengthHistoryTracker dominance flips
+//   - kLengthMaxMode = true (ParetoHistoryTracker dominance flips
 //     end_cycle and frontier-LB directions).
 //   - ShouldBoundSearch drops every length-deadline bound check
 //     (length-min prunes via max-acceptable / per-node max-cycle
@@ -397,6 +412,10 @@ class DfsMaximizeLengthPolicy : public SearchPolicyBase {
   static constexpr ScoreRecipe kScoreRecipe =
       score_recipes::kMaximizeScheduleLength;
 
+  /// Pareto history dominance, with the length axis inverted (see
+  /// class comment).
+  static constexpr HistoryKind kHistory = HistoryKind::kParetoHistoryTracker;
+
   // See class comment for the ranking semantics.
   static void FilterAndSortReadyList(
       const ScheduleConstructor &working,
@@ -408,7 +427,7 @@ class DfsMaximizeLengthPolicy : public SearchPolicyBase {
   //       below the function occupancy target — same monotonicity
   //       argument as length-min: pressure only grows, occupancy
   //       only drops, so no completion can recover.
-  //   (b) length-history dominance — see LengthHistoryTracker.
+  //   (b) length-history dominance — see ParetoHistoryTracker.
   //
   // This policy's recipe is length-primary, so DfsSearch guarantees
   // length_history is populated; pressure_history is nullopt and
@@ -416,7 +435,7 @@ class DfsMaximizeLengthPolicy : public SearchPolicyBase {
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      std::optional<LengthHistoryTracker> &length_history,
+      std::optional<ParetoHistoryTracker> &length_history,
       std::optional<PressureHistoryTracker> &pressure_history);
 
   // Always returns false — see class comment for the rationale.
@@ -436,6 +455,12 @@ class DfsMaximizeContinuousOccupancyPolicy : public SearchPolicyBase {
   // crossing a cliff.
   static constexpr ScoreRecipe kScoreRecipe =
       score_recipes::kMaximizeContinuousRegisterOccupancyScore;
+
+  /// Peak-pressure history dominance (scalar best-peak memo per
+  /// partition — see PressureHistoryTracker). Inherited by the
+  /// occupancy variants.
+  static constexpr HistoryKind kHistory =
+      HistoryKind::kPressureHistoryTracker;
 
   // Override SearchPolicyBase: pressure-aware filter + sort.
   //
@@ -479,7 +504,7 @@ class DfsMaximizeContinuousOccupancyPolicy : public SearchPolicyBase {
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      std::optional<LengthHistoryTracker> &length_history,
+      std::optional<ParetoHistoryTracker> &length_history,
       std::optional<PressureHistoryTracker> &pressure_history);
 
   // Called on completed schedules after the IsBetterThan/update step.
@@ -536,7 +561,7 @@ class DfsMaximizeContinuousOccupancyThenAreaPolicy
   static bool ShouldBoundSearch(
       const ScheduleConstructor &schedule_constructor,
       const ScheduleConstructor &best_schedule_constructor,
-      std::optional<LengthHistoryTracker> & /*length_history*/,
+      std::optional<ParetoHistoryTracker> & /*length_history*/,
       std::optional<PressureHistoryTracker> &pressure_history) {
     if (schedule_constructor.CompletionCannotImproveUpon(
             best_schedule_constructor, kScoreRecipe)) {

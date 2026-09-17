@@ -72,7 +72,7 @@ void ScheduledSetTracker::Schedule(const ScheduleNode *node) {
   }
 
   // Frontier maintenance is gated on having a length tracker:
-  // the only readers of the frontier (LengthHistoryTracker
+  // the only readers of the frontier (ParetoHistoryTracker
   // dominance, length-tracking shakedowns) all assume real LBs,
   // which require length info. Callers that opt out of length
   // tracking (e.g., BFS-DP) consume only scheduled_set_ +

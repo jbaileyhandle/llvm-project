@@ -35,7 +35,7 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/SubgraphDagDump.cpp
   HierarchicalScheduler/SearchOutcomeLog.cpp
   HierarchicalScheduler/ScheduledSetTracker.cpp
-  HierarchicalScheduler/LengthHistoryTracker.cpp
+  HierarchicalScheduler/ParetoHistoryTracker.cpp
   HierarchicalScheduler/PressureHistoryTracker.cpp
   HierarchicalScheduler/PartitionDag.cpp
   HierarchicalScheduler/BfsDpSearch.cpp

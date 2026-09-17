@@ -1,8 +1,8 @@
-//===- LengthHistoryTracker.h - Length history-based domination -*- C++ -*-===//
+//===- ParetoHistoryTracker.h - Pareto history-based domination -*- C++ -*-===//
 //
-// History table for length-minimization B&B pruning. Memoizes
-// previously-visited prefixes by partition; new prefixes that reach
-// a partition with no-better state get pruned.
+// History table for DFS B&B pruning. Memoizes previously-visited
+// prefixes by partition; new prefixes that reach a partition with
+// no-better state get pruned.
 //
 // A "partition" is the bipartition of the graph induced by which
 // nodes are scheduled vs. unscheduled — identified by the
@@ -10,13 +10,17 @@
 // prefixes share a partition iff they scheduled the same set of
 // nodes (regardless of order).
 //
-// Per partition, multiple prefix orderings can produce different
-// (end_cycle, frontier-LB) tuples. Length dominance is multi-
-// dimensional: prefix A dominates prefix B iff A.end_cycle <=
-// B.end_cycle AND A.frontier_lbs[i].lower_bound <=
-// B.frontier_lbs[i].lower_bound for every frontier node i. Two
-// prefixes that are incomparable on these dimensions both stay in
-// the bucket — a Pareto frontier per partition.
+// The dominance dimensions are recipe-driven: the scalar dims are
+// exactly the bound ScoreRecipe's slots (length for the length
+// passes; intermix credit + length for the pipe-mix pass), and the
+// recipe's dims additionally gate the vector-shaped sibling dims
+// (frontier LBs and per-pipe staleness; open-producer ILP counts) —
+// see Entry. E.g. for length minimization: prefix A dominates
+// prefix B iff A.end_cycle <= B.end_cycle AND
+// A.frontier_lbs[i].lower_bound <= B.frontier_lbs[i].lower_bound
+// for every frontier node i. Two prefixes that are incomparable on
+// the active dimensions both stay in the bucket — a Pareto frontier
+// per partition.
 //
 // Why incomparable entries arise. Within a single partition,
 // different prefix orderings produce different (end_cycle,
@@ -55,17 +59,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_LENGTHHISTORYTRACKER_H
-#define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_LENGTHHISTORYTRACKER_H
+#ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_PARETOHISTORYTRACKER_H
+#define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_PARETOHISTORYTRACKER_H
 
 #include "GCNRegisterTracker.h"
+#include "HwPipeClass.h"
 #include "IlpTracker.h"
+#include "PipeStalenessTracker.h"
 #include "ScheduleLengthTracker.h"
 #include "ScheduledSetTracker.h"
 #include "SearchStats.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include <array>
 
 namespace llvm {
 namespace hierarchical_scheduler {
@@ -89,7 +96,7 @@ struct FrontierLb {
   int lower_bound;
 };
 
-class LengthHistoryTracker {
+class ParetoHistoryTracker {
  public:
   /// Total-entry cap across all partitions. Insertion past this
   /// limit silently no-ops (search continues, just without
@@ -127,24 +134,38 @@ class LengthHistoryTracker {
     /// `length_max_mode_`: length-min wants lower LBs, length-max
     /// wants higher LBs. Vector-shaped, so it stays a sibling
     /// field rather than collapsing into the scalar Score.
+    /// Populated and compared only when the recipe has a
+    /// kScheduleLength dim (`include_length_dims_`); empty
+    /// otherwise.
     SmallVector<FrontierLb, 16> frontier_lbs;
+    /// Per-pipe capped staleness: visible instructions issued since
+    /// each pipe last issued, capped at that pipe's target spacing
+    /// (spacing ceiling 16, so values fit uint8_t). Populated from
+    /// PipeStalenessTracker::GetStalenessSnapshot() and compared
+    /// only when the recipe has a kIntermixCredit dim
+    /// (`include_staleness_dim_`); zero-filled otherwise. Dominance
+    /// direction: staler is better — a prefix whose every pipe is
+    /// at least as stale earns at least as much credit from any
+    /// given suffix (capped staleness is the sufficient statistic
+    /// for future credit; proof in PipeStalenessTracker.h), so A
+    /// dominates B requires A.staleness[p] >= B.staleness[p] for
+    /// every pipe p.
+    std::array<uint8_t, kNumHwPipes> pipe_staleness{};
     /// Per-open-producer issue positions, sorted by reg ascending.
-    /// Always populated. Whether it participates in dominance is
-    /// gated by `include_ilp_dim_`. When the gate is on, A
-    /// dominates B requires A.inst_count[R] <= B.inst_count[R]
-    /// for every open producer R (so A has same-or-more future
-    /// ILP cover for each). Same-partition entries share the
-    /// same vreg set in the same reg-sorted order, so element-
-    /// wise comparison is well-defined. Vector-shaped, doesn't
-    /// fit into Score either.
+    /// Populated and compared only when `include_ilp_dim_` is on
+    /// (recipe has a kIlpScore dim); empty otherwise. When the
+    /// gate is on, A dominates B requires A.inst_count[R] <=
+    /// B.inst_count[R] for every open producer R (so A has
+    /// same-or-more future ILP cover for each). Same-partition
+    /// entries share the same vreg set in the same reg-sorted
+    /// order, so element-wise comparison is well-defined.
+    /// Vector-shaped, doesn't fit into Score either.
     ///
-    /// Inline-16 capacity matches frontier_lbs to avoid heap
-    /// allocs in the typical case (|open| ≤ 16). Cost: when
-    /// include_ilp_dim_ is off, 128B/entry of dead inline buffer.
-    /// If refine-ILP doesn't become the production default, drop
-    /// the inline capacity to 0 to reclaim that storage at the
-    /// cost of a heap alloc per populated entry.
-    SmallVector<IlpTracker::OpenProducerInstCount, 16>
+    /// Inline capacity 0: refine-ILP is not the production
+    /// default, so most entries would carry a dead inline buffer
+    /// (128 B at capacity 16). Cost of 0 is one heap alloc per
+    /// entry when the ILP dim is on.
+    SmallVector<IlpTracker::OpenProducerInstCount, 0>
         open_producer_inst_counts;
   };
 
@@ -154,52 +175,49 @@ class LengthHistoryTracker {
   /// place (matches PressureHistoryTracker::Bucket's intent).
   using Bucket = SmallVector<Entry, 2>;
 
-  /// True iff this tracker's prune is sound and well-defined for
-  /// `recipe`. DfsSearch reads this to decide whether to construct
-  /// an LHT for a given policy; the constructor re-checks it and
-  /// fatal-errors on a mismatch (so any other caller that bypasses
-  /// the DfsSearch gate still trips loudly).
+  /// Construct over the bound trackers. Which searches run this
+  /// tracker at all is a policy decision (SearchPolicies' kHistory
+  /// constants, read by DfsSearch) — this constructor only checks
+  /// wiring: `scheduled_set_tracker` (partition key source) must
+  /// be non-null, and `length_tracker` must be non-null when the
+  /// recipe has a kScheduleLength dim. The score-source trackers
+  /// (`pressure_tracker`, `ilp_tracker`,
+  /// `pipe_staleness_tracker`) may be null (some tests / non-
+  /// production paths don't supply them); when null, the
+  /// corresponding fields populate from a fallback (0 / empty).
+  /// Production callers (DfsSearch) wire every tracker the recipe
+  /// reads. All bound trackers must outlive this tracker.
   ///
-  /// Sound shape: primary dim is kScheduleLength. LHT's dominance
-  /// is built around end_cycle + per-frontier-node LBs (length-axis
-  /// quantities); other primaries don't have a meaningful length-
-  /// axis dominance to memoize here, and route to PressureHistoryTracker
-  /// (peak-style primaries) or get no history tracker at all
-  /// (kIlpScore, until its own tracker is analyzed and added).
-  static constexpr bool IsApplicableToRecipe(const ScoreRecipe &recipe) {
-    return recipe.IsLengthPrimary();
-  }
-
-  /// Construct over the bound trackers. `scheduled_set_tracker`
-  /// and `length_tracker` must be non-null and outlive this
-  /// tracker. `pressure_tracker` and `ilp_tracker` may be null
-  /// (some tests / non-production paths don't supply them); when
-  /// null, the corresponding score fields populate from a
-  /// fallback (typically 0). Production callers (DfsSearch) wire
-  /// all four trackers consistently.
+  /// The scalar Pareto axes -- length, intermix credit, continuous
+  /// occupancy score, VGPR spill area, ILP score -- are all
+  /// carried by the Entry's `score` field, computed from `recipe`
+  /// by walking the recipe's slots and feeding each dim's value
+  /// through the matching tracker. The set of slots in the recipe
+  /// is the set of dims that participate in scalar dominance;
+  /// adding a new scalar dim is "extend the recipe + extend the
+  /// per-dim dispatch," no new gate flag.
   ///
-  /// The scalar Pareto axes -- length, continuous occupancy score,
-  /// VGPR spill area, ILP score -- are all carried by the Entry's
-  /// `score` field, computed from `recipe` by walking the recipe's
-  /// slots and feeding each dim's value through the matching
-  /// tracker. The set of slots in the recipe is the set of dims
-  /// that participate in scalar dominance; adding a new scalar dim
-  /// is "extend the recipe + extend the per-dim dispatch," no new
-  /// gate flag.
-  ///
-  /// Two dim-shaped axes don't fit into the scalar Score and stay
-  /// as sibling Entry fields:
+  /// Three dim-shaped axes don't fit into the scalar Score and
+  /// stay as sibling Entry fields, each gated by a recipe dim:
   ///
   ///   * `frontier_lbs` (length-axis vector): per-frontier-node
-  ///     lower bounds. Direction follows length_max_mode_ derived
-  ///     from `recipe.IsLengthMaxMode()`: length-min wants lower
-  ///     LBs, length-max wants higher.
+  ///     lower bounds. Gated by `include_length_dims_` from
+  ///     `recipe.HasDim(kScheduleLength)`. Direction follows
+  ///     length_max_mode_ derived from `recipe.IsLengthMaxMode()`:
+  ///     length-min wants lower LBs, length-max wants higher.
   ///
   ///   * `open_producer_inst_counts` (ILP-axis vector): per-open-
   ///     producer issue positions. Gated by `include_ilp_dim_`
   ///     derived from `recipe.HasDim(kIlpScore)`. When gated on,
   ///     a Pareto carry check `a.inst_count[R] <= b.inst_count[R]`
   ///     for every R must hold for `a` to dominate `b`.
+  ///
+  ///   * `pipe_staleness` (credit-axis vector): per-pipe capped
+  ///     staleness. Gated by `include_staleness_dim_` derived from
+  ///     `recipe.HasDim(kIntermixCredit)`. When gated on, `a`
+  ///     dominates `b` requires `a.pipe_staleness[p] >=
+  ///     b.pipe_staleness[p]` for every pipe p (staler earns at
+  ///     least as much from any suffix — see Entry).
   ///
   /// Combining `length_max_mode = true` with `include_ilp_dim =
   /// true` is unsupported by design -- length-max policies do not
@@ -211,10 +229,11 @@ class LengthHistoryTracker {
   /// The bitset-size >= 2 invariant required by PartitionKey's
   /// DenseMapInfo sentinels is enforced by ScheduledSetTracker's
   /// own constructor; we don't recheck it here.
-  LengthHistoryTracker(const ScheduledSetTracker *scheduled_set_tracker,
+  ParetoHistoryTracker(const ScheduledSetTracker *scheduled_set_tracker,
                        const ScheduleLengthTracker *length_tracker,
                        const GCNRegisterTracker *pressure_tracker,
                        const IlpTracker *ilp_tracker,
+                       const PipeStalenessTracker *pipe_staleness_tracker,
                        const ScoreRecipe &recipe);
 
   /// True iff the bound trackers' current prefix is dominated by
@@ -298,18 +317,23 @@ class LengthHistoryTracker {
 
  private:
   /// Returns true iff `a` dominates `b` on every Pareto dimension.
-  /// Three layers:
+  /// Four layers:
   ///   1. Scalar Score (via Score::Dominates): all recipe slots
   ///      compared with polarity-applied "higher is better"
   ///      semantics. Slot 0's polarity handles length min/max
   ///      direction automatically; other slots take their
   ///      direction from the recipe too.
-  ///   2. frontier_lbs (length-axis vector): parallel walk;
-  ///      direction follows length_max_mode_ (min mode wants
-  ///      a's LBs no greater, max mode wants no smaller).
+  ///   2. frontier_lbs (length-axis vector, gated by
+  ///      include_length_dims_): parallel walk; direction follows
+  ///      length_max_mode_ (min mode wants a's LBs no greater,
+  ///      max mode wants no smaller).
   ///   3. open_producer_inst_counts (ILP-axis vector, gated by
   ///      include_ilp_dim_): parallel walk requiring
   ///      a.inst_count[R] <= b.inst_count[R] for every R.
+  ///   4. pipe_staleness (credit-axis vector, gated by
+  ///      include_staleness_dim_): parallel walk requiring
+  ///      a.pipe_staleness[p] >= b.pipe_staleness[p] for every
+  ///      pipe p.
   /// Both Entries must be from the same partition: their
   /// frontier_lbs and open_producer_inst_counts vectors have
   /// equal length and parallel orderings.
@@ -324,23 +348,30 @@ class LengthHistoryTracker {
   /// Per-dim dispatch from the bound trackers to the raw value
   /// for a given ScoreDimension. Mirrors
   /// ScheduleConstructor::GetScoreDimensionValue's switch but
-  /// reads from the four trackers LHT was bound to. Returns 0
+  /// reads from the trackers this tracker was bound to. Returns 0
   /// when the matching tracker is null (test-only path; production
-  /// callers wire all four trackers consistently).
+  /// callers wire every tracker the recipe reads).
   int64_t GetDimRawValue(ScoreDimension dim) const;
 
   const ScheduledSetTracker *scheduled_set_tracker_;
   const ScheduleLengthTracker *length_tracker_;
   const GCNRegisterTracker *pressure_tracker_;
   const IlpTracker *ilp_tracker_;
+  const PipeStalenessTracker *pipe_staleness_tracker_;
   /// Recipe used to build the canonical scalar Score stored on
   /// each Entry (see Entry::score). Captured at construction so
   /// BuildQueryEntry can walk the slots without an extra pass-
   /// through.
   ScoreRecipe recipe_;
+  /// Gate for the length-axis vector dim (frontier_lbs). Derived
+  /// at construction from `recipe.HasDim(kScheduleLength)`.
+  bool include_length_dims_;
   /// Gate for the ILP-axis vector dim (open_producer_inst_counts).
   /// Derived at construction from `recipe.HasDim(kIlpScore)`.
   bool include_ilp_dim_;
+  /// Gate for the credit-axis vector dim (pipe_staleness). Derived
+  /// at construction from `recipe.HasDim(kIntermixCredit)`.
+  bool include_staleness_dim_;
   /// Flip the direction of `frontier_lbs` element comparison.
   /// Derived at construction from `recipe.IsLengthMaxMode()`. The
   /// length-scalar direction is already encoded in `Entry::score`'s
@@ -363,4 +394,4 @@ class LengthHistoryTracker {
 } // namespace hierarchical_scheduler
 } // namespace llvm
 
-#endif // LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_LENGTHHISTORYTRACKER_H
+#endif // LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_PARETOHISTORYTRACKER_H

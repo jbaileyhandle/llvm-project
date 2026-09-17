@@ -178,9 +178,6 @@ struct ScoreRecipe {
   std::array<std::optional<MetricSlot>, kMaxScoreSlots> slots;
 
   /// True iff the primary slot's dimension is kScheduleLength.
-  /// Length-primary recipes are owned by LengthHistoryTracker --
-  /// LHT::IsApplicableToRecipe routes them to LHT for history
-  /// pruning.
   constexpr bool IsLengthPrimary() const {
     return slots[0] && slots[0]->dim == ScoreDimension::kScheduleLength;
   }
@@ -188,10 +185,8 @@ struct ScoreRecipe {
   /// True iff the primary slot's dimension is computed by the
   /// register-pressure tracker -- one of kRegisterOcc,
   /// kContinuousOccScore, kContinuousOccArea, kVgprSpillArea.
-  /// Pressure-primary recipes are owned by PressureHistoryTracker;
-  /// PHT::IsApplicableToRecipe routes them to PHT for history
-  /// pruning. Parallel to IsLengthPrimary on the tracker-ownership
-  /// axis.
+  /// PressureHistoryTracker's ctor fatal-errors on recipes that
+  /// fail this check. Parallel to IsLengthPrimary.
   constexpr bool IsPressurePrimary() const {
     if (!slots[0]) {
       return false;
@@ -211,11 +206,22 @@ struct ScoreRecipe {
     return false;
   }
 
-  /// True iff length is primary AND polarity is kMaximize. The
-  /// length-max search inverts the length-axis dominance direction
-  /// in LengthHistoryTracker.
+  /// True iff the recipe carries a kScheduleLength dim with
+  /// kMaximize polarity, wherever that slot sits. Inverts the
+  /// length-axis dominance direction (frontier LBs) in
+  /// ParetoHistoryTracker. False when no length dim is present.
+  /// Deliberately NOT anchored to the primary slot: the dominance
+  /// direction is a property of the length dim itself, and a
+  /// recipe with a non-primary length dim (e.g. the pipe-mix
+  /// recipe's length tie-break) needs the direction read from
+  /// that slot's polarity.
   constexpr bool IsLengthMaxMode() const {
-    return IsLengthPrimary() && slots[0]->pol == Polarity::kMaximize;
+    for (const auto &slot : slots) {
+      if (slot && slot->dim == ScoreDimension::kScheduleLength) {
+        return slot->pol == Polarity::kMaximize;
+      }
+    }
+    return false;
   }
 
   /// True iff length is primary AND any tiebreak slot is present.
@@ -431,7 +437,7 @@ class Score {
   /// of *this is >= the corresponding slot of `o`. Distinct from
   /// operator>= (lex). Pareto dominance is the correct check for
   /// multi-objective DP memo tables (PressureHistoryTracker,
-  /// LengthHistoryTracker): a lex-collapse compare can prune a
+  /// ParetoHistoryTracker): a lex-collapse compare can prune a
   /// prefix that would have won at completion when the suffix
   /// equalizes a higher-priority slot. Pareto keeps incomparable
   /// entries instead.
