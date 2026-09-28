@@ -640,6 +640,65 @@ void MachineInstrSchedulerConfig::ValidateParsedConfig() const {
             }
         }
     }
+
+    // Some waves settings are only meaningful with certain schedulers;
+    // the two rules below check that. Enforced here, at parse time,
+    // rather than in SetFunctionWavesPerEUAttributeBasedOnConfig: that
+    // function only runs for functions present in the module being
+    // compiled, which would make the config's validity depend on which
+    // TU happens to get compiled. Neither rule applies when the
+    // configured scheduler is OptSched: the single-value waves form is
+    // precisely OptSched's per-function occupancy input, and OptSched
+    // steers occupancy internally rather than through the
+    // amdgpu-waves-per-eu attribute these rules protect.
+    if (!IsOptSched()) {
+        for (const auto &entry : demangled_func_signature_to_config_) {
+            const FunctionConfig &function_config = entry.second;
+            // A single-value waves field is an OptSched-only input.
+            // Non-OptSched schedulers steer occupancy through
+            // amdgpu-waves-per-eu, which needs the explicit `<min>,<max>`
+            // pair form.
+            if (function_config.optsched_occupancy_limit_.has_value()) {
+                report_fatal_error(
+                    Twine("misched.txt: single-value waves for '") +
+                    function_config.func_signature_ +
+                    "' is OptSched-only; use `<min>,<max>` instead");
+            }
+        }
+        // A `<min>,<max>` MAX (per-kernel or all_kernels) caps how far
+        // a scheduler may raise occupancy. It has no shared enforcement
+        // point: unlike the MIN, it is never written to the
+        // amdgpu-waves-per-eu attribute (see
+        // SetFunctionWavesPerEUAttributeBasedOnConfig for why), so it
+        // only takes effect where the configured scheduler itself reads
+        // the config and applies the cap inside its own occupancy
+        // logic. MaxOccupancy, HierarchicalScheduler, and MaxIlp do;
+        // under any other scheduler the value would silently do
+        // nothing, so it is rejected instead.
+        bool any_max_configured = global_settings_.all_kernels_max_waves
+                                      .has_value();
+        const FunctionConfig *max_example = nullptr;
+        for (const auto &entry : demangled_func_signature_to_config_) {
+            if (entry.second.max_waves_per_eu_.has_value()) {
+                any_max_configured = true;
+                max_example = &entry.second;
+                break;
+            }
+        }
+        bool max_supported = mi_scheduler_ == Scheduler::MaxOccupancy ||
+                             mi_scheduler_ == Scheduler::HierarchicalScheduler ||
+                             mi_scheduler_ == Scheduler::MaxIlp;
+        if (any_max_configured && !max_supported) {
+            std::string subject =
+                max_example != nullptr
+                    ? "for '" + max_example->func_signature_ + "'"
+                    : std::string("(all_kernels_occupancy)");
+            report_fatal_error(
+                Twine("misched.txt: `<min>,<max>` max-waves ") + subject +
+                " is only supported with MaxOccupancy, "
+                "HierarchicalScheduler, or MaxIlp");
+        }
+    }
 }
 
 MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
@@ -741,17 +800,9 @@ void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Fu
     std::optional<int> max_override;
     if (HasFunctionConfig(function)) {
         const FunctionConfig *config = GetFunctionConfig(function);
-
-        // The configured scheduler is NOT OptSched (we returned above otherwise),
-        // so a single-value occupancy limit is a misuse: it is an OptSched-only
-        // input. Non-OptSched schedulers steer occupancy through
-        // amdgpu-waves-per-eu, which needs the explicit `<min>,<max>` pair form.
-        if(config->optsched_occupancy_limit_.has_value()) {
-            report_fatal_error(Twine("misched.txt: single-value waves for '") +
-                               function.getName() +
-                               "' is OptSched-only; use `<min>,<max>` instead");
-        }
-
+        // A single-value (OptSched-only) limit with a non-OptSched
+        // scheduler was rejected by ValidateParsedConfig at parse time,
+        // so only the pair form can be present here.
         min_override = config->min_waves_per_eu_;
         max_override = config->max_waves_per_eu_;
     } else {
@@ -766,25 +817,15 @@ void MachineInstrSchedulerConfig::SetFunctionWavesPerEUAttributeBasedOnConfig(Fu
     // The MAX is a "don't optimize occupancy past this" ceiling. It is NEVER
     // written to the amdgpu-waves-per-eu attribute: an attribute max pads reserved
     // registers and caps the waves the runtime launches regardless of real
-    // register use, which is exactly what we want to avoid. Instead each scheduler
-    // consumes the max its own way, so only schedulers with a place to consume it
-    // support it; the rest must reject rather than silently ignore:
-    //   - MaxOccupancy: applied as the occupancy target at scheduler start
+    // register use, which is exactly what we want to avoid. So the max is not
+    // applied here at all -- it takes effect only inside schedulers that read
+    // it and apply it to their own occupancy decisions (ValidateParsedConfig
+    // rejects it for schedulers that don't):
+    //   - MaxOccupancy: caps its occupancy target at scheduler start
     //     (createGCNMaxOccupancyMachineScheduler calls MFI->limitOccupancy(max)).
-    //   - HierarchicalScheduler: consumed internally (GetPerKernelOccupancyTarget).
-    //   - MaxIlp: ignored -- it does not hold an occupancy ceiling anyway.
-    if(max_override.has_value()) {
-        Scheduler scheduler = GetScheduler();
-        bool max_supported = scheduler == Scheduler::MaxOccupancy ||
-                             scheduler == Scheduler::HierarchicalScheduler ||
-                             scheduler == Scheduler::MaxIlp;
-        if(!max_supported) {
-            report_fatal_error(Twine("misched.txt: `<min>,<max>` max-waves for '") +
-                               function.getName() +
-                               "' is only supported with MaxOccupancy, "
-                               "HierarchicalScheduler, or MaxIlp");
-        }
-    }
+    //   - HierarchicalScheduler: caps its per-kernel occupancy target
+    //     (GetPerKernelOccupancyTarget).
+    //   - MaxIlp: never raises occupancy, so a cap is vacuously honored.
 
     // The MIN is a genuine occupancy / register-allocator floor and is written to
     // amdgpu-waves-per-eu for any scheduler (positional: a lone value is the min,
