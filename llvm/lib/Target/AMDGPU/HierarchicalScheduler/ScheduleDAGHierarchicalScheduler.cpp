@@ -113,7 +113,25 @@ void ScheduleDAGHierarchicalScheduler::SortRegionsByOriginalRegisterOnlyOccupanc
 // Called once after all regions in all blocks have been visited.
 // Sorts recorded regions, then dispatches to the configured
 // scheduling algorithm.
+bool ScheduleDAGHierarchicalScheduler::ShouldScheduleFunction() const {
+  if (!MachineInstrSchedulerConfig::GetConfig().ConfiguredSchedulerAppliesTo(
+          MF.getFunction())) {
+    llvm::outs() << "HierarchicalScheduler: skipped by kernel_scheduler "
+                 << "filter (" << MF.getName() << ")\n";
+    return false;
+  }
+  return true;
+}
+
 void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
+  if (!ShouldScheduleFunction()) {
+    // The base-class finalize still runs for its bookkeeping; the
+    // function keeps the stock pass's schedule (see the header
+    // comment on ShouldScheduleFunction).
+    ScheduleDAGMILive::finalizeSchedule();
+    return;
+  }
+
   llvm::outs() << "HierarchicalScheduler: finalizeSchedule ("
                << regions_.size() << " regions)\n";
 

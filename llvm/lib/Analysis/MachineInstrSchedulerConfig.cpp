@@ -473,6 +473,45 @@ void MachineInstrSchedulerConfig::ParseKernelLine(const std::string &rest) {
                        min_waves, max_waves));
 }
 
+void MachineInstrSchedulerConfig::ParseKernelSchedulerFilterLine(
+    const std::string &rest, bool only_mode) {
+    const char *keyword =
+        only_mode ? "kernel_scheduler_only" : "kernel_scheduler_skip";
+    // Grammar: <m|d>/<signature>. No field follows the signature, so only
+    // the FIRST '/' is a delimiter -- a demangled signature containing '/'
+    // (e.g. `operator/`) stays intact.
+    size_t slash = rest.find('/');
+    if (slash == std::string::npos) {
+        report_fatal_error(Twine("misched.txt: malformed ") + keyword +
+                           " line '" + rest + "' (expected `" + keyword +
+                           " <m|d>/<signature>`)");
+    }
+    std::string demangled_func_signature = ResolveKernelSignature(
+        StringRef(rest).substr(0, slash), StringRef(rest).substr(slash + 1),
+        Twine("misched.txt: ") + keyword + " line '" + rest + "'");
+
+    // The two line kinds are opposite polarities of one filter; mixing
+    // them in a single config has no coherent meaning, so the second
+    // kind to appear trips a fatal error (order-independent: whichever
+    // kind is in the minority still gets reported as the conflict).
+    KernelSchedulerFilterMode line_mode = only_mode
+                                              ? KernelSchedulerFilterMode::kOnly
+                                              : KernelSchedulerFilterMode::kSkip;
+    if (kernel_scheduler_filter_mode_ != KernelSchedulerFilterMode::kNone &&
+        kernel_scheduler_filter_mode_ != line_mode) {
+        report_fatal_error(
+            "misched.txt: kernel_scheduler_only and kernel_scheduler_skip "
+            "lines cannot be mixed in one config");
+    }
+    kernel_scheduler_filter_mode_ = line_mode;
+
+    if (!kernel_scheduler_filter_signatures_.insert(demangled_func_signature)
+             .second) {
+        report_fatal_error(Twine("misched.txt: duplicate ") + keyword +
+                           " line for '" + demangled_func_signature + "'");
+    }
+}
+
 void MachineInstrSchedulerConfig::ParseKernelLatenciesLine(const std::string &rest) {
     // Grammar: <m|d>/<signature>/<latency spec>. Split keeping empty fields
     // so a missing field is rejected, not silently shifted into another
@@ -497,22 +536,15 @@ void MachineInstrSchedulerConfig::ParseKernelLatenciesLine(const std::string &re
         demangled_func_signature_to_latencies_[demangled_func_signature]);
 }
 
-MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
-    // misched.txt is a line-oriented, order-independent config. Each non-blank,
-    // non-comment line is a `kernel <m|d>/<sig>/[waves]` per-function line, a
-    // `kernel_latencies <m|d>/<sig>/vmem=N,smem=N,lds=N` per-function line, or
-    // a whitespace-separated list of option tokens (a scheduler name, a bare
-    // flag, or a `<key>=<value>` setting). Options may be split across any
-    // number of lines; exactly one scheduler name must appear.
-    //
-    // Config location: if the MISCHED_CONFIG_FILE environment variable is set,
-    // it must name a readable config file -- anything else (missing file, empty
-    // value) is a fatal error, so an intended config can never silently fail to
-    // apply. If unset, fall back to misched.txt in the compiler's CWD. The env
-    // var exists because the CWD lookup breaks under out-of-source builds:
-    // cmake runs the compiler from build/, not from the directory where the
-    // driver script wrote misched.txt. Environment propagates through the whole
-    // cmake/make/hipcc subprocess chain; CWD does not.
+std::string MachineInstrSchedulerConfig::ResolveConfigFilePath() {
+    // If the MISCHED_CONFIG_FILE environment variable is set, it must name
+    // a readable config file -- anything else (missing file, empty value)
+    // is a fatal error, so an intended config can never silently fail to
+    // apply. If unset, fall back to misched.txt in the compiler's CWD. The
+    // env var exists because the CWD lookup breaks under out-of-source
+    // builds: cmake runs the compiler from build/, not from the directory
+    // where the driver script wrote misched.txt. Environment propagates
+    // through the whole cmake/make/hipcc subprocess chain; CWD does not.
     const char *env_config_path = ::getenv("MISCHED_CONFIG_FILE");
     if (env_config_path != nullptr) {
         std::ifstream probe(env_config_path);
@@ -520,68 +552,110 @@ MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
             report_fatal_error(Twine("MISCHED_CONFIG_FILE is set but not "
                                      "readable: '") + env_config_path + "'");
         }
+        return env_config_path;
     }
-    std::ifstream misched_config_file(
-        env_config_path != nullptr ? env_config_path : "misched.txt");
-    if (misched_config_file) {
-        has_config_ = true;
+    return "misched.txt";
+}
 
-        std::string line;
-        while (std::getline(misched_config_file, line)) {
-            StringRef trimmed = StringRef(line).trim();
-            if (trimmed.empty() || trimmed.front() == '#') {
-                continue;
-            }
-
-            size_t ws = trimmed.find_first_of(" \t");
-            StringRef first_word = trimmed.substr(0, ws);
-            if (first_word == "kernel") {
-                // Signatures contain spaces, so a kernel line is not
-                // whitespace-tokenized: the text after the keyword is parsed
-                // as `<m|d>/<signature>/[waves]`.
-                StringRef rest = (ws == StringRef::npos) ? StringRef() : trimmed.substr(ws).trim();
-                ParseKernelLine(rest.str());
-                continue;
-            }
-            if (first_word == "kernel_latencies") {
-                // Not whitespace-tokenized, for the same reason as `kernel`.
-                StringRef rest = (ws == StringRef::npos) ? StringRef() : trimmed.substr(ws).trim();
-                ParseKernelLatenciesLine(rest.str());
-                continue;
-            }
-
-            for (const std::string &token : SplitByWhitespace(trimmed.str())) {
-                ParseOptionToken(token);
-            }
-        }
-
-        if (!scheduler_set_) {
-            report_fatal_error("misched.txt: no scheduler specified");
-        }
-
-        // all_kernels_occupancy (a blanket occupancy default) is mutually
-        // exclusive with any per-kernel waves override: mixing a global default
-        // with a per-kernel `<min>,<max>` (or the single-value OptSched limit) is
-        // ambiguous. Checked after the full parse so it holds regardless of line
-        // order. A bare `kernel <m|d>/<sig>` with no waves field is fine -- it
-        // only registers the function and carries no override.
-        if (global_settings_.all_kernels_min_waves.has_value() ||
-            global_settings_.all_kernels_max_waves.has_value()) {
-            for (const auto &entry : demangled_func_signature_to_config_) {
-                const FunctionConfig &function_config = entry.second;
-                if (function_config.min_waves_per_eu_.has_value() ||
-                    function_config.max_waves_per_eu_.has_value() ||
-                    function_config.optsched_occupancy_limit_.has_value()) {
-                    report_fatal_error(
-                        Twine("misched.txt: all_kernels_occupancy cannot be "
-                              "combined with a per-kernel waves setting for '") +
-                        function_config.func_signature_ + "'");
-                }
-            }
-        }
-
-        DebugPrint();
+void MachineInstrSchedulerConfig::ParseConfigLine(llvm::StringRef trimmed) {
+    size_t ws = trimmed.find_first_of(" \t");
+    StringRef first_word = trimmed.substr(0, ws);
+    // The per-function line kinds are dispatched on their keyword and are
+    // NOT whitespace-tokenized: signatures contain spaces, so everything
+    // after the keyword goes to the line kind's own parser.
+    StringRef rest =
+        (ws == StringRef::npos) ? StringRef() : trimmed.substr(ws).trim();
+    if (first_word == "kernel") {
+        ParseKernelLine(rest.str());
+        return;
     }
+    if (first_word == "kernel_latencies") {
+        ParseKernelLatenciesLine(rest.str());
+        return;
+    }
+    if (first_word == "kernel_scheduler_only" ||
+        first_word == "kernel_scheduler_skip") {
+        ParseKernelSchedulerFilterLine(rest.str(),
+                                       first_word == "kernel_scheduler_only");
+        return;
+    }
+    // Anything else is a whitespace-separated list of option tokens (a
+    // scheduler name, a bare flag, or a `<key>=<value>` setting).
+    for (const std::string &token : SplitByWhitespace(trimmed.str())) {
+        ParseOptionToken(token);
+    }
+}
+
+void MachineInstrSchedulerConfig::ParseConfigFile(
+    std::ifstream &misched_config_file) {
+    std::string line;
+    while (std::getline(misched_config_file, line)) {
+        StringRef trimmed = StringRef(line).trim();
+        if (trimmed.empty() || trimmed.front() == '#') {
+            continue;
+        }
+        ParseConfigLine(trimmed);
+    }
+}
+
+void MachineInstrSchedulerConfig::ValidateParsedConfig() const {
+    if (!scheduler_set_) {
+        report_fatal_error("misched.txt: no scheduler specified");
+    }
+
+    // The per-function scheduler filter is enforced by the schedulers
+    // that run as passes AFTER the stock machine scheduler (a
+    // filtered-out function keeps the stock schedule). Schedulers that
+    // ARE the stock pass (MaxOccupancy, MaxIlp, the Iterative
+    // variants) have nothing to fall back to, so a filter with them is
+    // rejected rather than silently ignored.
+    if (kernel_scheduler_filter_mode_ != KernelSchedulerFilterMode::kNone &&
+        mi_scheduler_ != Scheduler::HierarchicalScheduler &&
+        mi_scheduler_ != Scheduler::AcoOptSched &&
+        mi_scheduler_ != Scheduler::BnbOptSched) {
+        report_fatal_error(
+            Twine("misched.txt: kernel_scheduler_only/skip lines are not "
+                  "supported with scheduler '") + GetSchedulerAsString() +
+            "' (supported: HierarchicalScheduler, AcoOptSched, "
+            "BnbOptSched)");
+    }
+
+    // all_kernels_occupancy (a blanket occupancy default) is mutually
+    // exclusive with any per-kernel waves override: mixing a global default
+    // with a per-kernel `<min>,<max>` (or the single-value OptSched limit) is
+    // ambiguous. Checked after the full parse so it holds regardless of line
+    // order. A bare `kernel <m|d>/<sig>` with no waves field is fine -- it
+    // only registers the function and carries no override.
+    if (global_settings_.all_kernels_min_waves.has_value() ||
+        global_settings_.all_kernels_max_waves.has_value()) {
+        for (const auto &entry : demangled_func_signature_to_config_) {
+            const FunctionConfig &function_config = entry.second;
+            if (function_config.min_waves_per_eu_.has_value() ||
+                function_config.max_waves_per_eu_.has_value() ||
+                function_config.optsched_occupancy_limit_.has_value()) {
+                report_fatal_error(
+                    Twine("misched.txt: all_kernels_occupancy cannot be "
+                          "combined with a per-kernel waves setting for '") +
+                    function_config.func_signature_ + "'");
+            }
+        }
+    }
+}
+
+MachineInstrSchedulerConfig::MachineInstrSchedulerConfig() {
+    // misched.txt is a line-oriented, order-independent config; see
+    // ParseConfigLine for the line grammar and ResolveConfigFilePath for
+    // how the file is located. Cross-line rules live in
+    // ValidateParsedConfig, which runs after the whole file is parsed so
+    // they hold regardless of line order.
+    std::ifstream misched_config_file(ResolveConfigFilePath());
+    if (!misched_config_file) {
+        return;  // no config; has_config_ stays false
+    }
+    has_config_ = true;
+    ParseConfigFile(misched_config_file);
+    ValidateParsedConfig();
+    DebugPrint();
 }
 
 const MachineInstrSchedulerConfig::FunctionConfig *MachineInstrSchedulerConfig::GetFunctionConfigFromDemangledFunctionSignature(const std::string &demangled_signature) const {
@@ -599,6 +673,25 @@ const MachineInstrSchedulerConfig::FunctionConfig *MachineInstrSchedulerConfig::
 
 const MachineInstrSchedulerConfig::FunctionConfig *MachineInstrSchedulerConfig::GetFunctionConfigFromMangledFunctionSignature(const llvm::StringRef &mangled_signature) const {
     return GetFunctionConfigFromMangledFunctionSignature(mangled_signature.str());
+}
+
+bool MachineInstrSchedulerConfig::
+    ConfiguredSchedulerAppliesToMangledFunctionSignature(
+        llvm::StringRef mangled_signature) const {
+    if (kernel_scheduler_filter_mode_ == KernelSchedulerFilterMode::kNone) {
+        return true;
+    }
+    bool listed = kernel_scheduler_filter_signatures_.count(
+                      DemangleFunctionSignature(mangled_signature.str())) > 0;
+    return kernel_scheduler_filter_mode_ == KernelSchedulerFilterMode::kOnly
+               ? listed
+               : !listed;
+}
+
+bool MachineInstrSchedulerConfig::ConfiguredSchedulerAppliesTo(
+    const Function &function) const {
+    return ConfiguredSchedulerAppliesToMangledFunctionSignature(
+        function.getName());
 }
 
 const MachineInstrSchedulerConfig::KernelLatencies *
@@ -808,6 +901,21 @@ std::string MachineInstrSchedulerConfig::ToString() const {
     // Per-func options
     for(const auto &signature_config : demangled_func_signature_to_config_) {
         result += signature_config.second.ToString();
+    }
+
+    // Per-function scheduler filter (std::set iteration = sorted, so the
+    // echo is stable across runs regardless of line order in the file)
+    if (kernel_scheduler_filter_mode_ != KernelSchedulerFilterMode::kNone) {
+        result += std::string("\tScheduler filter (") +
+                  (kernel_scheduler_filter_mode_ ==
+                           KernelSchedulerFilterMode::kOnly
+                       ? "configured scheduler ONLY on"
+                       : "configured scheduler SKIPS") +
+                  "):\n";
+        for (const std::string &signature :
+             kernel_scheduler_filter_signatures_) {
+            result += "\t\t" + signature + "\n";
+        }
     }
 
     // Per-kernel latency overrides

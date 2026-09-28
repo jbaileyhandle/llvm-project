@@ -55,6 +55,17 @@ public:
   // configured scheduling algorithm (e.g., MaliciousScheduler).
   void finalizeSchedule() override;
 
+  // True iff the hierarchical scheduler should reschedule this
+  // function; when false, also prints the reason it declined. Any
+  // future per-function gate belongs here, next to the current one:
+  // the per-function scheduler filter (kernel_scheduler_only / _skip
+  // lines in misched.txt). A declined function keeps the schedule the
+  // stock MachineScheduler pass already produced — this pass runs
+  // immediately after it (the "packaged pair" in AMDGPUTargetMachine),
+  // so declining IS selecting the default scheduler for this function,
+  // and the resulting code matches a plain default build.
+  bool ShouldScheduleFunction() const;
+
   // Sort `regions_` ascending by the integer occupancy implied by
   // each region's original peak pressure. After the sort, `regions_[0]`
   // is the region whose original order produces the lowest occupancy

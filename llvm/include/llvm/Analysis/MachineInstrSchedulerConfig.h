@@ -6,6 +6,8 @@
 #include <vector>
 #include <map>
 #include <optional>
+#include <set>
+#include <iosfwd>
 
 #include "llvm/IR/Function.h"
 
@@ -250,6 +252,22 @@ class MachineInstrSchedulerConfig {
         const KernelLatencies *GetKernelLatenciesForMangledFunctionSignature(
             llvm::StringRef mangled_signature) const;
 
+        // Per-function scheduler filter, from `kernel_scheduler_only` /
+        // `kernel_scheduler_skip <m|d>/<signature>` lines. True iff the
+        // CONFIGURED scheduler should schedule `function`; false means the
+        // function keeps the schedule the stock pipeline produced (the
+        // default MaxOccupancy machine scheduler always runs first, so a
+        // filtered-out function's code matches a plain default build).
+        // With no filter lines, always true. This is the canonical
+        // per-function gating mechanism for every non-default scheduler;
+        // OptSched's older opt-in (a bare `kernel` line registers a
+        // function into OptSched) still works but is deprecated in favor
+        // of these lines. Consumers: the HierarchicalScheduler pass
+        // (finalizeSchedule early-out) and OptSched (isOptSchedEnabled).
+        bool ConfiguredSchedulerAppliesTo(const Function &function) const;
+        bool ConfiguredSchedulerAppliesToMangledFunctionSignature(
+            llvm::StringRef mangled_signature) const;
+
         // If there is a configuration for function, set waves per eu attribute
         // for the function based on the configuration
         void SetFunctionWavesPerEUAttributeBasedOnConfig(Function &function) const;
@@ -309,6 +327,22 @@ class MachineInstrSchedulerConfig {
 
     private:
         MachineInstrSchedulerConfig();
+
+        // Constructor stages, in call order. Resolve the config file's
+        // path (MISCHED_CONFIG_FILE env var, else ./misched.txt; fatal if
+        // the env var is set but unreadable) ...
+        static std::string ResolveConfigFilePath();
+        // ... parse it line by line (trim, skip blanks and # comments) ...
+        void ParseConfigFile(std::ifstream &misched_config_file);
+        // ... dispatching each line on its first word (the per-function
+        // line kinds `kernel`, `kernel_latencies`, `kernel_scheduler_only`
+        // / `_skip`; anything else is whitespace-tokenized option
+        // tokens) ...
+        void ParseConfigLine(llvm::StringRef trimmed);
+        // ... then enforce the cross-line rules that need the whole file
+        // parsed (exactly one scheduler; scheduler-filter support;
+        // all_kernels_occupancy vs per-kernel waves exclusivity).
+        void ValidateParsedConfig() const;
 
         // Return the FunctionConfig for the function with a given demangled signature
         // Return nullptr if not found
@@ -375,6 +409,17 @@ class MachineInstrSchedulerConfig {
         // keyword).
         void ParseKernelLatenciesLine(const std::string &rest);
 
+        // Parse a `kernel_scheduler_only` / `kernel_scheduler_skip
+        // <m|d>/<signature>` per-function scheduler-filter line (the text
+        // after the leading keyword; `only_mode` says which keyword).
+        // Unlike the kernel/kernel_latencies grammar there is no field
+        // after the signature, so only the FIRST '/' splits tag from
+        // signature -- a demangled signature containing '/' (e.g.
+        // `operator/`) parses correctly. Fatal on: mixing the two line
+        // kinds in one config, duplicate signature within the kind.
+        void ParseKernelSchedulerFilterLine(const std::string &rest,
+                                            bool only_mode);
+
         // Map a scheduler-name token to the Scheduler enum, or
         // Scheduler::InvalidOption if it is not a scheduler name.
         static Scheduler GetSchedulerFromName(llvm::StringRef name);
@@ -384,6 +429,17 @@ class MachineInstrSchedulerConfig {
         bool scheduler_set_ = false;
         std::unordered_map<std::string, FunctionConfig> demangled_func_signature_to_config_;
         std::unordered_map<std::string, KernelLatencies> demangled_func_signature_to_latencies_;
+
+        // Per-function scheduler filter (see ConfiguredSchedulerAppliesTo).
+        // kNone = no filter lines seen (configured scheduler applies
+        // everywhere); kOnly / kSkip = the mode of the filter lines seen
+        // (mixing modes is rejected at parse). Signatures are stored
+        // demangled, in a std::set so iteration (config echo) is in a
+        // stable sorted order.
+        enum class KernelSchedulerFilterMode { kNone, kOnly, kSkip };
+        KernelSchedulerFilterMode kernel_scheduler_filter_mode_ =
+            KernelSchedulerFilterMode::kNone;
+        std::set<std::string> kernel_scheduler_filter_signatures_;
 
         // Typed boolean flags (the spelling -> field table is in the .cpp).
         Flags flags_;

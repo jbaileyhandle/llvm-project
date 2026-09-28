@@ -1016,10 +1016,20 @@ bool ScheduleDAGOptSched::isOptSchedEnabled() const {
   // ===================================================================
   // jbaile
   // ===================================================================
+    const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
+    // Per-function scheduler filter (kernel_scheduler_only / _skip lines
+    // in misched.txt): an additional gate over the opt-in mechanisms
+    // below, checked first so it composes with them — e.g.
+    // run_on_all_functions + kernel_scheduler_skip means "every function
+    // except these". This is the canonical filter mechanism shared with
+    // the HierarchicalScheduler; the bare-`kernel`-line opt-in below
+    // still works but is deprecated in favor of kernel_scheduler_only.
+    if (!mis_config.ConfiguredSchedulerAppliesTo(C->MF->getFunction())) {
+        return false;
+    }
     // If we've configured for all functions to compile w/ OptSched
     // Or we have specifically configured this fucntion
     // Then OptSched should be enabled
-    const MachineInstrSchedulerConfig &mis_config = MachineInstrSchedulerConfig::GetConfig();
     const MachineInstrSchedulerConfig::FunctionConfig *func_config =  mis_config.GetFunctionConfigFromMangledFunctionSignature(C->MF->getFunction().getName());
     bool function_has_config = func_config != nullptr;
     if(function_has_config || mis_config.GetFlags().run_on_all_functions) {
