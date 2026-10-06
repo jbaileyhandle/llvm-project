@@ -41,6 +41,7 @@ namespace {
         {"disable_mem_clustering", &Flags::disable_mem_clustering},
         {"disable_max_occ_effective_max_waves_cap",
          &Flags::disable_max_occ_effective_max_waves_cap},
+        {"legacy_sgpr_occupancy_table", &Flags::legacy_sgpr_occupancy_table},
         {"run_on_all_functions", &Flags::run_on_all_functions},
         {"run_regardless_of_heuristic_outcome", &Flags::run_regardless_of_heuristic_outcome},
         {"use_continuous_occupancy_score", &Flags::use_continuous_occupancy_score},

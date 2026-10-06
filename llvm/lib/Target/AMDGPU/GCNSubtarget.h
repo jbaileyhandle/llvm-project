@@ -1136,6 +1136,23 @@ public:
   /// SGPRs
   unsigned getOccupancyWithNumSGPRs(unsigned SGPRs) const;
 
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  /// LLVM's original SGPR -> occupancy table, unchanged. Ignores the SGPRs a
+  /// trap handler adds per wave. getOccupancyWithNumSGPRs uses it only when
+  /// misched.txt sets legacy_sgpr_occupancy_table (and on GFX10+, where SGPRs
+  /// do not limit occupancy).
+  unsigned getOccupancyWithNumSGPRsLegacy(unsigned SGPRs) const;
+
+  /// Trap-aware SGPR -> occupancy for VI-GFX9 with a trap handler: the inverse
+  /// of getMaxNumSGPRs (which reserves TRAP_NUM_SGPRS = 16 per wave), written
+  /// as a static table: <=64 -> 10, <=80 -> 8, <=96 -> 7, else 6. Matches
+  /// measured gfx906 residency (sandbox
+  /// investigations/2026_10_05_mcpr_unroll_repro/sgpr_trap_test).
+  unsigned getOccupancyWithNumSGPRsTrapAware(unsigned SGPRs) const;
+  //========================================================================================
+
   /// Return the maximum number of waves per SIMD for kernels using \p VGPRs
   /// VGPRs
   unsigned getOccupancyWithNumVGPRs(unsigned VGPRs) const;

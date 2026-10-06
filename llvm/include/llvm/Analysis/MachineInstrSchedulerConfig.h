@@ -69,6 +69,16 @@ class MachineInstrSchedulerConfig {
             // MaxOccupancy factory, and Hierarchical's ApplyOccupancyTargetCap are
             // unaffected. Consumed in GCNSchedStrategy.cpp.
             bool disable_max_occ_effective_max_waves_cap = false;
+            // Use LLVM's original SGPR -> occupancy table
+            // (GCNSubtarget::getOccupancyWithNumSGPRsLegacy: <=80 -> 10,
+            // <=88 -> 9, <=100 -> 8 on VI-GFX9) instead of the default
+            // trap-aware one. The original table ignores the 16 SGPRs the
+            // hardware adds per wave when a trap handler is installed (always
+            // under KFD with CWSR enabled), so it overstates occupancy for
+            // SGPR-limited kernels; the default inverts getMaxNumSGPRs, which
+            // reserves them. Consumed in AMDGPUSubtarget.cpp and in OptSched's
+            // host-side bb_spill.hip.cpp.
+            bool legacy_sgpr_occupancy_table = false;
             // OptSched (AcoOptSched, BnbOptSched).
             bool run_on_all_functions = false;
             bool run_regardless_of_heuristic_outcome = false;

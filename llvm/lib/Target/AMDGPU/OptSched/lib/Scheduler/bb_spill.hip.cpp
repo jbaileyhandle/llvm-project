@@ -12,6 +12,7 @@
 #include "opt-sched/Scheduler/utilities.h"
 #include "opt-sched/Scheduler/dev_defines.h"
 #include "Wrapper/AMDGPU/OptSchedGCNTarget.h"
+#include "llvm/Analysis/MachineInstrSchedulerConfig.h"
 #include <algorithm>
 #include <cstdio>
 #include <iostream>
@@ -1219,7 +1220,34 @@ static unsigned getOccupancyWithNumVGPRs(unsigned VGPRs) {
 
 __host__ __device__
 static unsigned getOccupancyWithNumSGPRs(unsigned SGPRs) {
-  // copied from llvm/lib/Target/AMDGPU/AMDGPUSubtarget.cpp
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Host side: trap-aware by default, the same static table as
+  // GCNSubtarget::getOccupancyWithNumSGPRsTrapAware (gfx9 with a trap
+  // handler; see the derivation there). misched.txt
+  // legacy_sgpr_occupancy_table falls through to the original table below;
+  // the flag is read once (misched.txt is fixed for the whole compile).
+  // Device side (GPU-run ACO) is unchanged: it always uses the original table.
+#ifndef __HIP_DEVICE_COMPILE__
+  static const bool UseLegacyTable = llvm::MachineInstrSchedulerConfig::GetConfig()
+                                         .GetFlags()
+                                         .legacy_sgpr_occupancy_table;
+  if (!UseLegacyTable) {
+    if (SGPRs <= 64)
+      return 10;
+    if (SGPRs <= 80)
+      return 8;
+    if (SGPRs <= 96)
+      return 7;
+    return 6;
+  }
+#endif
+  //========================================================================================
+  // copied from llvm/lib/Target/AMDGPU/AMDGPUSubtarget.cpp (the legacy table;
+  // see the notes on GCNSubtarget::getOccupancyWithNumSGPRsLegacy: it ignores
+  // the trap handler's 16 SGPRs, and its <= 88 -> 9 step assumes 8-SGPR
+  // allocation blocks, while gfx9 allocates in blocks of 16)
   if (SGPRs <= 80)
     return 10;
   if (SGPRs <= 88)

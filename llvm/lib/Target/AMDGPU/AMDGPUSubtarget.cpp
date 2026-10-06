@@ -703,10 +703,76 @@ bool GCNSubtarget::useVGPRIndexMode() const {
 bool GCNSubtarget::useAA() const { return UseAA; }
 
 unsigned GCNSubtarget::getOccupancyWithNumSGPRs(unsigned SGPRs) const {
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // Trap-aware by default on VI-GFX9 when a trap handler is in use; the
+  // original table otherwise (GFX10+, pre-VI, no trap handler) or when
+  // misched.txt sets legacy_sgpr_occupancy_table. See
+  // getOccupancyWithNumSGPRsTrapAware. Called in hot loops (every
+  // GCNRegPressure::getOccupancy, e.g. each step of the Hierarchical search),
+  // so the flag is read once: misched.txt is fixed for the whole compile.
+  static const bool UseLegacyTable = MachineInstrSchedulerConfig::GetConfig()
+                                         .GetFlags()
+                                         .legacy_sgpr_occupancy_table;
+  if (UseLegacyTable || getGeneration() >= AMDGPUSubtarget::GFX10 ||
+      getGeneration() < AMDGPUSubtarget::VOLCANIC_ISLANDS ||
+      !isTrapHandlerEnabled())
+    return getOccupancyWithNumSGPRsLegacy(SGPRs);
+  return getOccupancyWithNumSGPRsTrapAware(SGPRs);
+  //========================================================================================
+}
+
+unsigned GCNSubtarget::getOccupancyWithNumSGPRsTrapAware(unsigned SGPRs) const {
+  //========================================================================================
+  // jbaile
+  //========================================================================================
+  // VI-GFX9 with a trap handler (the only case getOccupancyWithNumSGPRs sends
+  // here). Each wave is allocated SGPRs + 16 (trap handler), rounded up to the
+  // 16-SGPR granule, out of 800 per SIMD; occupancy = 800 / allocation, max 10.
+  // Equivalently the inverse of getMaxNumSGPRs(W) =
+  // round_down_16(800 / W - 16), written out as a static table like the legacy
+  // version (this runs in hot loops):
+  //   W = 10: 80  - 16 = 64        -> SGPRs <= 64
+  //   W =  9: 88  - 16 = 72 -> 64  -> unreachable: no allocation between 81
+  //                                   and 88 is a multiple of 16
+  //   W =  8: 100 - 16 = 84 -> 80  -> SGPRs <= 80
+  //   W =  7: 114 - 16 = 98 -> 96  -> SGPRs <= 96
+  //   W =  6: 133 - 16 = 117 -> 112 -> everything above (SGPR counts stop
+  //                                   below 112)
+  // Measured on gfx906 under KFD (CWSR trap handler), all 240 SIMDs: 66-80
+  // SGPRs -> 8, 84-92 -> 7, 98 -> 6 waves (sandbox investigations/
+  // 2026_10_05_mcpr_unroll_repro/sgpr_trap_test); the legacy table says
+  // 10, 9-8, 8 for those.
+  if (SGPRs <= 64)
+    return 10;
+  if (SGPRs <= 80)
+    return 8;
+  if (SGPRs <= 96)
+    return 7;
+  return 6;
+  //========================================================================================
+}
+
+unsigned GCNSubtarget::getOccupancyWithNumSGPRsLegacy(unsigned SGPRs) const {
   if (getGeneration() >= AMDGPUSubtarget::GFX10)
     return getMaxWavesPerEU();
 
   if (getGeneration() >= AMDGPUSubtarget::VOLCANIC_ISLANDS) {
+    //========================================================================================
+    // jbaile
+    //========================================================================================
+    // Original LLVM table, unchanged. Two known issues on VI-GFX9:
+    //  - It ignores the 16 SGPRs per wave a trap handler adds (measured on
+    //    gfx906; see getOccupancyWithNumSGPRsTrapAware).
+    //  - Its "<= 88 -> 9" step implies SGPRs are allocated in blocks of 8
+    //    (88 = 11 x 8), but getSGPRAllocGranule is 16 on VI+. With 16-SGPR
+    //    blocks no allocation falls between 81 and 88 (80 gives 10 waves, the
+    //    next block, 96, gives 8), so occupancy 9 is unreachable and 81-88
+    //    SGPRs should give 8. Measured with a trap handler: 70 SGPRs (+16 = 86)
+    //    ran 8 waves, not the 9 that 8-SGPR blocks would allow. Not measured
+    //    without a trap handler (every wave here has one).
+    //========================================================================================
     if (SGPRs <= 80)
       return 10;
     if (SGPRs <= 88)
