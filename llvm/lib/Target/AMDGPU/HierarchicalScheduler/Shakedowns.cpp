@@ -83,6 +83,63 @@ void CheckTransitiveReduction(ScheduleGraph &graph) {
   llvm::outs() << "\n";
 }
 
+// Reduced-graph edges as (from, to) debug-name pairs, so edge sets from
+// two separately built graphs can be compared. Debug names, not
+// ToString(): ToString embeds the node's globally unique id, which
+// differs between builds.
+std::set<std::pair<std::string, std::string>>
+ReducedEdgeNames(const ScheduleGraph &graph) {
+  std::set<std::pair<std::string, std::string>> edges;
+  const ReducedGraph &reduced = graph.GetReducedGraph();
+  for (int topo_idx = 0; topo_idx < reduced.size; ++topo_idx) {
+    for (int succ_topo_idx : reduced.successors_by_topo_index[topo_idx]) {
+      edges.insert({graph.GetTopoOrder()[topo_idx]->GetDebugName().str(),
+                    graph.GetTopoOrder()[succ_topo_idx]->GetDebugName().str()});
+    }
+  }
+  return edges;
+}
+
+// Verifies that weak edges contribute neither reachability nor
+// reduced-graph edges. Adds kCluster edges between test-DAG nodes with
+// no strong path between them -- D<->E in both directions, so one
+// points backward in the topo order, plus H->C -- and checks that
+// those pairs stay unreachable and the reduced graph is unchanged.
+void CheckWeakEdgesIgnoredByReachability() {
+  auto baseline = ScheduleGraph::BuildTestDAG();
+  baseline->ValidateAndComputeTopologicalOrder();
+  baseline->ComputeTransitiveReductionAndReachability();
+
+  auto graph = ScheduleGraph::BuildTestDAG();
+  // BuildTestDAG emplacement order: [A, C, D, E, F, G, H]
+  ScheduleNode *c = &graph->Nodes()[1];
+  ScheduleNode *d = &graph->Nodes()[2];
+  ScheduleNode *e = &graph->Nodes()[3];
+  ScheduleNode *h = &graph->Nodes()[6];
+  graph->AddEdge(d, e, ScheduleEdge::kCluster);
+  graph->AddEdge(e, d, ScheduleEdge::kCluster);
+  graph->AddEdge(h, c, ScheduleEdge::kCluster);
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeTransitiveReductionAndReachability();
+
+  int mismatches = 0;
+  const std::pair<ScheduleNode *, ScheduleNode *> weak_pairs[] = {
+      {d, e}, {e, d}, {h, c}};
+  for (const auto &[from, to] : weak_pairs) {
+    if (graph->IsReachableInDag(from, to)) {
+      llvm::outs() << "    " << from->ToString() << " reaches "
+                   << to->ToString() << " through a weak edge\n";
+      ++mismatches;
+    }
+  }
+  if (ReducedEdgeNames(*graph) != ReducedEdgeNames(*baseline)) {
+    llvm::outs() << "    reduced graph changed by weak edges\n";
+    ++mismatches;
+  }
+  llvm::outs() << "  Weak edges ignored by reachability: "
+               << (mismatches == 0 ? "PASS" : "FAIL") << "\n";
+}
+
 // Dumps the computed dominator tree on the test DAG. Print-only.
 void CheckDominatorTree(ScheduleGraph &graph) {
   graph.ComputeDominatorTree();
@@ -670,6 +727,7 @@ void RunTestDAGShakedown(const GCNSubtarget &st) {
   llvm::outs() << "\n";
 
   CheckTransitiveReduction(*test_graph);
+  CheckWeakEdgesIgnoredByReachability();
   CheckDominatorTree(*test_graph);
   CheckCriticalPath(*test_graph);
   CheckCriticalPathFromEntry(*test_graph);

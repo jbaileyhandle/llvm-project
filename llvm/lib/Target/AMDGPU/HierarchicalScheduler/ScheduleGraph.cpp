@@ -717,6 +717,11 @@ void ScheduleGraph::ComputeTransitiveReductionAndReachability() {
     ScheduleNode *curr_node = topo_order_[curr_topo_idx];
 
     for (const ScheduleEdge &succ_edge : curr_node->Successors()) {
+      // Weak edges are scheduling hints, not dependences: they never
+      // make a node reachable and never appear in the reduced graph.
+      if (succ_edge.IsWeakEdge()) {
+        continue;
+      }
       int succ_topo_idx = succ_edge.node_->GetTopoIndex();
 
       if (reachability_by_topo_index_[curr_topo_idx].test(succ_topo_idx)) {

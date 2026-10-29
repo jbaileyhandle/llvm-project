@@ -1234,6 +1234,10 @@ public:
   /// Compute the transitive reduction of this graph. Stores the result
   /// internally. Requires topo sort to have been computed first.
   ///
+  /// Only strong edges are considered. Weak edges (cluster and weak
+  /// hints) are scheduling preferences, not dependences, so they
+  /// contribute neither reachability nor reduced-graph edges.
+  ///
   /// Uses a single-pass algorithm: iterate nodes in reverse topo order,
   /// process successors in ascending topo order (closest first). If a
   /// successor is already reachable via a previously processed closer
@@ -1262,7 +1266,7 @@ public:
   }
 
   /// Does the node at topo index `from_topo_idx` reach the node at
-  /// topo index `to_topo_idx` along directed edges in the original
+  /// topo index `to_topo_idx` along strong edges of the original
   /// (non-reduced) graph? A node always reaches itself.
   ///
   /// Bare lookup; caller is responsible for ensuring HasReachability
@@ -1280,7 +1284,8 @@ public:
 
   /// Compute the dominator tree from the transitively reduced graph.
   /// Stores the result internally. Requires transitive reduction to have
-  /// been computed first.
+  /// been computed first. Like the reduced graph, it reflects strong
+  /// edges only.
   void ComputeDominatorTree();
 
   /// Whether ComputeDominatorTree() has been called.
