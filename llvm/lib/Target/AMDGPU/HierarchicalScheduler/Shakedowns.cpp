@@ -15,6 +15,7 @@
 #include "ScheduleDAGHierarchicalScheduler.h"
 #include "BfsDpSearch.h"
 #include "BfsDpSettings.h"
+#include "ContinuousOccupancyScorer.h"
 #include "DecomposeAndSchedule.h"
 #include "DfsSearch.h"
 #include "DominatorTree.h"
@@ -3946,7 +3947,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
 // the same optimum: the schedule whose worst-pressure edge has the
 // lowest pressure. DFS picks by max_pressure_ across the schedule;
 // BFS-DP picks by min-along-path edge score. Since
-// ComputeContinuousOccupancyScore is monotonically decreasing in
+// the continuous occupancy score is monotonically decreasing in
 // pressure, "min score along the path" corresponds to "max pressure
 // on the path's worst edge" — the same definition of peak — so the
 // two algorithms must agree.
@@ -4174,9 +4175,7 @@ void RunGCNRegisterTrackerShakedown(ScheduleGraph &graph,
 // scheduling steps, of the continuous occupancy score of cur_pressure_,
 // and Unschedule subtracts each step back out exactly (round-trips to
 // 0). Independently recomputes each step's expected contribution from
-// cur_pressure_ via the formula-based ComputeContinuousOccupancyScore,
-// which also cross-checks the tracker's table-backed lookup against the
-// formula (the tables are built from that formula).
+// cur_pressure_ via ContinuousOccupancyScorer directly.
 void RunOccupancyAreaTrackingShakedown(ScheduleGraph &graph,
                                        const MachineFunction &mf) {
   llvm::outs() << "  Occupancy-area tracking shakedown:\n";
@@ -4198,8 +4197,9 @@ void RunOccupancyAreaTrackingShakedown(ScheduleGraph &graph,
     int step = 0;
     if (node->IsSchedulingUnit()) {
       const GCNRegPressure &cur = tracker.GetCurrentPressure();
-      step = GCNRegisterTracker::ComputeContinuousOccupancyScore(
-          st, cur.getVGPRNum(st.hasGFX90AInsts()), cur.getSGPRNum());
+      step = ContinuousOccupancyScorer::Get(st).Score(
+          static_cast<int>(cur.getVGPRNum(st.hasGFX90AInsts())),
+          static_cast<int>(cur.getSGPRNum()));
     }
     contrib.push_back(step);
     expected_area += step;
@@ -5500,7 +5500,8 @@ void RunScoreRecipeShakedown(ScheduleGraph &graph,
   // Local alias for the occupancy score multiplier. One integer
   // occupancy step is worth M points in the continuous score, so
   // each bracket occupies [occ*M, (occ+1)*M).
-  constexpr int M = GCNRegisterTracker::kOccScoreMultiplier;
+  constexpr int M = ContinuousOccupancyScorer::kOccScoreMultiplier;
+  const ContinuousOccupancyScorer &scorer = ContinuousOccupancyScorer::Get(st);
   int max_waves = static_cast<int>(st.getMaxWavesPerEU());
 
   llvm::outs() << "  ScoreRecipe shakedown:\n";
@@ -5513,18 +5514,26 @@ void RunScoreRecipeShakedown(ScheduleGraph &graph,
   // [(occ-1)*M, occ*M) — the range of the next-lower bracket. That
   // single bound catches both "integer occ dropped by 1" and "didn't
   // overshoot into the bracket below that."
+  //
+  // At occ = 1 the ceiling is the hardware VGPR limit, so ceil + 1 is
+  // one register over the limit and must score exactly -1.
   llvm::outs() << "    VGPR cliff sweep (sgpr=0):\n";
   llvm::outs() << "      max_waves=" << max_waves << "\n";
   for (int occ = max_waves; occ >= 1; --occ) {
     unsigned ceil = st.getMaxNumVGPRs(occ);
-    int score_at = GCNRegisterTracker::ComputeContinuousOccupancyScore(
-        st, ceil, 0);
-    int score_above = GCNRegisterTracker::ComputeContinuousOccupancyScore(
-        st, ceil + 1, 0);
+    int score_at = scorer.Score(static_cast<int>(ceil), 0);
+    int score_above = scorer.Score(static_cast<int>(ceil) + 1, 0);
     int expected_at = M * occ;
     bool pass_at = (score_at == expected_at);
-    bool pass_step = (score_above >= (occ - 1) * M) &&
-                     (score_above < occ * M);
+    bool pass_step;
+    if (occ > 1) {
+      // One past this occupancy's ceiling: the next lower occupancy's
+      // band.
+      pass_step = (score_above >= (occ - 1) * M) && (score_above < occ * M);
+    } else {
+      // Occupancy 1's ceiling is the hardware limit: one over scores -1.
+      pass_step = (score_above == -1);
+    }
     llvm::outs() << "      occ=" << occ << " ceil=" << ceil
                  << " score@ceil=" << score_at
                  << " score@ceil+1=" << score_above
@@ -5537,31 +5546,38 @@ void RunScoreRecipeShakedown(ScheduleGraph &graph,
 
   // --- Part 2: sweep SGPR cliffs, VGPR held at 1 so SGPR dominates ---
   //
-  // Uses our rolled-own GetMaxNumSGPRsForOcc (built from the same
-  // classifier the scoring helper uses), so the ceil values here
-  // agree with what the helper sees. Skips unreachable occupancies
-  // (GetMaxNumSGPRsForOcc returns kNoSGPRCliff) — those have no
-  // finite cliff to probe. Also skips the bottom bracket for the
-  // same reason.
+  // Ceilings come from scanning getOccupancyWithNumSGPRs up to the
+  // hardware limit, independent of the scorer. Skips occupancies no
+  // SGPR count gives (no cliff to probe) and the lowest occupancy,
+  // whose ceiling is the hardware limit (ceil + 1 would be past it).
+  //
+  // Unlike VGPRs, one SGPR past a cliff can drop more than one
+  // occupancy level (gfx906 with the trap-aware table: 64 SGPRs is
+  // occupancy 10, 65 is 8). So the expected bracket at ceil + 1 comes
+  // from the classifier (occ_above), not from occ - 1.
+  int sgpr_limit = static_cast<int>(st.getAddressableNumSGPRs());
+  std::vector<int> sgpr_ceiling_by_occ(max_waves + 1, -1);
+  for (int n = 0; n <= sgpr_limit; ++n) {
+    sgpr_ceiling_by_occ[st.getOccupancyWithNumSGPRs(n)] = n;
+  }
   llvm::outs() << "    SGPR cliff sweep (vgpr=1):\n";
   for (int occ = max_waves; occ >= 1; --occ) {
-    unsigned ceil =
-        GCNRegisterTracker::GetMaxNumSGPRsForOcc(st, occ);
-    if (ceil >= GCNRegisterTracker::kNoSGPRCliff) {
-      // Either unreachable or the unbounded bottom bracket. Skip.
+    int ceil = sgpr_ceiling_by_occ[occ];
+    if (ceil < 0 || ceil == sgpr_limit) {
       continue;
     }
-    int score_at = GCNRegisterTracker::ComputeContinuousOccupancyScore(
-        st, 1, ceil);
-    int score_above = GCNRegisterTracker::ComputeContinuousOccupancyScore(
-        st, 1, ceil + 1);
+    int score_at = scorer.Score(1, ceil);
+    int score_above = scorer.Score(1, ceil + 1);
+    int occ_above = static_cast<int>(st.getOccupancyWithNumSGPRs(ceil + 1));
     int expected_at = M * occ;
     bool pass_at = (score_at == expected_at);
-    bool pass_step = (score_above >= (occ - 1) * M) &&
-                     (score_above < occ * M);
+    bool pass_step = (occ_above < occ) &&
+                     (score_above >= occ_above * M) &&
+                     (score_above < (occ_above + 1) * M);
     llvm::outs() << "      occ=" << occ << " ceil=" << ceil
                  << " score@ceil=" << score_at
                  << " score@ceil+1=" << score_above
+                 << " (occ=" << occ_above << ")"
                  << (pass_at && pass_step ? "  PASS" : "  FAIL")
                  << "\n";
     if (!pass_at || !pass_step) {
@@ -5639,56 +5655,74 @@ void RunScoreRecipeShakedown(ScheduleGraph &graph,
                << " at_ceiling=" << sc_full.RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget() << "\n";
 }
 
-// Sweep every entry of the precomputed continuous-occupancy-score
-// lookup tables and verify each value matches what
-// ComputeContinuousOccupancyScore returns for the corresponding
-// register count. Compares vgpr_score_by_count[v] against
-// ComputeContinuousOccupancyScore(st, v, 0) for all v in range,
-// and similarly sgpr_score_by_count[s] against (st, 0, s).
-void RunContinuousScoreTableSweepShakedown(const GCNSubtarget &st) {
-  const auto &score_tables =
-      GCNRegisterTracker::GetOrComputeContinuousOccupancyScoreTables(st);
+// For every VGPR count and every SGPR count from 1 to the hardware
+// limit, checks the score lies in its own occupancy's band
+// [occ*M, (occ+1)*M), with occ from LLVM's occupancy functions.
+// Count 0 is excluded: it scores exactly (occ+1)*M by design.
+//
+// For counts 1 to kMaxAmountOver past each limit, checks the score is
+// exactly -(amount over).
+void RunContinuousScoreBandSweepShakedown(const GCNSubtarget &st) {
+  constexpr int kMaxAmountOver = 50;
+  const ContinuousOccupancyScorer &scorer = ContinuousOccupancyScorer::Get(st);
+  constexpr int M = ContinuousOccupancyScorer::kOccScoreMultiplier;
 
-  llvm::outs() << "  Continuous score table sweep:\n";
+  llvm::outs() << "  Continuous score band sweep:\n";
 
-  int vgpr_mismatches = 0;
-  for (size_t v = 0; v < GCNRegisterTracker::kContinuousScoreVGPRTableSize;
-       ++v) {
-    int formula = GCNRegisterTracker::ComputeContinuousOccupancyScore(
-        st, /*num_vgpr=*/v, /*num_sgpr=*/0);
-    int lookup = score_tables.vgpr_score_by_count[v];
-    if (formula != lookup) {
-      llvm::outs() << "    VGPR mismatch at vgpr=" << v
-                   << ": formula=" << formula << " lookup=" << lookup << "\n";
-      ++vgpr_mismatches;
+  int vgpr_limit = static_cast<int>(st.getAddressableNumVGPRs());
+  int vgpr_out_of_band = 0;
+  for (int v = 1; v <= vgpr_limit; ++v) {
+    int score = scorer.Score(v, 0);
+    int occ = static_cast<int>(st.getOccupancyWithNumVGPRs(v));
+    if (score < occ * M || score >= (occ + 1) * M) {
+      llvm::outs() << "    VGPR out of band at vgpr=" << v << ": occ=" << occ
+                   << " score=" << score << "\n";
+      ++vgpr_out_of_band;
     }
   }
 
-  int sgpr_mismatches = 0;
-  for (size_t s = 0; s < GCNRegisterTracker::kContinuousScoreSGPRTableSize;
-       ++s) {
-    int formula = GCNRegisterTracker::ComputeContinuousOccupancyScore(
-        st, /*num_vgpr=*/0, /*num_sgpr=*/s);
-    int lookup = score_tables.sgpr_score_by_count[s];
-    if (formula != lookup) {
-      llvm::outs() << "    SGPR mismatch at sgpr=" << s
-                   << ": formula=" << formula << " lookup=" << lookup << "\n";
-      ++sgpr_mismatches;
+  int sgpr_limit = static_cast<int>(st.getAddressableNumSGPRs());
+  int sgpr_out_of_band = 0;
+  for (int s = 1; s <= sgpr_limit; ++s) {
+    int score = scorer.Score(0, s);
+    int occ = static_cast<int>(st.getOccupancyWithNumSGPRs(s));
+    if (score < occ * M || score >= (occ + 1) * M) {
+      llvm::outs() << "    SGPR out of band at sgpr=" << s << ": occ=" << occ
+                   << " score=" << score << "\n";
+      ++sgpr_out_of_band;
     }
   }
 
-  bool pass = (vgpr_mismatches == 0) && (sgpr_mismatches == 0);
-  llvm::outs() << "    swept "
-               << GCNRegisterTracker::kContinuousScoreVGPRTableSize
-               << " VGPR + "
-               << GCNRegisterTracker::kContinuousScoreSGPRTableSize
-               << " SGPR entries; "
-               << vgpr_mismatches << " VGPR mismatches, "
-               << sgpr_mismatches << " SGPR mismatches"
+  int over_limit_mismatches = 0;
+  for (int amount_over = 1; amount_over <= kMaxAmountOver; ++amount_over) {
+    int vgpr_score = scorer.Score(vgpr_limit + amount_over, 0);
+    if (vgpr_score != -amount_over) {
+      llvm::outs() << "    VGPR over limit at vgpr=" << vgpr_limit + amount_over
+                   << ": score=" << vgpr_score << " expected="
+                   << -amount_over << "\n";
+      ++over_limit_mismatches;
+    }
+    int sgpr_score = scorer.Score(0, sgpr_limit + amount_over);
+    if (sgpr_score != -amount_over) {
+      llvm::outs() << "    SGPR over limit at sgpr=" << sgpr_limit + amount_over
+                   << ": score=" << sgpr_score << " expected="
+                   << -amount_over << "\n";
+      ++over_limit_mismatches;
+    }
+  }
+
+  bool pass = (vgpr_out_of_band == 0) && (sgpr_out_of_band == 0) &&
+              (over_limit_mismatches == 0);
+  llvm::outs() << "    swept 1.." << vgpr_limit << " VGPRs + 1.." << sgpr_limit
+               << " SGPRs; " << vgpr_out_of_band << " VGPR + "
+               << sgpr_out_of_band << " SGPR out of band; "
+               << over_limit_mismatches << " over-limit mismatches (1.."
+               << kMaxAmountOver << " over each limit)"
                << (pass ? "  PASS" : "  FAIL") << "\n";
   if (!pass) {
-    report_fatal_error("ContinuousScoreTableSweep: lookup table disagrees "
-                       "with formula on some entries");
+    report_fatal_error("ContinuousScoreBandSweep: a score lies outside its "
+                       "occupancy band, or an over-limit count does not "
+                       "score -(amount over)");
   }
 }
 
@@ -7707,7 +7741,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
 
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
-  RunContinuousScoreTableSweepShakedown(st);
+  RunContinuousScoreBandSweepShakedown(st);
   RunTestDAGShakedown(st);
   RunInsertSubgraphProxiesShakedown();
   RunSubgraphContiguityShakedown(MF, *LIS);

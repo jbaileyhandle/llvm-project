@@ -27,6 +27,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_PARTITIONDAG_H
 
 #include "BfsDpSettings.h"
+#include "ContinuousOccupancyScorer.h"
 #include "GCNRegPressure.h"
 #include "ScheduleConstructor.h"
 #include "Score.h"
@@ -334,6 +335,10 @@ class PartitionDag {
   const ScheduleGraph *graph_;
   const GCNSubtarget *st_;
   const MachineFunction *mf_;
+
+  /// st_'s continuous occupancy scorer, looked up once at
+  /// construction.
+  const ContinuousOccupancyScorer *continuous_occupancy_scorer_;
 
   /// Search configuration (metric + timeout). Set once at
   /// construction; see BfsDpSettings.

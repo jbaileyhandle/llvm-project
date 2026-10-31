@@ -22,7 +22,9 @@ PartitionDag::PartitionDag(const ScheduleGraph *graph,
                            const GCNSubtarget *st,
                            const MachineFunction *mf,
                            BfsDpSettings settings)
-    : graph_(graph), st_(st), mf_(mf), settings_(settings) {
+    : graph_(graph), st_(st), mf_(mf),
+      continuous_occupancy_scorer_(&ContinuousOccupancyScorer::Get(*st)),
+      settings_(settings) {
   // BFS-DP's max-over-paths of min-along-path bottleneck DP only
   // supports single-slot register-peak recipes (peak occupancy or
   // continuous occupancy score). Sum-style dims (length, area,
@@ -283,10 +285,11 @@ int PartitionDag::ComputeScoreFromPressure(
   // guard, so slot 0's dimension fully determines the score.
   ScoreDimension dim = settings_.recipe.slots[0]->dim;
   switch (dim) {
-    case ScoreDimension::kContinuousOccScore:
-      return GCNRegisterTracker::ComputeContinuousOccupancyScore(
-          *st_, pressure.getVGPRNum(st_->hasGFX90AInsts()),
-          pressure.getSGPRNum());
+    case ScoreDimension::kContinuousOccScore: {
+      return continuous_occupancy_scorer_->Score(
+          static_cast<int>(pressure.getVGPRNum(st_->hasGFX90AInsts())),
+          static_cast<int>(pressure.getSGPRNum()));
+    }
     case ScoreDimension::kRegisterOcc:
       return static_cast<int>(pressure.getOccupancy(*st_));
     default:

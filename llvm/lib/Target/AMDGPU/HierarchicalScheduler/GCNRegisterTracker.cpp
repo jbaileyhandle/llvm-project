@@ -35,7 +35,7 @@ GCNRegisterTracker GCNRegisterTracker::NoHistoryClone() const {
 //   node_reg_info_table_, remaining_uses_, live_regs_, cur_pressure_,
 //   ... (max_pressure_, occ_area_, undo_stack_, pressure_history_
 //   default), ..., track_pressure_history_, mf_, st_, mfi_, mri_,
-//   continuous_score_tables_.
+//   continuous_occupancy_scorer_.
 GCNRegisterTracker::GCNRegisterTracker(const GCNRegisterTracker &source,
                                        NoHistoryCloneTag)
     : node_reg_info_table_(source.node_reg_info_table_),
@@ -64,7 +64,7 @@ GCNRegisterTracker::GCNRegisterTracker(const GCNRegisterTracker &source,
       st_(source.st_),
       mfi_(source.mfi_),
       mri_(source.mri_),
-      continuous_score_tables_(source.continuous_score_tables_) {}
+      continuous_occupancy_scorer_(source.continuous_occupancy_scorer_) {}
 
 GCNRegisterTracker::GCNRegisterTracker(const ScheduleGraph &graph,
                                        const MachineFunction &mf,
@@ -75,8 +75,7 @@ GCNRegisterTracker::GCNRegisterTracker(const ScheduleGraph &graph,
       st_(&mf.getSubtarget<GCNSubtarget>()),
       mfi_(mf.getInfo<SIMachineFunctionInfo>()),
       mri_(&mf.getRegInfo()),
-      continuous_score_tables_(
-          &GetOrComputeContinuousOccupancyScoreTables(*st_)) {
+      continuous_occupancy_scorer_(&ContinuousOccupancyScorer::Get(*st_)) {
   CheckForFunctionCalls(mf);
   InitRemainingUses();
 }
@@ -376,168 +375,18 @@ void GCNRegisterTracker::TestUnschedule(const ScheduleNode *node) {
 }
 
 // ============================================================================
-// SGPR ceiling table (file-local, built from the classifier)
-// ============================================================================
-
-namespace {
-
-// Walk getOccupancyWithNumSGPRs from 0 upward, recording the last n
-// at each occupancy level before it drops. Unreachable occupancies
-// and the bottom (flat) bracket both stay at kNoSGPRCliff.
-SmallVector<unsigned, 12> BuildSGPRMaxTable(const GCNSubtarget &st) {
-  SmallVector<unsigned, 12> table;
-  unsigned max_waves = st.getMaxWavesPerEU();
-  table.assign(max_waves + 1, GCNRegisterTracker::kNoSGPRCliff);
-
-  // Cap is just comfortably past any known SGPR cliff. gfx9's
-  // classifier plateaus at 7 past 100 SGPRs; 128 is ample headroom.
-  constexpr unsigned kScanCap = 128;
-
-  unsigned prev_occ = st.getOccupancyWithNumSGPRs(0);
-  for (unsigned n = 1; n <= kScanCap; ++n) {
-    unsigned cur = st.getOccupancyWithNumSGPRs(n);
-    if (cur < prev_occ) {
-      if (prev_occ < table.size()) {
-        table[prev_occ] = n - 1;
-      }
-      prev_occ = cur;
-      if (cur == 0) {
-        break;
-      }
-    }
-  }
-  // prev_occ now holds the bottom bracket. Leave its entry as
-  // kNoSGPRCliff — the bracket is unbounded above our scan cap.
-  return table;
-}
-
-} // namespace
-
-unsigned GCNRegisterTracker::GetMaxNumSGPRsForOcc(const GCNSubtarget &st,
-                                                  unsigned occ) {
-  static const SmallVector<unsigned, 12> kTable = BuildSGPRMaxTable(st);
-  return (occ < kTable.size()) ? kTable[occ] : kNoSGPRCliff;
-}
-
-// ============================================================================
-// Continuous occupancy score helpers (file-local)
-// ============================================================================
-//
-// Smooth version of integer occupancy: integer occupancy plus a
-// fractional bonus for how far below the current bracket's upper
-// edge the register count sits. See GCNRegisterTracker.h for the
-// formula. Uncapped by design: the early-exit check
-// (RegisterOnlyOccupancyIsAtOrAboveFunctionOccupancyTarget) makes
-// the top-bracket plateau unreachable during search, so a cap
-// would only add branches without changing any decision.
-namespace {
-
-// Continuous occupancy score for a single register class. The two
-// callbacks mirror the GCNSubtarget methods of the same names,
-// generic so the body is shared between VGPR and SGPR.
-template <typename GetOccupancyWithNumRegsFunc, typename GetMaxNumRegsFunc>
-int ComputeContinuousOccupancyScoreForRegClass(
-    unsigned num_regs, int max_waves,
-    GetOccupancyWithNumRegsFunc get_occupancy_with_num_regs_func,
-    GetMaxNumRegsFunc get_max_num_regs_func) {
-  constexpr int M = GCNRegisterTracker::kOccScoreMultiplier;
-
-  int occ = static_cast<int>(get_occupancy_with_num_regs_func(num_regs));
-  if (occ == 0) {
-    // Spilling — below the occ=1 bracket. Score 0 so any
-    // non-spilling schedule strictly beats it.
-    return 0;
-  }
-
-  // Bracket for this occupancy: (floor, ceil]. ceil is the max reg
-  // count still at this occ; floor is the max reg count at the next
-  // higher occ (or 0 if this is the top bracket, so the bracket
-  // spans 1..ceil).
-  int ceil = static_cast<int>(get_max_num_regs_func(occ));
-  int floor = (occ == max_waves)
-                  ? 0
-                  : static_cast<int>(get_max_num_regs_func(occ + 1));
-  int width = ceil - floor;
-
-  // Degenerate bracket: some targets have adjacent occupancies that
-  // share a register ceiling (insufficient granules to distinguish
-  // them). No within-bracket differentiation possible; just return
-  // the integer occupancy score.
-  if (width == 0) {
-    return M * occ;
-  }
-
-  int within = M * (ceil - static_cast<int>(num_regs)) / width;
-  return M * occ + within;
-}
-
-} // namespace
-
-// ============================================================================
 // Occupancy
 // ============================================================================
 
-int GCNRegisterTracker::ComputeContinuousOccupancyScore(
-    const GCNSubtarget &st, unsigned num_vgpr, unsigned num_sgpr) {
-  int max_waves = static_cast<int>(st.getMaxWavesPerEU());
-
-  int vgpr_score = ComputeContinuousOccupancyScoreForRegClass(
-      num_vgpr, max_waves,
-      [&](unsigned n) { return st.getOccupancyWithNumVGPRs(n); },
-      [&](unsigned occ) { return st.getMaxNumVGPRs(occ); });
-
-  int sgpr_score = ComputeContinuousOccupancyScoreForRegClass(
-      num_sgpr, max_waves,
-      [&](unsigned n) { return st.getOccupancyWithNumSGPRs(n); },
-      [&](unsigned occ) { return GetMaxNumSGPRsForOcc(st, occ); });
-
-  return std::min(vgpr_score, sgpr_score);
-}
-
 int GCNRegisterTracker::ContinuousScoreForPressure(
     const GCNRegPressure &rp) const {
-  // Hot path: one member-pointer load + two array indexes + one min.
-  // No per-call arithmetic — the per-pressure-value scores are
-  // precomputed once per subtarget and cached (see
-  // GetOrComputeContinuousOccupancyScoreTables).
-  return std::min(
-      continuous_score_tables_->vgpr_score_by_count[
-          rp.getVGPRNum(st_->hasGFX90AInsts())],
-      continuous_score_tables_->sgpr_score_by_count[rp.getSGPRNum()]);
+  return continuous_occupancy_scorer_->Score(
+      static_cast<int>(rp.getVGPRNum(st_->hasGFX90AInsts())),
+      static_cast<int>(rp.getSGPRNum()));
 }
 
 int GCNRegisterTracker::GetContinuousOccupancyScore() const {
   return ContinuousScoreForPressure(max_pressure_);
-}
-
-const GCNRegisterTracker::ContinuousOccupancyScoreTables &
-GCNRegisterTracker::GetOrComputeContinuousOccupancyScoreTables(
-    const GCNSubtarget &st) {
-  // Process-wide cache, lazily populated. One entry per unique
-  // subtarget pointer; in typical compilations there's only one.
-  // Construction-time call only — never on the hot path.
-  static DenseMap<const GCNSubtarget *, ContinuousOccupancyScoreTables>
-      cache;
-  auto it = cache.find(&st);
-  if (it != cache.end()) {
-    return it->second;
-  }
-
-  ContinuousOccupancyScoreTables tables;
-  for (size_t v = 0; v < kContinuousScoreVGPRTableSize; ++v) {
-    // Score for this VGPR count alone (SGPR set to 0 = SGPR
-    // dimension contributes its max possible score, so the min
-    // returns the VGPR-side value).
-    tables.vgpr_score_by_count[v] =
-        ComputeContinuousOccupancyScore(st, /*num_vgpr=*/v,
-                                        /*num_sgpr=*/0);
-  }
-  for (size_t s = 0; s < kContinuousScoreSGPRTableSize; ++s) {
-    tables.sgpr_score_by_count[s] =
-        ComputeContinuousOccupancyScore(st, /*num_vgpr=*/0,
-                                        /*num_sgpr=*/s);
-  }
-  return cache.insert({&st, tables}).first->second;
 }
 
 unsigned GCNRegisterTracker::GetRegisterOnlyOccupancy() const {

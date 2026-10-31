@@ -39,6 +39,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_GCNREGISTERTRACKER_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_GCNREGISTERTRACKER_H
 
+#include "ContinuousOccupancyScorer.h"
 #include "GCNRegPressure.h"
 #include "NodeRegInfo.h"
 #include "SIMachineFunctionInfo.h"
@@ -409,35 +410,14 @@ public:
   /// override is always nullopt and the raw MFI value is returned.
   unsigned GetLaunchOccupancyFloor() const;
 
-  /// Continuous occupancy score based on peak SGPR/VGPR pressure.
-  ///
-  /// Unlike the integer occupancy getters above, this score varies
-  /// smoothly as register pressure changes — two schedules at the
-  /// same integer occupancy are distinguished by how far each is
-  /// from the next-higher bracket. Higher is better.
+  /// Continuous occupancy score (see ContinuousOccupancyScorer) of
+  /// the peak SGPR/VGPR pressure. Higher is better.
   ///
   /// Register-only: LDS and launch bounds are not considered. Parallel
   /// to GetRegisterOnlyOccupancy(); compose with
   /// GetConfiguredMachineFunctionOccupancyTarget() / an early-exit
   /// check to handle non-register ceilings.
-  ///
-  /// For a single dimension (VGPR or SGPR):
-  ///   score = M * occ + M * (bracket_ceil - num_reg) / bracket_width
-  /// where M is kOccScoreMultiplier, `occ` is the integer occupancy
-  /// currently achieved by this dimension, and the bracket is the
-  /// register range in which the next integer occupancy step lies.
-  /// Final score is min(vgpr_score, sgpr_score), capped at
-  /// M * maxWavesPerEU. The bracket steps come from the subtarget,
-  /// so the score is portable across gfx targets.
   int GetContinuousOccupancyScore() const;
-
-  /// Pure-functional version of GetContinuousOccupancyScore for
-  /// arbitrary register counts. Same formula, but takes the counts
-  /// explicitly instead of reading from this region's peak pressure —
-  /// useful for shakedown tests that sweep made-up values.
-  static int ComputeContinuousOccupancyScore(const GCNSubtarget &st,
-                                             unsigned num_vgpr,
-                                             unsigned num_sgpr);
 
   /// Number of register defs the node would introduce (newly live
   /// registers). Read from the pre-extracted, deduplicated,
@@ -568,49 +548,6 @@ public:
   ///     kIlpScore live on their own trackers).
   int GetScalarScore(const ScoreRecipe &recipe) const;
 
-  /// Score points per integer occupancy step (the `M` in the formula
-  /// above). One full occupancy level is worth this many points.
-  static constexpr int kOccScoreMultiplier = 1000;
-
-  /// Stand-in ceiling used for SGPR brackets that have no finite
-  /// upper cliff (the bottom bracket, where the classifier plateaus,
-  /// and unreachable occupancy levels). Chosen well beyond any
-  /// realistic SGPR count so within-bracket interpolation stays
-  /// positive across the full range we'd ever see.
-  static constexpr unsigned kNoSGPRCliff = 255;
-
-  /// Precomputed continuous-occupancy-score lookup tables for one
-  /// subtarget — populated once per unique subtarget and cached.
-  /// One entry per possible raw register count for each dimension,
-  /// so per-call score lookup is just two array indexes + a min
-  /// with no per-call arithmetic.
-  ///
-  /// Sizes are conservative upper bounds for AMDGPU targets we care
-  /// about (gfx906 has 256 architectural VGPRs and ~102 per-wave
-  /// SGPRs). The +1 above the architectural max covers the
-  /// "one-above-cliff" probe used by shakedown sweeps (which test
-  /// values just past the top cliff to verify spill-bracket
-  /// behavior, score=0).
-  static constexpr size_t kContinuousScoreVGPRTableSize = 258;
-  static constexpr size_t kContinuousScoreSGPRTableSize = 129;
-  struct ContinuousOccupancyScoreTables {
-    std::array<int, kContinuousScoreVGPRTableSize> vgpr_score_by_count;
-    std::array<int, kContinuousScoreSGPRTableSize> sgpr_score_by_count;
-  };
-
-  /// Rolled-own replacement for GCNSubtarget::getMaxNumSGPRs, built by
-  /// scanning GCNSubtarget::getOccupancyWithNumSGPRs (the hardcoded
-  /// hardware classifier). Returns the max SGPR count whose classifier
-  /// value equals `occ`, or kNoSGPRCliff for the bottom bracket and
-  /// for unreachable occupancies (so the bottom bracket still
-  /// interpolates smoothly from its floor up to the stand-in ceil).
-  ///
-  /// Needed because LLVM's getMaxNumSGPRs applies granule alignment
-  /// and trap-handler reservations, so it can disagree with the
-  /// classifier on which bracket a given SGPR count falls in. This
-  /// helper agrees with the classifier by construction.
-  static unsigned GetMaxNumSGPRsForOcc(const GCNSubtarget &st, unsigned occ);
-
   /// Human-readable description of a node's register effects.
   std::string DescribeRegOps(const ScheduleNode *node) const;
 
@@ -732,20 +669,11 @@ private:
   /// after node_reg_info_table_ is set.
   void InitRemainingUses();
 
-  /// Pointer into the per-subtarget cache, set in the constructor.
-  /// Never reassigned after construction.
-  const ContinuousOccupancyScoreTables *continuous_score_tables_;
+  /// This subtarget's scorer, set in the constructor. Never
+  /// reassigned after construction.
+  const ContinuousOccupancyScorer *continuous_occupancy_scorer_;
 
 public:
-  /// Return the continuous-occupancy-score lookup tables for `st`.
-  /// Lazily populates a process-wide cache on first call for a given
-  /// subtarget pointer. Each tracker instance stores the returned
-  /// pointer in continuous_score_tables_ so per-call lookup is just
-  /// one member load + array indexes (no DenseMap lookup, no per-call
-  /// arithmetic). Public so shakedowns can index the tables directly
-  /// for formula-vs-lookup verification.
-  static const ContinuousOccupancyScoreTables &
-  GetOrComputeContinuousOccupancyScoreTables(const GCNSubtarget &st);
   /// Warn if the MachineFunction contains any call instructions,
   /// since the callee's register usage is invisible to the scheduler.
   /// Call instructions are scheduling boundaries and don't appear
@@ -770,8 +698,7 @@ private:
   GCNRegisterTracker(const GCNRegisterTracker &source,
                      NoHistoryCloneTag);
 
-  /// Cheap continuous occupancy score for an arbitrary pressure via
-  /// the precomputed tables (one min over two array reads). Backs both
+  /// Continuous occupancy score of `rp`. Backs both
   /// GetContinuousOccupancyScore (peak) and the per-step area
   /// accumulation (cur pressure).
   int ContinuousScoreForPressure(const GCNRegPressure &rp) const;
