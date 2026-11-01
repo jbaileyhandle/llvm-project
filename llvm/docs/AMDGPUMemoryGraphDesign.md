@@ -640,6 +640,10 @@ calls only `buildSchedGraph()`.
 
 ### 11.1 First steps (planned)
 
+Decided order (2026-11-01): steps 1–3 below, in that order, then the peak
+decomposition (11.2.2) last, after deciding exactly what it should
+report. The other probes in 11.2 stay on record but are not planned.
+
 1. **The MemoryGraph itself** (section 3), with the two helpers:
    `IdealMlp()` (section 4) and `ScoreOrder()` (section 5).
 2. **An MLP analysis pass**, modeled on `ScheduleDAGLengthAnalyzer`:
@@ -667,15 +671,34 @@ register ceiling. These probes get at that question cheaply.
 1. **Relax the ceiling.** Pin occupancy one or two tiers lower and
    measure observed MLP, pressure and runtime. Interpretation as in
    11.1.
-2. **Decompose the pressure peak.** In MaxOccupancy's final schedule,
-   split the live registers at the peak into values defined by loads
-   (issued, last use not yet reached) and everything else (addresses,
-   accumulators, ALU temporaries, tile state). The register tracker in
-   the analyzer already has the live set; the split is a per-register
-   "defined by a load" lookup. The budget any memory ordering can use is
-   roughly (ceiling − other state), so the achievable loads-in-flight
-   cap is that divided by the average load width. Compare the cap to the
-   observed in-flight count. It is an estimate, not a bound: more
+2. **Decompose the pressure peak** (planned, last; details still to be
+   decided). For regions at or near the register ceiling, split the
+   live registers at the peak by where each value's life begins and
+   ends, which says how much of the peak any ordering can move:
+
+   | begins | ends | scheduler control |
+   |---|---|---|
+   | before the region | after the region | none (pass-through) |
+   | before the region | in the region | the kill can move earlier |
+   | in the region | after the region | the def can move later |
+   | in the region | in the region | full |
+
+   Within the values defined in the region, split off those written by
+   a load, in two sub-cases: no use yet (held for memory latency, the
+   MLP cost) and already used at least once (held for reuse, like any
+   other value). The analyzer's register tracker already has the live
+   set at every step, and the graph's entry and exit nodes own the
+   live-in and live-out registers, so each group is a per-register
+   lookup. Count in the same weighted units as the peak so the groups
+   add up to it.
+
+   Still to decide before building it: whether to report the peak step
+   only or every step within some margin of it; the transient peak (new
+   defs landed, dying uses not yet released) versus the after-instruction
+   live set; and what the numbers are for. One use: the budget any memory
+   ordering can spend is roughly (ceiling − everything not under the
+   scheduler's control), so the achievable loads-in-flight cap is that
+   divided by the average load width. An estimate, not a bound: more
    overlap also lengthens address and index live ranges.
 3. **A manual menu with `sched_group_barrier`.**
    `__builtin_amdgcn_sched_group_barrier(mask, size, sync_id)` tells the
