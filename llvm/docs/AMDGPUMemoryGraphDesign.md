@@ -1,7 +1,12 @@
 # MemoryGraph: a memory-op view of a region for MLP search
 
-2026-10-27. Draft design, nothing implemented yet. Pseudo-code is at the
-level of a sketch, not final code.
+2026-10-27, updated 2026-11. Draft design, nothing implemented yet. Pseudo-code
+is at the level of a sketch, not final code.
+
+Companion docs: `AMDGPUMemoryGraphImplementationPlan.md` is the plan for building
+this, and lists the compiler behavior the first model leaves out. Where the two
+disagree, the plan wins. `AMDGPUWaitcntRules.md` has the compiler's wait rules in
+full.
 
 ## 0. Goal and reasoning
 
@@ -43,47 +48,79 @@ method).
 - **Tracked load**: a load we count for MLP (section 2).
 - **User of load L**: a node with a data edge (`ScheduleEdge::kData`) from
   L, meaning it reads a register L defines. Only *direct* users count.
-- **Queue store**: a vector-memory store. It takes part in the vmcnt
-  queue (section 2) but is not a load and is not counted in MLP.
+- **Tracked write**: a store of a tracked type, in the graph only if
+  `track_writes` is on (off by default). It takes part in the hardware
+  counters (section 2) but is not a load and is not counted in MLP.
 - **Memory node**: a node of the MemoryGraph. The memory nodes are all
-  tracked loads, all their users, and all queue stores. One instruction
-  can play several roles, for example a load whose address comes from
-  another load's data (pointer chasing).
+  tracked loads, all their users, all tracked writes, and every
+  `s_barrier`. One instruction can play several roles, for example a load
+  whose address comes from another load's data (pointer chasing).
 - **Memory node index**: a memory node's position in the MemoryGraph's
   own arrays, 0 to n−1.
-- **Wait queue**: the hardware counter a memory op is tracked by
-  (section 2).
+- **Counter**: the hardware counter a memory op is tracked by, vmcnt or
+  lgkmcnt (section 2). Some FLAT ops count in both.
 - **Strong edge**: an edge that enforces ordering. Cluster and weak hints
   (`IsWeakEdge()`) are not strong.
 - **The walk**: the procedure in section 5.3 that replays an ordering
   and advances a clock only when a user has to wait for data.
-- **Round**: one value of the walk's clock. Loads issued in the same
-  round are in flight together.
+- **Round**: one step of the walk's clock when every operation takes 1
+  (section 6.5, 6.6). Loads issued in the same round are in flight
+  together.
 
-## 2. Classifying memory ops and their wait queues
+## 2. Classifying memory ops and their counters
+
+The classifier handles every memory type. A separate configuration picks
+which types the graph tracks, so turning one on is a configuration change, not
+new code.
 
 ```
-enum class WaitQueue { kVmem, kLgkm };
-enum class MemClass  { kVmemLoad, kLdsLoad, kSmemLoad, kVmemStore };
+enum class MemAccess { kRead, kWrite };
+enum class MemType   { kVector, kFlat, kScalar, kLds, kGds };
 
-struct MemoryGraphOptions {
-  bool include_scalar = true;   // s_load_*, s_buffer_load_*
-  bool include_lds    = true;   // ds_read_*
-  bool include_stores = true;   // vector stores as queue stores
+struct MemOpInfo {
+  MemAccess access;
+  MemType   type;
+  bool      counts_in_vmcnt;
+  bool      counts_in_lgkmcnt;
 }
 
-optional<MemClass> Classify(node, options):
-  mi = node.instr
-  if mi is null: return none
-  if mi is a VMEM or FLAT-global load:      return kVmemLoad
-  if mi is a VMEM or FLAT-global store:     return options.include_stores ? kVmemStore : none
-  if mi is an SMEM load:                    return options.include_scalar ? kSmemLoad : none
-  if mi is a DS read:                       return options.include_lds ? kLdsLoad : none
-  return none        // true FLAT (may hit LDS): see open questions
+struct MemoryGraphOptions {
+  // Default: vector and FLAT only.
+  bool track_vector = true;
+  bool track_flat   = true;
+  bool track_scalar = false;
+  bool track_lds    = false;
+  bool track_gds    = false;
+  bool track_writes = false;
+}
 
-WaitQueue QueueOf(mem_class):
-  return mem_class in {kVmemLoad, kVmemStore} ? kVmem : kLgkm
+optional<MemOpInfo> ClassifyMemOp(mi)
 ```
+
+The counter fields are stored, not worked out from the type, because FLAT ops
+don't all use the same counters:
+
+| Instruction | Type | vmcnt | lgkmcnt |
+|---|---|---|---|
+| Vector memory (`isVMEM`), except buffer invalidates | vector | yes | no |
+| `global_*`, `scratch_*` | vector | yes | no |
+| `flat_*` with flat address space info, or no memory info | FLAT | yes | yes |
+| `flat_*` with global-only memory info | FLAT | yes | no |
+| `flat_*` with LDS-only memory info | FLAT | no | yes |
+| Scalar memory (`isSMRD`) | scalar | no | yes |
+| LDS (`isDS`, not GDS) | LDS | no | yes |
+| GDS | GDS | no | yes |
+
+**Read or write,** in this order, because atomics both load and store:
+
+1. `SIInstrInfo::isAtomicRet`: read. It returns a value that later code waits on.
+2. `SIInstrInfo::isAtomicNoRet`: write. Nothing can wait on it.
+3. `mayLoad()`: read.
+4. Anything else: write.
+
+**Atomics are covered.** They fall under the same rows of the table as other ops
+in their family: `global_atomic_*` is vector, `flat_atomic_*` is FLAT, `ds_add_*`
+and the like are LDS.
 
 How the counters behave on gfx906, from `SIInsertWaitcnts.cpp`
 (`WaitEventMaskForInst`, `getVmemWaitEventType`, `counterOutOfOrder`)
@@ -108,129 +145,173 @@ and `AMDGPUBaseInfo.cpp` (bit widths):
   - Mixing event types in the counter has the same effect.
   - **4 bits on gfx9: at most 15 outstanding.** Past that, the compiler
     waits for max−1 instead of the exact count (`getWaitCountMax`), so
-    waits become conservative. This caps achievable LDS MLP in
-    LDS-heavy regions and the model should apply the same cap.
+    waits become conservative. This could matter in LDS-heavy regions. The
+    first model leaves counter limits out.
 - vmcnt and lgkmcnt are independent. A wait on one never covers ops in
-  the other. Exception: a pending true-FLAT op (one that may hit LDS or
-  global) forces both counters to 0 on gfx9
-  (`hasFlatLgkmVMemCountInOrder()` is false).
+  the other.
+- A FLAT that counts in both counters makes every vmcnt or lgkmcnt wait a
+  wait for 0 on gfx9 (`hasFlatLgkmVMemCountInOrder()` is false), until both
+  counters have drained after it (section 5.2).
 
 ## 3. Construction
 
 ```
+// Organized like ScheduleGraph: nodes are reserved up front so pointers stay valid,
+// edges hold node pointers, each node stores its own id and topo index, and results
+// per node are vectors indexed by topo index.
+
+enum class MemoryNodeKind {
+  kMemOp,     // a tracked load or write; mem_op_info says which
+  kBarrier,   // s_barrier
+  kUserOnly,  // not a tracked memory op, only uses a load's data
+  kSink,      // the end of the region; waits for every load, has no instruction
+}
+
+struct MemoryEdge {
+  MemoryNode *node            // the connected node
+  bool        waits_for_data
+}
+
+// Being a user is separate from the kind, because one instruction can be both a
+// load and a user: a load whose address comes from another load's data.
+class MemoryNode {
+  int                 id               // this node's position in nodes_
+  int                 topo_index
+  MemoryNodeKind      kind
+  ScheduleNode       *original_node    // valid while the original graph lives
+  const MachineInstr *original_instr   // stable across graph rebuilds
+  optional<MemOpInfo> mem_op_info      // set when kind is kMemOp
+  int                 latency          // how long this op takes (below)
+  vector<MemoryNode*> loads_used       // loads this node directly reads
+  vector<MemoryEdge>  successors
+  vector<MemoryEdge>  predecessors
+}
+
 class MemoryGraph {
-  // One entry per memory node, indexed by memory node index.
-  vector<ScheduleNode*>       original_node    // valid while the original graph lives
-  vector<const MachineInstr*> original_instr   // stable across graph rebuilds
-  vector<optional<MemClass>>  mem_class        // set for loads and queue stores
-  vector<vector<int>>         loads_used       // loads this node directly reads
-  vector<vector<Edge>>        successors       // Edge = {to, waits_for_data (0 or 1)}
-  vector<vector<Edge>>        predecessors
-  vector<int>                 topo_order
-  int                         sink             // synthetic, index n
-  DenseMap<const ScheduleNode*, int> memory_node_index   // original node -> index
+  vector<MemoryNode>  nodes_           // reserved up front, never reallocated
+  vector<MemoryNode*> topo_order_
+  MemoryNode         *sink_
+  DenseMap<const ScheduleNode*, MemoryNode*> memory_node_of_   // original node -> memory node
 }
 
 MemoryGraph Build(original, options):
   original.ComputeTransitiveReductionAndReachability()   // strong edges only (section 9)
 
-  // 1. Loads and queue stores.
+  // 1. Tracked loads and writes, and barriers.
   for node in original.topo_order:
-    if c = Classify(node, options):
-      AddMemoryNode(node).mem_class = c
+    if info = ClassifyMemOp(node.instr), and options track it:
+      AddMemoryNode(node, kMemOp).mem_op_info = info
+    else if IsWaveRendezvous(node.instr):
+      AddMemoryNode(node, kBarrier)
 
   // 2. Direct users of loads.
   for each load L:
-    for edge in original_node[L].successors:
-      if edge.IsDataEdge() and edge.to is not the original exit node:
-        U = memory_node_index.get(edge.to) or AddMemoryNode(edge.to)
-        loads_used[U].push(L)
+    for edge in L.original_node.Successors():
+      if edge.IsDataEdge() and edge.node is not the original exit node:
+        U = memory_node_of_.get(edge.node) or AddMemoryNode(edge.node, kUserOnly)
+        U.loads_used.push(L)
 
   // 3. Edges: one per reachable pair (transitive closure).
   for each pair of memory nodes (A, B), A != B:
-    if original.IsReachableInDag(original_node[A], original_node[B]):
-      AddEdge(A, B, waits_for_data = (IsLoad(A) and A in loads_used[B]) ? 1 : 0)
+    if original.IsReachableInDag(A.original_node, B.original_node):
+      AddEdge(A, B, waits_for_data = IsLoad(A) and A in B.loads_used)
 
-  // 4. Sink. Every load's data must return before the region is done.
-  sink = AddSyntheticNode()
+  // 4. Sink: the end of the region. It waits for every load.
+  sink_ = AddSyntheticNode(kSink)
   for each memory node M:
-    AddEdge(M, sink, waits_for_data = IsLoad(M) ? 1 : 0)
+    AddEdge(M, sink_, waits_for_data = IsLoad(M))
 
-  topo_order = TopoSort()
+  ComputeTopologicalOrder()
 ```
 
 **What an edge means.**
 
-- **Reachable** → an edge with flag 0: B can't issue before A, but in the
+- **Ordering only** (`waits_for_data` false): B can't issue before A, but in the
   zero-issue-time model (section 5) it can issue at the same instant.
-- **Direct data use** → flag 1: B must wait for A's data to come back.
+- **Waits for data** (`waits_for_data` true): B must wait for A's data to come
+  back.
 
 Reachability alone does not mean waiting. If B is reachable from load A
 only through ordering edges (for example A → store S → load B, kept in
 order because the addresses might alias), B doesn't need A's data. Any
 instruction that does need A's data, directly or not, sits after one of
-A's direct users. Those users are memory nodes and carry the 1, so waits
-still propagate along chains.
+A's direct users. Those users are memory nodes and their edges wait for data,
+so waits still propagate along chains.
 
 **"Load B depends on load A"** means B is reachable, through strong
 edges, from one of A's direct users. Equivalently, some MemoryGraph path
-from A to B contains a flag-1 edge.
+from A to B contains an edge that waits for data.
 
-**What the flag is for.** It is a dependence flag, not a latency. Ideal
-MLP (section 4) uses it directly as a unit latency. Ordering evaluation
-(section 5) takes each load's latency from the chosen latency mode and
-uses the flag only to know that a wait is needed.
+**What `waits_for_data` is for.** It says a wait is needed, not how long. How
+long comes from the load's latency, which lives on the node.
 
-**Size.** Closure edges grow as n². That's fine at tens of memory nodes.
-If reduction is ever needed, it must be weight-aware: a flag-1 edge may
-only be dropped if some other path between the same nodes also contains
-a flag-1 edge. Plain transitive reduction would drop A→B whenever any
-other path exists and could silently remove a wait. Simplest rule: never
-drop flag-1 edges.
+**Latency of each operation.** One number per operation. By default it's LLVM's
+latency from `SUnit::Latency`: on gfx906, vector and FLAT 80, LDS and scalar 5.
+The `misched.txt` load-latency settings replace those numbers, and LLVM only
+applies them to dependence edges, so the graph reads those settings itself.
 
-## 4. Ideal MLP (always unit latency)
+**Barriers.** `s_barrier` sits inside regions, not at their edges. A barrier node
+adds no ordering of its own. Its edges come from reachability like every other
+node's, so a non-invariant load stays on its side of the barrier, while an
+invariant load or a user that isn't a memory op can sit on either side.
+
+**The sink.** The sink is the region's end, matching `ScheduleGraph`'s exit node.
+It waits for every load, like a barrier at the end of the region. So every read
+has a waiter, and a read nobody uses in the region needs no special handling in
+the walk. There's no source node: a node with no predecessors starts at time 0,
+and `ScheduleGraph`'s entry node exists to own live-in registers, which this graph
+doesn't have.
+
+**Size.** Closure edges grow as n². That's fine at tens of memory nodes, and this
+graph is never transitively reduced.
+
+## 4. Ideal MLP
 
 ```
-int IdealRounds():
-  for node in topo_order:
-    t[node] = max over predecessors p of (t[p] + waits_for_data(p -> node)),
-              or 0 if node has no predecessors
-  return t[sink]
+struct IdealScore {
+  int   memory_time   // the least time the region's memory work can take
+  float mlp
+}
 
-double IdealMlp():
-  return NumLoads() / IdealRounds()      // loads only; users and stores not counted
+IdealScore Ideal(latency_setting):
+  // start[node]: the earliest time node can run. Indexed by topo index, like
+  // ScheduleGraph's per-node tables.
+  for node in topo_order_:
+    start[node] = max over each predecessor:
+                    start[predecessor] + latency(predecessor)   if that edge waits for data
+                    start[predecessor]                          if it's ordering only
+                  or 0 if node has no predecessors
+  memory_time = start[sink_]
+  return IdealScore {
+    memory_time = memory_time,
+    mlp         = (sum of latency(read) over tracked reads) / memory_time,
+  }
 ```
 
-`IdealRounds()` is the number of loads on the longest chain of data
-waits: the number of stages, D, in the MLP doc. Queue stores don't change
-it, because under unit latency a store issued in a round finishes within
-that round.
+`memory_time` here is how long the longest chain of waiting takes, where each load in the
+chain waits on the data of the one before it. Those loads can't overlap, so the region
+can't finish its memory work any faster than this. The sink waits for every load, so its
+start is that time.
 
-**It is an upper bound on what any ordering can score** in unit mode with
-until-return intervals (section 5):
+The latency setting is either every operation takes 1, or LLVM's latency. With 1,
+`memory_time` is the number of stages, D, in the MLP doc, and `mlp` is NumLoads ÷ D.
 
-1. The walk's clock only advances when a user waits on a load issued in
-   the current round, and then by exactly one. So every round has a load
-   in flight, and busy time equals the total time T.
-2. An ordering's MLP is therefore NumLoads ÷ T.
-3. Every load issues no earlier than its longest flag path from the
-   source, so T ≥ D.
+**Why time and not a count of loads.** A count isn't even an upper bound once
+latencies differ. Take two parallel vector loads (100) and a chain of four LDS
+loads (1 each). Counting gives 6 ÷ 4 = 1.5, but the real value is
+(100 + 100 + 4) ÷ 100 = 2.04. With only vector and FLAT tracked, all at the same
+latency, the two settings give the same number.
 
-The only unit-mode scores possible are NumLoads ÷ T for T = D … NumLoads.
+**What to compare it against.** `ScoreOrder` (section 5) returns the same two names.
+- `memory_time` against `memory_time`: how much an order stretches the memory work. An
+  order's is never less than ideal's.
+- `mlp` against `latency_based_mlp`: never higher than ideal's, because both have the
+  same numerator, and an order's denominator is at least the longest chain. Not against
+  `use_based_mlp`, where a read can stay in flight far longer than its latency, so it can
+  exceed ideal's.
 
-**Two caveats.**
-
-- **The bound is not always reachable.** "Loads as early as dependencies
-  allow, users after" reaches T = D unless the lgkmcnt drain gets in the
-  way: an ordering edge can force a scalar load S into the same round as,
-  and before, a user U that waits on an earlier lgkm load. U's wait is
-  then `lgkmcnt(0)`, which also waits for S and costs an extra round.
-  `IdealRounds()` ignores this.
-- **In unit mode the in-order queue cannot delay a return.** An op
-  issued earlier always returns no later than a later op's issue + 1. So
-  queue modeling only changes until-return scores when latencies differ
-  (`kClass`, `kModel`). It still changes until-use scores in every mode,
-  because it decides which loads a wait covers.
+**It may not be reachable.** It ignores drains, so a region with a FLAT that counts in
+both counters, or an `s_barrier`, may not reach it.
 
 ## 5. Scoring an ordering
 
@@ -242,118 +323,241 @@ The only unit-mode scores possible are NumLoads ÷ T for T = D … NumLoads.
   once. Time advances only when a user must wait for data.
 - Instructions that aren't memory nodes are ignored.
 
-**Latency mode** (where each memory op's latency comes from):
+**Latency setting** (where each memory op's latency comes from):
 
-| Mode | Latency |
+| Setting | Latency |
 |---|---|
 | `kUnit` | 1 for every load and store |
-| `kClass` | a nominal latency per MemClass, from measurement (VMEM ≫ LDS) |
-| `kModel` | the op's modeled latency in the original graph |
+| `kLlvm` | LLVM's latency for that op (section 3) |
 
-`kClass` is the expected default. Exact latencies are unknown and vary
-with cache hit rate, but the ratio between classes (VMEM roughly an order
-of magnitude slower than LDS) is known and matters.
+`kLlvm` already gives vector and FLAT the same latency and LDS a much lower one, so
+no per-type latencies are needed. Scalar's default 5 is lower than measured. The
+permanent fix is an alternate timing model (`timing_model=<name>` in `misched.txt`),
+which the graph picks up through `SUnit::Latency`.
 
-**Interval mode** (when a load stops counting as in flight):
+**Every walk reports MLP two ways,** because a load can stop counting as in flight at
+two different points:
 
-| Mode | A load is in flight until… | Answers |
-|---|---|---|
-| `kUntilReturn` | its effective return (5.2) | how many loads overlap, if the latencies are right |
-| `kUntilUse` | the first use that covers it (5.2) | how many loads the schedule leaves un-waited at once; the number that survives when real latency is longer than the estimate |
+| A load is in flight until… | Answers |
+|---|---|
+| the first waiter that covers it runs (5.2). The main number. | how many loads the schedule leaves un-waited at once; the number that survives when real latency is longer than the estimate |
+| its data returns (5.2) | how many loads overlap, if the latencies are right. The one to compare against section 4's ideal. |
 
-Under `kUntilUse` there is no "ideal" in the section 4 sense: a load whose
-first use is far away keeps counting, so the score can exceed
-NumLoads ÷ D. Its top is NumLoads (every first use at the end).
+### 5.2 Wait rules
 
-### 5.2 Wait queues
+A chosen subset of `AMDGPUWaitcntRules.md`. The implementation plan lists what's left
+out.
 
-**Effective return time.** Within one queue, the counter reports op B
-done only after every op issued before it:
+**Effective return time.** Within one counter, op B is reported done only after every
+op issued before it:
 
-  effective_return(B) = max(issue(B) + latency(B), effective_return(previous op in B's queue))
+  effective_return(B) = max(issue(B) + latency(B), effective_return(previous op in B's counter))
 
-Waiting on B then automatically includes waiting on everything issued
-before it in that queue, stores included.
+**What a wait covers.** The hardware has no "wait for load B" instruction. A wait says
+"stall until at most N ops are outstanding in this counter", and the compiler sets N to
+the number of ops issued after B. So a wait covers B and everything issued before it in
+that counter, but nothing after it, and nothing in the other counter.
 
-**A use covers a load** if it waits on that load directly, or on a later
-op in the same queue. While a scalar load is outstanding, any lgkm wait
-covers every outstanding lgkm op.
+Example: issue V1, V2, V3, then a user of V2. The wait is `vmcnt(1)`. It covers V1 and
+V2, and V3 stays in flight.
+
+**A drain means waiting until a counter reaches 0.** In the same example, `vmcnt(0)`
+would make the user of V2 wait for V3 too. A wait becomes a drain when:
+
+- it's an `s_barrier`: both counters drain;
+- it's an lgkmcnt wait and a scalar read is outstanding, or more than one kind of op is
+  outstanding in lgkmcnt, such as LDS and GDS;
+- cautious mode is on.
+
+**Cautious mode.** A FLAT counts in both counters if its memory info doesn't rule out
+either kind of memory: the info says flat address space, or there's no info at all. While
+such a FLAT might still be running, the compiler can't trust the counts, so every vmcnt
+or lgkmcnt wait becomes a wait for 0.
+
+A wait for 0 on a counter proves everything issued in that counter has finished, and the
+compiler needs that proof from both counters. Neither wait has to be for the FLAT's own
+data. This is the compiler's real rule (`hasPendingFlat`, `applyWaitcnt`).
+
+The model needs no extra state for this. Such a FLAT sits in both wait queues (5.3), and
+while cautious mode is on every wait is a drain, so the FLAT can only leave a queue through
+a drain. "The FLAT is still in a queue" therefore means exactly "that queue hasn't drained
+since the FLAT". So:
+
+> Cautious mode is on while a FLAT that counts in both counters is still in either wait
+> queue.
+
+Several FLATs in a row need nothing extra: if an older one is still in a queue, so is the
+newer one, and a drain removes both.
 
 ### 5.3 Pseudo-code
 
+The walk goes through the order one node at a time, keeping a clock. Each node may wait,
+which can move the clock, and then may issue. The terms used below:
+
+- **Wait queue.** One for each hardware counter, vmcnt and lgkmcnt. The hardware only keeps
+  a count. The model keeps a list of the ops issued and not yet waited on, oldest first,
+  because it has to know which reads a wait applies to. An op that counts in both counters
+  is in both queues. `WaitQueues` holds the two, and is the only thing the walk talks to.
+- **Waited on.** An op is waited on when a wait covers it (5.2), and it then leaves that
+  queue. The first time this happens to a read is its `first_wait_time`, which is where the
+  read stops counting in `use_based_mlp`.
+- **Wait.** Wait for one op: that op and everything before it in its queue. The clock moves
+  to that op's effective return. Ops after it stay in the queue.
+- **Drain.** Wait for everything in a queue (5.2). The clock moves to the effective return
+  of the newest op in that queue, and the queue empties.
+- **When a drain replaces a wait.** When the compiler can't trust the count: cautious mode
+  is on (5.2), the queue holds a scalar read, or the queue holds more than one kind of op.
+  The vmcnt queue only ever holds one kind, so the last two only happen in lgkmcnt.
+- **Raw and effective return.** An op's raw return is its issue time plus its latency: when
+  its data is actually back. Its effective return is when the program can know that, which
+  can be later, because a counter only reports an op done once everything issued before it
+  is done (5.2). Effective return decides when a wait ends. Raw return decides how long a
+  read is in flight for `latency_based_mlp`, so a fast load stuck behind a slow one isn't
+  counted as in flight for longer than its own latency.
+
 ```
 struct OrderScore {
-  map<MemClass, double> mlp     // per load class (5.4)
-  double combined_mlp
-  double length
+  float use_based_mlp              // a read is in flight until a use waits on it; the main number
+  float latency_based_mlp          // a read is in flight until its raw return; compare to ideal
+  int   memory_time                // how long the region's memory work takes in this order
+  int   peak_outstanding_vmcnt     // to notice if regions get near the counter limit
+  int   peak_outstanding_lgkmcnt
 }
 
-OrderScore ScoreOrder(order, latency_mode, interval_mode):
+// One counter's queue.
+class WaitQueue {
+  list of (op, effective_return) ops   // issued and not yet waited on, oldest first
+  int last_return = 0                  // effective return of the newest op
+  int peak_size = 0
+
+  Add(op, effective_return):
+    append (op, effective_return) to ops
+    last_return = effective_return
+    peak_size = max(peak_size, size of ops)
+
+  // Wait for op. Returns when the wait ends, and the ops it removed: op and everything
+  // before it.
+  (end, removed) Wait(op):
+    removed = op and everything before it, taken out of ops
+    return (op's effective_return, removed)
+
+  // Wait for everything. Returns when the wait ends, and the ops it removed.
+  (end, removed) Drain():
+    removed = everything, taken out of ops
+    return (last_return, removed)
+
+  bool Holds(op)
+  bool HoldsOutOfOrderKinds()          // a scalar read, or more than one kind of op
+  bool HoldsFlatInBothCounters()       // a FLAT that counts in both counters
+}
+
+// Both queues, and the rules that involve both.
+class WaitQueues {
+  WaitQueue vmcnt, lgkmcnt
+
+  // Issue op into each queue it counts in. A counter reports an op done only after
+  // everything issued before it in that counter, so the op can't be known done before
+  // the newest op already there.
+  Issue(op, raw_return):
+    effective_return = raw_return
+    for each queue op counts in:  effective_return = max(effective_return, queue.last_return)
+    for each queue op counts in:  queue.Add(op, effective_return)
+
+  // Everything a node must wait for before it runs, given the loads it reads. Returns
+  // when the waits end, and every op they removed.
+  (end, removed) WaitFor(loads):
+    cautious = CautiousMode()          // decided once, before any of this node's waits
+    for each load in loads, for each queue that holds it:
+      if ShouldDrain(queue, cautious):
+        add the result of queue.Drain()
+      else:
+        add the result of queue.Wait(load)
+    return (the latest end, all removed ops)
+
+  // s_barrier.
+  (end, removed) DrainAll():
+    return the combined result of vmcnt.Drain() and lgkmcnt.Drain()
+
+  private:
+  // Whether the compiler would turn a wait on this queue into a drain, because it can't
+  // trust the count: cautious mode is on, a scalar read can finish out of order, or a mix
+  // of kinds can (5.2).
+  bool ShouldDrain(queue, cautious):
+    return cautious or queue.HoldsOutOfOrderKinds()
+
+  // A FLAT that counts in both counters makes every wait a drain until both queues have
+  // drained after it (5.2). While cautious mode is on, it can only leave a queue through
+  // a drain, so "still in a queue" means exactly "that queue hasn't drained since".
+  bool CautiousMode():
+    return vmcnt.HoldsFlatInBothCounters() or lgkmcnt.HoldsFlatInBothCounters()
+}
+
+OrderScore ScoreOrder(order, latency_setting):     // order ends with the sink
   time = 0
-  last_return = {kVmem: 0, kLgkm: 0}
-  outstanding = {kVmem: [], kLgkm: []}     // ops issued and not yet covered, in issue order
-  intervals = []                           // [start, end) and class, per load
+  queues = WaitQueues()
 
   for node in order:
-    // 1. Wait, if this node reads loaded data (a node can be both a user and a load).
-    if loads_used[node] is not empty:
-      wait_until = max over L in loads_used[node] of WaitTime(L)
-      time = max(time, wait_until)
-      for L in loads_used[node]:
-        Cover(L, time)        // ends the covered loads' intervals in kUntilUse mode
+    // 1. Wait, if this node needs to. A node can be both a user and a load.
+    if node is a barrier:
+      (end, removed) = queues.DrainAll()
+    else:
+      (end, removed) = queues.WaitFor(node.loads_used)
 
-    // 2. Issue, if this node is a load or a queue store.
-    if mem_class[node]:
-      q = QueueOf(mem_class[node])
-      ret = max(time + Latency(node, latency_mode), last_return[q])
-      last_return[q] = ret
-      effective_return[node] = ret
-      issue[node] = time
-      outstanding[q].push(node)
+    // The node waits for all of them at once, so the clock moves once, to the latest.
+    // Every removed op was waited on at that moment.
+    time = max(time, end)
+    for each op in removed:
+      // Only a FLAT that counts in both counters sits in two queues, so only it can be
+      // waited on twice. Its first wait is when it stopped being in flight; keep that.
+      if op has no first_wait_time yet:
+        first_wait_time[op] = time
 
-  end_time = max(time, max of last_return)
-  for each load L:
-    end = (interval_mode == kUntilReturn) ? effective_return[L]
-                                          : covered_at[L] if set, else end_time
-    intervals.push({issue[L], end, mem_class[L]})
+    // 2. Issue, if this node is a tracked load or write.
+    if node.mem_op_info:
+      issue_time[node] = time
+      raw_return[node] = time + Latency(node, latency_setting)
+      queues.Issue(node, raw_return[node])
 
-  return {mlp: SweepPerClass(intervals), combined_mlp: Sweep(intervals), length: end_time}
+  use_based_intervals     = for each tracked read: [issue_time[read], first_wait_time[read])
+  latency_based_intervals = for each tracked read: [issue_time[read], raw_return[read])
 
-WaitTime(L):
-  if QueueOf(L) == kLgkm and a scalar load is outstanding in kLgkm:
-    return last_return[kLgkm]         // lgkmcnt(0): drain everything issued so far
-  return effective_return[L]
+  return OrderScore {
+    use_based_mlp            = Mlp(use_based_intervals),
+    latency_based_mlp        = Mlp(latency_based_intervals),
+    // The walk's total time. With only reads tracked it equals both MLP denominators.
+    // With track_writes on it can be larger, by time spent waiting only for a store:
+    // a real cost, but not time a read is in flight.
+    memory_time              = time,
+    peak_outstanding_vmcnt   = queues.vmcnt.peak_size,
+    peak_outstanding_lgkmcnt = queues.lgkmcnt.peak_size,
+  }
 
-Cover(L, t):
-  // In-order queue: covering L also covers every op issued before it.
-  if L is not in outstanding[QueueOf(L)]: return    // already covered by an earlier wait
-  q = QueueOf(L)
-  if q == kLgkm and a scalar load is outstanding:  pop all of outstanding[q]
-  else:  pop outstanding[q] up to and including L
-  for each popped op P:  covered_at[P] = t
+// Average number of intervals that overlap, over the time when at least one is open
+// (the MLP doc, sections 2.1–2.3): total length of all intervals ÷ length of their union.
+// An interval of zero length adds nothing, so uses at the same instant need no special
+// handling.
+float Mlp(intervals)
 ```
 
-The sweep is the one in the MLP doc (sections 2.1–2.3): average =
-(total interval length) ÷ (time covered by at least one interval). Uses
-at the same instant need no special handling, because a span of zero
-length contributes nothing.
+The sink is an ordinary user of every load, so every read gets a `first_wait_time`, and a
+read nobody uses in the region needs no special case.
 
-The `outstanding` queues are the push-on-issue / pop-on-use model.
-Effective return times give the *time* a wait ends; the queues record
-*which* loads that wait covers, for `kUntilUse`.
+Untracked types aren't in the queues. So with FLAT untracked, cautious mode never starts,
+even though the real compiler would enter it.
 
-### 5.4 Per-class MLP
+### 5.4 MLP by type (later)
 
-Report MLP separately for vector, LDS and scalar loads instead of one
-combined number. "One vector load and three LDS loads in flight" is not
-meaningfully 4: they are different resources, with different latencies
-and different wait queues. For a class, the denominator is the time
-during which at least one load *of that class* is in flight; the
-combined number uses all loads and is reported alongside.
+For now each walk reports one MLP over all tracked reads. With the default tracking,
+vector and FLAT, that's the number we want. Vector latency is what dominates
+performance, and FLAT has the same latency.
 
-Vector latency is what dominates performance, so **vector MLP** is the
-natural primary objective, with LDS and scalar MLP as secondary terms or
-tiebreaks.
+MLP by type may be worth adding later. "One vector load and three LDS loads in flight"
+is not meaningfully 4: they're different resources, with different latencies and
+different counters. For one type, the denominator would be the time during which at
+least one load *of that type* is in flight.
+
+Until then, tracking just one type gives that type's MLP, with one difference: the walk
+then doesn't see waits caused by the untracked types.
 
 ## 6. Building the menu
 
@@ -411,14 +615,15 @@ Why it fits the goal:
   cost nothing next to a scheduler run.
 - **It never delays a user whose data is back.** Such a user costs no
   time under the model and only extends a live range if delayed.
-- **Per-class windows** (W_vmem, W_lds) are a natural extension: vector
-  loads are the expensive overlap and LDS loads are cheap in latency but
-  still cost registers.
+- **A window per type** (one for vector, one for LDS) is a natural extension
+  once LDS is tracked: vector loads are the expensive overlap and LDS loads are
+  cheap in latency but still cost registers.
 
 Variation at a fixed W comes from `priority`, which decides which ready
 load to issue first:
 
-- longest flag path to the sink first (critical loads early);
+- longest time to the sink first, counting only edges that wait for data
+  (critical loads early);
 - program order;
 - fewest destination registers first;
 - randomized with a seed.
@@ -426,12 +631,11 @@ load to issue first:
 Different priorities put different loads in flight together, which is
 the variation the fill-in step needs. Duplicate orderings are dropped.
 
-Each candidate is scored with `ScoreOrder` under the chosen modes and the
-menu is sorted by the primary objective (5.4). The W used to make a
-candidate is recorded with it.
+Each candidate is scored with `ScoreOrder` and the menu is sorted by
+`use_based_mlp`. The W used to make a candidate is recorded with it.
 
-**A variant for until-use.** The "take returned users first" rule ends
-each load's until-use interval as early as the model allows. If the goal
+**Holding users back.** The "take returned users first" rule ends each
+read's use-based in-flight time as early as the model allows. If the goal
 is to leave loads un-waited for longer than the estimated latency, add a
 slack S: hold a user until clock ≥ its wait time + S. S = 0 is the rule
 above.
@@ -439,7 +643,7 @@ above.
 ### 6.3 Checking the backbone: exhaustive search on small regions
 
 ```
-vector<Candidate> EnumerateOrders(latency_mode, interval_mode, max_orders):
+vector<Candidate> EnumerateOrders(latency_setting, max_orders):
   DFS over the ready list, recording ScoreOrder for every complete ordering,
   pruned by the first-use rule below; stop at max_orders.
 ```
@@ -477,8 +681,9 @@ dominance, in the pattern of the existing PartitionDag / history
 trackers: the state is (set of scheduled memory nodes, clock, queue
 contents), and among partial orderings with the same state only the best
 is kept. Target one number of rounds T at a time, pruning prefixes that
-can no longer finish in T rounds (longest remaining flag path from any
-unissued load exceeds T − clock). Don't build this until the comparison
+can no longer finish in T rounds (the longest remaining chain of loads that
+wait on each other, from any unissued load, exceeds T − clock). Don't build
+this until the comparison
 says it's needed.
 
 ### 6.5 From rounds to an ordering (for round-based generators)
@@ -512,15 +717,16 @@ Each load v has a legal range of rounds:
   that starts at v (counting v), plus 1. Any later and the chain after v
   would not fit in T rounds.
 
-Ordering edges (flag 0) narrow the range further: a load can't be in an
+Ordering-only edges narrow the range further: a load can't be in an
 earlier round than an op it must follow. Each user goes in the round
-after the latest round among the loads it reads, and a queue store goes
+after the latest round among the loads it reads, and a tracked write goes
 in any round at or after its predecessors'.
 
 The menu then varies two things:
 
-1. **T**, from `IdealRounds()` (every load as early as possible) up to
-   `NumLoads()` (one load per round). Fewer rounds means more overlap.
+1. **T**, from ideal's `memory_time` with every operation taking 1 (every
+   load as early as possible) up to the number of loads (one load per
+   round). Fewer rounds means more overlap.
 2. **The placement within each range** at a fixed T. Loads with slack
    (earliest < latest) can be pushed later to spread the in-flight set
    out, or pulled earlier to bunch it. The MLP doc's example is a chain
@@ -613,22 +819,24 @@ calls only `buildSchedGraph()`.
 
 ## 10. Open questions
 
-1. **True FLAT ops** count against both counters and force full waits
-   on gfx9. Classify as VMEM and accept the error, or model both queues?
+1. **True FLAT ops.** Resolved: FLAT is its own type, and one that counts
+   in both counters is in both queues and turns on cautious mode (5.2).
 2. **Hardware ordering.** The compiler treats vmcnt as decrementing in
    issue order for loads and stores together, and lgkm same-type ops in
-   order except scalar reads. This matches the Vega ISA's data-dependency
-   section as remembered; verify against the document.
+   order except scalar reads. The compiler's behavior is now observed
+   (`AMDGPUWaitcntRules.md`). Whether the hardware requires it hasn't been
+   checked against AMD's documentation.
 3. **Weak edges from `buildSchedGraph()`.** Believed not to happen;
    unverified.
-4. **`kClass` latency numbers** per class. The measured-latency feedback
-   infrastructure (per-kernel vmem/smem/lds latencies fed into misched)
-   is the natural source if it is still in place.
-5. **Combining per-class MLP into one objective:** vector primary, LDS
-   and scalar as tiebreaks, or a weighted sum?
-6. **Region end in `kUntilUse` mode.** A load with no use in the region
-   currently ends at the region's end time. Its value is consumed by a
-   later region, so this undercounts its window.
+4. **Latency numbers per type.** Resolved: LLVM's latencies already give
+   vector and FLAT the same latency and LDS a much lower one, and the
+   `misched.txt` latency settings override them. Scalar's default is too
+   low; the fix is an alternate timing model (section 5.1).
+5. **Combining MLP by type into one objective.** Deferred: one MLP over all
+   tracked types for now (5.4).
+6. **Region end for `use_based_mlp`.** A load with no use in the region
+   ends at the region's end, when the sink waits for it. Its value is
+   consumed by a later region, so this undercounts its window.
 7. **Deadlock rule in the windowed scheduler** (6.2, last branch): issue
    the highest-priority load, or the one whose issue unblocks the most
    users?
@@ -645,7 +853,7 @@ decomposition (11.2.2) last, after deciding exactly what it should
 report. The other probes in 11.2 stay on record but are not planned.
 
 1. **The MemoryGraph itself** (section 3), with the two helpers:
-   `IdealMlp()` (section 4) and `ScoreOrder()` (section 5).
+   `Ideal()` (section 4) and `ScoreOrder()` (section 5).
 2. **An MLP analysis pass**, modeled on `ScheduleDAGLengthAnalyzer`:
    runs after the last real scheduler, rebuilds each region's graph
    from the final instruction order, builds the MemoryGraph, and reports

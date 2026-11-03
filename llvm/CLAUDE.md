@@ -37,6 +37,14 @@
 - Cite sources when making claims about conventions or best practices.
 - Do not add "Co-Authored-By: Claude" or similar to commit messages. It is not
   informative and creates clutter.
+- Keep each edit small and self-contained: one change the user can read and
+  comment on easily. Never bundle unrelated changes into one edit.
+- After an edit, stop and let the user respond before editing the same file again.
+  The VS Code extension diffs a second edit to the same file in one turn against a
+  stale copy of the file, so the diff shows unrelated lines as changed. Known bug,
+  closed as not planned:
+  https://claudeissues.com/issue/87943-bug-vs-code-panel-sequential-edits-to-one-file-diff-each-proposal-against-a-stal
+  Never send two edits in one message.
 - Give honest answers regardless of whether they please the user. Changing
   a position under pushback is fine when the pushback contains a real
   argument that changes the analysis — in that case, explain specifically
