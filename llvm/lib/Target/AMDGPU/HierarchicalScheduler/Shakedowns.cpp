@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ScheduleDAGHierarchicalScheduler.h"
+#include "AMDGPU.h"
 #include "BfsDpSearch.h"
 #include "BfsDpSettings.h"
 #include "ContinuousOccupancyScorer.h"
@@ -23,6 +24,7 @@
 #include "GCNSubtarget.h"
 #include "HwPipeClass.h"
 #include "IlpTracker.h"
+#include "MemoryGraph.h"
 #include "ParetoHistoryTracker.h"
 #include "NodeRegInfo.h"
 #include "OccupancyTargetUtil.h"
@@ -5726,6 +5728,180 @@ void RunContinuousScoreBandSweepShakedown(const GCNSubtarget &st) {
   }
 }
 
+// Unit tests for ClassifyMemOp. Builds one instruction per case, with explicit
+// operands and memory info, and checks the classifier's whole answer. Operand
+// layouts are copied from instructions the compiler accepted in the
+// sandbox investigation 2026_11_01_flat_waitcnt, or from LLVM's own .mir tests.
+// The instructions are never inserted into a block, so the function being
+// compiled is unaffected, and each is deleted after its check.
+void RunClassifyMemOpUnitTests(MachineFunction &mf) {
+  llvm::outs() << "  ClassifyMemOp unit tests:\n";
+  const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
+  const SIInstrInfo &tii = *st.getInstrInfo();
+
+  // Memory info for one 4-byte access in the given address space.
+  auto memory_info = [&](unsigned address_space,
+                         MachineMemOperand::Flags flags) {
+    return mf.getMachineMemOperand(MachinePointerInfo(address_space), flags,
+                                   /*s=*/4, Align(4));
+  };
+  const MachineMemOperand::Flags kLoad = MachineMemOperand::MOLoad;
+  const MachineMemOperand::Flags kStore = MachineMemOperand::MOStore;
+  const MachineMemOperand::Flags kLoadStore = kLoad | kStore;
+
+  // Builds an instruction with no memory info yet.
+  auto build = [&](unsigned opcode) {
+    return BuildMI(mf, DebugLoc(), tii.get(opcode));
+  };
+
+  const MemAccess kRead = MemAccess::kRead;
+  const MemAccess kWrite = MemAccess::kWrite;
+
+  struct Case {
+    const char *name;
+    MachineInstr *mi;
+    std::optional<MemOpInfo> expected;  // nullopt: not a memory op
+  };
+  std::vector<Case> cases = {
+      {"global_load",
+       build(AMDGPU::GLOBAL_LOAD_DWORD)
+           .addDef(AMDGPU::VGPR10).addReg(AMDGPU::VGPR0_VGPR1).addImm(0)
+           .addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::GLOBAL_ADDRESS, kLoad)),
+       MemOpInfo{kRead, MemType::kVector, true, false}},
+      {"global_store",
+       build(AMDGPU::GLOBAL_STORE_DWORD)
+           .addReg(AMDGPU::VGPR0_VGPR1).addReg(AMDGPU::VGPR2).addImm(0)
+           .addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::GLOBAL_ADDRESS, kStore)),
+       MemOpInfo{kWrite, MemType::kVector, true, false}},
+      {"global_atomic_add, returns a value",
+       build(AMDGPU::GLOBAL_ATOMIC_ADD_RTN)
+           .addDef(AMDGPU::VGPR45).addReg(AMDGPU::VGPR0_VGPR1)
+           .addReg(AMDGPU::VGPR6).addImm(0).addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::GLOBAL_ADDRESS, kLoadStore)),
+       MemOpInfo{kRead, MemType::kVector, true, false}},
+      {"global_atomic_add, no return",
+       build(AMDGPU::GLOBAL_ATOMIC_ADD)
+           .addReg(AMDGPU::VGPR0_VGPR1).addReg(AMDGPU::VGPR6).addImm(0)
+           .addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::GLOBAL_ADDRESS, kLoadStore)),
+       MemOpInfo{kWrite, MemType::kVector, true, false}},
+      {"flat_load, flat address space info",
+       build(AMDGPU::FLAT_LOAD_DWORD)
+           .addDef(AMDGPU::VGPR40).addReg(AMDGPU::VGPR2_VGPR3).addImm(0)
+           .addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::FLAT_ADDRESS, kLoad)),
+       MemOpInfo{kRead, MemType::kFlat, true, true}},
+      {"flat_load, global-only info",
+       build(AMDGPU::FLAT_LOAD_DWORD)
+           .addDef(AMDGPU::VGPR40).addReg(AMDGPU::VGPR2_VGPR3).addImm(0)
+           .addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::GLOBAL_ADDRESS, kLoad)),
+       MemOpInfo{kRead, MemType::kFlat, true, false}},
+      {"flat_load, LDS-only info",
+       build(AMDGPU::FLAT_LOAD_DWORD)
+           .addDef(AMDGPU::VGPR40).addReg(AMDGPU::VGPR2_VGPR3).addImm(0)
+           .addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::LOCAL_ADDRESS, kLoad)),
+       MemOpInfo{kRead, MemType::kFlat, false, true}},
+      {"flat_load, no memory info",
+       build(AMDGPU::FLAT_LOAD_DWORD)
+           .addDef(AMDGPU::VGPR40).addReg(AMDGPU::VGPR2_VGPR3).addImm(0)
+           .addImm(0),
+       MemOpInfo{kRead, MemType::kFlat, true, true}},
+      {"flat_store, flat address space info",
+       build(AMDGPU::FLAT_STORE_DWORD)
+           .addReg(AMDGPU::VGPR2_VGPR3).addReg(AMDGPU::VGPR4).addImm(0)
+           .addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::FLAT_ADDRESS, kStore)),
+       MemOpInfo{kWrite, MemType::kFlat, true, true}},
+      {"buffer_load",
+       build(AMDGPU::BUFFER_LOAD_DWORD_OFFSET)
+           .addDef(AMDGPU::VGPR0).addReg(AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3)
+           .addReg(AMDGPU::SGPR5).addImm(0).addImm(0).addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::GLOBAL_ADDRESS, kLoad)),
+       MemOpInfo{kRead, MemType::kVector, true, false}},
+      {"buffer_wbinvl1, a cache invalidate",
+       build(AMDGPU::BUFFER_WBINVL1), std::nullopt},
+      {"ds_read",
+       build(AMDGPU::DS_READ_B32_gfx9)
+           .addDef(AMDGPU::VGPR41).addReg(AMDGPU::VGPR5).addImm(0).addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::LOCAL_ADDRESS, kLoad)),
+       MemOpInfo{kRead, MemType::kLds, false, true}},
+      {"ds_write",
+       build(AMDGPU::DS_WRITE_B32_gfx9)
+           .addReg(AMDGPU::VGPR1).addReg(AMDGPU::VGPR0).addImm(8).addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::LOCAL_ADDRESS, kStore)),
+       MemOpInfo{kWrite, MemType::kLds, false, true}},
+      {"ds_add, returns a value",
+       build(AMDGPU::DS_ADD_RTN_U32_gfx9)
+           .addDef(AMDGPU::VGPR46).addReg(AMDGPU::VGPR5).addReg(AMDGPU::VGPR6)
+           .addImm(0).addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::LOCAL_ADDRESS, kLoadStore)),
+       MemOpInfo{kRead, MemType::kLds, false, true}},
+      {"ds_read with the gds bit set",
+       build(AMDGPU::DS_READ_B32)
+           .addDef(AMDGPU::VGPR43).addReg(AMDGPU::VGPR5).addImm(0).addImm(1)
+           .addMemOperand(memory_info(AMDGPUAS::REGION_ADDRESS, kLoad)),
+       MemOpInfo{kRead, MemType::kGds, false, true}},
+      {"s_load",
+       build(AMDGPU::S_LOAD_DWORD_IMM)
+           .addDef(AMDGPU::SGPR10).addReg(AMDGPU::SGPR0_SGPR1).addImm(0)
+           .addImm(0)
+           .addMemOperand(memory_info(AMDGPUAS::CONSTANT_ADDRESS, kLoad)),
+       MemOpInfo{kRead, MemType::kScalar, false, true}},
+      // A clock read, not a memory access, but scalar memory by encoding
+      // (isSMRD). It writes a register that later code waits on, so it's a
+      // read, as the compiler treats it.
+      {"s_memtime",
+       build(AMDGPU::S_MEMTIME).addDef(AMDGPU::SGPR0_SGPR1),
+       MemOpInfo{kRead, MemType::kScalar, false, true}},
+      {"v_add, not a memory op",
+       build(AMDGPU::V_ADD_U32_e32)
+           .addDef(AMDGPU::VGPR50).addReg(AMDGPU::VGPR11).addReg(AMDGPU::VGPR13),
+       std::nullopt},
+  };
+
+  auto describe = [](const std::optional<MemOpInfo> &info) {
+    if (!info) {
+      return std::string("not a memory op");
+    }
+    const char *const kTypeNames[] = {"vector", "flat", "scalar", "lds", "gds"};
+    std::string text = kTypeNames[static_cast<int>(info->type)];
+    text += info->access == MemAccess::kRead ? " read" : " write";
+    text += info->counts_in_vmcnt ? ", vmcnt" : "";
+    text += info->counts_in_lgkmcnt ? ", lgkmcnt" : "";
+    return text;
+  };
+  auto same = [](const std::optional<MemOpInfo> &a,
+                 const std::optional<MemOpInfo> &b) {
+    if (!a || !b) {
+      return !a && !b;
+    }
+    return a->access == b->access && a->type == b->type &&
+           a->counts_in_vmcnt == b->counts_in_vmcnt &&
+           a->counts_in_lgkmcnt == b->counts_in_lgkmcnt;
+  };
+
+  int failures = 0;
+  for (const Case &test_case : cases) {
+    const std::optional<MemOpInfo> actual = ClassifyMemOp(*test_case.mi, st);
+    const bool pass = same(actual, test_case.expected);
+    llvm::outs() << "    " << test_case.name << ": " << describe(actual)
+                 << (pass ? "  PASS" : "  FAIL, expected " +
+                                           describe(test_case.expected))
+                 << "\n";
+    if (!pass) {
+      ++failures;
+    }
+    mf.deleteMachineInstr(test_case.mi);
+  }
+  if (failures > 0) {
+    report_fatal_error("ClassifyMemOp unit tests failed");
+  }
+}
+
 // Forward declaration: the body lives at the end of the anonymous
 // namespace alongside the other recent-addition shakedowns
 // (RunScoreShakedown, RunOccupancyTargetUtilShakedown), but
@@ -7742,6 +7918,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
   RunContinuousScoreBandSweepShakedown(st);
+  RunClassifyMemOpUnitTests(MF);
   RunTestDAGShakedown(st);
   RunInsertSubgraphProxiesShakedown();
   RunSubgraphContiguityShakedown(MF, *LIS);

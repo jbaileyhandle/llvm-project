@@ -3,7 +3,7 @@
 | Step | What | Status |
 |---|---|---|
 | 0 | Verify the compiler's wait behavior | Done |
-| 1 | Classify an instruction | Not started |
+| 1 | Classify an instruction | Done |
 | 2 | Build the graph | Not started |
 | 3 | Ideal | Not started |
 | 4 | Score one ordering | Not started |
@@ -132,7 +132,7 @@ evidence says it matters. `AMDGPUWaitcntRules.md` has the details of each.
 | Issue stalls when a counter is full | From memory, not verified: the next op can't issue until one finishes | In-flight count could be overstated | Same as counter limits |
 | Loop preheader flush | `vmcnt(0)` at the end of the block before some loops | Missed wait | Outside the loop's own regions |
 | Store to a pointer a scalar load read | `lgkmcnt(0)` | Missed wait | Only matters once scalar is on |
-| `s_memtime`, a scalar clock read | Not a memory access, but counts in lgkmcnt, and later code waits on the register it writes | Classified as a write, so those waits are missed | Only matters once scalar is on, and it should be rare |
+| `BUFFER_LOAD_LDS_*`, which load global memory straight into LDS | Counts in vmcnt. Writes no register, so later code waits on it through LDS instead: any LDS access waits on vmcnt for it | Classified as a vector write (out of the graph by default), and its LDS-based waits are missed | Only produced by specific intrinsics; not seen in our kernels |
 | Function return | Waits for everything | None | Reads already count until the end of the region |
 | MLP by type | Not applicable | One MLP over all tracked types (design 5.4) | Tracking one type at a time gives that type's MLP; worth a comment in the code |
 

@@ -111,12 +111,11 @@ don't all use the same counters:
 | LDS (`isDS`, not GDS) | LDS | no | yes |
 | GDS | GDS | no | yes |
 
-**Read or write,** in this order, because atomics both load and store:
-
-1. `SIInstrInfo::isAtomicRet`: read. It returns a value that later code waits on.
-2. `SIInstrInfo::isAtomicNoRet`: write. Nothing can wait on it.
-3. `mayLoad()`: read.
-4. Anything else: write.
+**Read or write.** A read is an op that writes a register; anything else is a write.
+This is the compiler's own test: `SIInsertWaitcnts` records a counted op against
+every register it defines, and only those registers are ever waited on. So a read
+is exactly an op whose result later code can wait for, and an atomic is a read if it
+returns a value and a write if it doesn't, with no special case.
 
 **Atomics are covered.** They fall under the same rows of the table as other ops
 in their family: `global_atomic_*` is vector, `flat_atomic_*` is FLAT, `ds_add_*`
