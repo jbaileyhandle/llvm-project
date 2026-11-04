@@ -5,7 +5,7 @@
 | 0 | Verify the compiler's wait behavior | Done |
 | 1 | Classify an instruction | Done |
 | 2 | Build the graph | Done |
-| 3 | Ideal | Not started |
+| 3 | Ideal | Done |
 | 4 | Score one ordering | Not started |
 | 5 | Commit | Not started |
 

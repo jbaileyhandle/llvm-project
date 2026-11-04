@@ -172,7 +172,7 @@ bool MemoryGraphOptions::IsTracked(const MemOpInfo &info) const {
 MemoryNode &MemoryGraph::AddNode(MemoryNodeKind kind,
                                  const ScheduleNode *original_node,
                                  std::optional<MemOpInfo> mem_op_info,
-                                 int latency) {
+                                 int llvm_latency) {
   if ((kind == MemoryNodeKind::kMemOp) != mem_op_info.has_value()) {
     report_fatal_error("MemoryGraph::AddNode: a node has MemOpInfo exactly "
                        "when its kind is kMemOp");
@@ -189,7 +189,7 @@ MemoryNode &MemoryGraph::AddNode(MemoryNodeKind kind,
   node.kind_ = kind;
   node.original_node_ = original_node;
   node.mem_op_info_ = mem_op_info;
-  node.latency_ = mem_op_info ? latency : 0;
+  node.llvm_latency_ = mem_op_info ? llvm_latency : 0;
   if (original_node != nullptr) {
     if (original_node->IsRealInstruction()) {
       node.original_instr_ = original_node->GetSUnit()->getInstr();
@@ -236,7 +236,8 @@ void MemoryGraph::AddMemOpAndBarrierNodes(
   for (const ScheduleNode *node : original.GetTopoOrder()) {
     const NodeRole role = role_classifier(*node);
     if (role.tracked_mem_op) {
-      AddNode(MemoryNodeKind::kMemOp, node, role.tracked_mem_op, role.latency);
+      AddNode(MemoryNodeKind::kMemOp, node, role.tracked_mem_op,
+              role.llvm_latency);
     } else if (role.is_barrier) {
       AddNode(MemoryNodeKind::kBarrier, node);
     }
@@ -336,7 +337,7 @@ namespace {
 // (mayLoad). So, as in the compiler, an op that isn't a load, such as the
 // s_memtime clock read, keeps its timing-model latency. Without a setting, the
 // latency is SUnit::Latency, which reads the active timing model.
-int LatencyOf(const MachineInstr &mi, const SUnit &su) {
+int LlvmLatencyOf(const MachineInstr &mi, const SUnit &su) {
   if (mi.mayLoad()) {
     const MachineInstrSchedulerConfig::GlobalSettings &settings =
         MachineInstrSchedulerConfig::GetConfig().GetGlobalSettings();
@@ -376,7 +377,7 @@ MemoryGraph::Build(ScheduleGraph &original, const GCNSubtarget &st,
     const std::optional<MemOpInfo> info = ClassifyMemOp(mi, st);
     if (info && options.IsTracked(*info)) {
       role.tracked_mem_op = info;
-      role.latency = LatencyOf(mi, *node.GetSUnit());
+      role.llvm_latency = LlvmLatencyOf(mi, *node.GetSUnit());
     } else if (IsWaveRendezvous(mi)) {
       role.is_barrier = true;
     }
@@ -401,4 +402,51 @@ MemoryGraph::OrderFromSchedule(ArrayRef<const ScheduleNode *> schedule) const {
   // The sink stands for the end of the region, so it comes last.
   order.push_back(sink_);
   return order;
+}
+
+IdealScore MemoryGraph::Ideal(LatencySetting setting) const {
+  // The earliest time each node can run, indexed by topo index. Filled in
+  // topological order, so a node's predecessors are always done before it.
+  std::vector<int> earliest_start_by_topo_index(topo_order_.size(), 0);
+
+  // The numerator of mlp: the total time the tracked reads spend in flight.
+  int total_read_latency = 0;
+
+  for (const MemoryNode *node : topo_order_) {
+    // A node can start once every predecessor allows it.
+    int earliest_start = 0;
+    for (const MemoryEdge &edge : node->Predecessors()) {
+      const MemoryNode &predecessor = *edge.node;
+      const int predecessor_start =
+          earliest_start_by_topo_index[predecessor.GetTopoIndex()];
+
+      // An ordering-only edge only keeps this node from starting before the
+      // predecessor. An edge that waits for data also waits for the
+      // predecessor's data to come back.
+      int allowed_from = predecessor_start;
+      if (edge.waits_for_data) {
+        allowed_from += predecessor.GetLatency(setting);
+      }
+
+      earliest_start = std::max(earliest_start, allowed_from);
+    }
+    earliest_start_by_topo_index[node->GetTopoIndex()] = earliest_start;
+
+    if (node->IsRead()) {
+      total_read_latency += node->GetLatency(setting);
+    }
+  }
+
+  // The sink waits for every load, so the earliest it can start is when the
+  // region's memory work is done.
+  const int memory_time = earliest_start_by_topo_index[sink_->GetTopoIndex()];
+
+  // With no memory time there's nothing to overlap, so mlp is 0 rather than a
+  // division by zero.
+  float mlp = 0.0f;
+  if (memory_time > 0) {
+    mlp = static_cast<float>(total_read_latency) / memory_time;
+  }
+
+  return IdealScore{memory_time, mlp};
 }

@@ -5943,7 +5943,7 @@ std::multiset<std::string> MemoryNodeLines(const MemoryGraph &graph) {
       uses += (uses.empty() ? "" : ",") + name;
     }
     lines.insert(MemoryNodeName(node) + " " + kind + " latency=" +
-                 std::to_string(node.GetLatency()) + " uses=" + uses);
+                 std::to_string(node.GetLlvmLatency()) + " uses=" + uses);
   }
   return lines;
 }
@@ -6045,6 +6045,37 @@ bool CheckOrderFromSchedule(const ScheduleGraph &original,
   return pass;
 }
 
+// The role of a BuildMemoryGraphTestDAG node, decided by name the way
+// MemoryGraph::Build decides it from an instruction. L1 to L4 are vector loads
+// with the LLVM latencies in `load_latencies`, in that order. S is a vector
+// store with LLVM latency 100. Each is a memory op only if `options` tracks
+// it. B is a barrier.
+NodeRole TestDagRole(const ScheduleNode &node,
+                     const MemoryGraphOptions &options,
+                     ArrayRef<int> load_latencies) {
+  const StringRef name = node.GetDebugName();
+
+  std::optional<MemOpInfo> info;
+  int llvm_latency = 0;
+  if (name.starts_with("L")) {
+    // L1 to L4: the digit picks the latency.
+    info = MemOpInfo{MemAccess::kRead, MemType::kVector, true, false};
+    llvm_latency = load_latencies[name[1] - '1'];
+  } else if (name == "S") {
+    info = MemOpInfo{MemAccess::kWrite, MemType::kVector, true, false};
+    llvm_latency = 100;
+  }
+
+  NodeRole role;
+  if (info && options.IsTracked(*info)) {
+    role.tracked_mem_op = info;
+    role.llvm_latency = llvm_latency;
+  } else if (name == "B") {
+    role.is_barrier = true;
+  }
+  return role;
+}
+
 // Builds the memory graph of BuildMemoryGraphTestDAG with writes tracked or
 // not, and checks it against answers worked out by hand from that factory's
 // drawing. Returns whether every check passed.
@@ -6053,26 +6084,11 @@ bool CheckMemoryGraphBuild(bool track_writes) {
   options.track_writes = track_writes;
   auto original = ScheduleGraph::BuildMemoryGraphTestDAG();
 
-  // Roles by name, decided the way MemoryGraph::Build decides them: a memory
-  // op if `options` tracks it, otherwise a barrier if it's B.
-  auto role_classifier = [&](const ScheduleNode &node) {
-    const StringRef name = node.GetDebugName();
-    std::optional<MemOpInfo> info;
-    if (name.starts_with("L")) {  // L1 to L4
-      info = MemOpInfo{MemAccess::kRead, MemType::kVector, true, false};
-    } else if (name == "S") {
-      info = MemOpInfo{MemAccess::kWrite, MemType::kVector, true, false};
-    }
-    NodeRole role;
-    if (info && options.IsTracked(*info)) {
-      role.tracked_mem_op = info;
-      role.latency = 100;
-    } else if (name == "B") {
-      role.is_barrier = true;
-    }
-    return role;
-  };
-  auto graph = MemoryGraph::BuildWithRoleClassifier(*original, role_classifier);
+  // Every load's LLVM latency is 100.
+  auto graph = MemoryGraph::BuildWithRoleClassifier(
+      *original, [&](const ScheduleNode &node) {
+        return TestDagRole(node, options, {100, 100, 100, 100});
+      });
 
   // N, X and E play no role and read no load's data, so they aren't in the
   // graph. A and U are users. The sink uses every load.
@@ -6133,6 +6149,84 @@ void RunMemoryGraphBuildUnitTests() {
   }
   if (!pass) {
     report_fatal_error("MemoryGraph build unit tests failed");
+  }
+}
+
+// One Ideal test on BuildMemoryGraphTestDAG, with its answer worked out by
+// hand from the factory's drawing.
+struct IdealTestCase {
+  const char *description;
+  int load_latencies[4];  // the LLVM latencies of L1, L2, L3 and L4
+  bool track_writes;
+  LatencySetting setting;
+  int expected_memory_time;
+  int expected_total_read_latency;  // the numerator of the expected mlp
+};
+
+// Runs one Ideal test case and prints its result. Returns whether it passed.
+bool CheckIdealCase(const IdealTestCase &test_case) {
+  MemoryGraphOptions options;
+  options.track_writes = test_case.track_writes;
+
+  auto original = ScheduleGraph::BuildMemoryGraphTestDAG();
+  auto graph = MemoryGraph::BuildWithRoleClassifier(
+      *original, [&](const ScheduleNode &node) {
+        return TestDagRole(node, options, test_case.load_latencies);
+      });
+
+  const IdealScore score = graph->Ideal(test_case.setting);
+
+  // The same division Ideal does, so only rounding can differ.
+  const float expected_mlp =
+      static_cast<float>(test_case.expected_total_read_latency) /
+      test_case.expected_memory_time;
+  const bool pass = score.memory_time == test_case.expected_memory_time &&
+                    std::fabs(score.mlp - expected_mlp) < 1e-6f;
+
+  llvm::outs() << "\t\t" << test_case.description << ": memory_time "
+               << score.memory_time << ", mlp " << std::to_string(score.mlp);
+  if (pass) {
+    llvm::outs() << "  PASS\n";
+  } else {
+    llvm::outs() << "  FAIL, expected memory_time "
+                 << test_case.expected_memory_time << ", mlp "
+                 << test_case.expected_total_read_latency << "/"
+                 << test_case.expected_memory_time << "\n";
+  }
+  return pass;
+}
+
+// Ideal on BuildMemoryGraphTestDAG. With every load at 100, the longest chain
+// of waits is L1 -> A -> L2 -> U -> B -> L4: A waits for L1's data (100), U
+// for L2's (200), and L4's own data is back at 300. L3 starts with L2, at 100,
+// and its data is back at 200, inside that chain.
+void RunMemoryGraphIdealUnitTests() {
+  llvm::outs() << "\tMemoryGraph Ideal unit tests:\n";
+
+  const IdealTestCase cases[] = {
+      {"all loads 100, kLlvm", {100, 100, 100, 100}, false,
+       LatencySetting::kLlvm, 300, 400},
+      // Equal latencies, so the same mlp as with kLlvm.
+      {"all loads 100, kUnit", {100, 100, 100, 100}, false,
+       LatencySetting::kUnit, 3, 4},
+      // The short chain ends by 3. L3 starts at 1, alongside it, and its data
+      // is back at 101.
+      {"L3 100, other loads 1, kLlvm", {1, 1, 100, 1}, false,
+       LatencySetting::kLlvm, 101, 103},
+      // Counting loads ignores that L3 is slower: 4/3 instead of 103/101.
+      {"L3 100, other loads 1, kUnit", {1, 1, 100, 1}, false,
+       LatencySetting::kUnit, 3, 4},
+      // S adds no time, since nothing waits for its data, and it isn't a read.
+      {"all loads 100, writes tracked, kLlvm", {100, 100, 100, 100}, true,
+       LatencySetting::kLlvm, 300, 400},
+  };
+
+  bool pass = true;
+  for (const IdealTestCase &test_case : cases) {
+    pass &= CheckIdealCase(test_case);
+  }
+  if (!pass) {
+    report_fatal_error("MemoryGraph Ideal unit tests failed");
   }
 }
 
@@ -8265,6 +8359,7 @@ void ScheduleDAGHierarchicalScheduler::RunInstrOrderReplayShakedowns() {
 void ScheduleDAGHierarchicalScheduler::RunMemoryGraphShakedowns() {
   RunClassifyMemOpUnitTests(MF);
   RunMemoryGraphBuildUnitTests();
+  RunMemoryGraphIdealUnitTests();
 
   llvm::outs() << "\tMemoryGraph on real regions:\n";
   const GCNSubtarget &st = MF.getSubtarget<GCNSubtarget>();

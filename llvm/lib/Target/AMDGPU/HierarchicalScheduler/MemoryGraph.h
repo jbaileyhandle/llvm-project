@@ -85,6 +85,12 @@ struct MemoryEdge {
                         // time passes between them; otherwise ordering only
 };
 
+/// Where each memory op's latency comes from (design doc section 5.1).
+enum class LatencySetting {
+  kUnit,  // 1 for every tracked load and write
+  kLlvm,  // the op's LLVM latency, stored at build (design doc section 3)
+};
+
 /// One node of a MemoryGraph. Organized like ScheduleNode: read-only
 /// accessors, filled in by MemoryGraph.
 class MemoryNode {
@@ -107,9 +113,17 @@ public:
     return mem_op_info_ && mem_op_info_->access == MemAccess::kRead;
   }
 
-  /// How long this op takes (design doc section 3). 0 unless it's a tracked
-  /// load or write.
-  int GetLatency() const { return latency_; }
+  /// This op's LLVM latency, stored at build (design doc section 3): its
+  /// latency under LatencySetting::kLlvm. 0 unless it's a tracked load or
+  /// write.
+  int GetLlvmLatency() const { return llvm_latency_; }
+  /// This op's latency under `setting`. 0 unless it's a tracked load or write.
+  int GetLatency(LatencySetting setting) const {
+    if (kind_ != MemoryNodeKind::kMemOp) {
+      return 0;
+    }
+    return setting == LatencySetting::kUnit ? 1 : llvm_latency_;
+  }
 
   /// The tracked loads whose data this node reads. Non-empty exactly when
   /// this node is a user, whatever its kind: a load whose address comes from
@@ -131,7 +145,7 @@ private:
   const ScheduleNode *original_node_ = nullptr;
   const MachineInstr *original_instr_ = nullptr;
   std::optional<MemOpInfo> mem_op_info_;
-  int latency_ = 0;
+  int llvm_latency_ = 0;
   SmallVector<MemoryNode *, 4> loads_used_;
   SmallVector<MemoryEdge, 4> successors_;
   SmallVector<MemoryEdge, 4> predecessors_;
@@ -142,8 +156,15 @@ private:
 /// user isn't part of this; the build works that out from the graph's edges.
 struct NodeRole {
   std::optional<MemOpInfo> tracked_mem_op;  // set if a tracked load or write
-  int latency = 0;                          // used when tracked_mem_op is set
+  int llvm_latency = 0;                     // used when tracked_mem_op is set
   bool is_barrier = false;
+};
+
+/// The best the region's memory work could do (design doc section 4).
+struct IdealScore {
+  int memory_time;  // the least time the region's memory work can take
+  float mlp;        // the reads' total latency / memory_time; 0 when
+                    // memory_time is 0
 };
 
 /// A graph of one region's memory ops (design doc section 3). Organized like
@@ -171,6 +192,10 @@ public:
   std::vector<const MemoryNode *>
   OrderFromSchedule(ArrayRef<const ScheduleNode *> schedule) const;
 
+  /// The region's ideal under `setting`: the best its memory work could do,
+  /// held back only by the edges (design doc section 4).
+  IdealScore Ideal(LatencySetting setting) const;
+
   ArrayRef<MemoryNode> Nodes() const { return nodes_; }
   ArrayRef<MemoryNode *> GetTopoOrder() const { return topo_order_; }
   const MemoryNode *GetSink() const { return sink_; }
@@ -186,12 +211,12 @@ private:
   MemoryGraph() = default;
 
   /// Adds a complete node. `mem_op_info` must be set exactly when the kind is
-  /// kMemOp, and `latency` is used only then. `original_node` is null only for
-  /// the sink. nodes_ is reserved up front and this fails hard if it would
-  /// reallocate, because nodes point at each other.
+  /// kMemOp, and `llvm_latency` is used only then. `original_node` is null
+  /// only for the sink. nodes_ is reserved up front and this fails hard if it
+  /// would reallocate, because nodes point at each other.
   MemoryNode &AddNode(MemoryNodeKind kind, const ScheduleNode *original_node,
                       std::optional<MemOpInfo> mem_op_info = std::nullopt,
-                      int latency = 0);
+                      int llvm_latency = 0);
   void AddEdge(MemoryNode &from, MemoryNode &to, bool waits_for_data);
 
   // The build's steps, called in this order by BuildWithRoleClassifier.
