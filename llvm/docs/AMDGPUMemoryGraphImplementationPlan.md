@@ -4,7 +4,7 @@
 |---|---|---|
 | 0 | Verify the compiler's wait behavior | Done |
 | 1 | Classify an instruction | Done |
-| 2 | Build the graph | Not started |
+| 2 | Build the graph | Done |
 | 3 | Ideal | Not started |
 | 4 | Score one ordering | Not started |
 | 5 | Commit | Not started |
@@ -170,8 +170,6 @@ failure stops the suite.
 - Every counter the classifier assigns is one LLVM's instruction definitions say the instruction
   uses (`SIInstrInfo::usesVM_CNT`, `usesLGKM_CNT`). This catches basic classifier mistakes, like
   an LDS op in vmcnt. It can't check the FLAT rules, because those flags are set on every `flat_*`.
-- A load's latency matches the latency on its data edges in a graph built with no latency
-  divisor. That guards the local copy of the settings lookup.
 - Graph edges match `IsReachableInDag` for every pair of nodes.
 - For the region's real order, `latency_based_mlp` never exceeds ideal's `mlp`, and
   `memory_time` is never less than ideal's.

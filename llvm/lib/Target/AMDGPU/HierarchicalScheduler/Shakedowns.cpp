@@ -5902,6 +5902,357 @@ void RunClassifyMemOpUnitTests(MachineFunction &mf) {
   }
 }
 
+// A memory node's name in test output: its original node's debug name, or
+// "sink".
+std::string MemoryNodeName(const MemoryNode &node) {
+  if (node.GetOriginalNode() == nullptr) {
+    return "sink";
+  }
+  return node.GetOriginalNode()->GetDebugName().str();
+}
+
+// One line per node: its name, kind (read or write for a memory op), latency
+// and the loads it uses, e.g. "A user_only latency=0 uses=L1". Comparing these
+// as a set checks the nodes without depending on the order the build added
+// them.
+std::multiset<std::string> MemoryNodeLines(const MemoryGraph &graph) {
+  std::multiset<std::string> lines;
+  for (const MemoryNode &node : graph.Nodes()) {
+    std::string kind;
+    switch (node.GetKind()) {
+    case MemoryNodeKind::kMemOp:
+      kind = node.IsRead() ? "read" : "write";
+      break;
+    case MemoryNodeKind::kBarrier:
+      kind = "barrier";
+      break;
+    case MemoryNodeKind::kUserOnly:
+      kind = "user_only";
+      break;
+    case MemoryNodeKind::kSink:
+      kind = "sink";
+      break;
+    }
+    std::vector<std::string> load_names;
+    for (const MemoryNode *load : node.GetLoadsUsed()) {
+      load_names.push_back(MemoryNodeName(*load));
+    }
+    std::sort(load_names.begin(), load_names.end());
+    std::string uses;
+    for (const std::string &name : load_names) {
+      uses += (uses.empty() ? "" : ",") + name;
+    }
+    lines.insert(MemoryNodeName(node) + " " + kind + " latency=" +
+                 std::to_string(node.GetLatency()) + " uses=" + uses);
+  }
+  return lines;
+}
+
+// One line per edge, "from->to data" when the later node waits for the
+// earlier load's data and "from->to order" otherwise. Read from each node's
+// successor lists, or from its predecessor lists when `from_predecessors` is
+// set; the two must agree. A multiset, so a duplicated edge shows up.
+std::multiset<std::string> MemoryEdgeLines(const MemoryGraph &graph,
+                                           bool from_predecessors) {
+  auto line = [](const MemoryNode &from, const MemoryNode &to,
+                 bool waits_for_data) {
+    return MemoryNodeName(from) + "->" + MemoryNodeName(to) +
+           (waits_for_data ? " data" : " order");
+  };
+  std::multiset<std::string> lines;
+  for (const MemoryNode &node : graph.Nodes()) {
+    if (from_predecessors) {
+      for (const MemoryEdge &edge : node.Predecessors()) {
+        lines.insert(line(*edge.node, node, edge.waits_for_data));
+      }
+    } else {
+      for (const MemoryEdge &edge : node.Successors()) {
+        lines.insert(line(node, *edge.node, edge.waits_for_data));
+      }
+    }
+  }
+  return lines;
+}
+
+// Compares `actual` with `expected`, printing PASS or FAIL and, on a failure,
+// each line missing from `actual` and each line it has that wasn't expected.
+bool CheckSameLines(StringRef label, const std::multiset<std::string> &actual,
+                    const std::multiset<std::string> &expected) {
+  std::vector<std::string> missing;
+  std::vector<std::string> unexpected;
+  std::set_difference(expected.begin(), expected.end(), actual.begin(),
+                      actual.end(), std::back_inserter(missing));
+  std::set_difference(actual.begin(), actual.end(), expected.begin(),
+                      expected.end(), std::back_inserter(unexpected));
+  const bool pass = missing.empty() && unexpected.empty();
+  llvm::outs() << "\t\t\t" << label << ": " << (pass ? "PASS" : "FAIL")
+               << "\n";
+  for (const std::string &line : missing) {
+    llvm::outs() << "\t\t\t\tmissing: " << line << "\n";
+  }
+  for (const std::string &line : unexpected) {
+    llvm::outs() << "\t\t\t\tunexpected: " << line << "\n";
+  }
+  return pass;
+}
+
+// Checks the graph's order: ids and topo indices match positions in Nodes()
+// and GetTopoOrder(), every edge goes from a lower topo index to a higher one,
+// and the sink comes last.
+bool CheckMemoryGraphOrder(const MemoryGraph &graph) {
+  ArrayRef<MemoryNode> nodes = graph.Nodes();
+  ArrayRef<MemoryNode *> topo_order = graph.GetTopoOrder();
+  bool pass = topo_order.size() == nodes.size() &&
+              topo_order.back() == graph.GetSink();
+  for (int index = 0; index < static_cast<int>(nodes.size()); ++index) {
+    pass &= nodes[index].GetId() == index;
+  }
+  for (int index = 0; index < static_cast<int>(topo_order.size()); ++index) {
+    pass &= topo_order[index]->GetTopoIndex() == index;
+  }
+  for (const MemoryNode &node : nodes) {
+    for (const MemoryEdge &edge : node.Successors()) {
+      pass &= node.GetTopoIndex() < edge.node->GetTopoIndex();
+    }
+  }
+  llvm::outs() << "\t\t\ttopological order: " << (pass ? "PASS" : "FAIL")
+               << "\n";
+  return pass;
+}
+
+// Checks OrderFromSchedule on a hand-picked schedule of the test graph: it
+// keeps the schedule's order, drops nodes that aren't in the memory graph, and
+// ends with the sink.
+bool CheckOrderFromSchedule(const ScheduleGraph &original,
+                            const MemoryGraph &graph, bool track_writes) {
+  std::vector<const ScheduleNode *> schedule;
+  for (StringRef name :
+       {"N", "L1", "X", "A", "L2", "S", "L3", "U", "B", "L4", "E"}) {
+    schedule.push_back(
+        &*llvm::find_if(original.Nodes(), [&](const ScheduleNode &node) {
+          return node.GetDebugName() == name;
+        }));
+  }
+  std::string actual;
+  for (const MemoryNode *node : graph.OrderFromSchedule(schedule)) {
+    actual += (actual.empty() ? "" : " ") + MemoryNodeName(*node);
+  }
+  const std::string expected = track_writes ? "L1 A L2 S L3 U B L4 sink"
+                                            : "L1 A L2 L3 U B L4 sink";
+  const bool pass = actual == expected;
+  llvm::outs() << "\t\t\torder from schedule: " << actual
+               << (pass ? "  PASS" : "  FAIL, expected " + expected) << "\n";
+  return pass;
+}
+
+// Builds the memory graph of BuildMemoryGraphTestDAG with writes tracked or
+// not, and checks it against answers worked out by hand from that factory's
+// drawing. Returns whether every check passed.
+bool CheckMemoryGraphBuild(bool track_writes) {
+  MemoryGraphOptions options;
+  options.track_writes = track_writes;
+  auto original = ScheduleGraph::BuildMemoryGraphTestDAG();
+
+  // Roles by name, decided the way MemoryGraph::Build decides them: a memory
+  // op if `options` tracks it, otherwise a barrier if it's B.
+  auto role_classifier = [&](const ScheduleNode &node) {
+    const StringRef name = node.GetDebugName();
+    std::optional<MemOpInfo> info;
+    if (name.starts_with("L")) {  // L1 to L4
+      info = MemOpInfo{MemAccess::kRead, MemType::kVector, true, false};
+    } else if (name == "S") {
+      info = MemOpInfo{MemAccess::kWrite, MemType::kVector, true, false};
+    }
+    NodeRole role;
+    if (info && options.IsTracked(*info)) {
+      role.tracked_mem_op = info;
+      role.latency = 100;
+    } else if (name == "B") {
+      role.is_barrier = true;
+    }
+    return role;
+  };
+  auto graph = MemoryGraph::BuildWithRoleClassifier(*original, role_classifier);
+
+  // N, X and E play no role and read no load's data, so they aren't in the
+  // graph. A and U are users. The sink uses every load.
+  std::multiset<std::string> expected_nodes = {
+      "L1 read latency=100 uses=",
+      "A user_only latency=0 uses=L1",
+      "L2 read latency=100 uses=",
+      "U user_only latency=0 uses=L2",
+      "L3 read latency=100 uses=",
+      "B barrier latency=0 uses=",
+      "L4 read latency=100 uses=",
+      "sink sink latency=0 uses=L1,L2,L3,L4",
+  };
+  // One edge per pair the original graph orders, "data" exactly where the
+  // later node reads the earlier load's data.
+  std::multiset<std::string> expected_edges = {
+      // L2 reads A's data, but A isn't a load, so A -> L2 is ordering only.
+      "L1->A data", "L1->L2 order", "L1->U order", "L1->L3 order",
+      "L1->B order", "L1->L4 order", "L1->sink data",
+      "A->L2 order", "A->U order", "A->L3 order", "A->B order",
+      "A->L4 order", "A->sink order",
+      // No edge between U and L3 either way: the only path would use the
+      // weak U ~~> S edge.
+      "L2->U data", "L2->L3 order", "L2->B order", "L2->L4 order",
+      "L2->sink data",
+      "U->B order", "U->L4 order", "U->sink order",
+      // L3's data edge to the exit node becomes its data edge to the sink.
+      "L3->B order", "L3->L4 order", "L3->sink data",
+      "B->L4 order", "B->sink order",
+      "L4->sink data",
+  };
+  if (track_writes) {
+    // S reads nothing: its edge from L2 is a may-alias ordering, not data.
+    expected_nodes.insert("S write latency=100 uses=");
+    expected_edges.insert({"L1->S order", "A->S order", "L2->S order",
+                           "S->L3 order", "S->B order", "S->L4 order",
+                           "S->sink order"});
+  }
+
+  bool pass = CheckSameLines("nodes", MemoryNodeLines(*graph), expected_nodes);
+  pass &= CheckSameLines("edges", MemoryEdgeLines(*graph, false),
+                         expected_edges);
+  pass &= CheckSameLines("edges from predecessor lists",
+                         MemoryEdgeLines(*graph, /*from_predecessors=*/true),
+                         expected_edges);
+  pass &= CheckMemoryGraphOrder(*graph);
+  pass &= CheckOrderFromSchedule(*original, *graph, track_writes);
+  return pass;
+}
+
+void RunMemoryGraphBuildUnitTests() {
+  llvm::outs() << "\tMemoryGraph build unit tests:\n";
+  bool pass = true;
+  for (bool track_writes : {false, true}) {
+    llvm::outs() << "\t\ttrack_writes " << (track_writes ? "on" : "off")
+                 << ":\n";
+    pass &= CheckMemoryGraphBuild(track_writes);
+  }
+  if (!pass) {
+    report_fatal_error("MemoryGraph build unit tests failed");
+  }
+}
+
+// Appends a problem for each way `graph`'s edges differ from what the original
+// graph says: an edge A -> B exactly when B must come after A
+// (IsReachableInDag), waiting for data exactly when A is a load with a data
+// edge to B, and an edge from every node to the sink, waiting for data exactly
+// when the node is a load.
+void AppendEdgeProblems(const ScheduleGraph &original, const MemoryGraph &graph,
+                        StringRef label, std::vector<std::string> &problems) {
+  auto name = [](const MemoryNode &node) {
+    return node.GetOriginalNode() == nullptr
+               ? std::string("sink")
+               : node.GetOriginalNode()->ToString();
+  };
+  for (const MemoryNode &from : graph.Nodes()) {
+    if (&from == graph.GetSink()) {
+      continue;
+    }
+    DenseMap<const MemoryNode *, bool> waits_for_data_by_successor;
+    for (const MemoryEdge &edge : from.Successors()) {
+      waits_for_data_by_successor[edge.node] = edge.waits_for_data;
+    }
+    for (const MemoryNode &to : graph.Nodes()) {
+      bool expect_edge = true;
+      bool expect_waits_for_data = from.IsRead();
+      if (&to != graph.GetSink()) {
+        const ScheduleNode *from_original = from.GetOriginalNode();
+        const ScheduleNode *to_original = to.GetOriginalNode();
+        expect_edge = &from != &to &&
+                      original.IsReachableInDag(from_original, to_original);
+        expect_waits_for_data =
+            from.IsRead() &&
+            any_of(from_original->Successors(), [&](const ScheduleEdge &edge) {
+              return edge.IsDataEdge() && edge.node_ == to_original;
+            });
+      }
+      auto it = waits_for_data_by_successor.find(&to);
+      const bool has_edge = it != waits_for_data_by_successor.end();
+      std::string problem;
+      if (expect_edge != has_edge) {
+        problem = expect_edge ? "missing" : "unexpected";
+      } else if (has_edge && it->second != expect_waits_for_data) {
+        problem = expect_waits_for_data ? "should wait for data"
+                                        : "should be ordering only";
+      }
+      if (!problem.empty()) {
+        problems.push_back(label.str() + ": edge " + name(from) + "->" +
+                           name(to) + " " + problem);
+      }
+    }
+  }
+}
+
+// Appends a problem for each node of `fewer`, built with fewer types tracked,
+// that `more` doesn't have: tracking more types should only add nodes.
+void AppendMissingNodeProblems(const MemoryGraph &fewer,
+                               const MemoryGraph &more,
+                               std::vector<std::string> &problems) {
+  for (const MemoryNode &node : fewer.Nodes()) {
+    if (&node != fewer.GetSink() &&
+        more.GetMemoryNode(node.GetOriginalNode()) == nullptr) {
+      problems.push_back("tracking every type dropped " +
+                         node.GetOriginalNode()->ToString());
+    }
+  }
+}
+
+// Appends a problem for each instruction in the region that the classifier
+// puts in a counter its LLVM definition doesn't use (SIInstrInfo::usesVM_CNT,
+// usesLGKM_CNT). This catches basic mistakes, like an LDS op in vmcnt. It can't
+// check the FLAT rules, since every flat_* is defined to use both counters.
+void AppendCounterProblems(const ScheduleGraph &original,
+                           const GCNSubtarget &st,
+                           std::vector<std::string> &problems) {
+  for (const ScheduleNode &node : original.Nodes()) {
+    if (!node.IsRealInstruction() || node.GetSUnit()->getInstr() == nullptr) {
+      continue;
+    }
+    const MachineInstr &mi = *node.GetSUnit()->getInstr();
+    const std::optional<MemOpInfo> info = ClassifyMemOp(mi, st);
+    if (info && ((info->counts_in_vmcnt && !SIInstrInfo::usesVM_CNT(mi)) ||
+                 (info->counts_in_lgkmcnt && !SIInstrInfo::usesLGKM_CNT(mi)))) {
+      problems.push_back("counter its LLVM definition doesn't use: " +
+                         node.ToString());
+    }
+  }
+}
+
+// Builds a real region's memory graph twice, with the default options and
+// with every type and writes tracked, and checks both graphs' edges, that
+// tracking more only adds nodes, and the classifier's counters. Prints one
+// line for the region, then each problem. Returns whether there were none.
+bool CheckMemoryGraphOnRegion(ScheduleGraph &original,
+                              const GCNSubtarget &st) {
+  MemoryGraphOptions every_type;
+  every_type.track_scalar = true;
+  every_type.track_lds = true;
+  every_type.track_gds = true;
+  every_type.track_writes = true;
+  auto default_graph = MemoryGraph::Build(original, st, MemoryGraphOptions());
+  auto every_type_graph = MemoryGraph::Build(original, st, every_type);
+
+  std::vector<std::string> problems;
+  AppendEdgeProblems(original, *default_graph, "default types", problems);
+  AppendEdgeProblems(original, *every_type_graph, "every type", problems);
+  AppendMissingNodeProblems(*default_graph, *every_type_graph, problems);
+  AppendCounterProblems(original, st, problems);
+
+  // Node counts leave out the sink.
+  llvm::outs() << "\t\tregion: " << default_graph->Nodes().size() - 1
+               << " memory nodes, " << every_type_graph->Nodes().size() - 1
+               << " with every type tracked  "
+               << (problems.empty() ? "PASS" : "FAIL") << "\n";
+  for (const std::string &problem : problems) {
+    llvm::outs() << "\t\t\t" << problem << "\n";
+  }
+  return problems.empty();
+}
+
 // Forward declaration: the body lives at the end of the anonymous
 // namespace alongside the other recent-addition shakedowns
 // (RunScoreShakedown, RunOccupancyTargetUtilShakedown), but
@@ -7911,6 +8262,23 @@ void ScheduleDAGHierarchicalScheduler::RunInstrOrderReplayShakedowns() {
   CheckAdjustedLengthNotAboveRaw(adjusted_length, raw_length);
 }
 
+void ScheduleDAGHierarchicalScheduler::RunMemoryGraphShakedowns() {
+  RunClassifyMemOpUnitTests(MF);
+  RunMemoryGraphBuildUnitTests();
+
+  llvm::outs() << "\tMemoryGraph on real regions:\n";
+  const GCNSubtarget &st = MF.getSubtarget<GCNSubtarget>();
+  bool pass = true;
+  for (auto &region : regions_) {
+    WithRegionGraph(region, [&](ScheduleGraph &graph) {
+      pass &= CheckMemoryGraphOnRegion(graph, st);
+    });
+  }
+  if (!pass) {
+    report_fatal_error("MemoryGraph checks on real regions failed");
+  }
+}
+
 void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   llvm::outs() << "RunAllShakedowns:\n";
   RunEffectiveTimeoutShakedown();
@@ -7918,7 +8286,7 @@ void ScheduleDAGHierarchicalScheduler::RunAllShakedowns() {
   const GCNSubtarget &st =
       static_cast<const GCNSubtarget &>(MF.getSubtarget());
   RunContinuousScoreBandSweepShakedown(st);
-  RunClassifyMemOpUnitTests(MF);
+  RunMemoryGraphShakedowns();
   RunTestDAGShakedown(st);
   RunInsertSubgraphProxiesShakedown();
   RunSubgraphContiguityShakedown(MF, *LIS);

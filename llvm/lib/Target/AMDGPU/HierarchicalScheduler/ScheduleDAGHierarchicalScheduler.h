@@ -413,6 +413,11 @@ private:
   // WithRegionGraph.
   void RunInstrOrderReplayShakedowns();
 
+  // Shakedowns for MemoryGraph and the classifier it's built with: unit tests
+  // on test graphs, then checks of the real build on every region. A member
+  // for the same reason as RunInstrOrderReplayShakedowns.
+  void RunMemoryGraphShakedowns();
+
 protected:
   // Apply a computed schedule order to the given region. Physically moves
   // MachineInstrs to match the order given by |scheduled_units|.

@@ -637,6 +637,50 @@ public:
   /// Critical path: A→C→E→F→G (length 2+4+1+2 = 9).
   static std::unique_ptr<ScheduleGraph> BuildTestDAG();
 
+  /// Build a synthetic test DAG for MemoryGraph::BuildWithRoleClassifier. The
+  /// test gives each node its role by name. Nodes wrap nullptr; N and E are
+  /// set as the graph's entry and exit nodes, so the graph has the single
+  /// source and single sink that topological-order validation requires.
+  ///
+  ///     N (entry node) ---> X ---> E
+  ///     |
+  ///     v
+  ///            L1 (load)
+  ///            |  data
+  ///            v
+  ///            A (address math on L1's data)
+  ///            |  data
+  ///            v
+  ///            L2 (load)
+  ///           /  \
+  ///     data /    \ may-alias order
+  ///         v      v
+  ///         U ~~~> S (store)
+  ///         |      |  may-alias order
+  ///         |      v
+  ///         |      L3 (load) ----------+
+  ///          \    /   barrier order    |
+  ///           v  v                     | data
+  ///            B (s_barrier)           |
+  ///            |  barrier order        |
+  ///            v                       v
+  ///            L4 (load) --- data ---> E (exit node; values live out)
+  ///
+  ///     X: connected only to N and E, never to a load.
+  ///
+  ///   ~~~> is a cluster edge: weak, so reachability ignores it.
+  ///
+  /// What it exercises:
+  ///   - A wait passing through a non-memory instruction: L1 -> A -> L2.
+  ///   - Ordering-only paths through an untracked store: L2 -> S -> L3.
+  ///   - A pair with no path between them in either direction: U and L3. The
+  ///     cluster edge U ~~> S would create one (U -> S -> L3) if reachability
+  ///     followed weak edges, so this also checks that it doesn't.
+  ///   - A barrier.
+  ///   - The exit node not counting as a user.
+  ///   - An unrelated instruction (X) staying out of the graph.
+  static std::unique_ptr<ScheduleGraph> BuildMemoryGraphTestDAG();
+
   /// Build a synthetic test DAG specifically for exercising
   /// GetLengthLowerBound. Shape and latencies chosen so the LB
   /// transitions several times through the forward schedule — both

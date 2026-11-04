@@ -1385,6 +1385,47 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildTestDAG() {
   return graph;
 }
 
+std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildMemoryGraphTestDAG() {
+  auto graph = std::make_unique<ScheduleGraph>();
+
+  // See the declaration for the drawing. Nodes are created in a topological
+  // order. Edge latencies don't matter: MemoryGraph takes latency from the
+  // roles the test gives.
+  graph->ReserveNodes(11);
+  ScheduleNode &n = graph->EmplaceNode(nullptr, "N", graph.get());
+  ScheduleNode &l1 = graph->EmplaceNode(nullptr, "L1", graph.get());
+  ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
+  ScheduleNode &l2 = graph->EmplaceNode(nullptr, "L2", graph.get());
+  ScheduleNode &u = graph->EmplaceNode(nullptr, "U", graph.get());
+  ScheduleNode &s = graph->EmplaceNode(nullptr, "S", graph.get());
+  ScheduleNode &l3 = graph->EmplaceNode(nullptr, "L3", graph.get());
+  ScheduleNode &b = graph->EmplaceNode(nullptr, "B", graph.get());
+  ScheduleNode &l4 = graph->EmplaceNode(nullptr, "L4", graph.get());
+  ScheduleNode &x = graph->EmplaceNode(nullptr, "X", graph.get());
+  ScheduleNode &e = graph->EmplaceNode(nullptr, "E", graph.get());
+
+  graph->AddEdge(&n, &l1, ScheduleEdge::kData);
+  graph->AddEdge(&n, &x, ScheduleEdge::kData);
+  graph->AddEdge(&x, &e, ScheduleEdge::kData);
+  graph->AddEdge(&l1, &a, ScheduleEdge::kData);
+  graph->AddEdge(&a, &l2, ScheduleEdge::kData);
+  graph->AddEdge(&l2, &u, ScheduleEdge::kData);
+  graph->AddEdge(&l2, &s, ScheduleEdge::kMayAliasMem);
+  graph->AddEdge(&u, &s, ScheduleEdge::kCluster);
+  graph->AddEdge(&s, &l3, ScheduleEdge::kMayAliasMem);
+  graph->AddEdge(&u, &b, ScheduleEdge::kBarrier);
+  graph->AddEdge(&l3, &b, ScheduleEdge::kBarrier);
+  graph->AddEdge(&b, &l4, ScheduleEdge::kBarrier);
+  graph->AddEdge(&l3, &e, ScheduleEdge::kData);
+  graph->AddEdge(&l4, &e, ScheduleEdge::kData);
+
+  graph->entry_node_ = &n;
+  graph->exit_node_ = &e;
+
+  graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
+  return graph;
+}
+
 std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildLengthLowerBoundTestDAG() {
   auto graph = std::make_unique<ScheduleGraph>();
 
