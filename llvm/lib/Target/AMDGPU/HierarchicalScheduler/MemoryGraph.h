@@ -67,6 +67,19 @@ struct MemoryGraphOptions {
 
 class MemoryNode;
 
+/// The read types a score tracks: the reads counted in its MLPs and in the
+/// wait queues' tracked peaks. Tracking changes no timing.
+struct TrackedReadTypes {
+  bool vector = true;
+  bool flat = true;
+  bool scalar = false;
+  bool lds = false;
+  bool gds = false;
+
+  /// Whether `node` is a read of one of the types above.
+  bool Tracks(const MemoryNode &node) const;
+};
+
 /// What a node is. Being a user (reading some tracked load's data) is
 /// separate from the kind, because one instruction can be both a load and a
 /// user: a load whose address comes from another load's data.

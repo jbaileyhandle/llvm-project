@@ -42,6 +42,7 @@
 #include "SearchPolicies.h"
 #include "SubgraphFormation.h"
 #include "SubgraphInfo.h"
+#include "WaitQueues.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -6230,6 +6231,361 @@ void RunMemoryGraphIdealUnitTests() {
   }
 }
 
+// What each kind of op looks like to the wait queues, for the queue tests.
+const MemOpInfo kVectorLoadInfo{MemAccess::kRead, MemType::kVector, true,
+                                false};
+const MemOpInfo kLdsLoadInfo{MemAccess::kRead, MemType::kLds, false, true};
+const MemOpInfo kGdsLoadInfo{MemAccess::kRead, MemType::kGds, false, true};
+const MemOpInfo kScalarLoadInfo{MemAccess::kRead, MemType::kScalar, false,
+                                true};
+// A FLAT whose memory info doesn't rule out either kind of memory, so it goes
+// in both queues.
+const MemOpInfo kFlatInBothQueuesInfo{MemAccess::kRead, MemType::kFlat, true,
+                                      true};
+
+// Memory nodes for the queue tests: BuildMemoryGraphTestDAG's memory graph,
+// with L1 to L4 given the MemOpInfos in `load_infos`, in that order. A test
+// pushes them into wait queues in whatever order it likes; the queues don't
+// look at the graph's edges.
+class QueueTestNodes {
+public:
+  explicit QueueTestNodes(ArrayRef<MemOpInfo> load_infos)
+      : original_(ScheduleGraph::BuildMemoryGraphTestDAG()) {
+    graph_ = MemoryGraph::BuildWithRoleClassifier(
+        *original_, [&](const ScheduleNode &node) {
+          NodeRole role;
+          const StringRef name = node.GetDebugName();
+          if (name.starts_with("L")) {
+            // L1 to L4: the digit picks the MemOpInfo.
+            const int index = name[1] - '1';
+            if (index < static_cast<int>(load_infos.size())) {
+              role.tracked_mem_op = load_infos[index];
+            }
+          }
+          return role;
+        });
+  }
+
+  // The memory node for an original node's name, such as "L1".
+  const MemoryNode &Get(StringRef name) const {
+    for (const MemoryNode &node : graph_->Nodes()) {
+      if (node.GetOriginalNode() != nullptr &&
+          node.GetOriginalNode()->GetDebugName() == name) {
+        return node;
+      }
+    }
+    report_fatal_error("QueueTestNodes::Get: no memory node named " + name);
+  }
+
+private:
+  std::unique_ptr<ScheduleGraph> original_;
+  std::unique_ptr<MemoryGraph> graph_;
+};
+
+// Queue entries as "name:earliest_possible_pop_time", oldest first, such as
+// "L1:100 L2:100", or "(empty)".
+std::string DescribeEntries(ArrayRef<QueueEntry> entries) {
+  if (entries.empty()) {
+    return "(empty)";
+  }
+  std::string text;
+  for (const QueueEntry &entry : entries) {
+    text += (text.empty() ? "" : " ") + MemoryNodeName(*entry.node) + ":" +
+            std::to_string(entry.earliest_possible_pop_time);
+  }
+  return text;
+}
+
+// A node's waits as "issue <time>, popped <names>", such as
+// "issue 110, popped L1 L2".
+std::string DescribeNodeWait(const NodeWait &wait) {
+  std::string text = "issue " + std::to_string(wait.issue_time) + ", popped";
+  for (const MemoryNode *node : wait.popped) {
+    text += " " + MemoryNodeName(*node);
+  }
+  return text;
+}
+
+std::string CautiousText(const WaitQueues &queues) {
+  return queues.CautiousMode() ? "cautious" : "not cautious";
+}
+
+// Prints one queue check: what it got, and on a failure what it expected.
+// Returns whether they match.
+bool ReportQueueCheck(StringRef description, const std::string &actual,
+                      const std::string &expected) {
+  const bool pass = actual == expected;
+  llvm::outs() << "\t\t" << description << ": " << actual;
+  if (pass) {
+    llvm::outs() << "  PASS\n";
+  } else {
+    llvm::outs() << "  FAIL, expected " << expected << "\n";
+  }
+  return pass;
+}
+
+// A queue pops in issue order, so an op that completes early still can't be
+// popped before the entry ahead of it.
+bool CheckPopTimesChain() {
+  QueueTestNodes nodes({kVectorLoadInfo, kVectorLoadInfo});
+  WaitQueue queue(WaitQueueType::kVmcnt);
+  queue.Push(nodes.Get("L1"), 100);
+  queue.Push(nodes.Get("L2"), 50);
+  return ReportQueueCheck("push L1 complete at 100, then L2 complete at 50",
+                          DescribeEntries(queue.Entries()), "L1:100 L2:100");
+}
+
+// Once a queue is empty, nothing holds a new op back.
+bool CheckNoChainAfterDrain() {
+  QueueTestNodes nodes({kVectorLoadInfo, kVectorLoadInfo});
+  WaitQueue queue(WaitQueueType::kVmcnt);
+  queue.Push(nodes.Get("L1"), 100);
+  queue.Drain();
+  queue.Push(nodes.Get("L2"), 50);
+  return ReportQueueCheck("push L1 at 100, drain, push L2 at 50",
+                          DescribeEntries(queue.Entries()), "L2:50");
+}
+
+// Wait pops the op and every entry before it, and nothing after it.
+bool CheckWaitPopsThrough() {
+  QueueTestNodes nodes({kVectorLoadInfo, kVectorLoadInfo, kVectorLoadInfo});
+  WaitQueue queue(WaitQueueType::kVmcnt);
+  queue.Push(nodes.Get("L1"), 100);
+  queue.Push(nodes.Get("L2"), 110);
+  queue.Push(nodes.Get("L3"), 120);
+
+  const std::vector<QueueEntry> popped = queue.Wait(nodes.Get("L2"));
+
+  bool pass = ReportQueueCheck("L1 L2 L3, Wait(L2) pops",
+                               DescribeEntries(popped), "L1:100 L2:110");
+  pass &= ReportQueueCheck("L1 L2 L3, Wait(L2) leaves",
+                           DescribeEntries(queue.Entries()), "L3:120");
+  return pass;
+}
+
+// Drain pops every entry, oldest first.
+bool CheckDrainPopsAll() {
+  QueueTestNodes nodes({kVectorLoadInfo, kVectorLoadInfo, kVectorLoadInfo});
+  WaitQueue queue(WaitQueueType::kVmcnt);
+  queue.Push(nodes.Get("L1"), 100);
+  queue.Push(nodes.Get("L2"), 110);
+  queue.Push(nodes.Get("L3"), 120);
+
+  const std::vector<QueueEntry> popped = queue.Drain();
+
+  bool pass = ReportQueueCheck("L1 L2 L3, Drain pops", DescribeEntries(popped),
+                               "L1:100 L2:110 L3:120");
+  pass &= ReportQueueCheck("L1 L2 L3, Drain leaves",
+                           DescribeEntries(queue.Entries()), "(empty)");
+  return pass;
+}
+
+// Which contents of the lgkmcnt queue make every wait on it a drain: more
+// than one kind, or any scalar op. A FLAT's lgkmcnt side is the LDS kind, so
+// a FLAT and an LDS load together aren't mixed.
+bool CheckOutOfOrderKinds() {
+  struct KindsCase {
+    const char *description;
+    std::vector<MemOpInfo> load_infos;
+    bool out_of_order;
+  };
+  const KindsCase cases[] = {
+      {"lgkmcnt holds LDS, LDS", {kLdsLoadInfo, kLdsLoadInfo}, false},
+      {"lgkmcnt holds LDS, GDS", {kLdsLoadInfo, kGdsLoadInfo}, true},
+      {"lgkmcnt holds one scalar op", {kScalarLoadInfo}, true},
+      {"lgkmcnt holds FLAT, LDS", {kFlatInBothQueuesInfo, kLdsLoadInfo},
+       false},
+  };
+
+  bool pass = true;
+  for (const KindsCase &test_case : cases) {
+    QueueTestNodes nodes(test_case.load_infos);
+    WaitQueues queues;
+    for (int index = 0; index < static_cast<int>(test_case.load_infos.size());
+         ++index) {
+      queues.Issue(nodes.Get("L" + std::to_string(index + 1)), 100);
+    }
+
+    const bool out_of_order =
+        queues.GetLgkmcntQueue().HoldsOutOfOrderKinds();
+    pass &= ReportQueueCheck(test_case.description,
+                             out_of_order ? "out of order" : "in order",
+                             test_case.out_of_order ? "out of order"
+                                                    : "in order");
+  }
+  return pass;
+}
+
+// With LDS and GDS both in lgkmcnt, a wait for the LDS load is a drain, so it
+// pops the GDS load issued after it too.
+bool CheckMixedKindsWaitDrains() {
+  QueueTestNodes nodes({kLdsLoadInfo, kGdsLoadInfo});
+  WaitQueues queues;
+  queues.Issue(nodes.Get("L1"), 100);
+  queues.Issue(nodes.Get("L2"), 110);
+
+  const NodeWait wait = queues.WaitFor({&nodes.Get("L1")}, 0);
+
+  return ReportQueueCheck("LDS L1 at 100, GDS L2 at 110, wait for L1",
+                          DescribeNodeWait(wait), "issue 110, popped L1 L2");
+}
+
+// Cautious mode is on while a FLAT that goes in both queues is in either
+// queue. A vmcnt drain pops the FLAT from vmcnt only, so cautious mode stays
+// on until lgkmcnt drains too (case c08 in the waitcnt investigation).
+bool CheckCautiousModeLifecycle() {
+  QueueTestNodes nodes(
+      {kFlatInBothQueuesInfo, kVectorLoadInfo, kVectorLoadInfo});
+  const MemoryNode &flat = nodes.Get("L1");
+  WaitQueues queues;
+  queues.Issue(flat, 100);
+  queues.Issue(nodes.Get("L2"), 110);
+  queues.Issue(nodes.Get("L3"), 120);
+
+  bool pass = ReportQueueCheck(
+      "issue FLAT L1 at 100, vector L2 at 110, vector L3 at 120",
+      CautiousText(queues), "cautious");
+
+  // Cautious, so the wait for L2 is a drain: it also pops L3, which was
+  // issued after L2. A normal wait would pop only L1 and L2, at 110.
+  const NodeWait wait_for_l2 = queues.WaitFor({&nodes.Get("L2")}, 0);
+  pass &= ReportQueueCheck("wait for L2", DescribeNodeWait(wait_for_l2),
+                           "issue 120, popped L1 L2 L3");
+  pass &= ReportQueueCheck("after the vmcnt drain", CautiousText(queues),
+                           "cautious");
+
+  // L1 is still in lgkmcnt. Waiting for its data drains that queue.
+  const NodeWait wait_for_flat = queues.WaitFor({&flat}, 120);
+  pass &= ReportQueueCheck("wait for L1", DescribeNodeWait(wait_for_flat),
+                           "issue 120, popped L1");
+  pass &= ReportQueueCheck("after the lgkmcnt drain", CautiousText(queues),
+                           "not cautious");
+  return pass;
+}
+
+// A wait for an op that could already be popped by its issue_wait_begin_time
+// doesn't stall: the node issues then.
+bool CheckNoStallWhenAlreadyDone() {
+  QueueTestNodes nodes({kVectorLoadInfo});
+  WaitQueues queues;
+  queues.Issue(nodes.Get("L1"), 100);
+
+  const NodeWait wait = queues.WaitFor({&nodes.Get("L1")}, 150);
+
+  return ReportQueueCheck(
+      "L1 at 100, wait for it with issue_wait_begin_time 150",
+      DescribeNodeWait(wait), "issue 150, popped L1");
+}
+
+// Each queue's pop times depend only on its own entries. LDS load L1 is ahead
+// of FLAT L2 only in lgkmcnt, so the vmcnt drain that the wait for vector
+// load L3 does ends at 110, not at L1's 120.
+bool CheckPopTimesArePerQueue() {
+  QueueTestNodes nodes(
+      {kLdsLoadInfo, kFlatInBothQueuesInfo, kVectorLoadInfo});
+  WaitQueues queues;
+  queues.Issue(nodes.Get("L1"), 120);
+  queues.Issue(nodes.Get("L2"), 100);
+  queues.Issue(nodes.Get("L3"), 110);
+
+  bool pass = ReportQueueCheck(
+      "LDS L1 at 120, FLAT L2 at 100, vector L3 at 110: vmcnt",
+      DescribeEntries(queues.GetVmcntQueue().Entries()), "L2:100 L3:110");
+  pass &= ReportQueueCheck(
+      "LDS L1 at 120, FLAT L2 at 100, vector L3 at 110: lgkmcnt",
+      DescribeEntries(queues.GetLgkmcntQueue().Entries()), "L1:120 L2:120");
+
+  const NodeWait wait_for_l3 = queues.WaitFor({&nodes.Get("L3")}, 0);
+  pass &= ReportQueueCheck("wait for L3", DescribeNodeWait(wait_for_l3),
+                           "issue 110, popped L2 L3");
+  pass &= ReportQueueCheck(
+      "after the wait for L3: lgkmcnt",
+      DescribeEntries(queues.GetLgkmcntQueue().Entries()), "L1:120 L2:120");
+
+  // L2 is still in lgkmcnt, so cautious mode is still on, and the wait for
+  // L1 drains lgkmcnt. That ends at 120, when L1 is done.
+  const NodeWait wait_for_l1 = queues.WaitFor({&nodes.Get("L1")}, 110);
+  pass &= ReportQueueCheck("wait for L1", DescribeNodeWait(wait_for_l1),
+                           "issue 120, popped L1 L2");
+  pass &= ReportQueueCheck(
+      "after the wait for L1: both queues",
+      DescribeEntries(queues.GetVmcntQueue().Entries()) + ", " +
+          DescribeEntries(queues.GetLgkmcntQueue().Entries()),
+      "(empty), (empty)");
+  pass &= ReportQueueCheck("after the wait for L1", CautiousText(queues),
+                           "not cautious");
+  return pass;
+}
+
+// A vector write, for the tracked-peak test: it goes in vmcnt, but it isn't a
+// read, so it's never tracked.
+const MemOpInfo kVectorWriteInfo{MemAccess::kWrite, MemType::kVector, true,
+                                 false};
+
+// A queue's two peaks as "peak <all entries>, tracked peak <tracked entries>",
+// such as "peak 3, tracked peak 2".
+std::string DescribePeaks(const WaitQueue &queue) {
+  return "peak " + std::to_string(queue.GetPeakSize()) + ", tracked peak " +
+         std::to_string(queue.GetPeakTrackedSize());
+}
+
+// The tracked peak counts only tracked reads, and every pop, by a wait or a
+// drain, lowers the count. With the default tracking, vector loads are
+// tracked and the vector write isn't.
+bool CheckTrackedPeak() {
+  // QueueTestNodes gives L1 to L4 these MemOpInfos in order.
+  QueueTestNodes nodes(
+      {kVectorLoadInfo, kVectorWriteInfo, kVectorLoadInfo, kVectorLoadInfo});
+  const MemoryNode &load_l1 = nodes.Get("L1");
+  const MemoryNode &write_l2 = nodes.Get("L2");
+  const MemoryNode &load_l3 = nodes.Get("L3");
+  const MemoryNode &load_l4 = nodes.Get("L4");
+  WaitQueue queue(WaitQueueType::kVmcnt);
+
+  // Three entries, two of them tracked reads.
+  queue.Push(load_l1, 100);
+  queue.Push(write_l2, 110);
+  queue.Push(load_l3, 120);
+  bool pass = ReportQueueCheck("push load L1, write L2, load L3",
+                               DescribePeaks(queue), "peak 3, tracked peak 2");
+
+  // The wait pops L1, leaving one tracked read, so L4 brings the count back
+  // to 2. Without the pop lowering it, the tracked peak would reach 3.
+  queue.Wait(load_l1);
+  queue.Push(load_l4, 130);
+  pass &= ReportQueueCheck("then wait for L1, push load L4",
+                           DescribePeaks(queue), "peak 3, tracked peak 2");
+
+  // The drain pops L2, L3 and L4, leaving no tracked reads, so pushing L1
+  // again brings the count to 1. Without the drain lowering it, it would
+  // reach 3.
+  queue.Drain();
+  queue.Push(load_l1, 140);
+  pass &= ReportQueueCheck("then drain, push load L1 again",
+                           DescribePeaks(queue), "peak 3, tracked peak 2");
+  return pass;
+}
+
+void RunWaitQueueUnitTests() {
+  llvm::outs() << "\tWaitQueue unit tests:\n";
+
+  bool pass = true;
+  pass &= CheckPopTimesChain();
+  pass &= CheckNoChainAfterDrain();
+  pass &= CheckWaitPopsThrough();
+  pass &= CheckDrainPopsAll();
+  pass &= CheckOutOfOrderKinds();
+  pass &= CheckMixedKindsWaitDrains();
+  pass &= CheckCautiousModeLifecycle();
+  pass &= CheckNoStallWhenAlreadyDone();
+  pass &= CheckPopTimesArePerQueue();
+  pass &= CheckTrackedPeak();
+
+  if (!pass) {
+    report_fatal_error("WaitQueue unit tests failed");
+  }
+}
+
 // Appends a problem for each way `graph`'s edges differ from what the original
 // graph says: an edge A -> B exactly when B must come after A
 // (IsReachableInDag), waiting for data exactly when A is a load with a data
@@ -8360,6 +8716,7 @@ void ScheduleDAGHierarchicalScheduler::RunMemoryGraphShakedowns() {
   RunClassifyMemOpUnitTests(MF);
   RunMemoryGraphBuildUnitTests();
   RunMemoryGraphIdealUnitTests();
+  RunWaitQueueUnitTests();
 
   llvm::outs() << "\tMemoryGraph on real regions:\n";
   const GCNSubtarget &st = MF.getSubtarget<GCNSubtarget>();

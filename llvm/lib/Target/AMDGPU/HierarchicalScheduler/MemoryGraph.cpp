@@ -169,6 +169,33 @@ bool MemoryGraphOptions::IsTracked(const MemOpInfo &info) const {
   llvm_unreachable("MemoryGraphOptions::IsTracked: unknown MemType");
 }
 
+bool TrackedReadTypes::Tracks(const MemoryNode &node) const {
+  // Writes, users, barriers and the sink are never tracked. Only reads reach
+  // the switch, so their MemOpInfo is set.
+  if (!node.IsRead()) {
+    return false;
+  }
+
+  switch (node.GetMemOpInfo()->type) {
+    case MemType::kVector: {
+      return vector;
+    }
+    case MemType::kFlat: {
+      return flat;
+    }
+    case MemType::kScalar: {
+      return scalar;
+    }
+    case MemType::kLds: {
+      return lds;
+    }
+    case MemType::kGds: {
+      return gds;
+    }
+  }
+  llvm_unreachable("TrackedReadTypes::Tracks: unknown MemType");
+}
+
 MemoryNode &MemoryGraph::AddNode(MemoryNodeKind kind,
                                  const ScheduleNode *original_node,
                                  std::optional<MemOpInfo> mem_op_info,

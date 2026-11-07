@@ -55,14 +55,25 @@ comments and docs cite these by function or test name, since line numbers drift.
 |---|---|---|
 | A pending FLAT turns vmcnt and lgkmcnt waits into waits for 0 | `WaitcntBrackets::determineWait`, `hasPendingFlat` in `SIInsertWaitcnts.cpp` | **Observed**, Step 0 |
 | Two FLATs with global memory info get `vmcnt(1)`; flat memory info gets 0 | LLVM test `flat_zero_waitcnt` in `test/CodeGen/AMDGPU/waitcnt.mir` | LLVM's own test; same pattern **observed**, Step 0 |
-| Why: "flat memory ops may decrement VMCNT out-of-order as well as LGKMCNT out-of-order" | Commit `f0b93f1e9e64`, https://reviews.llvm.org/D46616 | Commit message only |
+| Why: "flat memory ops may decrement VMCNT out-of-order as well as LGKMCNT out-of-order" | Commit `f0b93f1e9e64`, https://reviews.llvm.org/D46616; the ISA manual, §9.2–9.2.2 | Commit message; **AMD manual** says the same |
 | Which FLATs count in which counter | `mayAccessVMEMThroughFlat`, `mayAccessLDSThroughFlat` | **Observed**, Step 0 |
 | Cautious mode lasting past the first wait | `hasPendingFlat`, `applyWaitcnt` | **Observed**, Step 0 |
 | Wait for 0 on a five-operation sequence | Step 0, case c02 | **Observed**, Step 0 |
 | `s_barrier` sits inside regions; memory ops can't cross it, other instructions can | `SIInstrInfo::isSchedulingBoundary`, `isGlobalMemoryObject` and `buildSchedGraph` in `ScheduleDAGInstrs.cpp`; the `barrier_mix_test` kernel in `dfs_test` | Read in source; a mid-region barrier seen in the shakedown log |
+| Ops of one kind are reported done in order; different kinds sharing a counter (LDS, GDS) aren't | ISA manual §4.4, p. 23; `counterOutOfOrder` | **AMD manual**; **observed**, c21, c23 |
+| Vector reads and writes are reported done in issue order; `global_*` and `scratch_*` use only vmcnt | ISA manual §4.4, p. 24; §9.4–9.5, p. 79 | **AMD manual**; **observed**, c01, c17 |
+| Scalar reads and writes can be reported done out of order, even among themselves, so only a wait for 0 is usable | ISA manual §7.3, p. 49; §4.4, p. 24; `counterOutOfOrder` | **AMD manual**; **observed**, c43 (loads), c44 (store with LDS) |
+| A FLAT counts in both counters and is done only when both drop; FLATs complete out of order with each other | ISA manual §9.2–9.2.2, p. 78 | **AMD manual**; the compiler narrows it to FLATs that may touch both (c03, c05) |
 
-"Observed" means the compiler emits this. It doesn't show the hardware requires it. No AMD
-hardware documentation has been checked for any of this.
+"ISA manual" is AMD's "Vega" 7nm Instruction Set Architecture Reference Guide, 26 November
+2019, the ISA for gfx906 (MI50). Saved at
+`~/Dropbox/Grad_School/Research/papers/gpu2/Vega_7nm_Shader_ISA_26November2019.pdf`, from
+https://gpuopen.com/download/Vega_7nm_Shader_ISA_26November2019.pdf. Design section 5.2
+quotes the passages.
+
+"Observed" means the compiler emits this. It doesn't show the hardware requires it. "AMD
+manual" means the ISA manual says it. The ordering rules above are the only ones checked
+against the manual; the compiler's specific wait choices are observed behavior only.
 
 ## Step 0: Verify the compiler's wait behavior (done)
 

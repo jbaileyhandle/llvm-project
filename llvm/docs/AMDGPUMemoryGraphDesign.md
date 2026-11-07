@@ -347,6 +347,37 @@ two different points:
 A chosen subset of `AMDGPUWaitcntRules.md`. The implementation plan lists what's left
 out.
 
+**What the hardware guarantees.** The rules below follow from what AMD's ISA manual for
+gfx906 says about the order in which memory ops are reported done. Quotes are from the
+"Vega" 7nm Instruction Set Architecture Reference Guide, 26 November 2019 (the MI50 ISA):
+
+- **Ops of one kind are reported done in order; different kinds aren't.** "Instructions of
+  a given type return in order, but instructions of different types can complete
+  out-of-order. For example, both GDS and LDS instructions use LGKM_cnt, but they can
+  return out-of-order." (§4.4, p. 23.) So waiting for one op also waits for every op of
+  its kind issued before it, and a counter holding more than one kind can only be trusted
+  at 0. Observed: c21, c23.
+- **vmcnt holds one kind.** Vector memory "reads and writes return in the order they were
+  issued, including mixing reads and writes" (§4.4, p. 24), and `global_*` and `scratch_*`
+  use only vmcnt (§9.4, §9.5, p. 79).
+- **Scalar memory is out of order even with itself.** "Scalar memory reads and writes can
+  return data out-of-order from how they were issued; they can return partial results at
+  different times when the read crosses two cache lines. … Because the instructions can
+  return out-of-order, the only sensible way to use this counter is to implement
+  S_WAITCNT 0" (§7.3, p. 49). Scalar loads go through the scalar data cache, where some
+  hit and some miss, so the count says how many are outstanding but not which. Observed:
+  c43 (scalar loads alone), c44 (a scalar store makes an LDS wait a drain).
+- **A FLAT counts in both counters.** FLAT instructions "are executed as both an LDS and a
+  Buffer instruction; so, they increment both VM_CNT and LGKM_CNT and are not considered
+  done until both have been decremented", "can complete out of order with each other", and
+  "the only sensible S_WAITCNT value to use after FLAT instructions is zero" (§9.2–9.2.2,
+  p. 78). The compiler narrows this to FLATs whose memory info doesn't rule out either kind
+  of memory (c03, c05).
+
+The manual is saved at
+`~/Dropbox/Grad_School/Research/papers/gpu2/Vega_7nm_Shader_ISA_26November2019.pdf`,
+downloaded from https://gpuopen.com/download/Vega_7nm_Shader_ISA_26November2019.pdf.
+
 **Effective return time.** Within one counter, op B is reported done only after every
 op issued before it:
 
