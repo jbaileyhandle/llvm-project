@@ -45,19 +45,17 @@ method).
 ## 1. Vocabulary
 
 - **Original graph**: the region's ScheduleGraph.
-- **Tracked load**: a load we count for MLP (section 2).
+- **Tracked read**: a read of a type the score's `TrackedReadTypes` picks
+  (section 2). Only tracked reads count in MLP. Tracking changes no timing.
 - **User of load L**: a node with a data edge (`ScheduleEdge::kData`) from
   L, meaning it reads a register L defines. Only *direct* users count.
-- **Tracked write**: a store of a tracked type, in the graph only if
-  `track_writes` is on (off by default). It takes part in the hardware
-  counters (section 2) but is not a load and is not counted in MLP.
-- **Memory node**: a node of the MemoryGraph. The memory nodes are all
-  tracked loads, all their users, all tracked writes, and every
-  `s_barrier`. One instruction can play several roles, for example a load
-  whose address comes from another load's data (pointer chasing).
+- **Memory node**: a node of the MemoryGraph. The memory nodes are every
+  memory op (loads and writes of every type), every user of a load, and
+  every `s_barrier`. One instruction can play several roles, for example a
+  load whose address comes from another load's data (pointer chasing).
 - **Memory node index**: a memory node's position in the MemoryGraph's
   own arrays, 0 to n−1.
-- **Counter**: the hardware counter a memory op is tracked by, vmcnt or
+- **Counter**: the hardware counter a memory op counts in, vmcnt or
   lgkmcnt (section 2). Some FLAT ops count in both.
 - **Strong edge**: an edge that enforces ordering. Cluster and weak hints
   (`IsWeakEdge()`) are not strong.
@@ -69,9 +67,10 @@ method).
 
 ## 2. Classifying memory ops and their counters
 
-The classifier handles every memory type. A separate configuration picks
-which types the graph tracks, so turning one on is a configuration change, not
-new code.
+The classifier handles every memory type, and every memory op it recognizes goes
+in the graph, since any of them can make a wait longer. Which reads count toward
+MLP is a separate choice, `TrackedReadTypes`, passed when scoring (sections 4 and
+5). It changes no timing.
 
 ```
 enum class MemAccess { kRead, kWrite };
@@ -84,17 +83,16 @@ struct MemOpInfo {
   bool      counts_in_lgkmcnt;
 }
 
-struct MemoryGraphOptions {
+struct TrackedReadTypes {
   // Default: vector and FLAT only.
-  bool track_vector = true;
-  bool track_flat   = true;
-  bool track_scalar = false;
-  bool track_lds    = false;
-  bool track_gds    = false;
-  bool track_writes = false;
+  bool vector = true;
+  bool flat   = true;
+  bool scalar = false;
+  bool lds    = false;
+  bool gds    = false;
 }
 
-optional<MemOpInfo> ClassifyMemOp(mi)
+optional<MemOpInfo> ClassifyMemOp(mi, st)
 ```
 
 The counter fields are stored, not worked out from the type, because FLAT ops
@@ -160,9 +158,9 @@ and `AMDGPUBaseInfo.cpp` (bit widths):
 // per node are vectors indexed by topo index.
 
 enum class MemoryNodeKind {
-  kMemOp,     // a tracked load or write; mem_op_info says which
+  kMemOp,     // a load or write; mem_op_info says which
   kBarrier,   // s_barrier
-  kUserOnly,  // not a tracked memory op, only uses a load's data
+  kUserOnly,  // not a memory op, only uses a load's data
   kSink,      // the end of the region; waits for every load, has no instruction
 }
 
@@ -193,12 +191,12 @@ class MemoryGraph {
   DenseMap<const ScheduleNode*, MemoryNode*> memory_node_of_   // original node -> memory node
 }
 
-MemoryGraph Build(original, options):
+MemoryGraph Build(original, st):
   original.ComputeTransitiveReductionAndReachability()   // strong edges only (section 9)
 
-  // 1. Tracked loads and writes, and barriers.
+  // 1. Memory ops and barriers.
   for node in original.topo_order:
-    if info = ClassifyMemOp(node.instr), and options track it:
+    if info = ClassifyMemOp(node.instr, st):
       AddMemoryNode(node, kMemOp).mem_op_info = info
     else if IsWaveRendezvous(node.instr):
       AddMemoryNode(node, kBarrier)
@@ -575,7 +573,7 @@ OrderScore ScoreOrder(order, latency_setting):     // order ends with the sink
       if op has no first_wait_time yet:
         first_wait_time[op] = time
 
-    // 2. Issue, if this node is a tracked load or write.
+    // 2. Issue, if this node is a load or write.
     if node.mem_op_info:
       issue_time[node] = time
       raw_return[node] = time + Latency(node, latency_setting)
@@ -587,9 +585,9 @@ OrderScore ScoreOrder(order, latency_setting):     // order ends with the sink
   return OrderScore {
     use_based_mlp            = Mlp(use_based_intervals),
     latency_based_mlp        = Mlp(latency_based_intervals),
-    // The walk's total time. With only reads tracked it equals both MLP denominators.
-    // With track_writes on it can be larger, by time spent waiting only for a store:
-    // a real cost, but not time a read is in flight.
+    // The walk's total time. It can be larger than both MLP denominators, by time
+    // spent waiting while no tracked read is in flight, such as behind a store or an
+    // untracked read: a real cost, but not time a tracked read is in flight.
     memory_time              = time,
     peak_outstanding_vmcnt   = queues.vmcnt.peak_size,
     peak_outstanding_lgkmcnt = queues.lgkmcnt.peak_size,
@@ -605,8 +603,8 @@ float Mlp(intervals)
 The sink is an ordinary user of every load, so every read gets a `first_wait_time`, and a
 read nobody uses in the region needs no special case.
 
-Untracked types aren't in the queues. So with FLAT untracked, cautious mode never starts,
-even though the real compiler would enter it.
+Every memory op is in the queues, tracked or not, so every type's waits and cautious mode
+are modeled. Tracking only picks which reads the MLPs count.
 
 ### 5.4 MLP by type (later)
 
@@ -619,8 +617,8 @@ is not meaningfully 4: they're different resources, with different latencies and
 different counters. For one type, the denominator would be the time during which at
 least one load *of that type* is in flight.
 
-Until then, tracking just one type gives that type's MLP, with one difference: the walk
-then doesn't see waits caused by the untracked types.
+Until then, tracking just one type gives that type's MLP. The walk still sees every
+type's waits, because tracking changes no timing.
 
 ## 6. Building the menu
 
@@ -782,8 +780,8 @@ Each load v has a legal range of rounds:
 
 Ordering-only edges narrow the range further: a load can't be in an
 earlier round than an op it must follow. Each user goes in the round
-after the latest round among the loads it reads, and a tracked write goes
-in any round at or after its predecessors'.
+after the latest round among the loads it reads, and a write goes in any
+round at or after its predecessors'.
 
 The menu then varies two things:
 

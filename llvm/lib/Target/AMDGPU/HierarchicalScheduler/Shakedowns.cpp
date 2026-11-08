@@ -6025,7 +6025,7 @@ bool CheckMemoryGraphOrder(const MemoryGraph &graph) {
 // keeps the schedule's order, drops nodes that aren't in the memory graph, and
 // ends with the sink.
 bool CheckOrderFromSchedule(const ScheduleGraph &original,
-                            const MemoryGraph &graph, bool track_writes) {
+                            const MemoryGraph &graph) {
   std::vector<const ScheduleNode *> schedule;
   for (StringRef name :
        {"N", "L1", "X", "A", "L2", "S", "L3", "U", "B", "L4", "E"}) {
@@ -6038,8 +6038,7 @@ bool CheckOrderFromSchedule(const ScheduleGraph &original,
   for (const MemoryNode *node : graph.OrderFromSchedule(schedule)) {
     actual += (actual.empty() ? "" : " ") + MemoryNodeName(*node);
   }
-  const std::string expected = track_writes ? "L1 A L2 S L3 U B L4 sink"
-                                            : "L1 A L2 L3 U B L4 sink";
+  const std::string expected = "L1 A L2 S L3 U B L4 sink";
   const bool pass = actual == expected;
   llvm::outs() << "\t\t\torder from schedule: " << actual
                << (pass ? "  PASS" : "  FAIL, expected " + expected) << "\n";
@@ -6047,29 +6046,38 @@ bool CheckOrderFromSchedule(const ScheduleGraph &original,
 }
 
 // The role of a BuildMemoryGraphTestDAG node, decided by name the way
-// MemoryGraph::Build decides it from an instruction. L1 to L4 are vector loads
-// with the LLVM latencies in `load_latencies`, in that order. S is a vector
-// store with LLVM latency 100. Each is a memory op only if `options` tracks
-// it. B is a barrier.
-NodeRole TestDagRole(const ScheduleNode &node,
-                     const MemoryGraphOptions &options,
-                     ArrayRef<int> load_latencies) {
+// MemoryGraph::Build decides it from an instruction. L1 to L4 are loads with
+// the LLVM latencies in `load_latencies` and the types in `load_types`, in
+// that order. Each type must be vector or LDS. S is a vector store with LLVM
+// latency 100. B is a barrier.
+NodeRole TestDagRole(const ScheduleNode &node, ArrayRef<int> load_latencies,
+                     ArrayRef<MemType> load_types) {
   const StringRef name = node.GetDebugName();
 
   std::optional<MemOpInfo> info;
   int llvm_latency = 0;
   if (name.starts_with("L")) {
-    // L1 to L4: the digit picks the latency.
-    info = MemOpInfo{MemAccess::kRead, MemType::kVector, true, false};
-    llvm_latency = load_latencies[name[1] - '1'];
+    // L1 to L4: the digit picks the latency and the type.
+    const int index = name[1] - '1';
+    llvm_latency = load_latencies[index];
+
+    // A vector load counts in vmcnt, and an LDS load in lgkmcnt.
+    const MemType type = load_types[index];
+    if (type == MemType::kVector) {
+      info = MemOpInfo{MemAccess::kRead, MemType::kVector, true, false};
+    } else if (type == MemType::kLds) {
+      info = MemOpInfo{MemAccess::kRead, MemType::kLds, false, true};
+    } else {
+      report_fatal_error("TestDagRole: a load must be vector or LDS");
+    }
   } else if (name == "S") {
     info = MemOpInfo{MemAccess::kWrite, MemType::kVector, true, false};
     llvm_latency = 100;
   }
 
   NodeRole role;
-  if (info && options.IsTracked(*info)) {
-    role.tracked_mem_op = info;
+  if (info) {
+    role.mem_op = info;
     role.llvm_latency = llvm_latency;
   } else if (name == "B") {
     role.is_barrier = true;
@@ -6077,18 +6085,18 @@ NodeRole TestDagRole(const ScheduleNode &node,
   return role;
 }
 
-// Builds the memory graph of BuildMemoryGraphTestDAG with writes tracked or
-// not, and checks it against answers worked out by hand from that factory's
-// drawing. Returns whether every check passed.
-bool CheckMemoryGraphBuild(bool track_writes) {
-  MemoryGraphOptions options;
-  options.track_writes = track_writes;
+// Builds the memory graph of BuildMemoryGraphTestDAG and checks it against
+// answers worked out by hand from that factory's drawing. Returns whether
+// every check passed.
+bool CheckMemoryGraphBuild() {
   auto original = ScheduleGraph::BuildMemoryGraphTestDAG();
 
-  // Every load's LLVM latency is 100.
+  // Every load is a vector load with LLVM latency 100.
   auto graph = MemoryGraph::BuildWithRoleClassifier(
       *original, [&](const ScheduleNode &node) {
-        return TestDagRole(node, options, {100, 100, 100, 100});
+        return TestDagRole(node, {100, 100, 100, 100},
+                           {MemType::kVector, MemType::kVector,
+                            MemType::kVector, MemType::kVector});
       });
 
   // N, X and E play no role and read no load's data, so they aren't in the
@@ -6097,6 +6105,7 @@ bool CheckMemoryGraphBuild(bool track_writes) {
       "L1 read latency=100 uses=",
       "A user_only latency=0 uses=L1",
       "L2 read latency=100 uses=",
+      "S write latency=100 uses=",
       "U user_only latency=0 uses=L2",
       "L3 read latency=100 uses=",
       "B barrier latency=0 uses=",
@@ -6107,27 +6116,22 @@ bool CheckMemoryGraphBuild(bool track_writes) {
   // later node reads the earlier load's data.
   std::multiset<std::string> expected_edges = {
       // L2 reads A's data, but A isn't a load, so A -> L2 is ordering only.
-      "L1->A data", "L1->L2 order", "L1->U order", "L1->L3 order",
-      "L1->B order", "L1->L4 order", "L1->sink data",
-      "A->L2 order", "A->U order", "A->L3 order", "A->B order",
+      "L1->A data", "L1->L2 order", "L1->S order", "L1->U order",
+      "L1->L3 order", "L1->B order", "L1->L4 order", "L1->sink data",
+      "A->L2 order", "A->S order", "A->U order", "A->L3 order", "A->B order",
       "A->L4 order", "A->sink order",
       // No edge between U and L3 either way: the only path would use the
       // weak U ~~> S edge.
-      "L2->U data", "L2->L3 order", "L2->B order", "L2->L4 order",
-      "L2->sink data",
+      "L2->S order", "L2->U data", "L2->L3 order", "L2->B order",
+      "L2->L4 order", "L2->sink data",
+      // S reads nothing: its edge from L2 is a may-alias ordering, not data.
+      "S->L3 order", "S->B order", "S->L4 order", "S->sink order",
       "U->B order", "U->L4 order", "U->sink order",
       // L3's data edge to the exit node becomes its data edge to the sink.
       "L3->B order", "L3->L4 order", "L3->sink data",
       "B->L4 order", "B->sink order",
       "L4->sink data",
   };
-  if (track_writes) {
-    // S reads nothing: its edge from L2 is a may-alias ordering, not data.
-    expected_nodes.insert("S write latency=100 uses=");
-    expected_edges.insert({"L1->S order", "A->S order", "L2->S order",
-                           "S->L3 order", "S->B order", "S->L4 order",
-                           "S->sink order"});
-  }
 
   bool pass = CheckSameLines("nodes", MemoryNodeLines(*graph), expected_nodes);
   pass &= CheckSameLines("edges", MemoryEdgeLines(*graph, false),
@@ -6136,18 +6140,14 @@ bool CheckMemoryGraphBuild(bool track_writes) {
                          MemoryEdgeLines(*graph, /*from_predecessors=*/true),
                          expected_edges);
   pass &= CheckMemoryGraphOrder(*graph);
-  pass &= CheckOrderFromSchedule(*original, *graph, track_writes);
+  pass &= CheckOrderFromSchedule(*original, *graph);
   return pass;
 }
 
 void RunMemoryGraphBuildUnitTests() {
   llvm::outs() << "\tMemoryGraph build unit tests:\n";
-  bool pass = true;
-  for (bool track_writes : {false, true}) {
-    llvm::outs() << "\t\ttrack_writes " << (track_writes ? "on" : "off")
-                 << ":\n";
-    pass &= CheckMemoryGraphBuild(track_writes);
-  }
+  llvm::outs() << "\t\tBuildMemoryGraphTestDAG:\n";
+  const bool pass = CheckMemoryGraphBuild();
   if (!pass) {
     report_fatal_error("MemoryGraph build unit tests failed");
   }
@@ -6158,11 +6158,10 @@ void RunMemoryGraphBuildUnitTests() {
 struct IdealTestCase {
   const char *description;
   int load_latencies[4];  // the LLVM latencies of L1, L2, L3 and L4
+  MemType load_types[4];  // the types of L1, L2, L3 and L4: vector or LDS
 
-  // Building: whether S goes in the graph.
-  bool track_writes;
-  // Scoring: whether Ideal's MLP counts vector reads. L1 to L4 are all vector
-  // reads, so this decides whether they count.
+  // Whether Ideal's MLP counts vector reads. The other read types keep their
+  // defaults, which leave LDS reads untracked.
   bool vector_reads_tracked;
 
   LatencySetting setting;
@@ -6173,17 +6172,15 @@ struct IdealTestCase {
 
 // Runs one Ideal test case and prints its result. Returns whether it passed.
 bool CheckIdealCase(const IdealTestCase &test_case) {
-  MemoryGraphOptions options;
-  options.track_writes = test_case.track_writes;
-
   auto original = ScheduleGraph::BuildMemoryGraphTestDAG();
   auto graph = MemoryGraph::BuildWithRoleClassifier(
       *original, [&](const ScheduleNode &node) {
-        return TestDagRole(node, options, test_case.load_latencies);
+        return TestDagRole(node, test_case.load_latencies,
+                           test_case.load_types);
       });
 
-  // The other read types are left at their defaults. The test graph has no
-  // reads of those types, so they change nothing.
+  // The other read types keep their defaults, which leave LDS reads
+  // untracked.
   TrackedReadTypes tracked_read_types;
   tracked_read_types.vector = test_case.vector_reads_tracked;
 
@@ -6232,38 +6229,53 @@ bool CheckIdealCase(const IdealTestCase &test_case) {
 // for L2's (200), and L4's own data is back at 300. L3 starts with L2, at 100,
 // and its data is back at 200, inside that chain.
 //
-// In every case but the last, every read is tracked. The reads' flights then
+// In the first four cases, every read is tracked. The reads' flights then
 // cover the whole time until elapsed_time with no gaps, so
-// any_read_in_flight_time equals elapsed_time.
+// any_read_in_flight_time equals elapsed_time. The last two cases leave some
+// or all reads untracked.
 void RunMemoryGraphIdealUnitTests() {
   llvm::outs() << "\tMemoryGraph Ideal unit tests:\n";
 
   const IdealTestCase cases[] = {
+      // S adds no time, since nothing waits for its data, and it isn't a read.
       {"all loads 100, kLlvm", {100, 100, 100, 100},
-       /*track_writes=*/false, /*vector_reads_tracked=*/true,
-       LatencySetting::kLlvm, 300, 400, 300},
+       {MemType::kVector, MemType::kVector, MemType::kVector,
+        MemType::kVector},
+       /*vector_reads_tracked=*/true, LatencySetting::kLlvm, 300, 400, 300},
       // Equal latencies, so the same mlp as with kLlvm.
       {"all loads 100, kUnit", {100, 100, 100, 100},
-       /*track_writes=*/false, /*vector_reads_tracked=*/true,
-       LatencySetting::kUnit, 3, 4, 3},
+       {MemType::kVector, MemType::kVector, MemType::kVector,
+        MemType::kVector},
+       /*vector_reads_tracked=*/true, LatencySetting::kUnit, 3, 4, 3},
       // The short chain ends by 3. L3 starts at 1, alongside it, and its data
       // is back at 101.
       {"L3 100, other loads 1, kLlvm", {1, 1, 100, 1},
-       /*track_writes=*/false, /*vector_reads_tracked=*/true,
-       LatencySetting::kLlvm, 101, 103, 101},
+       {MemType::kVector, MemType::kVector, MemType::kVector,
+        MemType::kVector},
+       /*vector_reads_tracked=*/true, LatencySetting::kLlvm, 101, 103, 101},
       // Counting loads ignores that L3 is slower: 4/3 instead of 103/101.
       {"L3 100, other loads 1, kUnit", {1, 1, 100, 1},
-       /*track_writes=*/false, /*vector_reads_tracked=*/true,
-       LatencySetting::kUnit, 3, 4, 3},
-      // S adds no time, since nothing waits for its data, and it isn't a read.
-      {"all loads 100, writes tracked, kLlvm", {100, 100, 100, 100},
-       /*track_writes=*/true, /*vector_reads_tracked=*/true,
-       LatencySetting::kLlvm, 300, 400, 300},
+       {MemType::kVector, MemType::kVector, MemType::kVector,
+        MemType::kVector},
+       /*vector_reads_tracked=*/true, LatencySetting::kUnit, 3, 4, 3},
       // The loads still take their time, so elapsed_time is unchanged. But no
       // read counts in the MLP, so its parts and the mlp are all 0.
       {"all loads 100, vector reads untracked, kLlvm", {100, 100, 100, 100},
-       /*track_writes=*/false, /*vector_reads_tracked=*/false,
-       LatencySetting::kLlvm, 300, 0, 0},
+       {MemType::kVector, MemType::kVector, MemType::kVector,
+        MemType::kVector},
+       /*vector_reads_tracked=*/false, LatencySetting::kLlvm, 300, 0, 0},
+      // L1 and L4 are vector loads, which are tracked. L2 and L3 are LDS
+      // loads, which aren't. When each is in flight:
+      //   L1:      0 to 100
+      //   L2, L3:  100 to 105  (they come after A, which waits for L1's data)
+      //   L4:      105 to 205  (it comes after B, which comes after U, which
+      //                         waits for L2's data)
+      // From 100 to 105, only the untracked loads are in flight. So the
+      // tracked loads are in flight for 200 of the 205:
+      // any_read_in_flight_time is 200.
+      {"L2 and L3 LDS at 5, L1 and L4 vector at 100, kLlvm", {100, 5, 5, 100},
+       {MemType::kVector, MemType::kLds, MemType::kLds, MemType::kVector},
+       /*vector_reads_tracked=*/true, LatencySetting::kLlvm, 205, 200, 200},
   };
 
   bool pass = true;
@@ -6303,7 +6315,7 @@ public:
             // L1 to L4: the digit picks the MemOpInfo.
             const int index = name[1] - '1';
             if (index < static_cast<int>(load_infos.size())) {
-              role.tracked_mem_op = load_infos[index];
+              role.mem_op = load_infos[index];
             }
           }
           return role;
@@ -6636,7 +6648,7 @@ void RunWaitQueueUnitTests() {
 // edge to B, and an edge from every node to the sink, waiting for data exactly
 // when the node is a load.
 void AppendEdgeProblems(const ScheduleGraph &original, const MemoryGraph &graph,
-                        StringRef label, std::vector<std::string> &problems) {
+                        std::vector<std::string> &problems) {
   auto name = [](const MemoryNode &node) {
     return node.GetOriginalNode() == nullptr
                ? std::string("sink")
@@ -6674,23 +6686,9 @@ void AppendEdgeProblems(const ScheduleGraph &original, const MemoryGraph &graph,
                                         : "should be ordering only";
       }
       if (!problem.empty()) {
-        problems.push_back(label.str() + ": edge " + name(from) + "->" +
-                           name(to) + " " + problem);
+        problems.push_back("edge " + name(from) + "->" + name(to) + " " +
+                           problem);
       }
-    }
-  }
-}
-
-// Appends a problem for each node of `fewer`, built with fewer types tracked,
-// that `more` doesn't have: tracking more types should only add nodes.
-void AppendMissingNodeProblems(const MemoryGraph &fewer,
-                               const MemoryGraph &more,
-                               std::vector<std::string> &problems) {
-  for (const MemoryNode &node : fewer.Nodes()) {
-    if (&node != fewer.GetSink() &&
-        more.GetMemoryNode(node.GetOriginalNode()) == nullptr) {
-      problems.push_back("tracking every type dropped " +
-                         node.GetOriginalNode()->ToString());
     }
   }
 }
@@ -6716,31 +6714,21 @@ void AppendCounterProblems(const ScheduleGraph &original,
   }
 }
 
-// Builds a real region's memory graph twice, with the default options and
-// with every type and writes tracked, and checks both graphs' edges, that
-// tracking more only adds nodes, and the classifier's counters. Prints one
-// line for the region, then each problem. Returns whether there were none.
+// Builds a real region's memory graph and checks its edges and the
+// classifier's counters. Prints one line for the region, then each problem.
+// Returns whether there were none.
 bool CheckMemoryGraphOnRegion(ScheduleGraph &original,
                               const GCNSubtarget &st) {
-  MemoryGraphOptions every_type;
-  every_type.track_scalar = true;
-  every_type.track_lds = true;
-  every_type.track_gds = true;
-  every_type.track_writes = true;
-  auto default_graph = MemoryGraph::Build(original, st, MemoryGraphOptions());
-  auto every_type_graph = MemoryGraph::Build(original, st, every_type);
+  auto graph = MemoryGraph::Build(original, st);
 
   std::vector<std::string> problems;
-  AppendEdgeProblems(original, *default_graph, "default types", problems);
-  AppendEdgeProblems(original, *every_type_graph, "every type", problems);
-  AppendMissingNodeProblems(*default_graph, *every_type_graph, problems);
+  AppendEdgeProblems(original, *graph, problems);
   AppendCounterProblems(original, st, problems);
 
-  // Node counts leave out the sink.
-  llvm::outs() << "\t\tregion: " << default_graph->Nodes().size() - 1
-               << " memory nodes, " << every_type_graph->Nodes().size() - 1
-               << " with every type tracked  "
-               << (problems.empty() ? "PASS" : "FAIL") << "\n";
+  // The node count leaves out the sink.
+  llvm::outs() << "\t\tregion: " << graph->Nodes().size() - 1
+               << " memory nodes  " << (problems.empty() ? "PASS" : "FAIL")
+               << "\n";
   for (const std::string &problem : problems) {
     llvm::outs() << "\t\t\t" << problem << "\n";
   }

@@ -145,30 +145,6 @@ llvm::hierarchical_scheduler::ClassifyMemOp(const MachineInstr &mi,
   return std::nullopt;
 }
 
-bool MemoryGraphOptions::IsTracked(const MemOpInfo &info) const {
-  if (info.access == MemAccess::kWrite && !track_writes) {
-    return false;
-  }
-  switch (info.type) {
-    case MemType::kVector: {
-      return track_vector;
-    }
-    case MemType::kFlat: {
-      return track_flat;
-    }
-    case MemType::kScalar: {
-      return track_scalar;
-    }
-    case MemType::kLds: {
-      return track_lds;
-    }
-    case MemType::kGds: {
-      return track_gds;
-    }
-  }
-  llvm_unreachable("MemoryGraphOptions::IsTracked: unknown MemType");
-}
-
 bool TrackedReadTypes::Tracks(const MemoryNode &node) const {
   // Writes, users, barriers and the sink are never tracked. Only reads reach
   // the switch, so their MemOpInfo is set.
@@ -262,9 +238,8 @@ void MemoryGraph::AddMemOpAndBarrierNodes(
     function_ref<NodeRole(const ScheduleNode &)> role_classifier) {
   for (const ScheduleNode *node : original.GetTopoOrder()) {
     const NodeRole role = role_classifier(*node);
-    if (role.tracked_mem_op) {
-      AddNode(MemoryNodeKind::kMemOp, node, role.tracked_mem_op,
-              role.llvm_latency);
+    if (role.mem_op) {
+      AddNode(MemoryNodeKind::kMemOp, node, role.mem_op, role.llvm_latency);
     } else if (role.is_barrier) {
       AddNode(MemoryNodeKind::kBarrier, node);
     }
@@ -279,9 +254,9 @@ void MemoryGraph::AddUsers(const ScheduleGraph &original) {
     }
   }
 
-  // A user reads a tracked load's data through a kData edge in the original
-  // graph. The original exit node isn't one: it stands for code after the
-  // region, and the sink covers the region's end.
+  // A user reads a load's data through a kData edge in the original graph.
+  // The original exit node isn't one: it stands for code after the region,
+  // and the sink covers the region's end.
   const ScheduleNode *original_exit = original.GetExitNode();
   for (MemoryNode *load : loads) {
     for (const ScheduleEdge &edge : load->original_node_->Successors()) {
@@ -317,7 +292,7 @@ void MemoryGraph::AddEdges(const ScheduleGraph &original) {
 }
 
 void MemoryGraph::AddSink() {
-  // The sink is an ordinary user of every tracked load, so every read has
+  // The sink is an ordinary user of every load, so every read has
   // something that waits on it, and it comes after every node.
   MemoryNode &sink = AddNode(MemoryNodeKind::kSink, nullptr);
   sink_ = &sink;
@@ -390,9 +365,8 @@ int LlvmLatencyOf(const MachineInstr &mi, const SUnit &su) {
 
 } // namespace
 
-std::unique_ptr<MemoryGraph>
-MemoryGraph::Build(ScheduleGraph &original, const GCNSubtarget &st,
-                   const MemoryGraphOptions &options) {
+std::unique_ptr<MemoryGraph> MemoryGraph::Build(ScheduleGraph &original,
+                                                const GCNSubtarget &st) {
   return BuildWithRoleClassifier(original, [&](const ScheduleNode &node) {
     NodeRole role;
     // The entry and exit nodes and subgraph proxies have no instruction, so
@@ -402,8 +376,8 @@ MemoryGraph::Build(ScheduleGraph &original, const GCNSubtarget &st,
     }
     const MachineInstr &mi = *node.GetSUnit()->getInstr();
     const std::optional<MemOpInfo> info = ClassifyMemOp(mi, st);
-    if (info && options.IsTracked(*info)) {
-      role.tracked_mem_op = info;
+    if (info) {
+      role.mem_op = info;
       role.llvm_latency = LlvmLatencyOf(mi, *node.GetSUnit());
     } else if (IsWaveRendezvous(mi)) {
       role.is_barrier = true;

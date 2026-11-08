@@ -98,7 +98,10 @@ doesn't follow. No test catches that, so it's something to recheck when merging 
 
 ## Step 2: Build the graph
 
-`MemoryGraph::Build`, `MemoryGraphOptions` and the node layout, as in design sections 2 and 3.
+`MemoryGraph::Build` and the node layout, as in design sections 2 and 3. Step 2 also had
+`MemoryGraphOptions`, which picked the memory types and writes that went in the graph. The
+commit "AMDGPU HierarchicalScheduler: model every memory op" removed it: every memory op is
+now in the graph, and `TrackedReadTypes` picks which reads count toward MLP when scoring.
 
 - **Testable build.** The public `Build` calls an inner step that receives each node's
   `MemOpInfo` and latency as input, so tests can use graphs with no real instructions.
@@ -133,17 +136,14 @@ evidence says it matters. `AMDGPUWaitcntRules.md` has the details of each.
 
 | Case | What the compiler does | Effect of leaving it out | Why it can wait |
 |---|---|---|---|
-| FLAT stores that count in both counters | Start cautious mode. Nothing waits on a store's data, so it can last a long time, and in a loop every vector wait can become `vmcnt(0)` | MLP overstated, possibly by a lot, where these exist | We don't know how often they occur. Turning on `track_writes` models them. |
-| Atomics with no return value, in any family | Count in their counter like a store; nothing waits on them | Same as other writes: out of the graph by default, so the walk's counts ignore them | Rarely changes results. Turning on `track_writes` includes them. |
-| LDS or scalar waits ending cautious mode | Any `lgkmcnt(0)` counts toward ending it | Slightly pessimistic while those types are untracked | Goes away when they're turned on |
 | State from earlier code | Outstanding ops and cautious mode carry across blocks and into a region | Each region starts clean, so inherited waits and cautious mode are missed | Complicated to model |
 | Overwriting a register | Waits for the load that last wrote it, unless the new write is a same-kind vector load | Missed waits | Registers aren't assigned yet when this runs, so it can't be seen |
 | Fences with no barrier | `ATOMIC_FENCE` becomes a wait | Missed waits | `__syncthreads` already has a barrier beside it |
-| Counter limits | Waits are capped at `vmcnt(62)` and `lgkmcnt(14)` | Waits slightly too short | For vector, more than 62 ops after a load in one region seems unlikely. The lgkmcnt limit is more plausible once LDS is on. Peak outstanding is reported, so we'd notice. |
+| Counter limits | Waits are capped at `vmcnt(62)` and `lgkmcnt(14)` | Waits slightly too short | For vector, more than 62 ops after a load in one region seems unlikely. The lgkmcnt limit is more plausible, since LDS ops are in the graph. Peak outstanding is reported, so we'd notice. |
 | Issue stalls when a counter is full | From memory, not verified: the next op can't issue until one finishes | In-flight count could be overstated | Same as counter limits |
 | Loop preheader flush | `vmcnt(0)` at the end of the block before some loops | Missed wait | Outside the loop's own regions |
-| Store to a pointer a scalar load read | `lgkmcnt(0)` | Missed wait | Only matters once scalar is on |
-| `BUFFER_LOAD_LDS_*`, which load global memory straight into LDS | Counts in vmcnt. Writes no register, so later code waits on it through LDS instead: any LDS access waits on vmcnt for it | Classified as a vector write (out of the graph by default), and its LDS-based waits are missed | Only produced by specific intrinsics; not seen in our kernels |
+| Store to a pointer a scalar load read | `lgkmcnt(0)` | Missed wait | Scalar loads are in the graph, so this can matter; how often is unmeasured |
+| `BUFFER_LOAD_LDS_*`, which load global memory straight into LDS | Counts in vmcnt. Writes no register, so later code waits on it through LDS instead: any LDS access waits on vmcnt for it | Classified as a vector write, and its LDS-based waits are missed | Only produced by specific intrinsics; not seen in our kernels |
 | Function return | Waits for everything | None | Reads already count until the end of the region |
 | MLP by type | Not applicable | One MLP over all tracked types (design 5.4) | Tracking one type at a time gives that type's MLP; worth a comment in the code |
 
@@ -169,12 +169,12 @@ failure stops the suite.
 | Two vector loads next to a chain of four LDS loads | Ideal `mlp` is 204 / 100 |
 | Loads, `s_barrier`, more loads | The barrier waits for everything before it |
 | A load, `s_barrier`, then a user of the load | The user costs nothing, since the barrier already waited |
-| Scalar read outstanding, then a wait on an LDS load (both on) | The wait becomes a drain |
-| LDS and GDS outstanding together (both on) | The wait becomes a drain |
+| Scalar read outstanding, then a wait on an LDS load | The wait becomes a drain |
+| LDS and GDS outstanding together | The wait becomes a drain |
 | The six-step cautious mode example (`AMDGPUWaitcntRules.md`, case c08) | Each wait's cost, and that it ends when F's own data is used |
 | Two FLATs in a row, and a second FLAT after a drain | A new FLAT restarts cautious mode; one drain per queue ends it for all |
 | A `flat_*` known to touch global memory only | Normal waits, no cautious mode |
-| Same graph under different configurations | Switching a type or writes on or off adds or removes the expected nodes |
+| Some reads untracked: all vector reads, or LDS loads between vector loads | `elapsed_time` still counts every read; the MLP counts only tracked reads and leaves out time when none is in flight |
 | One order, scored | `use_based_mlp`, `latency_based_mlp` and `memory_time` match the values worked out by hand |
 
 **On the real instructions in `dfs_test`:**
@@ -186,7 +186,6 @@ failure stops the suite.
   tracking. With every read type tracked, its `latency_based_mlp.mlp` also never exceeds
   ideal's. These are separate checks: a store can make an order's elapsed time longer
   than the time its reads are in flight (design doc section 4).
-- Turning on all types only adds nodes; it never removes any.
 
 **Compiled output doesn't change:** compare the `dfs_test` assembly before and after,
 ignoring the `.ident` line.

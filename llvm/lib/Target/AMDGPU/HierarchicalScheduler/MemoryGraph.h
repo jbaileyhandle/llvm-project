@@ -47,24 +47,6 @@ struct MemOpInfo {
 std::optional<MemOpInfo> ClassifyMemOp(const MachineInstr &mi,
                                        const GCNSubtarget &st);
 
-/// Which memory ops the graph tracks. An op whose type is switched off is
-/// left out of the graph, so the model treats it as taking no time: nothing
-/// waits for it. The defaults track vector and FLAT reads only.
-struct MemoryGraphOptions {
-  bool track_vector = true;
-  bool track_flat = true;
-  bool track_scalar = false;
-  bool track_lds = false;
-  bool track_gds = false;
-  // Whether writes of the tracked types go in the graph. Only reads count
-  // toward MLP; writes matter only through the counters (design doc
-  // section 2, implementation plan "Left out").
-  bool track_writes = false;
-
-  /// Whether an op with this classification is tracked.
-  bool IsTracked(const MemOpInfo &info) const;
-};
-
 class MemoryNode;
 
 /// The read types a score tracks: the reads counted in its MLPs and in the
@@ -80,13 +62,13 @@ struct TrackedReadTypes {
   bool Tracks(const MemoryNode &node) const;
 };
 
-/// What a node is. Being a user (reading some tracked load's data) is
-/// separate from the kind, because one instruction can be both a load and a
-/// user: a load whose address comes from another load's data.
+/// What a node is. Being a user (reading some load's data) is separate from
+/// the kind, because one instruction can be both a load and a user: a load
+/// whose address comes from another load's data.
 enum class MemoryNodeKind {
-  kMemOp,     // a tracked load or write; GetMemOpInfo says which
+  kMemOp,     // a load or write; GetMemOpInfo says which
   kBarrier,   // s_barrier, which waits for everything
-  kUserOnly,  // not a tracked memory op, only reads a tracked load's data
+  kUserOnly,  // not a memory op, only reads a load's data
   kSink,      // the end of the region; waits for every load, no instruction
 };
 
@@ -100,7 +82,7 @@ struct MemoryEdge {
 
 /// Where each memory op's latency comes from (design doc section 5.1).
 enum class LatencySetting {
-  kUnit,  // 1 for every tracked load and write
+  kUnit,  // 1 for every load and write
   kLlvm,  // the op's LLVM latency, stored at build (design doc section 3)
 };
 
@@ -127,10 +109,9 @@ public:
   }
 
   /// This op's LLVM latency, stored at build (design doc section 3): its
-  /// latency under LatencySetting::kLlvm. 0 unless it's a tracked load or
-  /// write.
+  /// latency under LatencySetting::kLlvm. 0 unless it's a load or write.
   int GetLlvmLatency() const { return llvm_latency_; }
-  /// This op's latency under `setting`. 0 unless it's a tracked load or write.
+  /// This op's latency under `setting`. 0 unless it's a load or write.
   int GetLatency(LatencySetting setting) const {
     if (kind_ != MemoryNodeKind::kMemOp) {
       return 0;
@@ -138,7 +119,7 @@ public:
     return setting == LatencySetting::kUnit ? 1 : llvm_latency_;
   }
 
-  /// The tracked loads whose data this node reads. Non-empty exactly when
+  /// The loads whose data this node reads. Non-empty exactly when
   /// this node is a user, whatever its kind: a load whose address comes from
   /// another load's data has kind kMemOp and a non-empty list.
   ArrayRef<MemoryNode *> GetLoadsUsed() const { return loads_used_; }
@@ -165,11 +146,11 @@ private:
 };
 
 /// The role one node of the original graph plays in the memory graph: a
-/// tracked memory op (with its latency), a barrier, or neither. Whether it's a
-/// user isn't part of this; the build works that out from the graph's edges.
+/// memory op (with its latency), a barrier, or neither. Whether it's a user
+/// isn't part of this; the build works that out from the graph's edges.
 struct NodeRole {
-  std::optional<MemOpInfo> tracked_mem_op;  // set if a tracked load or write
-  int llvm_latency = 0;                     // used when tracked_mem_op is set
+  std::optional<MemOpInfo> mem_op;  // set if a load or write
+  int llvm_latency = 0;             // used when mem_op is set
   bool is_barrier = false;
 };
 
@@ -197,12 +178,11 @@ struct IdealScore {
 class MemoryGraph {
 public:
   /// Builds the graph for a region, giving each node its role with
-  /// ClassifyMemOp, the tracking `options` and the barrier check. Computes the
-  /// original graph's reachability if it hasn't been yet, which is why
-  /// `original` isn't const.
+  /// ClassifyMemOp and the barrier check, so every memory op gets a node.
+  /// Computes the original graph's reachability if it hasn't been yet, which
+  /// is why `original` isn't const.
   static std::unique_ptr<MemoryGraph> Build(ScheduleGraph &original,
-                                            const GCNSubtarget &st,
-                                            const MemoryGraphOptions &options);
+                                            const GCNSubtarget &st);
 
   /// The same build, using `role_classifier` to give each node its role. Build
   /// calls this; tests call it directly with their own roles, since test
@@ -250,15 +230,15 @@ private:
   /// Computes the original graph's topological order and reachability if they
   /// haven't been yet. This graph's order and edges are taken from them.
   static void PrepareOriginalGraph(ScheduleGraph &original);
-  /// Adds a node for each tracked memory op and each barrier.
+  /// Adds a node for each memory op and each barrier.
   void AddMemOpAndBarrierNodes(
       const ScheduleGraph &original,
       function_ref<NodeRole(const ScheduleNode &)> role_classifier);
-  /// Adds the users: nodes that read a tracked load's data.
+  /// Adds the users: nodes that read a load's data.
   void AddUsers(const ScheduleGraph &original);
   /// Adds one edge per pair where the original graph says B must come after A.
   void AddEdges(const ScheduleGraph &original);
-  /// Adds the sink, after every node and a user of every tracked load.
+  /// Adds the sink, after every node and a user of every load.
   void AddSink();
   /// Sorts the nodes into topological order and sets each node's topo index.
   /// The order is the original nodes' topological order, with the sink last.
