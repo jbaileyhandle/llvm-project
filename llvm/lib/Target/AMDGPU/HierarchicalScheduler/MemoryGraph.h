@@ -173,11 +173,22 @@ struct NodeRole {
   bool is_barrier = false;
 };
 
-/// The best the region's memory work could do (design doc section 4).
+/// One MLP with its parts (MLP doc, sections 2.3 and 2.4).
+struct MlpMeasure {
+  int summed_read_flight_time = 0;  // each tracked read's flight time, added up
+  int any_read_in_flight_time = 0;  // time during which any tracked read is in
+                                    // flight
+  float mlp = 0;                    // summed / any; 0 when any is 0
+};
+
+/// The region's memory work with every op started as early as the edges allow
+/// (design doc section 4). No order finishes sooner than elapsed_time. Its MLP
+/// is the highest any order can get only when every read in the graph is
+/// tracked.
 struct IdealScore {
-  int memory_time;  // the least time the region's memory work can take
-  float mlp;        // the reads' total latency / memory_time; 0 when
-                    // memory_time is 0
+  MlpMeasure latency_based_mlp;  // each tracked read in flight from its start
+                                 // time until its start time plus its latency
+  int elapsed_time = 0;          // when the last read's data is back
 };
 
 /// A graph of one region's memory ops (design doc section 3). Organized like
@@ -206,8 +217,10 @@ public:
   OrderFromSchedule(ArrayRef<const ScheduleNode *> schedule) const;
 
   /// The region's ideal under `setting`: the best its memory work could do,
-  /// held back only by the edges (design doc section 4).
-  IdealScore Ideal(LatencySetting setting) const;
+  /// held back only by the edges (design doc section 4). Its MLP counts only
+  /// the reads `tracked_read_types` picks; its elapsed time counts every read.
+  IdealScore Ideal(LatencySetting setting,
+                   const TrackedReadTypes &tracked_read_types) const;
 
   ArrayRef<MemoryNode> Nodes() const { return nodes_; }
   ArrayRef<MemoryNode *> GetTopoOrder() const { return topo_order_; }

@@ -182,8 +182,10 @@ failure stops the suite.
   uses (`SIInstrInfo::usesVM_CNT`, `usesLGKM_CNT`). This catches basic classifier mistakes, like
   an LDS op in vmcnt. It can't check the FLAT rules, because those flags are set on every `flat_*`.
 - Graph edges match `IsReachableInDag` for every pair of nodes.
-- For the region's real order, `latency_based_mlp` never exceeds ideal's `mlp`, and
-  `memory_time` is never less than ideal's.
+- For the region's real order, `elapsed_time` is never less than ideal's, under any
+  tracking. With every read type tracked, its `latency_based_mlp.mlp` also never exceeds
+  ideal's. These are separate checks: a store can make an order's elapsed time longer
+  than the time its reads are in flight (design doc section 4).
 - Turning on all types only adds nodes; it never removes any.
 
 **Compiled output doesn't change:** compare the `dfs_test` assembly before and after,

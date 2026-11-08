@@ -6158,10 +6158,17 @@ void RunMemoryGraphBuildUnitTests() {
 struct IdealTestCase {
   const char *description;
   int load_latencies[4];  // the LLVM latencies of L1, L2, L3 and L4
+
+  // Building: whether S goes in the graph.
   bool track_writes;
+  // Scoring: whether Ideal's MLP counts vector reads. L1 to L4 are all vector
+  // reads, so this decides whether they count.
+  bool vector_reads_tracked;
+
   LatencySetting setting;
-  int expected_memory_time;
-  int expected_total_read_latency;  // the numerator of the expected mlp
+  int expected_elapsed_time;
+  int expected_summed_read_flight_time;
+  int expected_any_read_in_flight_time;
 };
 
 // Runs one Ideal test case and prints its result. Returns whether it passed.
@@ -6175,24 +6182,47 @@ bool CheckIdealCase(const IdealTestCase &test_case) {
         return TestDagRole(node, options, test_case.load_latencies);
       });
 
-  const IdealScore score = graph->Ideal(test_case.setting);
+  // The other read types are left at their defaults. The test graph has no
+  // reads of those types, so they change nothing.
+  TrackedReadTypes tracked_read_types;
+  tracked_read_types.vector = test_case.vector_reads_tracked;
 
-  // The same division Ideal does, so only rounding can differ.
-  const float expected_mlp =
-      static_cast<float>(test_case.expected_total_read_latency) /
-      test_case.expected_memory_time;
-  const bool pass = score.memory_time == test_case.expected_memory_time &&
-                    std::fabs(score.mlp - expected_mlp) < 1e-6f;
+  const IdealScore score = graph->Ideal(test_case.setting, tracked_read_types);
+  const MlpMeasure &latency_based_mlp = score.latency_based_mlp;
 
-  llvm::outs() << "\t\t" << test_case.description << ": memory_time "
-               << score.memory_time << ", mlp " << std::to_string(score.mlp);
+  // The same division MeasureMlp does, so only rounding can differ. Stays 0
+  // when no tracked read is ever in flight, as MeasureMlp's does.
+  float expected_mlp = 0;
+  if (test_case.expected_any_read_in_flight_time > 0) {
+    expected_mlp =
+        static_cast<float>(test_case.expected_summed_read_flight_time) /
+        test_case.expected_any_read_in_flight_time;
+  }
+
+  const bool pass =
+      score.elapsed_time == test_case.expected_elapsed_time &&
+      latency_based_mlp.summed_read_flight_time ==
+          test_case.expected_summed_read_flight_time &&
+      latency_based_mlp.any_read_in_flight_time ==
+          test_case.expected_any_read_in_flight_time &&
+      std::fabs(latency_based_mlp.mlp - expected_mlp) < 1e-6f;
+
+  llvm::outs() << "\t\t" << test_case.description << ": elapsed_time "
+               << score.elapsed_time << ", summed_read_flight_time "
+               << latency_based_mlp.summed_read_flight_time
+               << ", any_read_in_flight_time "
+               << latency_based_mlp.any_read_in_flight_time << ", mlp "
+               << std::to_string(latency_based_mlp.mlp);
   if (pass) {
     llvm::outs() << "  PASS\n";
   } else {
-    llvm::outs() << "  FAIL, expected memory_time "
-                 << test_case.expected_memory_time << ", mlp "
-                 << test_case.expected_total_read_latency << "/"
-                 << test_case.expected_memory_time << "\n";
+    llvm::outs() << "  FAIL, expected elapsed_time "
+                 << test_case.expected_elapsed_time
+                 << ", summed_read_flight_time "
+                 << test_case.expected_summed_read_flight_time
+                 << ", any_read_in_flight_time "
+                 << test_case.expected_any_read_in_flight_time << ", mlp "
+                 << std::to_string(expected_mlp) << "\n";
   }
   return pass;
 }
@@ -6201,25 +6231,39 @@ bool CheckIdealCase(const IdealTestCase &test_case) {
 // of waits is L1 -> A -> L2 -> U -> B -> L4: A waits for L1's data (100), U
 // for L2's (200), and L4's own data is back at 300. L3 starts with L2, at 100,
 // and its data is back at 200, inside that chain.
+//
+// In every case but the last, every read is tracked. The reads' flights then
+// cover the whole time until elapsed_time with no gaps, so
+// any_read_in_flight_time equals elapsed_time.
 void RunMemoryGraphIdealUnitTests() {
   llvm::outs() << "\tMemoryGraph Ideal unit tests:\n";
 
   const IdealTestCase cases[] = {
-      {"all loads 100, kLlvm", {100, 100, 100, 100}, false,
-       LatencySetting::kLlvm, 300, 400},
+      {"all loads 100, kLlvm", {100, 100, 100, 100},
+       /*track_writes=*/false, /*vector_reads_tracked=*/true,
+       LatencySetting::kLlvm, 300, 400, 300},
       // Equal latencies, so the same mlp as with kLlvm.
-      {"all loads 100, kUnit", {100, 100, 100, 100}, false,
-       LatencySetting::kUnit, 3, 4},
+      {"all loads 100, kUnit", {100, 100, 100, 100},
+       /*track_writes=*/false, /*vector_reads_tracked=*/true,
+       LatencySetting::kUnit, 3, 4, 3},
       // The short chain ends by 3. L3 starts at 1, alongside it, and its data
       // is back at 101.
-      {"L3 100, other loads 1, kLlvm", {1, 1, 100, 1}, false,
-       LatencySetting::kLlvm, 101, 103},
+      {"L3 100, other loads 1, kLlvm", {1, 1, 100, 1},
+       /*track_writes=*/false, /*vector_reads_tracked=*/true,
+       LatencySetting::kLlvm, 101, 103, 101},
       // Counting loads ignores that L3 is slower: 4/3 instead of 103/101.
-      {"L3 100, other loads 1, kUnit", {1, 1, 100, 1}, false,
-       LatencySetting::kUnit, 3, 4},
+      {"L3 100, other loads 1, kUnit", {1, 1, 100, 1},
+       /*track_writes=*/false, /*vector_reads_tracked=*/true,
+       LatencySetting::kUnit, 3, 4, 3},
       // S adds no time, since nothing waits for its data, and it isn't a read.
-      {"all loads 100, writes tracked, kLlvm", {100, 100, 100, 100}, true,
-       LatencySetting::kLlvm, 300, 400},
+      {"all loads 100, writes tracked, kLlvm", {100, 100, 100, 100},
+       /*track_writes=*/true, /*vector_reads_tracked=*/true,
+       LatencySetting::kLlvm, 300, 400, 300},
+      // The loads still take their time, so elapsed_time is unchanged. But no
+      // read counts in the MLP, so its parts and the mlp are all 0.
+      {"all loads 100, vector reads untracked, kLlvm", {100, 100, 100, 100},
+       /*track_writes=*/false, /*vector_reads_tracked=*/false,
+       LatencySetting::kLlvm, 300, 0, 0},
   };
 
   bool pass = true;

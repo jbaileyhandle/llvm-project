@@ -267,12 +267,20 @@ graph is never transitively reduced.
 ## 4. Ideal MLP
 
 ```
-struct IdealScore {
-  int   memory_time   // the least time the region's memory work can take
-  float mlp
+struct MlpMeasure {
+  int   summed_read_flight_time   // each tracked read's flight time, added up
+  int   any_read_in_flight_time   // time during which any tracked read is in flight
+  float mlp                       // summed_read_flight_time ÷ any_read_in_flight_time;
+                                  // 0 when any_read_in_flight_time is 0
 }
 
-IdealScore Ideal(latency_setting):
+struct IdealScore {
+  MlpMeasure latency_based_mlp    // each tracked read in flight from its start until
+                                  // its start plus its latency
+  int        elapsed_time         // when the last read's data is back, tracked or not
+}
+
+IdealScore Ideal(latency_setting, tracked_read_types):
   // start[node]: the earliest time node can run. Indexed by topo index, like
   // ScheduleGraph's per-node tables.
   for node in topo_order_:
@@ -280,37 +288,62 @@ IdealScore Ideal(latency_setting):
                     start[predecessor] + latency(predecessor)   if that edge waits for data
                     start[predecessor]                          if it's ordering only
                   or 0 if node has no predecessors
-  memory_time = start[sink_]
+  flights = for each read that tracked_read_types tracks:
+              [start[read], start[read] + latency(read))
   return IdealScore {
-    memory_time = memory_time,
-    mlp         = (sum of latency(read) over tracked reads) / memory_time,
+    latency_based_mlp = MeasureMlp(flights),   // section 5's Mlp, keeping its parts
+    elapsed_time      = start[sink_],
   }
 ```
 
-`memory_time` here is how long the longest chain of waiting takes, where each load in the
+`elapsed_time` is how long the longest chain of waiting takes, where each load in the
 chain waits on the data of the one before it. Those loads can't overlap, so the region
-can't finish its memory work any faster than this. The sink waits for every load, so its
-start is that time.
+can't finish its memory work any faster than this. The sink waits for every load,
+tracked or not, so its start is that time.
 
-The latency setting is either every operation takes 1, or LLVM's latency. With 1,
-`memory_time` is the number of stages, D, in the MLP doc, and `mlp` is NumLoads ÷ D.
+`latency_based_mlp` counts only the reads `tracked_read_types` picks (by default vector
+and FLAT). Its denominator is the time during which any of them is in flight (the MLP
+doc, section 2.4), not `elapsed_time`. The two differ when untracked reads leave
+stretches with no tracked read in flight.
+
+The latency setting is either every operation takes 1, or LLVM's latency. With 1 and
+every read tracked, `elapsed_time` is the number of stages, D, in the MLP doc, and `mlp`
+is NumLoads ÷ D. When every op in the graph has the same LLVM latency, the two settings
+give the same `mlp`.
 
 **Why time and not a count of loads.** A count isn't even an upper bound once
 latencies differ. Take two parallel vector loads (100) and a chain of four LDS
-loads (1 each). Counting gives 6 ÷ 4 = 1.5, but the real value is
-(100 + 100 + 4) ÷ 100 = 2.04. With only vector and FLAT tracked, all at the same
-latency, the two settings give the same number.
+loads (1 each), all tracked. Counting gives 6 ÷ 4 = 1.5, but the real value is
+(100 + 100 + 4) ÷ 100 = 2.04.
 
-**What to compare it against.** `ScoreOrder` (section 5) returns the same two names.
-- `memory_time` against `memory_time`: how much an order stretches the memory work. An
-  order's is never less than ideal's.
-- `mlp` against `latency_based_mlp`: never higher than ideal's, because both have the
-  same numerator, and an order's denominator is at least the longest chain. Not against
-  `use_based_mlp`, where a read can stay in flight far longer than its latency, so it can
-  exceed ideal's.
+**What to compare it against.** `ScoreOrder` (section 5) reports the same quantities for
+one order.
+- `elapsed_time`: an order's is never less than ideal's, whatever is tracked. Ideal
+  starts every op as early as the edges allow, and in an order, waits and drains can
+  only start ops later. This is the bound to check.
+- `latency_based_mlp.summed_read_flight_time`: the same for every order, since each
+  tracked read is in flight for exactly its latency.
+- `latency_based_mlp.mlp`: no bound in general. Ideal starts every read as early as
+  possible, which can spread the tracked reads out. Example, with only vector reads
+  tracked: A is a vector load (80) with no predecessors, and B is a vector load (80)
+  that needs the data of U, an LDS load (5). Ideal runs A over [0, 80) and B over
+  [5, 85), for 160 ÷ 85 = 1.88. The order U, B, A runs both over [5, 85), for
+  160 ÷ 80 = 2.0.
 
-**It may not be reachable.** It ignores drains, so a region with a FLAT that counts in
-both counters, or an `s_barrier`, may not reach it.
+  When every read in the graph is tracked, an order's never exceeds ideal's. Ideal's
+  `elapsed_time` is then the length of a chain of reads, each starting when the one
+  before it has its data back. An order has to run that chain's reads one after another
+  too, so its `any_read_in_flight_time` is at least ideal's, over the same summed time.
+  With no writes in the graph either, an order's walk leaves no gaps, so this is the
+  same as the `elapsed_time` comparison. A write can leave a gap: a wait for a read also
+  waits for any write issued before it in the same counter, which can finish later.
+- `use_based_mlp`: not comparable. A read can stay in flight far longer than its
+  latency, so it can exceed ideal's.
+
+**It may not be reachable.** Ideal ignores the wait queues. In an order, a wait also
+waits for everything issued before its load in the same counter, and a FLAT that counts
+in both counters or an `s_barrier` forces a drain. So a region may not reach ideal's
+`elapsed_time`.
 
 ## 5. Scoring an ordering
 

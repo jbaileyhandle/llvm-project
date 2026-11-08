@@ -431,13 +431,92 @@ MemoryGraph::OrderFromSchedule(ArrayRef<const ScheduleNode *> schedule) const {
   return order;
 }
 
-IdealScore MemoryGraph::Ideal(LatencySetting setting) const {
+namespace {
+
+// When one memory op is in flight: from start_time until stop_time.
+struct MemOpFlight {
+  int start_time;
+  int stop_time;
+};
+
+// The MLP of a set of memory op flights (MLP doc, section 2.3):
+//
+//   summed_read_flight_time: every flight's length, added up. Time when two
+//     flights overlap counts twice.
+//   any_read_in_flight_time: the time during which at least one flight is in
+//     flight. Time when two flights overlap counts once.
+//   mlp: summed / any, the average number of flights in flight while any is.
+//
+// Example: flights [0, 100), [50, 150) and [200, 300) add up to 300. At least
+// one is in flight during [0, 150) and [200, 300), which is 150 + 100 = 250,
+// so mlp is 300 / 250 = 1.2.
+MlpMeasure MeasureMlp(std::vector<MemOpFlight> flights) {
+  MlpMeasure measure;
+
+  // Step 1: every flight's length, added up.
+  for (const MemOpFlight &flight : flights) {
+    measure.summed_read_flight_time += flight.stop_time - flight.start_time;
+  }
+
+  // Step 2: the time during which at least one flight is in flight.
+  //
+  // Sort the flights by start time, then sweep through them while keeping one
+  // "stretch": a span of time in which some flight is always in flight. Each
+  // flight either overlaps the current stretch, or starts after it stops.
+  llvm::sort(flights, [](const MemOpFlight &a, const MemOpFlight &b) {
+    return a.start_time < b.start_time;
+  });
+
+  bool have_stretch = false;  // false until the first flight
+  int stretch_start_time = 0;
+  int stretch_stop_time = 0;
+
+  for (const MemOpFlight &flight : flights) {
+    // The flight starts before the stretch stops, so it overlaps the stretch.
+    // The stretch now lasts until the later of the two stop times.
+    if (have_stretch && flight.start_time <= stretch_stop_time) {
+      stretch_stop_time = std::max(stretch_stop_time, flight.stop_time);
+      continue;
+    }
+
+    // The flight starts after the stretch stops, so between them nothing is
+    // in flight. The stretch is finished: count its length, then start a new
+    // stretch with this flight.
+    if (have_stretch) {
+      measure.any_read_in_flight_time += stretch_stop_time - stretch_start_time;
+    }
+    have_stretch = true;
+    stretch_start_time = flight.start_time;
+    stretch_stop_time = flight.stop_time;
+  }
+
+  // No later flight finishes the last stretch, so count it here.
+  if (have_stretch) {
+    measure.any_read_in_flight_time += stretch_stop_time - stretch_start_time;
+  }
+
+  // Step 3: the ratio. With nothing in flight there's nothing to overlap, so
+  // mlp stays 0 rather than dividing by zero.
+  if (measure.any_read_in_flight_time > 0) {
+    measure.mlp = static_cast<float>(measure.summed_read_flight_time) /
+                  measure.any_read_in_flight_time;
+  }
+
+  return measure;
+}
+
+} // namespace
+
+IdealScore
+MemoryGraph::Ideal(LatencySetting setting,
+                   const TrackedReadTypes &tracked_read_types) const {
   // The earliest time each node can run, indexed by topo index. Filled in
   // topological order, so a node's predecessors are always done before it.
   std::vector<int> earliest_start_by_topo_index(topo_order_.size(), 0);
 
-  // The numerator of mlp: the total time the tracked reads spend in flight.
-  int total_read_latency = 0;
+  // Each tracked read's flight: from its earliest start until its data is
+  // back.
+  std::vector<MemOpFlight> tracked_read_flights;
 
   for (const MemoryNode *node : topo_order_) {
     // A node can start once every predecessor allows it.
@@ -459,21 +538,18 @@ IdealScore MemoryGraph::Ideal(LatencySetting setting) const {
     }
     earliest_start_by_topo_index[node->GetTopoIndex()] = earliest_start;
 
-    if (node->IsRead()) {
-      total_read_latency += node->GetLatency(setting);
+    if (tracked_read_types.Tracks(*node)) {
+      tracked_read_flights.push_back(MemOpFlight{
+          earliest_start, earliest_start + node->GetLatency(setting)});
     }
   }
 
-  // The sink waits for every load, so the earliest it can start is when the
-  // region's memory work is done.
-  const int memory_time = earliest_start_by_topo_index[sink_->GetTopoIndex()];
+  IdealScore score;
 
-  // With no memory time there's nothing to overlap, so mlp is 0 rather than a
-  // division by zero.
-  float mlp = 0.0f;
-  if (memory_time > 0) {
-    mlp = static_cast<float>(total_read_latency) / memory_time;
-  }
+  // The sink waits for every load, tracked or not, so the earliest it can
+  // start is when the last read's data is back.
+  score.elapsed_time = earliest_start_by_topo_index[sink_->GetTopoIndex()];
 
-  return IdealScore{memory_time, mlp};
+  score.latency_based_mlp = MeasureMlp(std::move(tracked_read_flights));
+  return score;
 }
