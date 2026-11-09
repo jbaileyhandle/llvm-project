@@ -261,8 +261,10 @@ public:
   OrderFromSchedule(ArrayRef<const ScheduleNode *> schedule) const;
 
   /// The region's ideal under `setting`: the best its memory work could do,
-  /// held back only by the edges (design doc section 4). Its MLP counts only
-  /// the reads `tracked_read_types` picks; its elapsed time counts every read.
+  /// held back only by the edges (design doc section 4), and by each barrier
+  /// waiting for the memory ops that must come before it to finish. Its MLP
+  /// counts only the reads `tracked_read_types` picks. Its timing counts
+  /// every op.
   IdealScore ScoreIdeal(LatencySetting setting,
                         const TrackedReadTypes &tracked_read_types) const;
 

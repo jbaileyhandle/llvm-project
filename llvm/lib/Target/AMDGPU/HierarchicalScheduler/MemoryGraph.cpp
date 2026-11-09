@@ -474,6 +474,14 @@ MemoryGraph::ScoreIdeal(LatencySetting setting,
   std::vector<MemOpFlight> tracked_read_flights;
 
   for (const MemoryNode *node : topo_order_) {
+    // A barrier waits for every memory op issued before it to finish, reads
+    // and writes: the s_waitcnt 0 before s_barrier, which the walk's drain
+    // models. Here that means the ops with an edge into the barrier, which
+    // every order must issue before it. An op with no ordering to the
+    // barrier, such as an invariant load, could issue after it instead, so
+    // the barrier doesn't wait for it.
+    const bool is_barrier = node->GetKind() == MemoryNodeKind::kBarrier;
+
     // A node can start once every predecessor allows it.
     int earliest_start = 0;
     for (const MemoryEdge &edge : node->Predecessors()) {
@@ -481,11 +489,14 @@ MemoryGraph::ScoreIdeal(LatencySetting setting,
       const int predecessor_start =
           earliest_start_by_topo_index[predecessor.GetTopoIndex()];
 
-      // An ordering-only edge only keeps this node from starting before the
-      // predecessor. An edge that waits for data also waits for the
-      // predecessor's data to come back.
+      // An ordering-only edge into a node that isn't a barrier only keeps the
+      // node from starting before the predecessor. An edge that waits for
+      // data, or any edge into a barrier, also waits for the predecessor to
+      // finish. For a barrier, every predecessor's latency is added without
+      // checking that it's a memory op: one that isn't, like a user, has
+      // latency 0, so it adds nothing.
       int allowed_from = predecessor_start;
-      if (edge.waits_for_data) {
+      if (edge.waits_for_data || is_barrier) {
         allowed_from += predecessor.GetLatency(setting);
       }
 

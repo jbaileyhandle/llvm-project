@@ -6252,13 +6252,14 @@ void RunMemoryGraphIdealUnitTests() {
        {MemType::kVector, MemType::kVector, MemType::kVector,
         MemType::kVector},
        /*vector_reads_tracked=*/true, LatencySetting::kUnit, 3, 4, 3},
-      // The short chain ends by 3. L3 starts at 1, alongside it, and its data
-      // is back at 101.
+      // A waits for L1's data until 1, and U for L2's until 2. L3 starts at 1
+      // and its data is back at 101. B waits for L3, and for the store S, also
+      // back at 101, so L4 runs from 101 to 102.
       {"L3 100, other loads 1, kLlvm", {1, 1, 100, 1},
        {MemType::kVector, MemType::kVector, MemType::kVector,
         MemType::kVector},
-       /*vector_reads_tracked=*/true, LatencySetting::kLlvm, 101, 103, 101},
-      // Counting loads ignores that L3 is slower: 4/3 instead of 103/101.
+       /*vector_reads_tracked=*/true, LatencySetting::kLlvm, 102, 103, 102},
+      // Counting loads ignores that L3 is slower: 4/3 instead of 103/102.
       {"L3 100, other loads 1, kUnit", {1, 1, 100, 1},
        {MemType::kVector, MemType::kVector, MemType::kVector,
         MemType::kVector},
@@ -6273,14 +6274,14 @@ void RunMemoryGraphIdealUnitTests() {
       // loads, which aren't. When each is in flight:
       //   L1:      0 to 100
       //   L2, L3:  100 to 105  (they come after A, which waits for L1's data)
-      //   L4:      105 to 205  (it comes after B, which comes after U, which
-      //                         waits for L2's data)
-      // From 100 to 105, only the untracked loads are in flight. So the
-      // tracked loads are in flight for 200 of the 205:
+      //   L4:      200 to 300  (it comes after B, which waits for the store S,
+      //                         issued at 100, until 200)
+      // From 100 to 200, only the untracked loads and the store are in
+      // flight. So the tracked loads are in flight for 200 of the 300:
       // any_read_in_flight_time is 200.
       {"L2 and L3 LDS at 5, L1 and L4 vector at 100, kLlvm", {100, 5, 5, 100},
        {MemType::kVector, MemType::kLds, MemType::kLds, MemType::kVector},
-       /*vector_reads_tracked=*/true, LatencySetting::kLlvm, 205, 200, 200},
+       /*vector_reads_tracked=*/true, LatencySetting::kLlvm, 300, 200, 200},
   };
 
   bool pass = true;
@@ -6829,8 +6830,7 @@ void RunMemoryGraphWalkUnitTests() {
       // 105. B waits for every op in flight: L3, back at 105, and the store
       // S, back at 200. So B issues at 200, while no tracked read is in
       // flight, and elapsed_time is 100 more than the 200 of tracked flight.
-      // Ideal gives 205 here: every edge into a barrier is ordering only in
-      // Ideal, so there a barrier waits for nothing.
+      // ScoreIdeal gives 300 too, since its barrier also waits for S.
       {"L2 and L3 LDS 5, L1 and L4 vector 100, kLlvm", {100, 5, 5, 100},
        {MemType::kVector, MemType::kLds, MemType::kLds, MemType::kVector},
        default_order, LatencySetting::kLlvm,
@@ -6937,32 +6937,70 @@ void AppendCounterProblems(const ScheduleGraph &original,
   }
 }
 
+// Whether every memory op and barrier in `graph` is ordered with every
+// barrier: one of the two has an edge to the other. LLVM doesn't order
+// invariant loads, such as kernel-argument loads, with barriers
+// (ScheduleDAGInstrs::buildSchedGraph).
+bool EveryOpOrderedWithEveryBarrier(const MemoryGraph &graph) {
+  for (const MemoryNode &barrier : graph.Nodes()) {
+    if (barrier.GetKind() != MemoryNodeKind::kBarrier) {
+      continue;
+    }
+
+    // Which nodes are ordered with this barrier, indexed by topo index: those
+    // with an edge to or from it.
+    std::vector<bool> ordered_by_topo_index(graph.GetTopoOrder().size(), false);
+    for (const MemoryEdge &edge : barrier.Predecessors()) {
+      ordered_by_topo_index[edge.node->GetTopoIndex()] = true;
+    }
+    for (const MemoryEdge &edge : barrier.Successors()) {
+      ordered_by_topo_index[edge.node->GetTopoIndex()] = true;
+    }
+
+    // Every other memory op and barrier must be one of them.
+    for (const MemoryNode &node : graph.Nodes()) {
+      const bool is_op_or_barrier =
+          node.GetKind() == MemoryNodeKind::kMemOp ||
+          node.GetKind() == MemoryNodeKind::kBarrier;
+      if (is_op_or_barrier && &node != &barrier &&
+          !ordered_by_topo_index[node.GetTopoIndex()]) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 // Appends a problem for each way the region's input schedule beats Ideal,
 // which no order can do. Each bound is checked under each latency setting,
 // with every read type tracked.
 //
-// Ideal holds each node back only by its edges: an ordering-only edge adds no
-// time, and a barrier waits for nothing. So its elapsed_time is the latencies
-// of one chain of reads added up, where the path from each read to the next
-// starts with a data edge out of the read and its other edges add no time. A
-// real order is held back by the same edges and also by its waits. It issues
-// each read of the chain only after the one before it has its data, so their
-// flights don't overlap. That gives these bounds:
-//   - elapsed_time: the schedule's is at least Ideal's, since its sink waits
-//     for the chain's last read.
+// ScoreIdeal holds each node back only by its edges and by each barrier
+// waiting for the ops that must come before it. A real order is held back by
+// those too, and by its other waits. That gives these bounds:
+//   - elapsed_time: the schedule's is at least Ideal's.
 //   - Latency-based summed_read_flight_time: the same in both, since each
 //     flight lasts its read's latency in both.
 //   - Latency-based any_read_in_flight_time: the schedule's is at least
-//     Ideal's elapsed_time, since the chain's flights alone last that long.
-//     Ideal's is at most its elapsed_time, since every flight ends by the time
-//     the sink starts. So the schedule's is at least Ideal's.
+//     Ideal's, if `every_op_ordered_with_every_barrier`. The barriers then
+//     split Ideal and the schedule into the same segments, which don't
+//     overlap in time: a segment's ops start after the barrier before them,
+//     and finish before the barrier after them. In Ideal, a segment's flights
+//     all fit in the time its longest chain of reads takes, starting from the
+//     barrier before it (or from 0, in the first segment). In a chain, the
+//     path from each read to the next starts with a data edge out of the
+//     read, and its other edges add no time. The schedule runs that chain's
+//     reads one after another, each for its latency, so in that segment it
+//     has a read in flight for at least as long.
 // The last two mean the schedule's latency-based mlp is at most Ideal's.
 // The any_read_in_flight_time bound needs every read type tracked, so the
-// chain's flights all count: an untracked load can leave a gap in Ideal that a
-// real order fills with tracked reads. Tracking changes no timing, so the
-// elapsed_time bound holds under any tracking.
+// chains' flights all count. It needs the ordering because an op with no
+// ordering to a barrier can go on either side of it. Ideal may start it
+// before the barrier, where it adds time with a read in flight, while the
+// schedule puts it after the barrier, overlapping reads already in flight.
 void AppendIdealBoundProblems(const ScheduleGraph &original,
                               const MemoryGraph &graph,
+                              bool every_op_ordered_with_every_barrier,
                               std::vector<std::string> &problems) {
   const TrackedReadTypes tracked_read_types =
       TrackedReadTypes::AllReadTypesTracked();
@@ -6999,8 +7037,11 @@ void AppendIdealBoundProblems(const ScheduleGraph &original,
                          " differs from Ideal's " +
                          std::to_string(ideal_mlp.summed_read_flight_time));
     }
-    if (schedule_mlp.any_read_in_flight_time <
-        ideal_mlp.any_read_in_flight_time) {
+    // The any_read_in_flight_time bound holds only when every op is ordered
+    // with every barrier.
+    if (every_op_ordered_with_every_barrier &&
+        schedule_mlp.any_read_in_flight_time <
+            ideal_mlp.any_read_in_flight_time) {
       problems.push_back(setting_name + ": any_read_in_flight_time " +
                          std::to_string(schedule_mlp.any_read_in_flight_time) +
                          " is below Ideal's " +
@@ -7015,16 +7056,24 @@ void AppendIdealBoundProblems(const ScheduleGraph &original,
 bool CheckMemoryGraphOnRegion(ScheduleGraph &original,
                               const GCNSubtarget &st) {
   auto graph = MemoryGraph::Build(original, st);
+  const bool every_op_ordered_with_every_barrier =
+      EveryOpOrderedWithEveryBarrier(*graph);
 
   std::vector<std::string> problems;
   AppendEdgeProblems(original, *graph, problems);
   AppendCounterProblems(original, st, problems);
-  AppendIdealBoundProblems(original, *graph, problems);
+  AppendIdealBoundProblems(original, *graph,
+                           every_op_ordered_with_every_barrier, problems);
 
-  // The node count leaves out the sink.
+  // The node count leaves out the sink. The line says when the
+  // any_read_in_flight_time bound wasn't checked.
   llvm::outs() << "\t\tregion: " << graph->Nodes().size() - 1
-               << " memory nodes  " << (problems.empty() ? "PASS" : "FAIL")
-               << "\n";
+               << " memory nodes";
+  if (!every_op_ordered_with_every_barrier) {
+    llvm::outs() << ", any_read_in_flight_time bound not checked: an op "
+                    "isn't ordered with a barrier";
+  }
+  llvm::outs() << "  " << (problems.empty() ? "PASS" : "FAIL") << "\n";
   for (const std::string &problem : problems) {
     llvm::outs() << "\t\t\t" << problem << "\n";
   }
