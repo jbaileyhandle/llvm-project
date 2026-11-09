@@ -11,10 +11,9 @@
 #include <iterator>
 #include <utility>
 
-using namespace llvm;
-using namespace llvm::hierarchical_scheduler;
+namespace llvm::hierarchical_scheduler {
 
-WaitEvent llvm::hierarchical_scheduler::LgkmcntEvent(MemType type) {
+WaitEvent LgkmcntEvent(MemType type) {
   switch (type) {
   case MemType::kLds:
   case MemType::kFlat:
@@ -29,17 +28,15 @@ WaitEvent llvm::hierarchical_scheduler::LgkmcntEvent(MemType type) {
   report_fatal_error("LgkmcntEvent: a vector op doesn't go in lgkmcnt");
 }
 
-bool llvm::hierarchical_scheduler::IsFlatInBothQueues(const MemoryNode &node) {
+bool IsFlatInBothQueues(const MemoryNode &node) {
   const MemOpInfo &info = *node.GetMemOpInfo();
   return info.type == MemType::kFlat && info.counts_in_vmcnt &&
          info.counts_in_lgkmcnt;
 }
 
-namespace {
-
 // Classifies an op's WaitEvent in a queue of `type`. Fails hard if the op
 // doesn't go in that queue.
-WaitEvent ClassifyWaitEvent(WaitQueueType type, const MemOpInfo &info) {
+static WaitEvent ClassifyWaitEvent(WaitQueueType type, const MemOpInfo &info) {
   if (type == WaitQueueType::kVmcnt) {
     if (!info.counts_in_vmcnt) {
       report_fatal_error("WaitQueue::Push: the op doesn't go in vmcnt");
@@ -52,8 +49,6 @@ WaitEvent ClassifyWaitEvent(WaitQueueType type, const MemOpInfo &info) {
   }
   return LgkmcntEvent(info.type);
 }
-
-} // namespace
 
 void WaitQueue::Push(const MemoryNode &node, int raw_op_complete_time) {
   // What the entry records about the op in this queue.
@@ -197,3 +192,5 @@ void WaitQueues::AddPopped(const std::vector<QueueEntry> &popped,
     wait.popped.push_back(entry.node);
   }
 }
+
+} // namespace llvm::hierarchical_scheduler

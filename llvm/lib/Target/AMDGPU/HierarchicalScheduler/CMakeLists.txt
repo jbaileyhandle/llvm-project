@@ -21,6 +21,7 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/ContinuousOccupancyScorer.cpp
   HierarchicalScheduler/MemoryGraph.cpp
   HierarchicalScheduler/WaitQueues.cpp
+  HierarchicalScheduler/MlpTracker.cpp
   HierarchicalScheduler/NodeRegInfo.cpp
   HierarchicalScheduler/ScheduleLengthTracker.cpp
   HierarchicalScheduler/IlpTracker.cpp

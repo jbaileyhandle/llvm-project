@@ -345,6 +345,14 @@ in both counters or an `s_barrier` forces a drain. So a region may not reach ide
 
 ## 5. Scoring an ordering
 
+> **Partly out of date (2026-11-08).** Since this was written:
+> - `memory_time` is now `elapsed_time`.
+> - `Mlp` returns an `MlpMeasure`, which keeps its numerator and denominator
+>   (`MemoryGraph.h`).
+> - Pop times are chained per queue (`WaitQueues.h`).
+>
+> Where this section and the code disagree, the code is right.
+
 ### 5.1 Model
 
 - The input is an ordering: every memory node, consistent with the edges,

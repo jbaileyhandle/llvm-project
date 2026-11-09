@@ -58,6 +58,17 @@ struct TrackedReadTypes {
   bool lds = false;
   bool gds = false;
 
+  /// Every read type tracked.
+  static TrackedReadTypes AllReadTypesTracked() {
+    TrackedReadTypes types;
+    types.vector = true;
+    types.flat = true;
+    types.scalar = true;
+    types.lds = true;
+    types.gds = true;
+    return types;
+  }
+
   /// Whether `node` is a read of one of the types above.
   bool Tracks(const MemoryNode &node) const;
 };
@@ -162,6 +173,16 @@ struct MlpMeasure {
   float mlp = 0;                    // summed / any; 0 when any is 0
 };
 
+/// When one memory op is in flight: from start_time until stop_time.
+struct MemOpFlight {
+  int start_time;
+  int stop_time;
+};
+
+/// The MLP of a set of flights (MLP doc, section 2.3). Time when two flights
+/// overlap counts twice in the summed time and once in the "any" time.
+MlpMeasure MeasureMlp(std::vector<MemOpFlight> flights);
+
 /// The region's memory work with every op started as early as the edges allow
 /// (design doc section 4). No order finishes sooner than elapsed_time. Its MLP
 /// is the highest any order can get only when every read in the graph is
@@ -170,6 +191,49 @@ struct IdealScore {
   MlpMeasure latency_based_mlp;  // each tracked read in flight from its start
                                  // time until its start time plus its latency
   int elapsed_time = 0;          // when the last read's data is back
+};
+
+/// One order's memory work, walked through the wait queues (design doc
+/// section 5). Its MLPs count only the tracked reads. Its timing counts every
+/// op.
+struct OrderScore {
+  // Each tracked read in flight from its issue time until the first node
+  // whose waits cover it issues. A FLAT in both queues is covered once per
+  // queue, and is in flight until the later of the two.
+  MlpMeasure use_based_mlp;
+
+  // Each tracked read in flight from its issue time until its issue time plus
+  // its latency. This is the one to compare with IdealScore's.
+  MlpMeasure latency_based_mlp;
+
+  // When the sink issues: once its waits for every read have ended.
+  int elapsed_time = 0;
+
+  // The most ops each queue held at once, and the most tracked reads.
+  int peak_vmcnt_entries = 0;
+  int peak_lgkmcnt_entries = 0;
+  int peak_vmcnt_tracked_entries = 0;
+  int peak_lgkmcnt_tracked_entries = 0;
+};
+
+/// What happened at one node of ScoreOrder's walk. For tests and debugging.
+struct WalkStep {
+  const MemoryNode *node = nullptr;
+
+  // When the walk reached the node: the issue time of the node before it, or
+  // 0 for the first node.
+  int issue_wait_begin_time = 0;
+
+  // Whether cautious mode was on when the node's waits were decided, which
+  // makes every one of them a drain.
+  bool cautious = false;
+
+  // When the node issued, after its waits.
+  int issue_time = 0;
+
+  // The ops the node's waits popped from the queues. A FLAT in both queues
+  // can be listed twice, once per queue.
+  std::vector<const MemoryNode *> popped;
 };
 
 /// A graph of one region's memory ops (design doc section 3). Organized like
@@ -199,8 +263,28 @@ public:
   /// The region's ideal under `setting`: the best its memory work could do,
   /// held back only by the edges (design doc section 4). Its MLP counts only
   /// the reads `tracked_read_types` picks; its elapsed time counts every read.
-  IdealScore Ideal(LatencySetting setting,
-                   const TrackedReadTypes &tracked_read_types) const;
+  IdealScore ScoreIdeal(LatencySetting setting,
+                        const TrackedReadTypes &tracked_read_types) const;
+
+  /// Walks `order` through the wait queues and scores it (design doc section
+  /// 5). `order` must hold every node of this graph once, each after its
+  /// predecessors, so the sink is last; this fails hard otherwise.
+  /// OrderFromSchedule gives such an order from a full schedule. The MLPs
+  /// count only the reads `tracked_read_types` picks. The timing counts every
+  /// op. If `steps` isn't null, it's filled with one WalkStep per node of
+  /// `order`.
+  OrderScore ScoreOrder(ArrayRef<const MemoryNode *> order,
+                        LatencySetting setting,
+                        const TrackedReadTypes &tracked_read_types,
+                        std::vector<WalkStep> *steps = nullptr) const;
+
+  /// ScoreOrder on the memory nodes of `schedule`, a full schedule of the
+  /// original graph this graph was built from (OrderFromSchedule). Used to
+  /// score a region's schedule as it stands.
+  OrderScore ScoreSchedule(ArrayRef<const ScheduleNode *> schedule,
+                           LatencySetting setting,
+                           const TrackedReadTypes &tracked_read_types,
+                           std::vector<WalkStep> *steps = nullptr) const;
 
   ArrayRef<MemoryNode> Nodes() const { return nodes_; }
   ArrayRef<MemoryNode *> GetTopoOrder() const { return topo_order_; }

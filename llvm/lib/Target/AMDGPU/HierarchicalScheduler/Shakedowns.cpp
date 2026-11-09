@@ -6048,8 +6048,9 @@ bool CheckOrderFromSchedule(const ScheduleGraph &original,
 // The role of a BuildMemoryGraphTestDAG node, decided by name the way
 // MemoryGraph::Build decides it from an instruction. L1 to L4 are loads with
 // the LLVM latencies in `load_latencies` and the types in `load_types`, in
-// that order. Each type must be vector or LDS. S is a vector store with LLVM
-// latency 100. B is a barrier.
+// that order. Each type must be vector, LDS or FLAT. A FLAT load counts in
+// both queues, as one that may touch global memory or LDS does. S is a vector
+// store with LLVM latency 100. B is a barrier.
 NodeRole TestDagRole(const ScheduleNode &node, ArrayRef<int> load_latencies,
                      ArrayRef<MemType> load_types) {
   const StringRef name = node.GetDebugName();
@@ -6061,14 +6062,17 @@ NodeRole TestDagRole(const ScheduleNode &node, ArrayRef<int> load_latencies,
     const int index = name[1] - '1';
     llvm_latency = load_latencies[index];
 
-    // A vector load counts in vmcnt, and an LDS load in lgkmcnt.
+    // A vector load counts in vmcnt, an LDS load in lgkmcnt, and a FLAT load
+    // in both.
     const MemType type = load_types[index];
     if (type == MemType::kVector) {
       info = MemOpInfo{MemAccess::kRead, MemType::kVector, true, false};
     } else if (type == MemType::kLds) {
       info = MemOpInfo{MemAccess::kRead, MemType::kLds, false, true};
+    } else if (type == MemType::kFlat) {
+      info = MemOpInfo{MemAccess::kRead, MemType::kFlat, true, true};
     } else {
-      report_fatal_error("TestDagRole: a load must be vector or LDS");
+      report_fatal_error("TestDagRole: a load must be vector, LDS or FLAT");
     }
   } else if (name == "S") {
     info = MemOpInfo{MemAccess::kWrite, MemType::kVector, true, false};
@@ -6184,7 +6188,8 @@ bool CheckIdealCase(const IdealTestCase &test_case) {
   TrackedReadTypes tracked_read_types;
   tracked_read_types.vector = test_case.vector_reads_tracked;
 
-  const IdealScore score = graph->Ideal(test_case.setting, tracked_read_types);
+  const IdealScore score =
+      graph->ScoreIdeal(test_case.setting, tracked_read_types);
   const MlpMeasure &latency_based_mlp = score.latency_based_mlp;
 
   // The same division MeasureMlp does, so only rounding can differ. Stays 0
@@ -6642,6 +6647,224 @@ void RunWaitQueueUnitTests() {
   }
 }
 
+// The memory nodes with the names in `names`, in that order. A node's name is
+// what MemoryNodeName gives. Fails hard on a name that isn't in `graph`.
+std::vector<const MemoryNode *> MemoryNodesByName(const MemoryGraph &graph,
+                                                  ArrayRef<StringRef> names) {
+  std::vector<const MemoryNode *> nodes;
+  for (StringRef name : names) {
+    auto found =
+        llvm::find_if(graph.GetTopoOrder(), [&](const MemoryNode *node) {
+          return MemoryNodeName(*node) == name;
+        });
+    if (found == graph.GetTopoOrder().end()) {
+      report_fatal_error("MemoryNodesByName: no node named " + name);
+    }
+    nodes.push_back(*found);
+  }
+  return nodes;
+}
+
+// One entry per node of the walk, in order: "name issue_time", with
+// " cautious" added when cautious mode was on at the node's waits. E.g.
+// "U 150 cautious".
+std::vector<std::string> WalkEntries(ArrayRef<WalkStep> steps) {
+  std::vector<std::string> entries;
+  for (const WalkStep &step : steps) {
+    std::string entry =
+        MemoryNodeName(*step.node) + " " + std::to_string(step.issue_time);
+    if (step.cautious) {
+      entry += " cautious";
+    }
+    entries.push_back(entry);
+  }
+  return entries;
+}
+
+// The parts of an OrderScore the walk tests check, on one line. E.g.
+// "elapsed 300, use-based 400/300, latency-based 400/300,
+// peak vmcnt 3 (2 tracked), peak lgkmcnt 0 (0 tracked)".
+// Each MLP prints as summed_read_flight_time/any_read_in_flight_time. Its mlp
+// is the quotient of the two, from MeasureMlp, which the Ideal tests check.
+std::string OrderScoreLine(const OrderScore &score) {
+  // An MLP as "summed/any".
+  auto mlp_parts = [](const MlpMeasure &measure) {
+    return std::to_string(measure.summed_read_flight_time) + "/" +
+           std::to_string(measure.any_read_in_flight_time);
+  };
+
+  // A queue's peak as "all_entries (tracked_entries tracked)".
+  auto peak = [](int entries, int tracked_entries) {
+    return std::to_string(entries) + " (" + std::to_string(tracked_entries) +
+           " tracked)";
+  };
+
+  return "elapsed " + std::to_string(score.elapsed_time) +
+         ", use-based " + mlp_parts(score.use_based_mlp) +
+         ", latency-based " + mlp_parts(score.latency_based_mlp) +
+         ", peak vmcnt " +
+         peak(score.peak_vmcnt_entries, score.peak_vmcnt_tracked_entries) +
+         ", peak lgkmcnt " +
+         peak(score.peak_lgkmcnt_entries, score.peak_lgkmcnt_tracked_entries);
+}
+
+// One ScoreOrder test on BuildMemoryGraphTestDAG, with its answer worked out
+// by hand from the factory's drawing. The MLPs count the default tracked read
+// types, vector and FLAT, so LDS reads are untracked.
+struct WalkTestCase {
+  const char *description;
+  int load_latencies[4];  // the LLVM latencies of L1, L2, L3 and L4
+  MemType load_types[4];  // the types of L1, L2, L3 and L4
+  std::vector<StringRef> order;  // the memory nodes' names, ending with "sink"
+  LatencySetting setting;
+  std::string expected_score;               // as OrderScoreLine gives it
+  std::vector<std::string> expected_walk;   // as WalkEntries gives it
+};
+
+// Runs one walk test case and prints its result. Returns whether it passed.
+bool CheckWalkCase(const WalkTestCase &test_case) {
+  auto original = ScheduleGraph::BuildMemoryGraphTestDAG();
+  auto graph = MemoryGraph::BuildWithRoleClassifier(
+      *original, [&](const ScheduleNode &node) {
+        return TestDagRole(node, test_case.load_latencies,
+                           test_case.load_types);
+      });
+
+  // Walk the case's order, keeping one step per node.
+  const std::vector<const MemoryNode *> order =
+      MemoryNodesByName(*graph, test_case.order);
+  std::vector<WalkStep> steps;
+  const OrderScore score = graph->ScoreOrder(order, test_case.setting,
+                                             TrackedReadTypes(), &steps);
+
+  // Compare the score and the walk with the hand-worked answers.
+  const std::string score_line = OrderScoreLine(score);
+  const std::vector<std::string> walk = WalkEntries(steps);
+  const bool score_pass = score_line == test_case.expected_score;
+  const bool walk_pass = walk == test_case.expected_walk;
+
+  // A walk's entries on one line, for printing.
+  auto walk_line = [](ArrayRef<std::string> entries) {
+    std::string line;
+    for (const std::string &entry : entries) {
+      line += (line.empty() ? "" : ", ") + entry;
+    }
+    return line;
+  };
+
+  llvm::outs() << "\t\t" << test_case.description << ":\n";
+  llvm::outs() << "\t\t\tscore: " << score_line
+               << (score_pass ? "  PASS"
+                              : "  FAIL, expected " + test_case.expected_score)
+               << "\n";
+  llvm::outs() << "\t\t\twalk: " << walk_line(walk)
+               << (walk_pass ? "  PASS"
+                             : "  FAIL, expected " +
+                                   walk_line(test_case.expected_walk))
+               << "\n";
+  return score_pass && walk_pass;
+}
+
+// ScoreOrder on BuildMemoryGraphTestDAG. Unless a case says otherwise, the
+// order is the one CheckOrderFromSchedule gets: L1 A L2 S L3 U B L4 sink. In
+// it, A waits for L1's data, U for L2's, and the sink for L4's. B is a
+// barrier, so it waits for every op in flight in both queues: loads and
+// stores, tracked or not. That's the s_waitcnt 0 the compiler puts before
+// every s_barrier on gfx906 (SIInsertWaitcnts::generateWaitcntInstBefore).
+void RunMemoryGraphWalkUnitTests() {
+  llvm::outs() << "\tMemoryGraph walk unit tests:\n";
+
+  const std::vector<StringRef> default_order = {"L1", "A", "L2", "S",   "L3",
+                                                "U",  "B", "L4", "sink"};
+
+  const WalkTestCase cases[] = {
+      // The same elapsed_time and MLP as Ideal: L2 and L3 are in flight
+      // together from 100 to 200. U's wait pops only L2, the oldest entry.
+      // vmcnt's peak is L2, S and L3; S is a write, so 2 are tracked.
+      {"all loads vector 100, kLlvm", {100, 100, 100, 100},
+       {MemType::kVector, MemType::kVector, MemType::kVector,
+        MemType::kVector},
+       default_order, LatencySetting::kLlvm,
+       "elapsed 300, use-based 400/300, latency-based 400/300, "
+       "peak vmcnt 3 (2 tracked), peak lgkmcnt 0 (0 tracked)",
+       {"L1 0", "A 100", "L2 100", "S 100", "L3 100", "U 200", "B 200",
+        "L4 200", "sink 300"}},
+
+      // Every op takes 1, the store too.
+      {"all loads vector 100, kUnit", {100, 100, 100, 100},
+       {MemType::kVector, MemType::kVector, MemType::kVector,
+        MemType::kVector},
+       default_order, LatencySetting::kUnit,
+       "elapsed 3, use-based 4/3, latency-based 4/3, "
+       "peak vmcnt 3 (2 tracked), peak lgkmcnt 0 (0 tracked)",
+       {"L1 0", "A 1", "L2 1", "S 1", "L3 1", "U 2", "B 2", "L4 2",
+        "sink 3"}},
+
+      // L3's data is back at 101, but the first node whose waits cover it is
+      // B, at 200. Its use-based flight is 100 to 200, and its latency-based
+      // flight 100 to 101: 100 + 100 + 1 + 100 = 301.
+      {"L3 vector 1, other loads vector 100, kLlvm", {100, 100, 1, 100},
+       {MemType::kVector, MemType::kVector, MemType::kVector,
+        MemType::kVector},
+       default_order, LatencySetting::kLlvm,
+       "elapsed 300, use-based 400/300, latency-based 301/300, "
+       "peak vmcnt 3 (2 tracked), peak lgkmcnt 0 (0 tracked)",
+       {"L1 0", "A 100", "L2 100", "S 100", "L3 100", "U 200", "B 200",
+        "L4 200", "sink 300"}},
+
+      // A worse order: U waits for L2's data before S and L3 issue, so L3
+      // starts at 200 instead of 100, no two reads are in flight together,
+      // and elapsed_time is 100 more.
+      {"all loads vector 100, U before S, kLlvm", {100, 100, 100, 100},
+       {MemType::kVector, MemType::kVector, MemType::kVector,
+        MemType::kVector},
+       {"L1", "A", "L2", "U", "S", "L3", "B", "L4", "sink"},
+       LatencySetting::kLlvm,
+       "elapsed 400, use-based 400/400, latency-based 400/400, "
+       "peak vmcnt 2 (1 tracked), peak lgkmcnt 0 (0 tracked)",
+       {"L1 0", "A 100", "L2 100", "U 200", "S 200", "L3 200", "B 300",
+        "L4 300", "sink 400"}},
+
+      // L2 and L3 are LDS loads, which aren't tracked. U waits for L2 until
+      // 105. B waits for every op in flight: L3, back at 105, and the store
+      // S, back at 200. So B issues at 200, while no tracked read is in
+      // flight, and elapsed_time is 100 more than the 200 of tracked flight.
+      // Ideal gives 205 here: every edge into a barrier is ordering only in
+      // Ideal, so there a barrier waits for nothing.
+      {"L2 and L3 LDS 5, L1 and L4 vector 100, kLlvm", {100, 5, 5, 100},
+       {MemType::kVector, MemType::kLds, MemType::kLds, MemType::kVector},
+       default_order, LatencySetting::kLlvm,
+       "elapsed 300, use-based 200/200, latency-based 200/200, "
+       "peak vmcnt 1 (1 tracked), peak lgkmcnt 2 (0 tracked)",
+       {"L1 0", "A 100", "L2 100", "S 100", "L3 100", "U 105", "B 200",
+        "L4 200", "sink 300"}},
+
+      // L3 is a FLAT in both queues, so cautious mode is on from its issue
+      // until both queues have drained. U's wait for L2 is then a drain of
+      // lgkmcnt, which covers L3 there too, at 150. B, a barrier, drains both
+      // queues either way: vmcnt still holds S, back at 200, and L3, back at
+      // 150, so B issues at 200. L3 was still in vmcnt when B's waits were
+      // decided, so B's step shows cautious. L3's use-based flight ends when
+      // the later of the two nodes that cover it issues: B, at 200. Ending it
+      // at U, 150, would give 250/250.
+      {"L2 LDS 5, L3 FLAT 50, L1 and L4 vector 100, kLlvm", {100, 5, 50, 100},
+       {MemType::kVector, MemType::kLds, MemType::kFlat, MemType::kVector},
+       default_order, LatencySetting::kLlvm,
+       "elapsed 300, use-based 300/300, latency-based 250/250, "
+       "peak vmcnt 2 (1 tracked), peak lgkmcnt 2 (1 tracked)",
+       {"L1 0", "A 100", "L2 100", "S 100", "L3 100", "U 150 cautious",
+        "B 200 cautious", "L4 200", "sink 300"}},
+  };
+
+  bool pass = true;
+  for (const WalkTestCase &test_case : cases) {
+    pass &= CheckWalkCase(test_case);
+  }
+  if (!pass) {
+    report_fatal_error("MemoryGraph walk unit tests failed");
+  }
+}
+
 // Appends a problem for each way `graph`'s edges differ from what the original
 // graph says: an edge A -> B exactly when B must come after A
 // (IsReachableInDag), waiting for data exactly when A is a load with a data
@@ -6714,9 +6937,81 @@ void AppendCounterProblems(const ScheduleGraph &original,
   }
 }
 
-// Builds a real region's memory graph and checks its edges and the
-// classifier's counters. Prints one line for the region, then each problem.
-// Returns whether there were none.
+// Appends a problem for each way the region's input schedule beats Ideal,
+// which no order can do. Each bound is checked under each latency setting,
+// with every read type tracked.
+//
+// Ideal holds each node back only by its edges: an ordering-only edge adds no
+// time, and a barrier waits for nothing. So its elapsed_time is the latencies
+// of one chain of reads added up, where the path from each read to the next
+// starts with a data edge out of the read and its other edges add no time. A
+// real order is held back by the same edges and also by its waits. It issues
+// each read of the chain only after the one before it has its data, so their
+// flights don't overlap. That gives these bounds:
+//   - elapsed_time: the schedule's is at least Ideal's, since its sink waits
+//     for the chain's last read.
+//   - Latency-based summed_read_flight_time: the same in both, since each
+//     flight lasts its read's latency in both.
+//   - Latency-based any_read_in_flight_time: the schedule's is at least
+//     Ideal's elapsed_time, since the chain's flights alone last that long.
+//     Ideal's is at most its elapsed_time, since every flight ends by the time
+//     the sink starts. So the schedule's is at least Ideal's.
+// The last two mean the schedule's latency-based mlp is at most Ideal's.
+// The any_read_in_flight_time bound needs every read type tracked, so the
+// chain's flights all count: an untracked load can leave a gap in Ideal that a
+// real order fills with tracked reads. Tracking changes no timing, so the
+// elapsed_time bound holds under any tracking.
+void AppendIdealBoundProblems(const ScheduleGraph &original,
+                              const MemoryGraph &graph,
+                              std::vector<std::string> &problems) {
+  const TrackedReadTypes tracked_read_types =
+      TrackedReadTypes::AllReadTypesTracked();
+
+  // The region's schedule as it stands.
+  const ArrayRef<const ScheduleNode *> input_schedule =
+      original.GetInputScheduleConstructor().GetScheduleOrder();
+
+  for (LatencySetting setting :
+       {LatencySetting::kUnit, LatencySetting::kLlvm}) {
+    const std::string setting_name =
+        setting == LatencySetting::kUnit ? "kUnit" : "kLlvm";
+
+    const IdealScore ideal_score =
+        graph.ScoreIdeal(setting, tracked_read_types);
+    const OrderScore schedule_score =
+        graph.ScoreSchedule(input_schedule, setting, tracked_read_types);
+
+    // The elapsed_time bound.
+    if (schedule_score.elapsed_time < ideal_score.elapsed_time) {
+      problems.push_back(setting_name + ": elapsed_time " +
+                         std::to_string(schedule_score.elapsed_time) +
+                         " is below Ideal's " +
+                         std::to_string(ideal_score.elapsed_time));
+    }
+
+    // The two MLP parts.
+    const MlpMeasure &schedule_mlp = schedule_score.latency_based_mlp;
+    const MlpMeasure &ideal_mlp = ideal_score.latency_based_mlp;
+    if (schedule_mlp.summed_read_flight_time !=
+        ideal_mlp.summed_read_flight_time) {
+      problems.push_back(setting_name + ": summed_read_flight_time " +
+                         std::to_string(schedule_mlp.summed_read_flight_time) +
+                         " differs from Ideal's " +
+                         std::to_string(ideal_mlp.summed_read_flight_time));
+    }
+    if (schedule_mlp.any_read_in_flight_time <
+        ideal_mlp.any_read_in_flight_time) {
+      problems.push_back(setting_name + ": any_read_in_flight_time " +
+                         std::to_string(schedule_mlp.any_read_in_flight_time) +
+                         " is below Ideal's " +
+                         std::to_string(ideal_mlp.any_read_in_flight_time));
+    }
+  }
+}
+
+// Builds a real region's memory graph and checks its edges, the classifier's
+// counters, and that the region's input schedule doesn't beat Ideal. Prints
+// one line for the region, then each problem. Returns whether there were none.
 bool CheckMemoryGraphOnRegion(ScheduleGraph &original,
                               const GCNSubtarget &st) {
   auto graph = MemoryGraph::Build(original, st);
@@ -6724,6 +7019,7 @@ bool CheckMemoryGraphOnRegion(ScheduleGraph &original,
   std::vector<std::string> problems;
   AppendEdgeProblems(original, *graph, problems);
   AppendCounterProblems(original, st, problems);
+  AppendIdealBoundProblems(original, *graph, problems);
 
   // The node count leaves out the sink.
   llvm::outs() << "\t\tregion: " << graph->Nodes().size() - 1
@@ -8749,6 +9045,7 @@ void ScheduleDAGHierarchicalScheduler::RunMemoryGraphShakedowns() {
   RunMemoryGraphBuildUnitTests();
   RunMemoryGraphIdealUnitTests();
   RunWaitQueueUnitTests();
+  RunMemoryGraphWalkUnitTests();
 
   llvm::outs() << "\tMemoryGraph on real regions:\n";
   const GCNSubtarget &st = MF.getSubtarget<GCNSubtarget>();

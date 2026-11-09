@@ -8,6 +8,7 @@
 #include "AMDGPU.h"
 #include "GCNSubtarget.h"
 #include "HwPipeClass.h"
+#include "MlpTracker.h"
 #include "SIInstrInfo.h"
 #include "SIMachineFunctionInfo.h"
 #include "ScheduleGraph.h"
@@ -17,15 +18,12 @@
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineMemOperand.h"
 
-using namespace llvm;
-using namespace llvm::hierarchical_scheduler;
-
-namespace {
+namespace llvm::hierarchical_scheduler {
 
 // Whether a FLAT op may touch global memory, and so counts in vmcnt.
 // Local copy of SIInsertWaitcnts::mayAccessVMEMThroughFlat: an op with no
 // memory info may touch anything, and only info saying LDS rules it out.
-bool MayTouchGlobalMemory(const MachineInstr &mi) {
+static bool MayTouchGlobalMemory(const MachineInstr &mi) {
   if (mi.memoperands_empty()) {
     return true;
   }
@@ -39,7 +37,7 @@ bool MayTouchGlobalMemory(const MachineInstr &mi) {
 
 // Whether a FLAT op may touch LDS, and so counts in lgkmcnt.
 // Local copy of SIInsertWaitcnts::mayAccessLDSThroughFlat.
-bool MayTouchLds(const MachineInstr &mi, const GCNSubtarget &st) {
+static bool MayTouchLds(const MachineInstr &mi, const GCNSubtarget &st) {
   // Only FLAT ops whose instruction definition uses lgkmcnt can reach LDS.
   // global_* and scratch_* don't, so they never count in lgkmcnt.
   if (!SIInstrInfo::usesLGKM_CNT(mi)) {
@@ -70,7 +68,7 @@ bool MayTouchLds(const MachineInstr &mi, const GCNSubtarget &st) {
 // it defines, implicit ones included, and only those registers are ever
 // waited on. So an atomic that returns a value is a read and one that doesn't
 // is a write, with no special case.
-MemAccess AccessOf(const MachineInstr &mi) {
+static MemAccess AccessOf(const MachineInstr &mi) {
   for (const MachineOperand &operand : mi.operands()) {
     if (operand.isReg() && operand.isDef()) {
       return MemAccess::kRead;
@@ -79,17 +77,14 @@ MemAccess AccessOf(const MachineInstr &mi) {
   return MemAccess::kWrite;
 }
 
-} // namespace
-
 // Mirrors SIInsertWaitcnts::updateEventWaitcntAfter, which decides which
 // counters each instruction counts in: the same families, in the same order,
 // with the same conditions. The comments below note where this differs.
 // Branches of that function not handled here (s_sendmsg, exports, calls) are
 // listed in the implementation plan's "Left out" table or don't occur in
 // compute kernels.
-std::optional<MemOpInfo>
-llvm::hierarchical_scheduler::ClassifyMemOp(const MachineInstr &mi,
-                                            const GCNSubtarget &st) {
+std::optional<MemOpInfo> ClassifyMemOp(const MachineInstr &mi,
+                                       const GCNSubtarget &st) {
   const SIInstrInfo &tii = *st.getInstrInfo();
 
   // DS: LDS and GDS ops (ds_read, ds_write, ds_add, ...). They count only in
@@ -328,8 +323,6 @@ void MemoryGraph::ComputeTopologicalOrder() {
   }
 }
 
-namespace {
-
 // An op's latency (design doc section 3). misched.txt's load-latency settings
 // (vmem_load_latency, smem_load_latency, lds_load_latency, and per-kernel
 // kernel_latencies) are applied by LLVM only to dependence edges, in
@@ -339,7 +332,7 @@ namespace {
 // (mayLoad). So, as in the compiler, an op that isn't a load, such as the
 // s_memtime clock read, keeps its timing-model latency. Without a setting, the
 // latency is SUnit::Latency, which reads the active timing model.
-int LlvmLatencyOf(const MachineInstr &mi, const SUnit &su) {
+static int LlvmLatencyOf(const MachineInstr &mi, const SUnit &su) {
   if (mi.mayLoad()) {
     const MachineInstrSchedulerConfig::GlobalSettings &settings =
         MachineInstrSchedulerConfig::GetConfig().GetGlobalSettings();
@@ -362,8 +355,6 @@ int LlvmLatencyOf(const MachineInstr &mi, const SUnit &su) {
   }
   return static_cast<int>(su.Latency);
 }
-
-} // namespace
 
 std::unique_ptr<MemoryGraph> MemoryGraph::Build(ScheduleGraph &original,
                                                 const GCNSubtarget &st) {
@@ -404,14 +395,6 @@ MemoryGraph::OrderFromSchedule(ArrayRef<const ScheduleNode *> schedule) const {
   order.push_back(sink_);
   return order;
 }
-
-namespace {
-
-// When one memory op is in flight: from start_time until stop_time.
-struct MemOpFlight {
-  int start_time;
-  int stop_time;
-};
 
 // The MLP of a set of memory op flights (MLP doc, section 2.3):
 //
@@ -479,11 +462,9 @@ MlpMeasure MeasureMlp(std::vector<MemOpFlight> flights) {
   return measure;
 }
 
-} // namespace
-
 IdealScore
-MemoryGraph::Ideal(LatencySetting setting,
-                   const TrackedReadTypes &tracked_read_types) const {
+MemoryGraph::ScoreIdeal(LatencySetting setting,
+                        const TrackedReadTypes &tracked_read_types) const {
   // The earliest time each node can run, indexed by topo index. Filled in
   // topological order, so a node's predecessors are always done before it.
   std::vector<int> earliest_start_by_topo_index(topo_order_.size(), 0);
@@ -527,3 +508,75 @@ MemoryGraph::Ideal(LatencySetting setting,
   score.latency_based_mlp = MeasureMlp(std::move(tracked_read_flights));
   return score;
 }
+
+// Fails hard unless `order` holds every node of `graph` once, each after its
+// predecessors. The sink comes after every other node, so this also puts it
+// last.
+static void ValidateOrder(const MemoryGraph &graph,
+                          ArrayRef<const MemoryNode *> order) {
+  const ArrayRef<MemoryNode *> topo_order = graph.GetTopoOrder();
+  if (order.size() != topo_order.size()) {
+    report_fatal_error("MemoryGraph::ScoreOrder: the order must hold every "
+                       "node once");
+  }
+
+  // Whether each node has come up in the order yet, indexed by topo index.
+  std::vector<bool> placed_by_topo_index(topo_order.size(), false);
+
+  for (const MemoryNode *node : order) {
+    // The node must be one of this graph's, and come up only once. With the
+    // size check above, that means every node comes up.
+    const int topo_index = node->GetTopoIndex();
+    if (topo_index < 0 || topo_index >= static_cast<int>(topo_order.size()) ||
+        topo_order[topo_index] != node) {
+      report_fatal_error("MemoryGraph::ScoreOrder: the order holds a node "
+                         "from another graph");
+    }
+    if (placed_by_topo_index[topo_index]) {
+      report_fatal_error("MemoryGraph::ScoreOrder: the order holds a node "
+                         "twice");
+    }
+
+    // Every predecessor must come before it.
+    for (const MemoryEdge &edge : node->Predecessors()) {
+      if (!placed_by_topo_index[edge.node->GetTopoIndex()]) {
+        report_fatal_error("MemoryGraph::ScoreOrder: the order puts a node "
+                           "before one of its predecessors");
+      }
+    }
+
+    placed_by_topo_index[topo_index] = true;
+  }
+}
+
+OrderScore
+MemoryGraph::ScoreOrder(ArrayRef<const MemoryNode *> order,
+                        LatencySetting setting,
+                        const TrackedReadTypes &tracked_read_types,
+                        std::vector<WalkStep> *steps) const {
+  // The tracker doesn't check that each node comes after its predecessors,
+  // so the whole order is checked here first.
+  ValidateOrder(*this, order);
+
+  MlpTracker tracker(this, setting, tracked_read_types);
+  for (const MemoryNode *node : order) {
+    tracker.Schedule(node);
+  }
+
+  if (steps != nullptr) {
+    const ArrayRef<WalkStep> tracker_steps = tracker.GetSteps();
+    steps->assign(tracker_steps.begin(), tracker_steps.end());
+  }
+  return tracker.GetScore();
+}
+
+OrderScore
+MemoryGraph::ScoreSchedule(ArrayRef<const ScheduleNode *> schedule,
+                           LatencySetting setting,
+                           const TrackedReadTypes &tracked_read_types,
+                           std::vector<WalkStep> *steps) const {
+  return ScoreOrder(OrderFromSchedule(schedule), setting, tracked_read_types,
+                    steps);
+}
+
+} // namespace llvm::hierarchical_scheduler
