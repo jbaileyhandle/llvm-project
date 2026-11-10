@@ -2,14 +2,16 @@
 //
 // A standalone pre-RA analysis pass that runs after whichever scheduler
 // produced the code (MaxOcc, MaxIlp, OptSched, or the hierarchical scheduler)
-// and emits per-region schedule-length / bubble statistics.
+// and emits per-region schedule-length / bubble statistics, and each
+// function's memory time (see MemoryTimeAnalysis.h).
 //
 // It never reorders instructions. For each region the outer driver
 // (scheduleRegions) hands it, schedule() builds the SUnit DAG from the
 // region's final MachineInstr order and passes it to
-// ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule. The MachineFunction is
-// left untouched: buildSchedGraph only reads the MIR, and with no
-// moveInstruction and no placeDebugValues, nothing is modified.
+// ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule and
+// MemoryTimeAnalysis::AnalyzeRegion. The MachineFunction is left untouched:
+// buildSchedGraph only reads the MIR, and with no moveInstruction and no
+// placeDebugValues, nothing is modified.
 //
 // It inherits ScheduleDAGInstrs (not ScheduleDAGMILive) deliberately: the
 // analyzer neither reorders nor tracks register pressure, so it needs no
@@ -21,7 +23,8 @@
 // Each region's structured RegionViz is accumulated by its basic block;
 // finalizeSchedule, which runs after the function's last region, writes one
 // schedule_length_viz/<func>.json per function for the HTML viewer
-// (viz/schedule_length_viewer.html).
+// (viz/schedule_length_viewer.html). finalizeSchedule also has the memory-time
+// analysis report the function's weighted totals.
 //
 // Being a separate pass -- rather than a mode of the hierarchical scheduler --
 // keeps analysis orthogonal to scheduling: every scheduler is analyzed the
@@ -34,6 +37,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULEDAGLENGTHANALYZER_H
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULEDAGLENGTHANALYZER_H
 
+#include "MemoryTimeAnalysis.h"
 #include "ScheduleLengthAnalysis.h"
 #include "llvm/CodeGen/ScheduleDAGInstrs.h"
 #include <map>
@@ -61,6 +65,9 @@ class ScheduleDAGLengthAnalyzer : public ScheduleDAGInstrs {
   // order within each block). Flushed to one JSON file per function by
   // finalizeSchedule.
   std::map<int, std::vector<RegionViz>> regions_by_block_;
+  // The memory-time analysis of this function's regions. finalizeSchedule
+  // has it report the function's totals.
+  MemoryTimeAnalysis memory_time_analysis_;
 
 public:
   ScheduleDAGLengthAnalyzer(MachineFunction &mf, const MachineLoopInfo *mli,

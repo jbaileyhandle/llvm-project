@@ -24,7 +24,7 @@ ScheduleDAGLengthAnalyzer::ScheduleDAGLengthAnalyzer(
     MachineFunction &mf, const MachineLoopInfo *mli, AAResults *aa,
     LiveIntervals *lis)
     : ScheduleDAGInstrs(mf, mli, /*RemoveKillFlags=*/false), aa_(aa),
-      lis_(lis) {}
+      lis_(lis), memory_time_analysis_(&mf, mli, lis) {}
 
 void ScheduleDAGLengthAnalyzer::schedule() {
   // scheduleRegions has already called enterRegion, so RegionBegin/RegionEnd
@@ -47,13 +47,24 @@ void ScheduleDAGLengthAnalyzer::schedule() {
     printed_banner_ = true;
   }
 
+  // Both analyses label the region with the same program-order index.
+  const int region_index = region_index_++;
   RegionInfo region(RegionBegin, RegionEnd, *lis_);
+
+  // Schedule length and bubbles.
   RegionViz viz = ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule(
-      SUnits, st, MF, *lis_, MF.getRegInfo(), region, region_index_++);
+      SUnits, st, MF, *lis_, MF.getRegInfo(), region, region_index);
   regions_by_block_[BB->getNumber()].push_back(std::move(viz));
+
+  // Memory time.
+  memory_time_analysis_.AnalyzeRegion(SUnits, region, region_index);
 }
 
 void ScheduleDAGLengthAnalyzer::finalizeSchedule() {
+  // Report the function's memory time. This comes before the early return
+  // below, so a function with no regions still gets its row.
+  memory_time_analysis_.Report();
+
   // Flush one JSON file per function for the HTML viewer. Skip functions with
   // no schedulable region (nothing to visualize).
   if (regions_by_block_.empty()) {

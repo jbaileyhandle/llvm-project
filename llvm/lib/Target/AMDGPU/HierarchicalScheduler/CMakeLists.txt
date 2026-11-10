@@ -45,6 +45,7 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/BfsDpSearch.cpp
   HierarchicalScheduler/MinCutFormation.cpp
   HierarchicalScheduler/ScheduleLengthAnalysis.cpp
+  HierarchicalScheduler/MemoryTimeAnalysis.cpp
   PARENT_SCOPE
 )
 

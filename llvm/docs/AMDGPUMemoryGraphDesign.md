@@ -932,6 +932,11 @@ report. The other probes in 11.2 stay on record but are not planned.
    enabled, reporting ideal and observed MLP at the default occupancy
    and at occupancy − 1.
 
+> **Steps 2 and 3 out of date (2026-11-10).** The analysis reports each
+> kernel's memory time instead of MLP: scheduled and ideal elapsed time,
+> weighted by block frequency, and their ratio (`MemoryTimeAnalysis.h`). It
+> runs inside `ScheduleDAGLengthAnalyzer` rather than as its own pass.
+
 Step 3 is probe 11.2.1 below. What it measures: whether the register
 ceiling is what limits MaxOccupancy's achieved MLP. If observed MLP barely
 moves when the budget grows, the ceiling isn't binding and the menu
