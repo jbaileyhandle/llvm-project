@@ -26,17 +26,6 @@ ScheduleDAGLengthAnalyzer::ScheduleDAGLengthAnalyzer(
     : ScheduleDAGInstrs(mf, mli, /*RemoveKillFlags=*/false), aa_(aa),
       lis_(lis) {}
 
-ScheduleDAGLengthAnalyzer::~ScheduleDAGLengthAnalyzer() {
-  // Flush one JSON file per function for the HTML viewer. Skip functions with
-  // no schedulable region (nothing to visualize).
-  if (regions_by_block_.empty()) {
-    return;
-  }
-  const std::string scheduler =
-      MachineInstrSchedulerConfig::GetConfig().GetSchedulerAsString();
-  ScheduleLengthAnalyzer::WriteVizJson(MF, scheduler, regions_by_block_);
-}
-
 void ScheduleDAGLengthAnalyzer::schedule() {
   // scheduleRegions has already called enterRegion, so RegionBegin/RegionEnd
   // bound this region's final instruction order (whatever the previous
@@ -62,4 +51,15 @@ void ScheduleDAGLengthAnalyzer::schedule() {
   RegionViz viz = ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule(
       SUnits, st, MF, *lis_, MF.getRegInfo(), region, region_index_++);
   regions_by_block_[BB->getNumber()].push_back(std::move(viz));
+}
+
+void ScheduleDAGLengthAnalyzer::finalizeSchedule() {
+  // Flush one JSON file per function for the HTML viewer. Skip functions with
+  // no schedulable region (nothing to visualize).
+  if (regions_by_block_.empty()) {
+    return;
+  }
+  const std::string scheduler =
+      MachineInstrSchedulerConfig::GetConfig().GetSchedulerAsString();
+  ScheduleLengthAnalyzer::WriteVizJson(MF, scheduler, regions_by_block_);
 }

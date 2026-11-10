@@ -18,9 +18,10 @@
 // all the analysis requires. AA and LiveIntervals -- which ScheduleDAGMILive
 // would have held -- are passed in and stored here.
 //
-// Each region's structured RegionViz is accumulated by its basic block; the
-// destructor writes one schedule_length_viz/<func>.json per function for the
-// HTML viewer (viz/schedule_length_viewer.html).
+// Each region's structured RegionViz is accumulated by its basic block;
+// finalizeSchedule, which runs after the function's last region, writes one
+// schedule_length_viz/<func>.json per function for the HTML viewer
+// (viz/schedule_length_viewer.html).
 //
 // Being a separate pass -- rather than a mode of the hierarchical scheduler --
 // keeps analysis orthogonal to scheduling: every scheduler is analyzed the
@@ -57,21 +58,23 @@ class ScheduleDAGLengthAnalyzer : public ScheduleDAGInstrs {
   // Whether the per-function banner has been printed yet.
   bool printed_banner_ = false;
   // Accumulated per-region analysis, keyed by basic-block number (in program
-  // order within each block). Flushed to one JSON file per function by the
-  // destructor.
+  // order within each block). Flushed to one JSON file per function by
+  // finalizeSchedule.
   std::map<int, std::vector<RegionViz>> regions_by_block_;
 
 public:
   ScheduleDAGLengthAnalyzer(MachineFunction &mf, const MachineLoopInfo *mli,
                             AAResults *aa, LiveIntervals *lis);
 
-  // Writes schedule_length_viz/<func>.json from the accumulated regions.
-  ~ScheduleDAGLengthAnalyzer() override;
-
   // Called per-region by the outer driver (scheduleRegions), after the region
   // has been entered. Builds the SUnit DAG for the region's final order and
   // hands it to ScheduleLengthAnalyzer. Reorders nothing.
   void schedule() override;
+
+  // Called once by the outer driver (scheduleRegions), after the function's
+  // last region. Writes schedule_length_viz/<func>.json from the accumulated
+  // regions.
+  void finalizeSchedule() override;
 };
 
 } // namespace hierarchical_scheduler
