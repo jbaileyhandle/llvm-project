@@ -961,17 +961,7 @@ void ScheduleGraph::CreateSubgraphBoundaryNodes(
   for (const auto &[reg, mask] : live_out) {
     exit.AddRegUse(Register(reg), mask);
   }
-  for (ScheduleNode &node : nodes_) {
-    if (&node == &entry || &node == &exit) {
-      continue;
-    }
-    if (node.NumPredecessors() == 0) {
-      AddEdge(&entry, &node, ScheduleEdge::kArtificial);
-    }
-    if (node.NumSuccessors() == 0) {
-      AddEdge(&node, &exit, ScheduleEdge::kArtificial);
-    }
-  }
+  WireEntryAndExit();
 }
 
 const ScheduleNode *ScheduleGraph::GetEntryNode() const {
@@ -1290,6 +1280,58 @@ void ScheduleGraph::VerifyInputScheduleMatchesMFOrder(
   }
 }
 
+namespace {
+
+// Whether any edge into `node` is strong. Weak edges (cluster and weak
+// hints) don't order anything, so they don't count.
+bool HasStrongPredecessor(const ScheduleNode &node) {
+  for (const ScheduleEdge &edge : node.Predecessors()) {
+    if (edge.IsStrongEdge()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Whether any edge out of `node` is strong. See HasStrongPredecessor.
+bool HasStrongSuccessor(const ScheduleNode &node) {
+  for (const ScheduleEdge &edge : node.Successors()) {
+    if (edge.IsStrongEdge()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+} // anonymous namespace
+
+void ScheduleGraph::WireEntryAndExit() {
+  for (ScheduleNode &node : nodes_) {
+    // The entry and exit are what the other nodes get wired to.
+    if (&node == entry_node_ || &node == exit_node_) {
+      continue;
+    }
+
+    // A root: nothing has to come before it, so the entry does.
+    if (!HasStrongPredecessor(node)) {
+      AddEdge(entry_node_, &node, ScheduleEdge::kArtificial);
+    }
+
+    // A leaf: nothing has to come after it, so the exit does.
+    if (!HasStrongSuccessor(node)) {
+      // TODO: LLVM's buildSchedGraph adds an artificial edge from
+      // high-latency leaf instructions to ExitSU with latency =
+      // SU->Latency - 1 (ScheduleDAGInstrs.cpp, line 877). This
+      // ensures cross-region heuristics account for results that
+      // won't be ready for many cycles (e.g., a VMEM load with
+      // latency 80 at the end of a region). We currently use
+      // latency 0, which is fine for within-region schedule length
+      // but may underestimate costs for cross-region analysis.
+      AddEdge(&node, exit_node_, ScheduleEdge::kArtificial);
+    }
+  }
+}
+
 void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
                                             const MachineRegisterInfo &mri,
                                             SlotIndex region_begin_idx,
@@ -1302,25 +1344,7 @@ void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
   exit_node_ = &exit_node;
 
   // Wire entry to all root nodes, exit from all leaf nodes.
-  for (ScheduleNode &node : nodes_) {
-    if (&node == &entry_node || &node == &exit_node) {
-      continue;
-    }
-    if (node.NumPredecessors() == 0) {
-      AddEdge(&entry_node, &node, ScheduleEdge::kArtificial);
-    }
-    if (node.NumSuccessors() == 0) {
-      // TODO: LLVM's buildSchedGraph adds an artificial edge from
-      // high-latency leaf instructions to ExitSU with latency =
-      // SU->Latency - 1 (ScheduleDAGInstrs.cpp, line 877). This
-      // ensures cross-region heuristics account for results that
-      // won't be ready for many cycles (e.g., a VMEM load with
-      // latency 80 at the end of a region). We currently use
-      // latency 0, which is fine for within-region schedule length
-      // but may underestimate costs for cross-region analysis.
-      AddEdge(&node, &exit_node, ScheduleEdge::kArtificial);
-    }
-  }
+  WireEntryAndExit();
 
   // Populate register defs/uses from LiveIntervals with per-lane
   // accuracy. getLiveLaneMask queries sub-range liveness to determine
@@ -1421,6 +1445,32 @@ std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildMemoryGraphTestDAG() {
 
   graph->entry_node_ = &n;
   graph->exit_node_ = &e;
+
+  graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
+  return graph;
+}
+
+std::unique_ptr<ScheduleGraph> ScheduleGraph::BuildEntryExitWiringTestDAG() {
+  auto graph = std::make_unique<ScheduleGraph>();
+
+  // Three instructions plus the entry and exit. See the declaration for
+  // the drawing.
+  graph->ReserveNodes(5);
+  ScheduleNode &a = graph->EmplaceNode(nullptr, "A", graph.get());
+  ScheduleNode &b = graph->EmplaceNode(nullptr, "B", graph.get());
+  ScheduleNode &c = graph->EmplaceNode(nullptr, "C", graph.get());
+
+  // The weak cluster edge is A's only edge out and B's only edge in.
+  graph->AddEdge(&a, &b, ScheduleEdge::kCluster);
+  graph->AddEdge(&b, &c, ScheduleEdge::kData, /*latency=*/1);
+
+  // The entry and exit, created and wired the way the real builders do
+  // it.
+  ScheduleNode &entry = graph->EmplaceNode(nullptr, "Entry", graph.get());
+  ScheduleNode &exit = graph->EmplaceNode(nullptr, "Exit", graph.get());
+  graph->entry_node_ = &entry;
+  graph->exit_node_ = &exit;
+  graph->WireEntryAndExit();
 
   graph->SetNodeRegInfoTable(NodeRegInfoTable(graph->GetNumGraphLocalIds()));
   return graph;

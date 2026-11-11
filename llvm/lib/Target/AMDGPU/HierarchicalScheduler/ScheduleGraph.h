@@ -681,6 +681,28 @@ public:
   ///   - An unrelated instruction (X) staying out of the graph.
   static std::unique_ptr<ScheduleGraph> BuildMemoryGraphTestDAG();
 
+  /// Build a synthetic test DAG for WireEntryAndExit's rule that only
+  /// strong edges decide which nodes are roots and leaves. Nodes wrap
+  /// nullptr. The factory builds the three nodes and their edges, adds
+  /// the entry and exit nodes, and calls WireEntryAndExit.
+  ///
+  ///   Before wiring:   A ~~~> B ---data---> C
+  ///
+  ///   Expected edges added by wiring:
+  ///     Entry ---> A      (A has no predecessor at all)
+  ///     Entry ---> B      (B's only predecessor is weak)
+  ///     A ---> Exit       (A's only successor is weak)
+  ///     C ---> Exit       (C has no successor at all)
+  ///
+  ///   ~~~> is a cluster edge: weak, so it doesn't stop A being a leaf
+  ///   or B being a root.
+  ///
+  /// If weak edges counted, A would get no edge to the exit and B none
+  /// from the entry. Ignoring weak edges, the graph would then have two
+  /// sources (Entry, B) and two sinks (A, Exit), and
+  /// ValidateAndComputeTopologicalOrder would stop with a fatal error.
+  static std::unique_ptr<ScheduleGraph> BuildEntryExitWiringTestDAG();
+
   /// Build a synthetic test DAG specifically for exercising
   /// GetLengthLowerBound. Shape and latencies chosen so the LB
   /// transitions several times through the forward schedule — both
@@ -1596,6 +1618,22 @@ private:
                                SlotIndex region_begin_idx,
                                SlotIndex region_end_idx);
 
+  /// Add an edge from entry_node_ to every node with no strong
+  /// predecessor, and from every node with no strong successor to
+  /// exit_node_. Afterwards the entry is the graph's only source and
+  /// the exit its only sink, which ValidateAndComputeTopologicalOrder
+  /// checks.
+  ///
+  /// Only strong edges count. A weak edge is a hint, not an ordering,
+  /// so a node whose only outgoing edges are weak still needs its edge
+  /// to the exit, or the check that ignores weak edges would find two
+  /// sinks. Likewise for the entry.
+  ///
+  /// Requires entry_node_ and exit_node_ to be set, and every other
+  /// node and edge to be in place. Used by CreateEntryAndExitNodes and
+  /// CreateSubgraphBoundaryNodes.
+  void WireEntryAndExit();
+
   /// Phase 4: Construct input_schedule_constructor_ and populate it
   /// by Schedule()-ing each leaf node in nodes_ storage order. Phase
   /// 1's emplacement order matches MF order (since SUnits come in MF
@@ -1655,11 +1693,12 @@ private:
 
   /// Emplace the synthetic SubgraphEntry/SubgraphExit nodes and
   /// install the boundary register sets on them: entry defines
-  /// `live_in`, exit uses `live_out`. Then wire SubgraphEntry to
-  /// every node with no predecessor, and every node with no
-  /// successor to SubgraphExit — because the intra-subgraph edges
-  /// are already present, those nodes are exactly the subgraph's
-  /// roots and leaves.
+  /// `live_in`, exit uses `live_out`. Then wire them up with
+  /// WireEntryAndExit: SubgraphEntry to every node with no strong
+  /// predecessor, and every node with no strong successor to
+  /// SubgraphExit. Because the intra-subgraph edges are already
+  /// present, those nodes are exactly the subgraph's roots and
+  /// leaves.
   void CreateSubgraphBoundaryNodes(
       const DenseMap<unsigned, LaneBitmask> &live_in,
       const DenseMap<unsigned, LaneBitmask> &live_out);

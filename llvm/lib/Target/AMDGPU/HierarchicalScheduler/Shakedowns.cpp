@@ -718,6 +718,50 @@ void CheckMinScheduleCycle(ScheduleGraph &graph,
                        : "FAIL\n");
 }
 
+// Checks that WireEntryAndExit decides roots and leaves by strong edges
+// only. In BuildEntryExitWiringTestDAG, a weak cluster edge is A's only
+// edge out and B's only edge in, so A still needs an edge to the exit
+// and B one from the entry.
+void CheckEntryExitWiringIgnoresWeakEdges() {
+  auto graph = ScheduleGraph::BuildEntryExitWiringTestDAG();
+
+  // BuildEntryExitWiringTestDAG emplacement order: [A, B, C, Entry, Exit]
+  const ScheduleNode *a = &graph->Nodes()[0];
+  const ScheduleNode *b = &graph->Nodes()[1];
+  const ScheduleNode *c = &graph->Nodes()[2];
+  const ScheduleNode *entry = graph->GetEntryNode();
+  const ScheduleNode *exit = graph->GetExitNode();
+
+  // What wiring connected the entry and exit to.
+  std::set<const ScheduleNode *> entry_successors;
+  for (const ScheduleEdge &edge : entry->Successors()) {
+    entry_successors.insert(edge.node_);
+  }
+  std::set<const ScheduleNode *> exit_predecessors;
+  for (const ScheduleEdge &edge : exit->Predecessors()) {
+    exit_predecessors.insert(edge.node_);
+  }
+
+  // Exactly the expected edges: A and B are roots, A and C are leaves.
+  int mismatches = 0;
+  if (entry_successors != std::set<const ScheduleNode *>{a, b}) {
+    llvm::outs() << "    entry's successors are not exactly A and B\n";
+    ++mismatches;
+  }
+  if (exit_predecessors != std::set<const ScheduleNode *>{a, c}) {
+    llvm::outs() << "    exit's predecessors are not exactly A and C\n";
+    ++mismatches;
+  }
+
+  // Runs the single-source/single-sink check twice, ignoring weak edges
+  // and then counting them. It stops with a fatal error instead of
+  // returning if either fails, so getting past it is part of the pass.
+  graph->ValidateAndComputeTopologicalOrder();
+
+  llvm::outs() << "  Entry/exit wiring ignores weak edges: "
+               << (mismatches == 0 ? "PASS" : "FAIL") << "\n";
+}
+
 // Exercises graph algorithms on a synthetic test DAG with known structure.
 // Delegates each algorithm to a helper in this anonymous namespace.
 void RunTestDAGShakedown(const GCNSubtarget &st) {
@@ -732,6 +776,7 @@ void RunTestDAGShakedown(const GCNSubtarget &st) {
 
   CheckTransitiveReduction(*test_graph);
   CheckWeakEdgesIgnoredByReachability();
+  CheckEntryExitWiringIgnoresWeakEdges();
   CheckDominatorTree(*test_graph);
   CheckCriticalPath(*test_graph);
   CheckCriticalPathFromEntry(*test_graph);
