@@ -22,6 +22,29 @@
 // through the kernel. Its efficiency is ideal / scheduled: 1 means the
 // schedule's memory work is as fast as the ideal, lower means slower.
 //
+// It also estimates how much faster the function would run if each region's
+// memory work took its ideal time. Whole schedule time is the time for all of
+// a region's instructions, not just its memory waits:
+//   - scheduled: the region's schedule length from the schedule-length
+//                analysis (ScheduleLengthAnalysis.h, raw lens: one wave, one
+//                instruction issued per cycle, LLVM's latencies).
+//   - ideal:     the same schedule with only its memory work made ideal: the
+//                schedule length minus the gap between scheduled and ideal
+//                memory time, but never below the region's length floor,
+//                which no order beats.
+// Both are weighted and summed like the memory times, and the speedup is
+// scheduled / ideal whole schedule time.
+//
+// The floor is needed because the two models count time differently. Memory
+// time gives issuing no time, so its gap can be time the schedule already fills
+// with other instructions; and it runs until every read's data is back, so its
+// gap can include waits for data the region never uses. Without the floor,
+// subtracting the gap could claim a length no order reaches.
+//
+// The estimate is optimistic. Where other instructions hide only part of the
+// gap, or other waves on the SIMD run during the waits, the real gain is
+// smaller.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_MEMORYTIMEANALYSIS_H
@@ -55,18 +78,25 @@ public:
 
   /// Measures one region's final order. `sunits` must already be built by
   /// buildSchedGraph for `region`. `region_index` labels the region in the
-  /// output. Fails hard if the scheduled memory time is below the ideal: no
-  /// order beats the ideal, so that would be a bug.
+  /// output. `schedule_length` and `schedule_length_floor` are the region's
+  /// raw-lens length and floor (LensViz::length and LensViz::floor from
+  /// ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule), in cycles. Fails
+  /// hard if the scheduled memory time is below the ideal: no order beats the
+  /// ideal, so that would be a bug.
   void AnalyzeRegion(MutableArrayRef<SUnit> sunits, const RegionInfo &region,
-                     int region_index);
+                     int region_index, int schedule_length,
+                     int schedule_length_floor);
 
-  /// Prints each region's memory times and the function's weighted totals,
-  /// and appends the totals as one row to memory_time_analysis.csv in the
-  /// compile's working directory. Call once, after the last region.
+  /// Prints each region's memory times and schedule length, and the
+  /// function's weighted totals: memory times, efficiency, whole schedule
+  /// times and speedup. Appends the totals as one row to
+  /// memory_time_analysis.csv in the compile's working directory. Call once,
+  /// after the last region.
   void Report() const;
 
 private:
-  /// One region's memory times, and how often its block runs.
+  /// One region's memory times, its schedule length, and how often its block
+  /// runs.
   struct RegionMemoryTime {
     int region_index = 0;
     int block_number = 0;
@@ -74,6 +104,8 @@ private:
     double block_frequency = 0;  // runs per run of the function; entry is 1
     int scheduled_memory_time = 0;
     int ideal_memory_time = 0;
+    int schedule_length = 0;        // cycles; see AnalyzeRegion
+    int schedule_length_floor = 0;  // no order of the region is shorter
   };
 
   const MachineFunction *mf_;

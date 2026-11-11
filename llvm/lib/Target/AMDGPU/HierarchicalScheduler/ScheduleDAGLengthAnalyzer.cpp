@@ -54,10 +54,14 @@ void ScheduleDAGLengthAnalyzer::schedule() {
   // Schedule length and bubbles.
   RegionViz viz = ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule(
       SUnits, st, MF, *lis_, MF.getRegInfo(), region, region_index);
-  regions_by_block_[BB->getNumber()].push_back(std::move(viz));
 
-  // Memory time.
-  memory_time_analysis_.AnalyzeRegion(SUnits, region, region_index);
+  // Memory time. It also takes the region's raw-lens length and floor, for
+  // the whole schedule times, so it runs before viz is moved away below.
+  memory_time_analysis_.AnalyzeRegion(SUnits, region, region_index,
+                                      viz.raw.length, viz.raw.floor);
+
+  // Keep the region's length data for the viewer's JSON.
+  regions_by_block_[BB->getNumber()].push_back(std::move(viz));
 }
 
 void ScheduleDAGLengthAnalyzer::finalizeSchedule() {

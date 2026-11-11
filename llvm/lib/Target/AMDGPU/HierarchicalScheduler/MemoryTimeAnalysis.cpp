@@ -21,6 +21,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -37,14 +38,25 @@ struct MemoryTimes {
   int ideal = 0;
 };
 
-// A function's memory times, each region's weighted by how many times its
-// block runs, and added up.
+// A function's memory times and whole schedule times, each region's weighted
+// by how many times its block runs, and added up.
 struct WeightedTotals {
   double scheduled_memory_time = 0;
   double ideal_memory_time = 0;
 
   // ideal / scheduled; none when scheduled is 0.
   std::optional<double> efficiency;
+
+  // Time for all of the schedule's instructions, not just its memory waits:
+  // the sum of the regions' schedule lengths. The ideal one is the same
+  // schedule with only its memory work made ideal: each region's length minus
+  // its memory time gap, floored (see MemoryTimeAnalysis.h).
+  double scheduled_whole_schedule_time = 0;
+  double ideal_whole_schedule_time = 0;
+
+  // scheduled / ideal whole schedule time; none when the ideal is 0, which
+  // happens only for a function with no regions.
+  std::optional<double> whole_schedule_time_speedup;
 };
 
 // Builds the region's graphs from its final order, then scores that order and
@@ -95,6 +107,17 @@ void PrintWeightedTotals(const WeightedTotals &totals) {
   } else {
     llvm::outs() << ", efficiency none";
   }
+
+  // The whole schedule times, on the same line.
+  llvm::outs() << format("; whole schedule: scheduled %.1f, ideal %.1f",
+                         totals.scheduled_whole_schedule_time,
+                         totals.ideal_whole_schedule_time);
+  if (totals.whole_schedule_time_speedup) {
+    llvm::outs() << format(", speedup %.3f",
+                           *totals.whole_schedule_time_speedup);
+  } else {
+    llvm::outs() << ", speedup none";
+  }
   llvm::outs() << "\n";
 }
 
@@ -114,11 +137,13 @@ std::string QuoteCsvField(StringRef field) {
 
 // Appends a function's weighted totals as one row of
 // memory_time_analysis.csv:
-//   function,scheduled_memory_time,ideal_memory_time,memory_time_efficiency
-// The function is the demangled signature kernel_resource_usage.csv uses, so
-// the harness can match kernels across the two files. A signature has commas
-// between its parameters, so it's quoted. The efficiency field is empty when
-// there is none.
+//   function,scheduled_memory_time,ideal_memory_time,memory_time_efficiency,
+//   scheduled_whole_schedule_time,ideal_whole_schedule_time,
+//   whole_schedule_time_speedup
+// (one line in the file). The function is the demangled signature
+// kernel_resource_usage.csv uses, so the harness can match kernels across the
+// two files. A signature has commas between its parameters, so it's quoted.
+// The efficiency and speedup fields are empty when there is none.
 //
 // Each clang process of a build appends and never empties the file, so a
 // benchmark with several source files keeps every kernel; the harness deletes
@@ -126,7 +151,7 @@ std::string QuoteCsvField(StringRef field) {
 // would write its own.
 void AppendCsvRow(StringRef mangled_function_name,
                   const WeightedTotals &totals) {
-  // Build the row.
+  // Build the row: the function and its memory times.
   std::string row;
   raw_string_ostream row_stream(row);
   row_stream << QuoteCsvField(
@@ -136,6 +161,13 @@ void AppendCsvRow(StringRef mangled_function_name,
                        totals.ideal_memory_time);
   if (totals.efficiency) {
     row_stream << format("%.4f", *totals.efficiency);
+  }
+
+  // Then its whole schedule times.
+  row_stream << format(",%.1f,%.1f,", totals.scheduled_whole_schedule_time,
+                       totals.ideal_whole_schedule_time);
+  if (totals.whole_schedule_time_speedup) {
+    row_stream << format("%.4f", *totals.whole_schedule_time_speedup);
   }
   row_stream << "\n";
 
@@ -166,7 +198,8 @@ MemoryTimeAnalysis::MemoryTimeAnalysis(const MachineFunction *mf,
 
 void MemoryTimeAnalysis::AnalyzeRegion(MutableArrayRef<SUnit> sunits,
                                        const RegionInfo &region,
-                                       int region_index) {
+                                       int region_index, int schedule_length,
+                                       int schedule_length_floor) {
   const MachineBasicBlock &block = *region.GetBlock();
 
   // Where the region's block sits: how many times it's estimated to run per
@@ -185,6 +218,10 @@ void MemoryTimeAnalysis::AnalyzeRegion(MutableArrayRef<SUnit> sunits,
   result.scheduled_memory_time = memory_times.scheduled;
   result.ideal_memory_time = memory_times.ideal;
 
+  // The region's schedule length, from the schedule-length analysis.
+  result.schedule_length = schedule_length;
+  result.schedule_length_floor = schedule_length_floor;
+
   // No order beats the ideal, so a scheduled time below it is a bug.
   if (result.scheduled_memory_time < result.ideal_memory_time) {
     report_fatal_error("MemoryTimeAnalysis: region " + Twine(region_index) +
@@ -194,18 +231,53 @@ void MemoryTimeAnalysis::AnalyzeRegion(MutableArrayRef<SUnit> sunits,
                        Twine(result.ideal_memory_time));
   }
 
+  // No order is shorter than the floor, so a length below it is a bug.
+  if (result.schedule_length < result.schedule_length_floor) {
+    report_fatal_error("MemoryTimeAnalysis: region " + Twine(region_index) +
+                       " of " + mf_->getName() + ": schedule length " +
+                       Twine(result.schedule_length) +
+                       " is below its floor " +
+                       Twine(result.schedule_length_floor));
+  }
+
   regions_.push_back(result);
 }
 
 void MemoryTimeAnalysis::Report() const {
-  // Weight each region's memory times by how many times its block runs, and
-  // add them up.
+  llvm::outs() << "\n=== Memory-time analysis: " << mf_->getName() << " ===\n";
+
+  // For each region: work out its whole schedule time with only its memory
+  // work made ideal, print the region, and add its times to the function's,
+  // each weighted by how many times its block runs.
   WeightedTotals totals;
   for (const RegionMemoryTime &region : regions_) {
+    // The region's length minus its memory time gap, but never below its
+    // floor. See MemoryTimeAnalysis.h for why the floor.
+    const int memory_time_gap =
+        region.scheduled_memory_time - region.ideal_memory_time;
+    const int ideal_whole_schedule_time =
+        std::max(region.schedule_length - memory_time_gap,
+                 region.schedule_length_floor);
+
+    // Print the region.
+    llvm::outs() << "\tregion[" << region.region_index << "] block "
+                 << region.block_number << ", loop depth " << region.loop_depth
+                 << format(", frequency %.2f", region.block_frequency)
+                 << ": scheduled " << region.scheduled_memory_time
+                 << ", ideal " << region.ideal_memory_time
+                 << "; whole schedule: length " << region.schedule_length
+                 << ", floor " << region.schedule_length_floor << ", ideal "
+                 << ideal_whole_schedule_time << "\n";
+
+    // Add its weighted times.
     totals.scheduled_memory_time +=
         region.block_frequency * region.scheduled_memory_time;
     totals.ideal_memory_time +=
         region.block_frequency * region.ideal_memory_time;
+    totals.scheduled_whole_schedule_time +=
+        region.block_frequency * region.schedule_length;
+    totals.ideal_whole_schedule_time +=
+        region.block_frequency * ideal_whole_schedule_time;
   }
 
   // Efficiency is ideal / scheduled. A function with no reads has 0 for both,
@@ -215,15 +287,15 @@ void MemoryTimeAnalysis::Report() const {
         totals.ideal_memory_time / totals.scheduled_memory_time;
   }
 
-  // Print one line per region, then the totals.
-  llvm::outs() << "\n=== Memory-time analysis: " << mf_->getName() << " ===\n";
-  for (const RegionMemoryTime &region : regions_) {
-    llvm::outs() << "\tregion[" << region.region_index << "] block "
-                 << region.block_number << ", loop depth " << region.loop_depth
-                 << format(", frequency %.2f", region.block_frequency)
-                 << ": scheduled " << region.scheduled_memory_time
-                 << ", ideal " << region.ideal_memory_time << "\n";
+  // Speedup is scheduled / ideal whole schedule time. A function with no
+  // regions has 0 for both, and no speedup.
+  if (totals.ideal_whole_schedule_time > 0) {
+    totals.whole_schedule_time_speedup =
+        totals.scheduled_whole_schedule_time /
+        totals.ideal_whole_schedule_time;
   }
+
+  // Then the totals.
   PrintWeightedTotals(totals);
 
   // Write the totals to the CSV.
