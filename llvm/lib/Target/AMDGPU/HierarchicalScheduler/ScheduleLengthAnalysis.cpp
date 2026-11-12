@@ -404,12 +404,20 @@ RegionViz ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule(
 
   // Two lenses over the SAME final order: raw (divisor 1) and occupancy-
   // adjusted (divisor = achieved occupancy).
+  //
+  // Both always count live-out latency: the exit waits for values that
+  // leave the region, so a region's length runs until they're ready. That
+  // matches memory time's sink, which the whole schedule time speedup
+  // compares against, and it measures every scheduler's output the same
+  // way whatever the scheduler itself optimized.
   std::unique_ptr<ScheduleGraph> raw_graph =
       ScheduleGraph::BuildFromSUnits(sunits, st, mf, lis, mri, region,
-                                     /*latency_divisor=*/1);
+                                     /*latency_divisor=*/1,
+                                     /*count_live_out_latency=*/true);
   std::unique_ptr<ScheduleGraph> adj_graph =
       ScheduleGraph::BuildFromSUnits(sunits, st, mf, lis, mri, region,
-                                     /*latency_divisor=*/occupancy);
+                                     /*latency_divisor=*/occupancy,
+                                     /*count_live_out_latency=*/true);
 
   // The from-exit direction is computed at build (GetCriticalPathLength);
   // compute from-entry too so per-node zero-slack (on_crit_path) is available.

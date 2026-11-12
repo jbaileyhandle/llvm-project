@@ -526,9 +526,10 @@ public:
   ///
   /// Creates our own entry and exit nodes rather than using LLVM's
   /// EntrySU/ExitSU. The entry node defines all live-in registers and
-  /// has edges to all root nodes (no predecessors among real instructions).
-  /// The exit node uses all live-out registers and has edges from all
-  /// leaf nodes (no successors among real instructions).
+  /// has edges to all root nodes (no strong predecessors). The exit node
+  /// uses all live-out registers and has edges from all leaf nodes (no
+  /// strong successors), plus, when `count_live_out_latency` is set,
+  /// latency edges from the instructions that write live-out registers.
   ///
   /// Live-in/live-out information comes from LiveIntervals. Register
   /// defs/uses are extracted from MachineInstrs and stored on each node
@@ -541,6 +542,12 @@ public:
   /// schedule-length analyzer passes 1 for its raw lens and the
   /// achieved occupancy for its occupancy-adjusted lens. A value of 1
   /// leaves latencies unscaled.
+  ///
+  /// count_live_out_latency makes the exit wait for values that leave
+  /// the region, so the schedule length counts the time until they're
+  /// ready; see AddLiveOutLatencyEdges. Also caller-owned, for the same
+  /// reason as latency_divisor. Off, the exit waits for nothing and the
+  /// length ends when the last instruction issues.
   static std::unique_ptr<ScheduleGraph> BuildFromSUnits(
       MutableArrayRef<SUnit> sunits,
       const GCNSubtarget &st,
@@ -548,7 +555,8 @@ public:
       const LiveIntervals &lis,
       const MachineRegisterInfo &mri,
       const RegionInfo &region,
-      int latency_divisor);
+      int latency_divisor,
+      bool count_live_out_latency);
 
   /// Build a standalone leaf graph from a subset of another graph's
   /// scheduling-unit nodes — the extraction step behind isolated
@@ -1609,14 +1617,48 @@ private:
       const DenseMap<const SUnit *, ScheduleNode *> &sunit_to_node,
       int latency_divisor = 1);
 
-  /// Phase 3: Create entry and exit nodes, wire them to root/leaf
-  /// nodes, and populate their register defs/uses from LiveIntervals.
-  /// Must be called after all real instruction nodes and edges are
-  /// added.
+  /// Phase 3: Create entry and exit nodes and populate their register
+  /// defs/uses from LiveIntervals: the entry defines the region's
+  /// live-in registers, and the exit uses its live-out registers. Adds
+  /// no edges; BuildFromSUnits then calls AddLiveOutLatencyEdges (when
+  /// asked to) and WireEntryAndExit. Must be called after all real
+  /// instruction nodes and edges are added.
   void CreateEntryAndExitNodes(const LiveIntervals &lis,
                                const MachineRegisterInfo &mri,
                                SlotIndex region_begin_idx,
                                SlotIndex region_end_idx);
+
+  /// Optional step after Phase 3: make the exit wait for values that
+  /// leave the region. Every instruction that writes a register the
+  /// exit uses (a live-out register) gets one kArtificial edge to the
+  /// exit, with latency = LlvmLatencyOf, scaled by `latency_divisor`
+  /// the way data edges are, minus 1. The schedule then ends when that
+  /// value is ready for the code after the region, as memory time's
+  /// sink does (MemoryGraph). No edge is added when that latency is 0.
+  /// Such an instruction now has a strong edge out, so WireEntryAndExit,
+  /// which runs next, doesn't give it a second one.
+  ///
+  /// The kind and the minus 1 copy LLVM's own edge for this: an
+  /// artificial edge to ExitSU in ScheduleDAGInstrs::buildSchedGraph.
+  /// LLVM adds it only when nothing in the region reads the value; this
+  /// adds it for every live-out write, which is redundant, but harmless,
+  /// when a reader in the region already waits for the value. It's
+  /// kArtificial rather than kData because code that reads data edges
+  /// (min-cut, MemoryGraph) takes them to mean a value flowing to an
+  /// instruction, and the exit isn't one. Which registers leave is
+  /// already on the exit's register list.
+  ///
+  /// Note the asymmetry: edges INTO the exit, but none OUT OF the entry
+  /// to the instructions that read live-in registers. LLVM's EntrySU
+  /// gets no edges either. That was a quick call, not a settled one. As
+  /// things stand, entry edges would carry latency 0 (live-in values
+  /// count as ready when the region starts) and add no ordering the
+  /// graph doesn't already have, while costing one edge per live-in
+  /// read. If something comes to need them, such as modeling a live-in
+  /// value that's still in flight, revisit this.
+  ///
+  /// Requires CreateEntryAndExitNodes to have run.
+  void AddLiveOutLatencyEdges(int latency_divisor);
 
   /// Add an edge from entry_node_ to every node with no strong
   /// predecessor, and from every node with no strong successor to
@@ -1630,7 +1672,7 @@ private:
   /// sinks. Likewise for the entry.
   ///
   /// Requires entry_node_ and exit_node_ to be set, and every other
-  /// node and edge to be in place. Used by CreateEntryAndExitNodes and
+  /// node and edge to be in place. Used by BuildFromSUnits and
   /// CreateSubgraphBoundaryNodes.
   void WireEntryAndExit();
 
@@ -1747,6 +1789,22 @@ struct ReducedGraph {
         successors_by_topo_index(num_nodes),
         predecessors_by_topo_index(num_nodes) {}
 };
+
+/// An instruction's latency as the scheduler's dependence edges see it,
+/// for code that has no dependence edge to read it from, such as
+/// MemoryGraph.
+///
+/// misched.txt's load-latency settings (vmem_load_latency,
+/// smem_load_latency, lds_load_latency, and per-kernel kernel_latencies)
+/// are applied by LLVM only to dependence edges, in
+/// GCNSubtarget::adjustSchedDependency, so SUnit::Latency doesn't see
+/// them. This is a local copy of how that function picks a setting: by
+/// the instruction's family, a per-kernel value over the global one, and
+/// only for loads (mayLoad). So, as in the compiler, an instruction that
+/// isn't a load, such as the s_memtime clock read, keeps its
+/// timing-model latency. Without a setting, the latency is
+/// SUnit::Latency, which reads the active timing model.
+int LlvmLatencyOf(const MachineInstr &mi, const SUnit &su);
 
 } // namespace hierarchical_scheduler
 } // namespace llvm

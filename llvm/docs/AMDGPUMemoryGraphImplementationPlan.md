@@ -111,7 +111,8 @@ now in the graph, and `TrackedReadTypes` picks which reads count toward MLP when
 - **Local copy of the latency settings lookup.** The `misched.txt` load-latency settings are
   applied only in `GCNSubtarget::adjustSchedDependency`. `MemoryGraph.cpp` gets a short local
   function that reads the same settings through accessors that already exist
-  (`MachineInstrSchedulerConfig::GetConfig`, `getKernelLatencyOverrides`).
+  (`MachineInstrSchedulerConfig::GetConfig`, `getKernelLatencyOverrides`). *(Since moved:
+  `LlvmLatencyOf` in `ScheduleGraph.h`, shared with the graph builder.)*
 - **Scalar latency (not part of this work).** The permanent fix for scalar's default 5 is an
   alternate timing model in `SIScheduleJbaileCustomGfx906.td`. `SICommonWriteRes` hardcodes
   scalar's 5, so it would need a template argument the way `VMEMLatency` has one.

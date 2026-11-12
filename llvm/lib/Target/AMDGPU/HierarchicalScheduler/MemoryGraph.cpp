@@ -323,39 +323,6 @@ void MemoryGraph::ComputeTopologicalOrder() {
   }
 }
 
-// An op's latency (design doc section 3). misched.txt's load-latency settings
-// (vmem_load_latency, smem_load_latency, lds_load_latency, and per-kernel
-// kernel_latencies) are applied by LLVM only to dependence edges, in
-// GCNSubtarget::adjustSchedDependency, so SUnit::Latency doesn't see them.
-// This is a local copy of how that function picks a setting: by the op's
-// family, a per-kernel value over the global one, and only for loads
-// (mayLoad). So, as in the compiler, an op that isn't a load, such as the
-// s_memtime clock read, keeps its timing-model latency. Without a setting, the
-// latency is SUnit::Latency, which reads the active timing model.
-static int LlvmLatencyOf(const MachineInstr &mi, const SUnit &su) {
-  if (mi.mayLoad()) {
-    const MachineInstrSchedulerConfig::GlobalSettings &settings =
-        MachineInstrSchedulerConfig::GetConfig().GetGlobalSettings();
-    const MachineInstrSchedulerConfig::KernelLatencies *kernel =
-        mi.getMF()->getInfo<SIMachineFunctionInfo>()->getKernelLatencyOverrides();
-    std::optional<int> setting;
-    if (SIInstrInfo::isVMEM(mi) || SIInstrInfo::isFLAT(mi)) {
-      setting = kernel && kernel->vmem_load_latency ? kernel->vmem_load_latency
-                                                    : settings.vmem_load_latency;
-    } else if (SIInstrInfo::isSMRD(mi)) {
-      setting = kernel && kernel->smem_load_latency ? kernel->smem_load_latency
-                                                    : settings.smem_load_latency;
-    } else if (SIInstrInfo::isDS(mi)) {
-      setting = kernel && kernel->lds_load_latency ? kernel->lds_load_latency
-                                                   : settings.lds_load_latency;
-    }
-    if (setting) {
-      return *setting;
-    }
-  }
-  return static_cast<int>(su.Latency);
-}
-
 std::unique_ptr<MemoryGraph> MemoryGraph::Build(ScheduleGraph &original,
                                                 const GCNSubtarget &st) {
   return BuildWithRoleClassifier(original, [&](const ScheduleNode &node) {

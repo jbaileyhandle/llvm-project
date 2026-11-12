@@ -77,7 +77,8 @@ MemoryTimes ScoreFinalOrderAndIdeal(MutableArrayRef<SUnit> sunits,
   // leaves the edges as LLVM gave them.
   const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
   std::unique_ptr<ScheduleGraph> graph = ScheduleGraph::BuildFromSUnits(
-      sunits, st, mf, lis, mf.getRegInfo(), region, /*latency_divisor=*/1);
+      sunits, st, mf, lis, mf.getRegInfo(), region, /*latency_divisor=*/1,
+      /*count_live_out_latency=*/false);
   std::unique_ptr<MemoryGraph> memory_graph = MemoryGraph::Build(*graph, st);
 
   // Score the final order, and the ideal. Their elapsed times count every

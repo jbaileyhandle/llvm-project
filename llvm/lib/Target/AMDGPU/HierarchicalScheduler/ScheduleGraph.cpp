@@ -771,7 +771,8 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
                                const LiveIntervals &lis,
                                const MachineRegisterInfo &mri,
                                const RegionInfo &region,
-                               int latency_divisor) {
+                               int latency_divisor,
+                               bool count_live_out_latency) {
   auto graph = std::make_unique<ScheduleGraph>();
 
   // ReserveNodes provides 2x SUnits + 2 entry/exit nodes of
@@ -802,6 +803,14 @@ ScheduleGraph::BuildFromSUnits(MutableArrayRef<SUnit> sunits,
   // the ScaleEdgeLatencies option, the analyzer from its lens).
   graph->AddEdgesBetweenLeafNodes(sunit_to_node, latency_divisor);
   graph->CreateEntryAndExitNodes(lis, mri, region_begin_idx, region_end_idx);
+
+  // The exit's latency edges come before the wiring: an instruction that
+  // gets one then has a strong edge out, so the wiring doesn't give it a
+  // second, latency-0 edge to the exit.
+  if (count_live_out_latency) {
+    graph->AddLiveOutLatencyEdges(latency_divisor);
+  }
+  graph->WireEntryAndExit();
   // Compute topo and both critical-path directions before Phase 4 so
   // the ScheduleLengthTracker inside input_schedule_constructor_
   // satisfies its precondition (cp_from_exit must be available at
@@ -1091,13 +1100,32 @@ void ScheduleGraph::CreateLeafNodesFromSUnits(
   }
 }
 
+namespace {
+
+// An edge latency divided by `latency_divisor`, the caller-owned scaling
+// BuildFromSUnits applies to its edges. A divisor of 1 or less leaves
+// the latency as it is.
+int ScaleLatency(int latency, int latency_divisor) {
+  if (latency_divisor <= 1) {
+    return latency;
+  }
+
+  // Wave-visible latency = ceil(SIMD-cycles / wave-issue-rate).
+  // Round-up (vs round-to-nearest) is the conservative choice: the load
+  // takes a fixed number of SIMD cycles, so the wave wakes up no earlier
+  // than ceil(latency / divisor) wave-slots later. Round-down would let
+  // the consumer issue before the load's result is ready. Floor of 1
+  // preserves the IssueWidth=1 ordering invariant.
+  float scaled =
+      static_cast<float>(latency) / static_cast<float>(latency_divisor);
+  return std::max(1, static_cast<int>(std::ceil(scaled)));
+}
+
+} // anonymous namespace
+
 void ScheduleGraph::AddEdgesBetweenLeafNodes(
     const DenseMap<const SUnit *, ScheduleNode *> &sunit_to_node,
     int latency_divisor) {
-  // Defensive: <=0 is meaningless. Treat as no-scaling.
-  if (latency_divisor < 1) {
-    latency_divisor = 1;
-  }
   for (ScheduleNode &node : nodes_) {
     SUnit *su = node.GetSUnit();
     if (!su) {
@@ -1115,19 +1143,8 @@ void ScheduleGraph::AddEdgesBetweenLeafNodes(
       }
 
       ScheduleEdge::Kind kind = MapSDepToEdgeKind(sdep);
-      int latency = static_cast<int>(sdep.getLatency());
-      if (latency_divisor > 1) {
-        // Wave-visible latency = ceil(SIMD-cycles / wave-issue-rate).
-        // Round-up (vs round-to-nearest) is the conservative choice:
-        // the load takes a fixed number of SIMD cycles, so the wave
-        // wakes up no earlier than ceil(latency / divisor) wave-slots
-        // later. Round-down would let the consumer issue before the
-        // load's result is ready. Floor of 1 preserves the
-        // IssueWidth=1 ordering invariant.
-        float scaled = static_cast<float>(latency) /
-                       static_cast<float>(latency_divisor);
-        latency = std::max(1, static_cast<int>(std::ceil(scaled)));
-      }
+      int latency =
+          ScaleLatency(static_cast<int>(sdep.getLatency()), latency_divisor);
       AddEdge(&node, succ_node, kind, latency);
     }
   }
@@ -1152,7 +1169,9 @@ void ScheduleGraph::PopulateInputScheduleConstructor(
   // scheduled), the order is: Entry, then leaves in MF order, then
   // Exit. Entry has kArtificial edges TO the root leaves (they need
   // entry scheduled first); Exit has kArtificial edges FROM the tail
-  // leaves (it becomes ready once all its predecessors are scheduled).
+  // leaves and, with count_live_out_latency, from the instructions
+  // that write live-out registers (it becomes ready once all its
+  // predecessors are scheduled).
   const ScheduleNode *entry_node = GetEntryNode();
   const ScheduleNode *exit_node = GetExitNode();
 
@@ -1280,6 +1299,33 @@ void ScheduleGraph::VerifyInputScheduleMatchesMFOrder(
   }
 }
 
+// See the header. Picks the setting the way
+// GCNSubtarget::adjustSchedDependency does.
+int hierarchical_scheduler::LlvmLatencyOf(const MachineInstr &mi,
+                                          const SUnit &su) {
+  if (mi.mayLoad()) {
+    const MachineInstrSchedulerConfig::GlobalSettings &settings =
+        MachineInstrSchedulerConfig::GetConfig().GetGlobalSettings();
+    const MachineInstrSchedulerConfig::KernelLatencies *kernel =
+        mi.getMF()->getInfo<SIMachineFunctionInfo>()->getKernelLatencyOverrides();
+    std::optional<int> setting;
+    if (SIInstrInfo::isVMEM(mi) || SIInstrInfo::isFLAT(mi)) {
+      setting = kernel && kernel->vmem_load_latency ? kernel->vmem_load_latency
+                                                    : settings.vmem_load_latency;
+    } else if (SIInstrInfo::isSMRD(mi)) {
+      setting = kernel && kernel->smem_load_latency ? kernel->smem_load_latency
+                                                    : settings.smem_load_latency;
+    } else if (SIInstrInfo::isDS(mi)) {
+      setting = kernel && kernel->lds_load_latency ? kernel->lds_load_latency
+                                                   : settings.lds_load_latency;
+    }
+    if (setting) {
+      return *setting;
+    }
+  }
+  return static_cast<int>(su.Latency);
+}
+
 namespace {
 
 // Whether any edge into `node` is strong. Weak edges (cluster and weak
@@ -1317,18 +1363,62 @@ void ScheduleGraph::WireEntryAndExit() {
       AddEdge(entry_node_, &node, ScheduleEdge::kArtificial);
     }
 
-    // A leaf: nothing has to come after it, so the exit does.
+    // A leaf: nothing has to come after it, so the exit does. Latency 0:
+    // this edge only keeps the exit last. Waiting for values that leave
+    // the region is AddLiveOutLatencyEdges's job; when it ran, a node
+    // writing such a value already has a strong edge out and doesn't
+    // get here.
     if (!HasStrongSuccessor(node)) {
-      // TODO: LLVM's buildSchedGraph adds an artificial edge from
-      // high-latency leaf instructions to ExitSU with latency =
-      // SU->Latency - 1 (ScheduleDAGInstrs.cpp, line 877). This
-      // ensures cross-region heuristics account for results that
-      // won't be ready for many cycles (e.g., a VMEM load with
-      // latency 80 at the end of a region). We currently use
-      // latency 0, which is fine for within-region schedule length
-      // but may underestimate costs for cross-region analysis.
       AddEdge(&node, exit_node_, ScheduleEdge::kArtificial);
     }
+  }
+}
+
+namespace {
+
+// Whether `node` writes any lane of a register in `live_outs`.
+// Instruction nodes record their writes with a full lane mask, so in
+// practice this is a match on the register.
+bool WritesLiveOutRegister(const ScheduleNode &node,
+                           ArrayRef<RegWithLaneMask> live_outs) {
+  for (const RegWithLaneMask &def : node.RegDefs()) {
+    for (const RegWithLaneMask &live_out : live_outs) {
+      if (def.reg == live_out.reg && (def.mask & live_out.mask).any()) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+} // anonymous namespace
+
+// See the header for what these edges are for, and why there are none
+// out of the entry.
+void ScheduleGraph::AddLiveOutLatencyEdges(int latency_divisor) {
+  // The registers that leave the region, as CreateEntryAndExitNodes put
+  // them on the exit.
+  const ArrayRef<RegWithLaneMask> live_outs = exit_node_->RegUses();
+
+  for (ScheduleNode &node : nodes_) {
+    // Only real instructions write registers.
+    if (!node.IsRealInstruction() || !node.GetSUnit()->getInstr()) {
+      continue;
+    }
+    if (!WritesLiveOutRegister(node, live_outs)) {
+      continue;
+    }
+
+    // The instruction's latency, scaled the way data edges are. Minus 1
+    // because the exit takes a cycle itself, so the schedule ends on the
+    // cycle the value is ready.
+    const SUnit &su = *node.GetSUnit();
+    const int latency =
+        ScaleLatency(LlvmLatencyOf(*su.getInstr(), su), latency_divisor) - 1;
+    if (latency <= 0) {
+      continue;
+    }
+    AddEdge(&node, exit_node_, ScheduleEdge::kArtificial, latency);
   }
 }
 
@@ -1342,9 +1432,6 @@ void ScheduleGraph::CreateEntryAndExitNodes(const LiveIntervals &lis,
       EmplaceNode(static_cast<SUnit *>(nullptr), "Exit", this);
   entry_node_ = &entry_node;
   exit_node_ = &exit_node;
-
-  // Wire entry to all root nodes, exit from all leaf nodes.
-  WireEntryAndExit();
 
   // Populate register defs/uses from LiveIntervals with per-lane
   // accuracy. getLiveLaneMask queries sub-range liveness to determine

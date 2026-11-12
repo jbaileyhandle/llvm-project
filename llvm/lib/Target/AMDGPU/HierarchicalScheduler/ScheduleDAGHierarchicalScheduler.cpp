@@ -194,7 +194,8 @@ void ScheduleDAGHierarchicalScheduler::WithRegionGraph(
     const GCNSubtarget &st =
         static_cast<const GCNSubtarget &>(MF.getSubtarget());
     auto graph = ScheduleGraph::BuildFromSUnits(
-        SUnits, st, MF, *LIS, MF.getRegInfo(), region, latency_divisor);
+        SUnits, st, MF, *LIS, MF.getRegInfo(), region, latency_divisor,
+        /*count_live_out_latency=*/false);
 
     callback(*graph);
   });
