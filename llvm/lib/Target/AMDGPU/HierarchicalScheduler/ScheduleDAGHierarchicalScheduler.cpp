@@ -193,9 +193,12 @@ void ScheduleDAGHierarchicalScheduler::WithRegionGraph(
 
     const GCNSubtarget &st =
         static_cast<const GCNSubtarget &>(MF.getSubtarget());
+    // The live_out_latency misched token decides whether the exit waits for
+    // values that leave the region, for every graph built here: the ones
+    // the passes schedule and the ones that measure a finished order.
     auto graph = ScheduleGraph::BuildFromSUnits(
         SUnits, st, MF, *LIS, MF.getRegInfo(), region, latency_divisor,
-        /*count_live_out_latency=*/false);
+        HierarchicalConfig::Get().live_out_latency);
 
     callback(*graph);
   });

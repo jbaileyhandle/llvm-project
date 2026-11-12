@@ -89,6 +89,15 @@ class MachineInstrSchedulerConfig {
             bool dump_subgraph_dag = false;
             bool dump_search_outcomes = false;
             bool scale_edge_latencies = false;
+            // HierarchicalScheduler: count live-out latency in the region
+            // graphs it schedules. The exit then waits for values that leave
+            // the region, so the length objective rewards issuing them early
+            // (ScheduleGraph::AddLiveOutLatencyEdges). The length analyzer
+            // always counts it, whatever this says. Not ready for a variant
+            // yet: subgraph copies drop these edges, and they turn loads that
+            // feed later regions into kDomTree splitters. Consumed via
+            // HierarchicalConfig.
+            bool live_out_latency = false;
             bool skip_occupancy_pass = false;
             bool skip_length_pass = false;
             // HierarchicalScheduler length pass: ignore the occupancy target.

@@ -50,6 +50,7 @@ namespace {
         {"dump_subgraph_dag", &Flags::dump_subgraph_dag},
         {"dump_search_outcomes", &Flags::dump_search_outcomes},
         {"scale_edge_latencies", &Flags::scale_edge_latencies},
+        {"live_out_latency", &Flags::live_out_latency},
         {"skip_occupancy_pass", &Flags::skip_occupancy_pass},
         {"skip_length_pass", &Flags::skip_length_pass},
         {"length_ignore_occupancy", &Flags::length_ignore_occupancy},
