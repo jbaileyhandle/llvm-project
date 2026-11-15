@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<!--
+  Memory viewer: reads one memory_viz/<function>.json, written by the
+  schedule-length analysis pass (HierarchicalScheduler/MemoryViz.h).
+
+  Three panes, each shown or hidden with the checkboxes at the top and resized
+  by dragging the dividers between them:
+    - Blocks: one node per region, shaded by the region's share of the
+      function's total weighted gain from ideal memory work. Click one to
+      open it in the other two panes.
+    - Code: the region's instructions in final order, with the memory clock
+      and the schedule clock (the cycle each issues at in the length
+      analysis's raw lens), the vmcnt and lgkmcnt queues (one bar per op, from the row it issues to
+      the row whose wait pops it), a chip per memory op labeled by type, a
+      "+N" on each load issued N cycles after its inputs were ready, each
+      wait's counter value and stall, and VGPR / SGPR pressure split into
+      registers holding load results (in flight or back) and everything else.
+    - Tiers: the region's memory ops grouped into tiers, this schedule next
+      to the ideal. A tier is a group of ops no wait separates. Hover a chip
+      to see the ops it waits on and the ops that wait on it.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Memory Viewer</title>
+<script src="lib/cytoscape.min.js"></script>
+<script src="lib/dagre.min.js"></script>
+<script src="lib/cytoscape-dagre.js"></script>
+<style>
+  :root {
+    --ink: #0b0b0b;
+    --muted: #52514e;
+    --grid: #dcdbd8;
+    --surface: #fcfcfb;
+    --panel: #f4f3f0;
+    --row: 18px;
+    --vector: #2a78d6;
+    --flat: #6250d6;
+    --scalar: #eb6834;
+    --lds: #1baf7a;
+    --gds: #e87ba4;
+    --barrier: #7a7874;
+    --stuck: #e34948;
+    --in-flight: #2a78d6;
+    --arrived: #9cc0ec;
+    --other: #c9c7c2;
+    --highlight: #fff2b3;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column;
+         font-family: sans-serif; font-size: 12px; color: var(--ink);
+         background: var(--surface); }
+  #top { padding: 6px 10px; border-bottom: 1px solid var(--grid);
+         display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
+  #meta { color: var(--muted); }
+  .toggles { display: flex; gap: 8px; }
+  .toggles label { border: 1px solid var(--grid); border-radius: 4px; padding: 1px 6px;
+                   cursor: pointer; user-select: none; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--muted); }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+            margin-right: 3px; vertical-align: -1px; }
+  #regionbar { padding: 4px 10px; border-bottom: 1px solid var(--grid); min-height: 18px; }
+  #regionbar h2 { display: inline; font-size: 13px; margin: 0 12px 0 0; }
+  .stats { color: var(--muted); font-family: monospace; }
+  .stats b { color: var(--ink); }
+  #main { flex: 1; min-height: 0; display: flex; }
+  .pane { min-width: 0; overflow: auto; }
+  .pane.hidden { display: none; }
+  #blocks { overflow: hidden; }
+  #tiers { padding: 6px 10px; }
+  .splitter { flex: 0 0 6px; cursor: col-resize; background: var(--grid); }
+  .splitter:hover, .splitter.drag { background: #a8a6a2; }
+  body.dragging { cursor: col-resize; user-select: none; }
+  .hint { color: var(--muted); }
+
+  /* Code view */
+  .codewrap { position: relative; width: max-content; }
+  .row { display: flex; height: var(--row); line-height: var(--row);
+         white-space: nowrap; font-family: monospace; font-size: 11px; }
+  .row:hover { background: #f0efec; }
+  .row.waitrow { background: #f7f3ec; }
+  .row.end { color: var(--muted); font-style: italic; }
+  .row.head { position: sticky; top: 0; z-index: 2; background: var(--surface);
+              font-family: sans-serif; font-size: 10px; color: var(--muted);
+              border-bottom: 1px solid var(--grid); height: auto; line-height: 12px;
+              padding: 2px 0; align-items: flex-end; }
+  .row.hl, .row.hl.waitrow { background: var(--highlight); }
+  .row.blame, .row.blame.waitrow { background: #fbe0df; }
+  .row.flash { animation: flash 1.2s; }
+  @keyframes flash { from { background: #ffd84d; } to { background: transparent; } }
+  .num { width: 34px; text-align: right; padding-right: 6px; color: var(--muted); flex: none; }
+  .clock { width: 48px; text-align: right; padding-right: 6px; color: var(--muted); flex: none; }
+  .lanes { flex: none; }
+  .lanes span { display: inline-block; }
+  .tags { width: 84px; overflow: hidden; flex: none; }
+  .text { width: 420px; overflow: hidden; text-overflow: ellipsis; padding-right: 8px; flex: none; }
+  .text.mem { font-weight: bold; }
+  .note { width: 300px; overflow: hidden; text-overflow: ellipsis; color: var(--muted);
+          padding-right: 8px; flex: none; }
+  .note.stall { color: var(--ink); font-weight: bold; }
+  .reg { width: 104px; display: flex; align-items: center; gap: 4px; padding-right: 6px; flex: none; }
+  .bar { position: relative; width: 70px; height: 10px; background: #f1f0ed;
+         border: 1px solid var(--grid); overflow: hidden; }
+  .bar span { position: absolute; top: 0; height: 100%; }
+  .regnum { width: 26px; text-align: right; }
+  .regnum.over { color: var(--stuck); font-weight: bold; }
+  svg.lanesvg { position: absolute; z-index: 1; }
+
+  /* Chips, shared by both views */
+  .chip { display: inline-block; padding: 0 4px; border-radius: 3px; color: #fff;
+          font-family: monospace; font-size: 10px; line-height: 14px; margin: 1px 3px 1px 0;
+          border: 1px solid transparent; cursor: default; }
+  .chip.write { background: none !important; color: var(--ink); }
+  .chip.hl { outline: 2px solid var(--ink); outline-offset: 1px; }
+  .chip.in { outline: 2px solid #8a8884; outline-offset: 1px; }
+  .chip.out { outline: 2px dashed #8a8884; outline-offset: 1px; }
+  .chip .late { font-size: 9px; margin-left: 2px; opacity: 0.9; }
+  .chip.stuck { box-shadow: 0 0 0 2px var(--stuck); }
+  .badge { display: inline-block; padding: 0 3px; border: 1px solid var(--stuck);
+           border-radius: 3px; font-size: 10px; line-height: 12px; color: var(--stuck); }
+
+  /* Tier view */
+  .tierintro { color: var(--muted); margin-bottom: 6px; max-width: 900px; line-height: 1.4; }
+  .tiersummary { font-family: monospace; margin-bottom: 8px; }
+  .tiercols { display: flex; gap: 14px; align-items: flex-start; }
+  .tiercol { position: relative; flex: 1 1 0; min-width: 0; }
+  .colhead { font-weight: bold; margin-bottom: 4px; }
+  .tier { background: var(--panel); border-radius: 4px; padding: 3px 6px 4px; }
+  .tier.empty { background: none; border: 1px dashed var(--grid); }
+  .tierlabel { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .tierlabel b { color: var(--ink); }
+  .boundary { font-family: monospace; font-size: 11px; color: var(--muted); margin: 3px 0 3px 10px;
+              padding-left: 8px; border-left: 3px solid var(--grid); }
+  .boundary.stall { border-left-color: var(--ink); color: var(--ink); }
+  .endmark { font-size: 11px; color: var(--muted); margin-top: 4px; font-style: italic; }
+  svg.links { position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+              pointer-events: none; overflow: visible; }
+</style>
+</head>
+<body>
+<div id="top">
+  <label><b>Load...</b> <input type="file" id="file" accept=".json"></label>
+  <span class="toggles">
+    <label><input type="checkbox" data-pane="blocks" checked> Blocks</label>
+    <label><input type="checkbox" data-pane="code" checked> Code</label>
+    <label><input type="checkbox" data-pane="tiers" checked> Tiers</label>
+  </span>
+  <span class="legend">
+    <span class="chip" style="background:var(--vector)">V</span>vector
+    <span class="chip" style="background:var(--flat)">F</span>flat
+    <span class="chip" style="background:var(--scalar)">S</span>scalar
+    <span class="chip" style="background:var(--lds)">LDS</span>
+    <span class="chip" style="background:var(--gds)">GDS</span>
+    <span class="chip" style="background:var(--barrier)">BAR</span>barrier
+    <span class="chip write" style="border-color:var(--vector)">V1w</span>write
+  </span>
+  <span id="meta" class="hint">No file loaded.</span>
+</div>
+<div id="regionbar"></div>
+<div id="main">
+  <div id="blocks" class="pane"></div>
+  <div id="code" class="pane"><div class="hint" style="padding:8px">Load a memory_viz/&lt;function&gt;.json file.</div></div>
+  <div id="tiers" class="pane"></div>
+</div>
+
+<script>
+"use strict";
+cytoscape.use(window.cytoscapeDagre);
+
+const ROW = 18;  // px per row; keep in sync with --row
+const TYPE_COLOR = { vector: "#2a78d6", flat: "#6250d6", scalar: "#eb6834",
+                     lds: "#1baf7a", gds: "#e87ba4", barrier: "#7a7874" };
+let DATA = null;
+let cy = null;
+let REGION = null;     // the selected region
+let CONSUMERS = [];    // per op: the ops that list it as an input
+
+document.getElementById("file").addEventListener("change", (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  file.text().then((text) => {
+    DATA = JSON.parse(text);
+    buildGraph();
+  });
+});
+
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                  .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function blockName(block) {
+  return block.name && block.name.length ? block.name : "bb." + block.number;
+}
+
+// One hue, light to dark, by share. The square root spreads out the small
+// shares, which would otherwise all look the same.
+function shareColor(share) {
+  if (share <= 0) return "#f1f0ed";
+  const lightness = 90 - 52 * Math.sqrt(Math.min(share, 1));
+  return `hsl(4, 72%, ${lightness}%)`;
+}
+
+// --- Panes ------------------------------------------------------------------
+
+// Every shown pane but the last has a width in px, set by dragging the
+// divider to its right; the last shown pane takes the rest.
+const PANES = ["blocks", "code", "tiers"];
+const paneWidths = { blocks: Math.round(0.18 * window.innerWidth),
+                     code: Math.round(0.5 * window.innerWidth),
+                     tiers: Math.round(0.3 * window.innerWidth) };
+
+function savePanes(shown) {
+  try {
+    localStorage.setItem("memory_viewer_panes", JSON.stringify({ shown, widths: paneWidths }));
+  } catch (e) {}
+}
+
+function applyPanes() {
+  const shown = {};
+  for (const box of document.querySelectorAll(".toggles input")) shown[box.dataset.pane] = box.checked;
+  for (const splitter of document.querySelectorAll(".splitter")) splitter.remove();
+  const visible = PANES.filter((name) => shown[name]);
+  for (const name of PANES) {
+    const pane = document.getElementById(name);
+    pane.classList.toggle("hidden", !shown[name]);
+    const index = visible.indexOf(name);
+    if (index < 0) continue;
+    if (index === visible.length - 1) {
+      pane.style.flex = "1 1 0";
+      continue;
+    }
+    pane.style.flex = `0 0 ${paneWidths[name]}px`;
+    const splitter = document.createElement("div");
+    splitter.className = "splitter";
+    splitter.addEventListener("mousedown", (event) => startDrag(event, name, splitter, shown));
+    pane.after(splitter);
+  }
+  savePanes(shown);
+  if (cy && shown.blocks) { cy.resize(); cy.fit(undefined, 20); }
+}
+
+function startDrag(event, name, splitter, shown) {
+  event.preventDefault();
+  const pane = document.getElementById(name);
+  const startX = event.clientX;
+  const startWidth = pane.getBoundingClientRect().width;
+  splitter.classList.add("drag");
+  document.body.classList.add("dragging");
+  const move = (e) => {
+    paneWidths[name] = Math.max(120, Math.round(startWidth + e.clientX - startX));
+    pane.style.flex = `0 0 ${paneWidths[name]}px`;
+  };
+  const up = () => {
+    document.removeEventListener("mousemove", move);
+    document.removeEventListener("mouseup", up);
+    splitter.classList.remove("drag");
+    document.body.classList.remove("dragging");
+    savePanes(shown);
+    if (cy && name === "blocks") cy.resize();
+  };
+  document.addEventListener("mousemove", move);
+  document.addEventListener("mouseup", up);
+}
+
+try {
+  const saved = JSON.parse(localStorage.getItem("memory_viewer_panes") || "null");
+  if (saved && saved.shown) {
+    for (const box of document.querySelectorAll(".toggles input")) {
+      if (box.dataset.pane in saved.shown) box.checked = saved.shown[box.dataset.pane];
+    }
+    Object.assign(paneWidths, saved.widths || {});
+  }
+} catch (e) {}
+for (const box of document.querySelectorAll(".toggles input")) {
+  box.addEventListener("change", applyPanes);
+}
+applyPanes();
+
+// --- Block graph -------------------------------------------------------
+
+// One node per region, chained within its block; one node for a block with
+// no region. Control-flow edges run from a block's last node to each
+// successor's first.
+function buildGraph() {
+  const elements = [];
+  const firstNode = {}, lastNode = {};
+  let best = null;
+  for (const block of DATA.blocks) {
+    if (!block.regions.length) {
+      const id = "b" + block.number;
+      firstNode[block.number] = lastNode[block.number] = id;
+      elements.push({ data: { id, label: blockName(block) + "\n(no region)",
+                              color: "#e6e5e2", text: "#52514e" } });
+      continue;
+    }
+    let previous = null;
+    for (const region of block.regions) {
+      const id = "r" + region.index;
+      const label = blockName(block) + "  r" + region.index +
+        "\nshare " + (100 * region.share).toFixed(1) + "% · f " +
+        block.frequency.toPrecision(3) + "\ngain " + region.gain + " cyc";
+      elements.push({ data: { id, label, color: shareColor(region.share),
+                              text: region.share > 0.35 ? "#fff" : "#0b0b0b",
+                              block: block.number, region: region.index } });
+      if (previous) {
+        elements.push({ data: { id: previous + "_" + id, source: previous, target: id },
+                        classes: "inblock" });
+      } else {
+        firstNode[block.number] = id;
+      }
+      previous = id;
+      if (!best || region.share > best.region.share) best = { block, region };
+    }
+    lastNode[block.number] = previous;
+  }
+  for (const block of DATA.blocks) {
+    for (const successor of block.succs) {
+      elements.push({ data: { id: "e" + block.number + "_" + successor,
+                              source: lastNode[block.number],
+                              target: firstNode[successor] } });
+    }
+  }
+
+  if (cy) cy.destroy();
+  cy = cytoscape({
+    container: document.getElementById("blocks"),
+    elements,
+    style: [
+      { selector: "node", style: {
+          "background-color": "data(color)", "label": "data(label)", "color": "data(text)",
+          "text-wrap": "wrap", "text-valign": "center", "text-halign": "center",
+          "font-size": 9, "font-family": "monospace", "width": 130, "height": 44,
+          "shape": "round-rectangle", "border-width": 1, "border-color": "#a8a6a2" } },
+      { selector: "node.sel", style: { "border-width": 3, "border-color": "#0b0b0b" } },
+      { selector: "edge", style: {
+          "width": 1.5, "line-color": "#c4c2be", "target-arrow-color": "#c4c2be",
+          "target-arrow-shape": "triangle", "curve-style": "bezier" } },
+      { selector: "edge.inblock", style: {
+          "width": 4, "line-color": "#8a8884", "target-arrow-shape": "none" } },
+    ],
+    layout: { name: "dagre", rankDir: "TB", nodeSep: 16, rankSep: 26 },
+    // Without a cap, fitting a function with one or two regions blows the
+    // nodes up to fill the pane.
+    maxZoom: 1.3,
+    wheelSensitivity: 0.2,
+  });
+  cy.on("tap", "node", (event) => {
+    const data = event.target.data();
+    if (data.region === undefined) return;
+    selectRegion(data.block, data.region);
+  });
+
+  const meta = document.getElementById("meta");
+  meta.classList.remove("hint");
+  meta.innerHTML = "<b>" + esc(DATA.function) + "</b> — " + esc(DATA.scheduler) +
+    " — occupancy " + DATA.occupancy + " (VGPR budget " + DATA.vgpr_budget +
+    ", SGPR " + DATA.sgpr_budget + ") — total weighted gain " +
+    DATA.total_weighted_gain.toFixed(1) + " cyc";
+
+  // Open on the region with the biggest share.
+  if (best) selectRegion(best.block.number, best.region.index);
+}
+
+function selectRegion(blockNumber, regionIndex) {
+  cy.nodes().removeClass("sel");
+  cy.getElementById("r" + regionIndex).addClass("sel");
+  const block = DATA.blocks.find((b) => b.number === blockNumber);
+  const region = block.regions.find((r) => r.index === regionIndex);
+  REGION = region;
+  CONSUMERS = region.ops.map(() => []);
+  region.ops.forEach((op, i) => op.inputs.forEach((j) => CONSUMERS[j].push(i)));
+  renderRegionBar(block, region);
+  renderCode(region);
+  renderTiers(region);
+}
+
+// --- Shared helpers ----------------------------------------------------
+
+const isMemOp = (op) => op.type !== "barrier";
+const isSinkWait = (region, wait) => wait.row === region.rows.length;
+
+function chip(op, index, extraClass, extraText) {
+  const color = TYPE_COLOR[op.type];
+  const write = isMemOp(op) && !op.read;
+  return `<span class="chip${write ? " write" : ""}${extraClass || ""}" data-op="${index}" ` +
+         `style="background:${color};border-color:${color}">${esc(op.label)}${extraText || ""}</span>`;
+}
+
+function opTitle(op) {
+  if (!isMemOp(op)) {
+    return `${op.label}: s_barrier at row ${op.row}, waits for every memory op before it`;
+  }
+  let t = `${op.label}: ${op.type} ${op.read ? "read" : "write"}${op.def ? " of " + op.def : ""}` +
+          ` at row ${op.row}, latency ${op.latency}\n` +
+          `issued at clock ${op.issue_time}, data back at ${op.data_time}\n` +
+          `tier ${op.tier} here, tier ${op.ideal_tier} in the ideal (earliest start ${op.ideal_start})`;
+  if (op.inputs.length) {
+    t += "\nwaits on " + op.inputs.map((j) => REGION.ops[j].label).join(", ");
+  }
+  return t;
+}
+
+function listLabels(indices, max) {
+  const labels = indices.map((i) => REGION.ops[i].label);
+  return labels.length <= max ? labels.join(", ")
+                              : labels.slice(0, max).join(", ") + `, … (${labels.length})`;
+}
+
+// A queue's counter value after a wait: the ops issued into it before the
+// wait's row that it doesn't pop, which is what an s_waitcnt for it allows
+// to stay outstanding.
+function counterAfter(region, wait, queue) {
+  let outstanding = 0;
+  for (const op of region.ops) {
+    if (op[queue] && op.row < wait.row && Math.max(...op.pop_rows, -1) > wait.row) {
+      outstanding++;
+    }
+  }
+  return outstanding;
+}
+
+function waitNote(region, wait) {
+  const ops = region.ops;
+  const counters = [];
+  for (const queue of ["vmcnt", "lgkmcnt"]) {
+    if (wait.popped.some((i) => ops[i][queue])) {
+      counters.push(queue + "(" + counterAfter(region, wait, queue) + ")");
+    }
+  }
+  // The stall first: it's what matters most and the note gets cut off.
+  const stall = wait.end_time - wait.begin_time;
+  let note = (stall > 0 ? "stall " + stall + " · " : "no stall · ") + counters.join(" ");
+  if (wait.barrier) {
+    note += " drain (barrier)";
+  } else if (wait.drain) {
+    note += " drain (" + (wait.cautious ? "FLAT cautious mode" : "scalar or mixed lgkmcnt") + ")";
+  }
+  if (isSinkWait(region, wait)) {
+    note += " for everything still in flight";
+  } else if (wait.waited_for.length) {
+    const names = wait.waited_for.map((i) => (ops[i].def || "?") + " " + ops[i].label);
+    note += " for " + names.join(", ");
+  }
+  return { note, stall };
+}
+
+// Per wait: the loads it delayed past their inputs, from each load's
+// stuck_waits.
+function loadsDelayedBy(region) {
+  const delayed = region.waits.map(() => []);
+  region.ops.forEach((op, i) => {
+    for (const sw of op.stuck_waits) if (sw.wait >= 0) delayed[sw.wait].push(i);
+  });
+  return delayed;
+}
+
+function renderRegionBar(block, region) {
+  const memOps = region.ops.filter(isMemOp);
+  const stuck = memOps.filter((op) => op.stuck > 0).length;
+  document.getElementById("regionbar").innerHTML =
+    `<h2>${esc(blockName(block))} — region ${region.index} — ${region.rows.length} instructions</h2>` +
+    `<span class="stats">frequency <b>${block.frequency.toPrecision(3)}</b> · ` +
+    `memory time <b>${region.scheduled_memory_time}</b> vs ideal <b>${region.ideal_memory_time}</b> · ` +
+    `length <b>${region.schedule_length}</b> (floor ${region.schedule_length_floor}) · ` +
+    `gain <b>${region.gain}</b> cyc · share <b>${(100 * region.share).toFixed(1)}%</b> · ` +
+    `${memOps.length} memory ops, <b>${stuck}</b> loads issued late</span>`;
+}
+
+// --- Code view ---------------------------------------------------------
+
+// Pack [start, end] row intervals into side-by-side tracks so overlapping
+// ones don't sit on top of each other. Returns the track count.
+function packTracks(items) {
+  const trackEnd = [];
+  const sorted = items.slice().sort((a, b) => a.start - b.start);
+  for (const item of sorted) {
+    let track = 0;
+    while (track < trackEnd.length && item.start <= trackEnd[track]) track++;
+    item.track = track;
+    trackEnd[track] = item.end;
+  }
+  return trackEnd.length;
+}
+
+const rowCenter = (row) => row * ROW + ROW / 2;
+
+// One queue's lane: a bar per op in the queue, from its issue row to the row
+// whose wait pops it from this queue. Bars get thinner as more ops are in
+// flight at once, so the lane stays under ~150px.
+function laneLayout(region, queue, totalRows) {
+  const items = [];
+  region.ops.forEach((op, index) => {
+    if (!op[queue]) return;
+    // An op in both queues is popped once per queue; use the later pop.
+    const popRow = op.pop_rows.length ? Math.max(...op.pop_rows) : totalRows - 1;
+    items.push({ op, index, start: op.row, end: popRow });
+  });
+  const tracks = packTracks(items);
+  let bar = 1, gap = 1;
+  for (const [b, g] of [[5, 2], [3, 1], [2, 1]]) {
+    if (tracks * (b + g) <= 150) { bar = b; gap = g; break; }
+  }
+  const width = Math.max(tracks * (bar + gap) + 4, 48);
+  return { items, bar, gap, width };
+}
+
+function laneSvgBody(lane, xOffset, queue, totalRows) {
+  let svg = "";
+  for (const item of lane.items) {
+    const x = xOffset + 2 + item.track * (lane.bar + lane.gap);
+    const y = rowCenter(item.start);
+    const height = Math.max(rowCenter(item.end) - y, 2);
+    const color = TYPE_COLOR[item.op.type];
+    const fill = item.op.read ? color : "none";
+    const popped = item.end >= totalRows - 1 ? "the region end" : "the wait at row " + item.end;
+    svg += `<rect x="${x}" y="${y}" width="${lane.bar}" height="${height}" fill="${fill}" ` +
+           `stroke="${color}" stroke-width="1" data-op="${item.index}"><title>${esc(item.op.label)} in ${queue}: ` +
+           `issued at row ${item.start} (clock ${item.op.issue_time}), popped by ${popped}; ` +
+           `data back at clock ${item.op.data_time}</title></rect>` +
+           `<line x1="${x - 1}" x2="${x + lane.bar + 1}" y1="${y + height}" y2="${y + height}" ` +
+           `stroke="${color}" stroke-width="2"/>`;
+  }
+  return svg;
+}
+
+// A stacked bar: registers holding a load result whose load is in flight,
+// holding one that's back, and everything else, against the budget.
+function pressureCell(total, load, inFlight, budget, kind) {
+  const scale = (x) => (100 * Math.max(x, 0) / Math.max(budget, 1)).toFixed(1) + "%";
+  const back = load - inFlight;
+  const other = Math.max(total - load, 0);
+  const title = `${kind} ${total} of ${budget}:\n${inFlight} hold a load result still in flight\n` +
+                `${back} hold a load result that's back\n${other} other`;
+  return `<div class="reg" title="${title}"><div class="bar">` +
+         `<span style="left:0;width:${scale(inFlight)};background:var(--in-flight)"></span>` +
+         `<span style="left:${scale(inFlight)};width:${scale(back)};background:var(--arrived)"></span>` +
+         `<span style="left:${scale(load)};width:${scale(other)};background:var(--other)"></span>` +
+         `</div><span class="regnum${total > budget ? " over" : ""}">${total}</span></div>`;
+}
+
+function renderCode(region) {
+  const pane = document.getElementById("code");
+  const rows = region.rows;
+  const totalRows = rows.length + 1;  // plus the region-end row
+  const delayed = loadsDelayedBy(region);
+
+  const vm = laneLayout(region, "vmcnt", totalRows);
+  const lgkm = laneLayout(region, "lgkmcnt", totalRows);
+  const lanesWidth = vm.width + lgkm.width;
+  const lanesCell = `<div class="lanes" style="width:${lanesWidth}px"></div>`;
+
+  let h = `<div class="codewrap">`;
+  h += `<div class="row head"><div class="num">row</div>` +
+       `<div class="clock" title="The memory model's clock when the instruction issues: it only moves at a wait that stalls">mem<br>clock</div>` +
+       `<div class="clock" title="The cycle the instruction issues at in the whole schedule time (the length analysis's raw lens)">sched<br>clock</div>` +
+       `<div class="lanes" style="width:${lanesWidth}px"><span style="width:${vm.width}px" ` +
+       `title="One bar per op in vmcnt, from where it issues to the wait that pops it">vmcnt</span>` +
+       `<span style="width:${lgkm.width}px" title="One bar per op in lgkmcnt">lgkmcnt</span></div>` +
+       `<div class="tags" title="+N: a load issued N cycles after its inputs were ready">op</div>` +
+       `<div class="text">instruction</div><div class="note">wait</div>` +
+       `<div class="reg" title="VGPRs in use after the instruction; dark blue: holding a load result still in flight; ` +
+       `light blue: holding a load result that's back; grey: other">VGPR (of ${DATA.vgpr_budget})</div>` +
+       `<div class="reg" title="SGPRs in use, split the same way">SGPR (of ${DATA.sgpr_budget})</div></div>`;
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const op = row.op >= 0 ? region.ops[row.op] : null;
+    const wait = row.wait >= 0 ? region.waits[row.wait] : null;
+
+    let tags = "";
+    if (op) {
+      tags += chip(op, row.op);
+      if (op.stuck > 0) {
+        const parts = op.stuck_waits.map((sw) => `row ${region.waits[sw.wait].row} (${sw.cycles} cyc)`);
+        const title = `Issued at clock ${op.issue_time}, but its inputs were ready at clock ` +
+                      `${op.inputs_ready_time}: ${op.stuck} cycles late.\n` +
+                      `Waits that moved the clock past its inputs: ${parts.join(", ")}`;
+        tags += `<span class="badge" data-stuck="${row.op}" title="${esc(title)}">+${op.stuck}</span>`;
+      }
+    }
+
+    let note = "", noteClass = "note", noteTitle = "", noteData = "";
+    if (wait) {
+      const w = waitNote(region, wait);
+      note = w.note;
+      noteTitle = note;
+      if (w.stall > 0) noteClass += " stall";
+      if (delayed[row.wait].length) {
+        noteTitle += `\nLoads issued after this wait that didn't need it: ` +
+                     listLabels(delayed[row.wait], 16);
+        noteData = ` data-wait="${row.wait}"`;
+      }
+    }
+
+    h += `<div class="row${wait ? " waitrow" : ""}" id="row-${i}">` +
+      `<div class="num">${i}</div><div class="clock">${row.memory_time}</div>` +
+      `<div class="clock">${row.schedule_cycle}</div>${lanesCell}` +
+      `<div class="tags">${tags}</div>` +
+      `<div class="text${op ? " mem" : ""}" title="${esc(row.text)}">${esc(row.text)}</div>` +
+      `<div class="${noteClass}" title="${esc(noteTitle)}"${noteData}>${esc(note)}</div>` +
+      pressureCell(row.vgpr, row.vgpr_load, row.vgpr_load_in_flight, DATA.vgpr_budget, "VGPR") +
+      pressureCell(row.sgpr, row.sgpr_load, row.sgpr_load_in_flight, DATA.sgpr_budget, "SGPR") +
+      `</div>`;
+  }
+
+  // The region end: where the sink pops whatever is still in flight.
+  const sinkIndex = region.waits.findIndex((w) => isSinkWait(region, w));
+  const sink = sinkIndex >= 0 ? region.waits[sinkIndex] : null;
+  const sinkNote = sink ? waitNote(region, sink).note : "";
+  h += `<div class="row end" id="row-${rows.length}"><div class="num">${rows.length}</div>` +
+    `<div class="clock">${sink ? sink.end_time : region.scheduled_memory_time}</div>` +
+    `<div class="clock" title="The exit issues at cycle ${region.schedule_length - 1}; the length is ` +
+    `${region.schedule_length}">${region.schedule_length - 1}</div>${lanesCell}` +
+    `<div class="tags"></div><div class="text">— region end —</div>` +
+    `<div class="note" title="${esc(sinkNote)}">${esc(sinkNote)}</div></div>`;
+
+  // The lanes, drawn over the rows' lane cells, below the header row.
+  h += `<svg class="lanesvg" width="${lanesWidth}" height="${totalRows * ROW}">` +
+       laneSvgBody(vm, 0, "vmcnt", totalRows) + laneSvgBody(lgkm, vm.width, "lgkmcnt", totalRows) +
+       `</svg></div>`;
+  pane.innerHTML = h;
+  pane.scrollTop = 0;
+
+  // Line the lanes up with the rows' lane cells.
+  const laneCell = pane.querySelector(".row:not(.head) .lanes");
+  if (laneCell) {
+    const svg = pane.querySelector("svg.lanesvg");
+    svg.style.left = laneCell.offsetLeft + "px";
+    svg.style.top = laneCell.parentElement.offsetTop + "px";
+  }
+}
+
+// --- Tier view ---------------------------------------------------------
+
+function renderTiers(region) {
+  const pane = document.getElementById("tiers");
+  const ops = region.ops;
+  const order = ops.map((_, i) => i).sort((a, b) => ops[a].row - ops[b].row);
+
+  // This schedule's tiers. The last one holds no op when it starts at the
+  // region end; it's drawn as the end instead.
+  const tiers = region.tiers.map((tier) => ({ ...tier, ops: [] }));
+  for (const i of order) tiers[ops[i].tier].ops.push(i);
+  let endTier = null;
+  const last = tiers[tiers.length - 1];
+  if (tiers.length > 1 && last.ops.length === 0 && last.wait >= 0 &&
+      isSinkWait(region, region.waits[last.wait])) {
+    endTier = tiers.pop();
+  }
+
+  // The ideal's tiers.
+  const idealCount = ops.length ? Math.max(...ops.map((op) => op.ideal_tier)) + 1 : 0;
+  const ideal = Array.from({ length: idealCount }, () => []);
+  for (const i of order) ideal[ops[i].ideal_tier].push(i);
+
+  const late = order.filter((i) => isMemOp(ops[i]) && ops[i].tier > ops[i].ideal_tier);
+
+  let h = `<div class="tierintro">A tier is a group of memory ops that no wait separates: they can go in ` +
+          `any order within it, but not into an earlier tier. <b>This schedule</b>: each wait that stalls ` +
+          `starts a tier (the clock only moves there). <b>Ideal</b>: each round of waiting for data starts ` +
+          `a tier. <b>↓k</b>: k tiers later than in the ideal. <span class="chip" style="background:#888;` +
+          `box-shadow:0 0 0 2px var(--stuck)">red ring</span>: a load issued late (the +N in the code view). ` +
+          `Hover a chip for what it waits on (solid) and what waits on it (dashed); click to find it in the code.</div>`;
+  h += `<div class="tiersummary">this schedule: <b>${tiers.length}</b> tiers, memory time ` +
+       `<b>${region.scheduled_memory_time}</b> · ideal: <b>${idealCount}</b> tiers, memory time ` +
+       `<b>${region.ideal_memory_time}</b> · <b>${late.length}</b> ops in a later tier than ideal</div>`;
+
+  // This schedule.
+  let actual = `<div class="colhead">This schedule</div>`;
+  tiers.forEach((tier, k) => {
+    if (k > 0) {
+      const wait = region.waits[tier.wait];
+      const w = waitNote(region, wait);
+      const where = isSinkWait(region, wait) ? "region end" : "row " + wait.row;
+      actual += `<div class="boundary stall" title="${esc(where + ": " + w.note)}">` +
+                `${esc(where)} · ${esc(w.note)}</div>`;
+    }
+    const chips = tier.ops.map((i) => {
+      const op = ops[i];
+      const behind = op.tier - op.ideal_tier;
+      return chip(op, i, op.stuck > 0 ? " stuck" : "",
+                  behind > 0 ? `<span class="late">↓${behind}</span>` : "");
+    }).join("");
+    const count = tier.ops.filter((i) => isMemOp(ops[i])).length;
+    actual += `<div class="tier${tier.ops.length ? "" : " empty"}"><div class="tierlabel">` +
+              `<b>Tier ${k}</b> · clock ${tier.clock} · ${count ? count + " ops" : "no memory ops"}</div>` +
+              `<div class="chips">${chips}</div></div>`;
+  });
+  if (endTier) {
+    const wait = region.waits[endTier.wait];
+    actual += `<div class="boundary stall">region end · ${esc(waitNote(region, wait).note)}</div>`;
+  }
+  actual += `<div class="endmark">region end · memory time ${region.scheduled_memory_time}</div>`;
+
+  // The ideal.
+  let idealHtml = `<div class="colhead">Ideal</div>`;
+  ideal.forEach((tierOps, k) => {
+    if (k > 0) {
+      idealHtml += `<div class="boundary">waits for data from an earlier tier</div>`;
+    }
+    const starts = tierOps.map((i) => ops[i].ideal_start);
+    const lo = Math.min(...starts), hi = Math.max(...starts);
+    const count = tierOps.filter((i) => isMemOp(ops[i])).length;
+    idealHtml += `<div class="tier"><div class="tierlabel"><b>Tier ${k}</b> · ` +
+                 `earliest start ${lo === hi ? lo : lo + "–" + hi} · ${count} ops</div>` +
+                 `<div class="chips">${tierOps.map((i) => chip(ops[i], i)).join("")}</div></div>`;
+  });
+  idealHtml += `<div class="endmark">region end · memory time ${region.ideal_memory_time}</div>`;
+
+  h += `<div class="tiercols"><div class="tiercol" id="tc-actual">${actual}<svg class="links"></svg></div>` +
+       `<div class="tiercol" id="tc-ideal">${idealHtml}<svg class="links"></svg></div></div>`;
+  if (!ops.length) h = `<div class="hint">No memory ops in this region.</div>`;
+  pane.innerHTML = h;
+  pane.scrollTop = 0;
+}
+
+// Lines in each tier column from the op's inputs to it (solid) and from it
+// to the ops that wait on it (dashed).
+function drawLinks(index) {
+  for (const id of ["tc-actual", "tc-ideal"]) {
+    const column = document.getElementById(id);
+    if (!column) continue;
+    const svg = column.querySelector("svg.links");
+    const base = column.getBoundingClientRect();
+    const at = (i) => column.querySelector(`.chip[data-op="${i}"]`);
+    const link = (from, to, dashed) => {
+      const a = at(from), b = at(to);
+      if (!a || !b) return "";
+      const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      const x1 = ra.left + ra.width / 2 - base.left, y1 = ra.bottom - base.top;
+      const x2 = rb.left + rb.width / 2 - base.left, y2 = rb.top - base.top;
+      const bend = Math.max((y2 - y1) / 2, 12);
+      return `<path d="M${x1},${y1} C${x1},${y1 + bend} ${x2},${y2 - bend} ${x2},${y2}" fill="none" ` +
+             `stroke="${dashed ? "#8a8884" : "#0b0b0b"}" stroke-width="1.3"` +
+             `${dashed ? ' stroke-dasharray="4,3"' : ""}/>`;
+    };
+    let paths = "";
+    for (const j of REGION.ops[index].inputs) paths += link(j, index, false);
+    for (const j of CONSUMERS[index]) paths += link(index, j, true);
+    svg.innerHTML = paths;
+  }
+}
+
+// --- Hover and click -----------------------------------------------------
+
+let marked = [];
+function mark(elements, cls) {
+  for (const el of elements) { el.classList.add(cls); marked.push([el, cls]); }
+}
+function clearMarks() {
+  for (const [el, cls] of marked) el.classList.remove(cls);
+  marked = [];
+  for (const svg of document.querySelectorAll("svg.links")) svg.innerHTML = "";
+}
+const chipsOf = (i) => document.querySelectorAll(`.chip[data-op="${i}"]`);
+const rowOf = (row) => document.getElementById("row-" + row);
+
+document.addEventListener("mouseover", (event) => {
+  if (!REGION) return;
+  clearMarks();
+  const target = event.target;
+
+  // A memory op: it, its inputs, and what waits on it.
+  const opElement = target.closest(".chip[data-op], rect[data-op]");
+  if (opElement) {
+    const i = +opElement.dataset.op;
+    const op = REGION.ops[i];
+    mark(chipsOf(i), "hl");
+    for (const j of op.inputs) mark(chipsOf(j), "in");
+    for (const j of CONSUMERS[i]) mark(chipsOf(j), "out");
+    const row = rowOf(op.row);
+    if (row) mark([row], "hl");
+    drawLinks(i);
+    if (!opElement.title && opElement.tagName !== "rect") opElement.title = opTitle(op);
+    return;
+  }
+
+  // A late load's badge: the waits that delayed it.
+  const badge = target.closest("[data-stuck]");
+  if (badge) {
+    const op = REGION.ops[+badge.dataset.stuck];
+    for (const sw of op.stuck_waits) {
+      const row = rowOf(REGION.waits[sw.wait].row);
+      if (row) mark([row], "blame");
+    }
+    return;
+  }
+
+  // A wait: the loads it delayed.
+  const waitNoteElement = target.closest("[data-wait]");
+  if (waitNoteElement) {
+    REGION.ops.forEach((op, i) => {
+      if (op.stuck_waits.some((sw) => sw.wait === +waitNoteElement.dataset.wait)) {
+        const row = rowOf(op.row);
+        if (row) mark([row], "blame");
+        mark(chipsOf(i), "hl");
+      }
+    });
+  }
+});
+
+// Clicking a chip in the tier view scrolls the code view to its row.
+document.getElementById("tiers").addEventListener("click", (event) => {
+  const chipElement = event.target.closest(".chip[data-op]");
+  if (!chipElement || !REGION) return;
+  const row = rowOf(REGION.ops[+chipElement.dataset.op].row);
+  const code = document.getElementById("code");
+  if (!row || code.classList.contains("hidden")) return;
+  code.scrollTop = row.offsetTop - code.clientHeight / 3;
+  row.classList.remove("flash");
+  void row.offsetWidth;
+  row.classList.add("flash");
+});
+</script>
+</body>
+</html>

@@ -24,7 +24,8 @@ ScheduleDAGLengthAnalyzer::ScheduleDAGLengthAnalyzer(
     MachineFunction &mf, const MachineLoopInfo *mli, AAResults *aa,
     LiveIntervals *lis)
     : ScheduleDAGInstrs(mf, mli, /*RemoveKillFlags=*/false), aa_(aa),
-      lis_(lis), memory_time_analysis_(&mf, mli, lis) {}
+      lis_(lis), memory_time_analysis_(&mf, mli, lis),
+      memory_viz_(&mf, mli, lis) {}
 
 void ScheduleDAGLengthAnalyzer::schedule() {
   // scheduleRegions has already called enterRegion, so RegionBegin/RegionEnd
@@ -59,6 +60,8 @@ void ScheduleDAGLengthAnalyzer::schedule() {
   // the whole schedule times, so it runs before viz is moved away below.
   memory_time_analysis_.AnalyzeRegion(SUnits, region, region_index,
                                       viz.raw.length, viz.raw.floor);
+  memory_viz_.AnalyzeRegion(SUnits, region, region_index, viz.raw.length,
+                            viz.raw.floor);
 
   // Keep the region's length data for the viewer's JSON.
   regions_by_block_[BB->getNumber()].push_back(std::move(viz));
@@ -77,4 +80,5 @@ void ScheduleDAGLengthAnalyzer::finalizeSchedule() {
   const std::string scheduler =
       MachineInstrSchedulerConfig::GetConfig().GetSchedulerAsString();
   ScheduleLengthAnalyzer::WriteVizJson(MF, scheduler, regions_by_block_);
+  memory_viz_.WriteJson(scheduler);
 }

@@ -38,6 +38,7 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_SCHEDULEDAGLENGTHANALYZER_H
 
 #include "MemoryTimeAnalysis.h"
+#include "MemoryViz.h"
 #include "ScheduleLengthAnalysis.h"
 #include "llvm/CodeGen/ScheduleDAGInstrs.h"
 #include <map>
@@ -68,6 +69,8 @@ class ScheduleDAGLengthAnalyzer : public ScheduleDAGInstrs {
   // The memory-time analysis of this function's regions. finalizeSchedule
   // has it report the function's totals.
   MemoryTimeAnalysis memory_time_analysis_;
+  // The memory viewer's data (viz/memory_viewer.html).
+  MemoryViz memory_viz_;
 
 public:
   ScheduleDAGLengthAnalyzer(MachineFunction &mf, const MachineLoopInfo *mli,
