@@ -215,6 +215,22 @@ void MemoryViz::AnalyzeRegion(MutableArrayRef<SUnit> sunits,
     row.schedule_cycle = length_tracker.GetScheduledCycle(node);
     row.vgpr = static_cast<int>(pressure.getVGPRNum(unified_vgpr));
     row.sgpr = static_cast<int>(pressure.getSGPRNum());
+
+    // Its virtual registers, each once. readsReg also counts a subregister
+    // def that keeps the rest of the register, and skips undef reads.
+    for (const MachineOperand &operand : mi.operands()) {
+      if (!operand.isReg() || !operand.getReg().isVirtual()) {
+        continue;
+      }
+      const int reg_number = static_cast<int>(operand.getReg().virtRegIndex());
+      if (operand.isDef() && !is_contained(row.defs, reg_number)) {
+        row.defs.push_back(reg_number);
+      }
+      if (operand.readsReg() && !is_contained(row.uses, reg_number)) {
+        row.uses.push_back(reg_number);
+      }
+    }
+
     row_of_schedule_node[node] = static_cast<int>(result.rows.size());
     row_instrs.push_back(&mi);
     result.rows.push_back(std::move(row));
@@ -222,6 +238,17 @@ void MemoryViz::AnalyzeRegion(MutableArrayRef<SUnit> sunits,
   const int num_rows = static_cast<int>(result.rows.size());
   if (num_rows == 0) {
     return;
+  }
+
+  // The virtual registers read after the region: the exit node uses them.
+  for (const RegWithLaneMask &live_out : graph->GetExitNode()->RegUses()) {
+    if (!live_out.reg.isVirtual()) {
+      continue;
+    }
+    const int reg_number = static_cast<int>(live_out.reg.virtRegIndex());
+    if (!is_contained(result.live_out, reg_number)) {
+      result.live_out.push_back(reg_number);
+    }
   }
 
   // Walk the final order through the wait queues, keeping every step, and
@@ -684,6 +711,16 @@ void MemoryViz::WriteJson(StringRef scheduler_name) const {
                                     row.sgpr_load_in_flight);
                       out.attribute("op", row.op);
                       out.attribute("wait", row.wait);
+                      out.attributeArray("defs", [&] {
+                        for (int reg : row.defs) {
+                          out.value(reg);
+                        }
+                      });
+                      out.attributeArray("uses", [&] {
+                        for (int reg : row.uses) {
+                          out.value(reg);
+                        }
+                      });
                     });
                   }
                 });
@@ -758,6 +795,12 @@ void MemoryViz::WriteJson(StringRef scheduler_name) const {
                       out.attribute("clock", tier.clock);
                       out.attribute("wait", tier.wait);
                     });
+                  }
+                });
+
+                out.attributeArray("live_out", [&] {
+                  for (int reg : region.live_out) {
+                    out.value(reg);
                   }
                 });
               });

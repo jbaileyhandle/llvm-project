@@ -15,6 +15,10 @@
       "+N" on each load issued N cycles after its inputs were ready, each
       wait's counter value and stall, and VGPR / SGPR pressure split into
       registers holding load results (in flight or back) and everything else.
+      Virtual registers are tinted, definitions underlined; hover one for
+      lines from its definitions to its reads, click to keep it. Lines are
+      shown in full: the pane scrolls sideways, with the row number, clocks,
+      lanes and op chips pinned at the left.
     - Tiers: the region's memory ops grouped into tiers, this schedule next
       to the ideal. A tier is a group of ops no wait separates. Hover a chip
       to see the ops it waits on and the ops that wait on it.
@@ -73,28 +77,48 @@
   body.dragging { cursor: col-resize; user-select: none; }
   .hint { color: var(--muted); }
 
-  /* Code view */
+  /* Code view. The columns up to the op chips stay pinned at the left when
+     the pane scrolls sideways; they take the row's background, so the text
+     scrolls under them. --lanes-w and --text-w are set per region. */
   .codewrap { position: relative; width: max-content; }
   .row { display: flex; height: var(--row); line-height: var(--row);
-         white-space: nowrap; font-family: monospace; font-size: 11px; }
+         white-space: nowrap; font-family: monospace; font-size: 11px;
+         background: var(--surface); }
   .row:hover { background: #f0efec; }
   .row.waitrow { background: #f7f3ec; }
   .row.end { color: var(--muted); font-style: italic; }
-  .row.head { position: sticky; top: 0; z-index: 2; background: var(--surface);
+  .row.head { position: sticky; top: 0; z-index: 4; background: var(--surface);
               font-family: sans-serif; font-size: 10px; color: var(--muted);
               border-bottom: 1px solid var(--grid); height: auto; line-height: 12px;
               padding: 2px 0; align-items: flex-end; }
   .row.hl, .row.hl.waitrow { background: var(--highlight); }
   .row.blame, .row.blame.waitrow { background: #fbe0df; }
   .row.flash { animation: flash 1.2s; }
-  @keyframes flash { from { background: #ffd84d; } to { background: transparent; } }
-  .num { width: 34px; text-align: right; padding-right: 6px; color: var(--muted); flex: none; }
-  .clock { width: 48px; text-align: right; padding-right: 6px; color: var(--muted); flex: none; }
-  .lanes { flex: none; }
+  @keyframes flash { from { background: #ffd84d; } to { background: var(--surface); } }
+  .num, .clock, .lanes, .tags { position: sticky; z-index: 2; background: inherit; flex: none; }
+  .num { width: 34px; left: 0; text-align: right; padding-right: 6px; color: var(--muted); }
+  .clock { width: 48px; text-align: right; padding-right: 6px; color: var(--muted); }
+  .memclock { left: 34px; }
+  .schedclock { left: 82px; }
+  .lanes { width: var(--lanes-w); left: 130px; }
+  .lanes.lanehost { z-index: 3; }  /* holds the lane drawing for every row */
   .lanes span { display: inline-block; }
-  .tags { width: 84px; overflow: hidden; flex: none; }
-  .text { width: 420px; overflow: hidden; text-overflow: ellipsis; padding-right: 8px; flex: none; }
+  .tags { width: 84px; overflow: hidden; left: calc(130px + var(--lanes-w));
+          box-shadow: 1px 0 0 var(--grid); }
+  .text { width: var(--text-w); padding: 0 8px 0 14px; flex: none; }  /* left: the register rail */
   .text.mem { font-weight: bold; }
+
+  /* Virtual registers: tinted by register, definitions underlined. */
+  .vr { border-radius: 2px; cursor: pointer;
+        background: color-mix(in srgb, var(--vr) 16%, transparent); }
+  .vr.def { background: color-mix(in srgb, var(--vr) 30%, transparent);
+            box-shadow: inset 0 -2px 0 var(--vr); }
+  .vr.on { background: color-mix(in srgb, var(--vr) 50%, transparent);
+           outline: 1.5px solid var(--vr); }
+  .k0 { --vr: #2a78d6; } .k1 { --vr: #eb6834; } .k2 { --vr: #1baf7a; } .k3 { --vr: #eda100; }
+  .k4 { --vr: #e87ba4; } .k5 { --vr: #008300; } .k6 { --vr: #6250d6; } .k7 { --vr: #e34948; }
+  svg.reglinks { position: absolute; left: 0; top: 0; z-index: 1; pointer-events: none;
+                 overflow: visible; }
   .note { width: 300px; overflow: hidden; text-overflow: ellipsis; color: var(--muted);
           padding-right: 8px; flex: none; }
   .note.stall { color: var(--ink); font-weight: bold; }
@@ -539,26 +563,199 @@ function pressureCell(total, load, inFlight, budget, kind) {
          `</div><span class="regnum${total > budget ? " over" : ""}">${total}</span></div>`;
 }
 
+// --- Registers -----------------------------------------------------------
+
+// Per virtual register of the shown region: its tint (k0-k7), the rows that
+// define it, and its reads, each with the row of the def it reads (-1 when
+// the value comes from before the region).
+let REGS = new Map();
+let shownReg = null;   // the register whose lines are drawn
+let pinnedReg = null;  // the clicked one, shown when the cursor is on no other
+
+// Eight tints for hundreds of registers. A register takes the tint that has
+// gone unseen for the most rows when it first appears, so registers mentioned
+// near each other differ; hovering is what matches far-apart ones.
+const REG_TINTS = 8;
+let tintLastSeen = [];
+
+function regInfo(reg) {
+  if (!REGS.has(reg)) REGS.set(reg, { tint: -1, defs: [], reads: [] });
+  return REGS.get(reg);
+}
+
+function analyzeRegisters(region) {
+  REGS = new Map();
+  shownReg = null;
+  pinnedReg = null;
+  tintLastSeen = new Array(REG_TINTS).fill(-Infinity);
+  const latestDef = new Map();
+  region.rows.forEach((row, i) => {
+    // Reads before defs: a row that writes part of a register it also reads
+    // reads the earlier def.
+    for (const reg of row.uses) {
+      regInfo(reg).reads.push({ row: i, from: latestDef.has(reg) ? latestDef.get(reg) : -1 });
+    }
+    for (const reg of row.defs) {
+      regInfo(reg).defs.push(i);
+      latestDef.set(reg, i);
+    }
+  });
+}
+
+// A row's text as HTML, each virtual register (%85, %85.sub0) in a span
+// tinted by register. A mention before " = " is a def if the row defines the
+// register; after it, a read, unless the row only defines it (an implicit-def
+// or an inline asm output, printed after the opcode).
+function textHtml(row, i) {
+  const equals = row.text.indexOf(" = ");
+  let html = "", at = 0;
+  for (const m of row.text.matchAll(/%(\d+)(\.[A-Za-z0-9_]+)?/g)) {
+    const reg = +m[1];
+    const info = regInfo(reg);
+    if (info.tint < 0) {
+      info.tint = tintLastSeen.indexOf(Math.min(...tintLastSeen));
+    }
+    tintLastSeen[info.tint] = i;
+    const beforeEquals = equals >= 0 && m.index < equals;
+    const def = row.defs.includes(reg) && (beforeEquals || !row.uses.includes(reg));
+    html += esc(row.text.slice(at, m.index)) +
+            `<span class="vr k${info.tint}${def ? " def" : ""}" data-reg="${reg}">${esc(m[0])}</span>`;
+    at = m.index + m[0].length;
+  }
+  return html + esc(row.text.slice(at));
+}
+
+function rowList(rows) {
+  const unique = [...new Set(rows)];
+  return unique.length <= 12 ? unique.join(", ")
+                             : unique.slice(0, 12).join(", ") + `, … (${unique.length})`;
+}
+
+function regTitle(reg) {
+  const info = REGS.get(reg);
+  let t = `%${reg}: ` + (info.defs.length ? "defined at row " + rowList(info.defs)
+                                           : "defined before the region");
+  if (info.defs.length && info.reads.some((read) => read.from < 0)) t += " and before the region";
+  t += info.reads.length ? "; read at row " + rowList(info.reads.map((read) => read.row))
+                         : "; not read in this region";
+  if (REGION.live_out.includes(reg)) t += "; read after the region";
+  return t + "\nClick to keep it highlighted; Esc to let go.";
+}
+
+// Highlights `reg`'s mentions and draws its lines. null clears.
+function showRegister(reg) {
+  if (reg === shownReg) return;
+  for (const el of document.querySelectorAll("#code .vr.on")) el.classList.remove("on");
+  shownReg = reg;
+  if (reg !== null) {
+    for (const el of document.querySelectorAll(`#code .vr[data-reg="${reg}"]`)) el.classList.add("on");
+  }
+  drawRegister();
+}
+
+// The shown register's lines. They run along a rail just right of the pinned
+// columns, and from it to each mention along the row's edge, so they don't
+// cross the text: a dot under each def, an arrowhead over each read. A value
+// from before the region starts the rail at the region's top; one read after
+// the region runs it to the region end. Redrawn when the pane scrolls
+// sideways, since the rail stays by the pinned columns.
+function drawRegister() {
+  const wrap = document.querySelector("#code .codewrap");
+  const svg = wrap && wrap.querySelector("svg.reglinks");
+  if (!svg) return;
+  svg.innerHTML = "";
+  if (shownReg === null || !REGS.has(shownReg)) return;
+  const reg = shownReg;
+  const info = REGS.get(reg);
+  const color = getComputedStyle(document.querySelector(`#code .vr[data-reg="${reg}"]`))
+                  .getPropertyValue("--vr").trim();
+
+  const base = wrap.getBoundingClientRect();
+  const railX = rowOf(0).querySelector(".tags").getBoundingClientRect().right - base.left + 6;
+  const rowTop = (row) => rowOf(row).getBoundingClientRect().top - base.top;
+  const tokenX = (row, def) => {
+    const rowElement = rowOf(row);
+    const el = rowElement.querySelector(`.vr[data-reg="${reg}"]${def ? ".def" : ":not(.def)"}`) ||
+               rowElement.querySelector(`.vr[data-reg="${reg}"]`);
+    if (!el) return null;
+    const box = el.getBoundingClientRect();
+    return box.left + box.width / 2 - base.left;
+  };
+  const stroke = `fill="none" stroke="${color}" stroke-width="1.5"`;
+  // A label for the rail's start or end, past the end of the row's text and
+  // joined to the rail by a dotted line along the row's top edge.
+  const label = (row, text) => {
+    const range = document.createRange();
+    range.selectNodeContents(rowOf(row).querySelector(".text"));
+    const x = range.getBoundingClientRect().right - base.left + 10;
+    const y = rowTop(row);
+    return `<path d="M${railX},${y + 1} H${x - 3}" ${stroke} stroke-dasharray="2,3"/>` +
+           `<text x="${x}" y="${y + 13}" font-size="10" font-family="sans-serif" fill="${color}">${text}</text>`;
+  };
+
+  let paths = "", top = Infinity, bottom = -Infinity;
+  const reach = (y) => { top = Math.min(top, y); bottom = Math.max(bottom, y); };
+
+  // Defs: along the bottom edge of the row.
+  for (const d of info.defs) {
+    const x = tokenX(d, true);
+    if (x === null) continue;
+    const y = rowTop(d) + ROW;
+    paths += `<path d="M${railX},${y} H${x}" ${stroke}/><circle cx="${x}" cy="${y - 1}" r="2.5" fill="${color}"/>`;
+    reach(y);
+  }
+
+  // Reads: along the top edge of the row.
+  for (const read of info.reads) {
+    const x = tokenX(read.row, false);
+    if (x === null) continue;
+    const y = rowTop(read.row);
+    paths += `<path d="M${railX},${y} H${x}" ${stroke}/>` +
+             `<path d="M${x - 3},${y - 1} L${x + 3},${y - 1} L${x},${y + 3} Z" fill="${color}"/>`;
+    reach(y);
+  }
+
+  if (info.reads.some((read) => read.from < 0) || (!info.defs.length && info.reads.length)) {
+    paths += label(0, "from before the region");
+    reach(rowTop(0) + 1);
+  }
+  if (REGION.live_out.includes(reg)) {
+    paths += label(REGION.rows.length, "read after the region");
+    reach(rowTop(REGION.rows.length) + 1);
+  }
+
+  if (bottom > top) paths += `<path d="M${railX},${top} V${bottom}" ${stroke}/>`;
+  svg.innerHTML = paths;
+}
+
 function renderCode(region) {
   const pane = document.getElementById("code");
   const rows = region.rows;
   const totalRows = rows.length + 1;  // plus the region-end row
   const delayed = loadsDelayedBy(region);
+  analyzeRegisters(region);
 
   const vm = laneLayout(region, "vmcnt", totalRows);
   const lgkm = laneLayout(region, "lgkmcnt", totalRows);
   const lanesWidth = vm.width + lgkm.width;
-  const lanesCell = `<div class="lanes" style="width:${lanesWidth}px"></div>`;
+  const lanesCell = `<div class="lanes"></div>`;
+  // The lanes, drawn in the first row's lane cell, over every row's.
+  const lanesSvg = `<svg class="lanesvg" style="left:0;top:0" width="${lanesWidth}" height="${totalRows * ROW}">` +
+                   laneSvgBody(vm, 0, "vmcnt", totalRows) + laneSvgBody(lgkm, vm.width, "lgkmcnt", totalRows) +
+                   `</svg>`;
 
-  let h = `<div class="codewrap">`;
+  // The instruction column fits the longest line, plus its padding.
+  const longest = Math.max(16, ...rows.map((row) => row.text.length));
+  let h = `<div class="codewrap" style="--lanes-w:${lanesWidth}px;--text-w:calc(${longest}ch + 24px)">`;
   h += `<div class="row head"><div class="num">row</div>` +
-       `<div class="clock" title="The memory model's clock when the instruction issues: it only moves at a wait that stalls">mem<br>clock</div>` +
-       `<div class="clock" title="The cycle the instruction issues at in the whole schedule time (the length analysis's raw lens)">sched<br>clock</div>` +
-       `<div class="lanes" style="width:${lanesWidth}px"><span style="width:${vm.width}px" ` +
+       `<div class="clock memclock" title="The memory model's clock when the instruction issues: it only moves at a wait that stalls">mem<br>clock</div>` +
+       `<div class="clock schedclock" title="The cycle the instruction issues at in the whole schedule time (the length analysis's raw lens)">sched<br>clock</div>` +
+       `<div class="lanes"><span style="width:${vm.width}px" ` +
        `title="One bar per op in vmcnt, from where it issues to the wait that pops it">vmcnt</span>` +
        `<span style="width:${lgkm.width}px" title="One bar per op in lgkmcnt">lgkmcnt</span></div>` +
        `<div class="tags" title="+N: a load issued N cycles after its inputs were ready">op</div>` +
-       `<div class="text">instruction</div><div class="note">wait</div>` +
+       `<div class="text" title="Each virtual register is tinted, its definitions underlined. Hover one for lines ` +
+       `from its definitions to its reads; click to keep it.">instruction</div><div class="note">wait</div>` +
        `<div class="reg" title="VGPRs in use after the instruction; dark blue: holding a load result still in flight; ` +
        `light blue: holding a load result that's back; grey: other">VGPR (of ${DATA.vgpr_budget})</div>` +
        `<div class="reg" title="SGPRs in use, split the same way">SGPR (of ${DATA.sgpr_budget})</div></div>`;
@@ -594,10 +791,11 @@ function renderCode(region) {
     }
 
     h += `<div class="row${wait ? " waitrow" : ""}" id="row-${i}">` +
-      `<div class="num">${i}</div><div class="clock">${row.memory_time}</div>` +
-      `<div class="clock">${row.schedule_cycle}</div>${lanesCell}` +
+      `<div class="num">${i}</div><div class="clock memclock">${row.memory_time}</div>` +
+      `<div class="clock schedclock">${row.schedule_cycle}</div>` +
+      (i === 0 ? `<div class="lanes lanehost">${lanesSvg}</div>` : lanesCell) +
       `<div class="tags">${tags}</div>` +
-      `<div class="text${op ? " mem" : ""}" title="${esc(row.text)}">${esc(row.text)}</div>` +
+      `<div class="text${op ? " mem" : ""}">${textHtml(row, i)}</div>` +
       `<div class="${noteClass}" title="${esc(noteTitle)}"${noteData}>${esc(note)}</div>` +
       pressureCell(row.vgpr, row.vgpr_load, row.vgpr_load_in_flight, DATA.vgpr_budget, "VGPR") +
       pressureCell(row.sgpr, row.sgpr_load, row.sgpr_load_in_flight, DATA.sgpr_budget, "SGPR") +
@@ -609,26 +807,21 @@ function renderCode(region) {
   const sink = sinkIndex >= 0 ? region.waits[sinkIndex] : null;
   const sinkNote = sink ? waitNote(region, sink).note : "";
   h += `<div class="row end" id="row-${rows.length}"><div class="num">${rows.length}</div>` +
-    `<div class="clock">${sink ? sink.end_time : region.scheduled_memory_time}</div>` +
-    `<div class="clock" title="The exit issues at cycle ${region.schedule_length - 1}; the length is ` +
+    `<div class="clock memclock">${sink ? sink.end_time : region.scheduled_memory_time}</div>` +
+    `<div class="clock schedclock" title="The exit issues at cycle ${region.schedule_length - 1}; the length is ` +
     `${region.schedule_length}">${region.schedule_length - 1}</div>${lanesCell}` +
     `<div class="tags"></div><div class="text">— region end —</div>` +
     `<div class="note" title="${esc(sinkNote)}">${esc(sinkNote)}</div></div>`;
 
-  // The lanes, drawn over the rows' lane cells, below the header row.
-  h += `<svg class="lanesvg" width="${lanesWidth}" height="${totalRows * ROW}">` +
-       laneSvgBody(vm, 0, "vmcnt", totalRows) + laneSvgBody(lgkm, vm.width, "lgkmcnt", totalRows) +
-       `</svg></div>`;
+  // The register lines, sized to the whole code view once it's laid out.
+  h += `<svg class="reglinks"></svg></div>`;
   pane.innerHTML = h;
   pane.scrollTop = 0;
-
-  // Line the lanes up with the rows' lane cells.
-  const laneCell = pane.querySelector(".row:not(.head) .lanes");
-  if (laneCell) {
-    const svg = pane.querySelector("svg.lanesvg");
-    svg.style.left = laneCell.offsetLeft + "px";
-    svg.style.top = laneCell.parentElement.offsetTop + "px";
-  }
+  pane.scrollLeft = 0;
+  const wrap = pane.querySelector(".codewrap");
+  const regLinks = wrap.querySelector("svg.reglinks");
+  regLinks.setAttribute("width", wrap.scrollWidth);
+  regLinks.setAttribute("height", wrap.scrollHeight);
 }
 
 // --- Tier view ---------------------------------------------------------
@@ -761,6 +954,15 @@ document.addEventListener("mouseover", (event) => {
   clearMarks();
   const target = event.target;
 
+  // A virtual register: its mentions and def-to-read lines. The pinned one
+  // shows whenever the cursor is on no other.
+  const regElement = target.closest("#code .vr");
+  showRegister(regElement ? +regElement.dataset.reg : pinnedReg);
+  if (regElement) {
+    if (!regElement.title) regElement.title = regTitle(+regElement.dataset.reg);
+    return;
+  }
+
   // A memory op: it, its inputs, and what waits on it.
   const opElement = target.closest(".chip[data-op], rect[data-op]");
   if (opElement) {
@@ -811,6 +1013,28 @@ document.getElementById("tiers").addEventListener("click", (event) => {
   row.classList.remove("flash");
   void row.offsetWidth;
   row.classList.add("flash");
+});
+
+// Clicking a register keeps it shown while you scroll to far-off reads;
+// clicking it again or Esc lets go.
+document.getElementById("code").addEventListener("click", (event) => {
+  const regElement = event.target.closest(".vr");
+  if (!regElement || !REGION) return;
+  const reg = +regElement.dataset.reg;
+  pinnedReg = pinnedReg === reg ? null : reg;
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || pinnedReg === null) return;
+  pinnedReg = null;
+  showRegister(null);
+});
+
+// The register rail follows the pinned columns when the pane scrolls sideways.
+let codeScrollLeft = 0;
+document.getElementById("code").addEventListener("scroll", (event) => {
+  if (event.target.scrollLeft === codeScrollLeft) return;
+  codeScrollLeft = event.target.scrollLeft;
+  if (shownReg !== null) drawRegister();
 });
 </script>
 </body>

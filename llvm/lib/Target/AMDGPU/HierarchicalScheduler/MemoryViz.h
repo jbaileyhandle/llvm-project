@@ -10,6 +10,8 @@
 //     issues, and its VGPR and SGPR pressure. The pressure is split into the
 //     registers holding load results, which of those the load hasn't filled
 //     yet (in flight), and everything else.
+//   - The virtual registers each instruction writes and reads, and those the
+//     region leaves live, so the viewer can link definitions to uses.
 //   - Every memory op: its type, which wait queues it goes in, when it issues
 //     and when its data is back, and the rows whose waits pop it. Barriers
 //     are listed with the ops, so the tier view can place them.
@@ -88,6 +90,12 @@ struct MemoryVizRow {
   // Index into the region's ops and waits, or -1.
   int op = -1;
   int wait = -1;
+
+  // The virtual registers it writes and reads, by number (%85 is 85). A
+  // write to part of a register that keeps the rest (a subregister def
+  // without undef) also reads it.
+  std::vector<int> defs;
+  std::vector<int> uses;
 };
 
 /// A wait that moved the clock past a stuck load's inputs, and by how much.
@@ -177,6 +185,9 @@ struct MemoryVizRegion {
   // This schedule's tiers, in order. If the region end stalls, the last one
   // starts there and holds no op.
   std::vector<MemoryVizTier> tiers;
+
+  // The virtual registers read after the region, by number.
+  std::vector<int> live_out;
 };
 
 class MemoryViz {
