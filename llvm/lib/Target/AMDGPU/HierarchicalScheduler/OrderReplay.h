@@ -9,12 +9,14 @@
 //   {
 //     "function": "<mangled function name>",
 //     "regions": [
-//       {"block": <block number>, "instrs": ["<MIR text>", ...]},
+//       {"index": <region index>, "block": <block number>,
+//        "instrs": ["<MIR text>", ...]},
 //       ...
 //     ]
 //   }
-// Regions are listed in program order. Each instruction is named by its MIR
-// text as the memory viewer's dump prints it. See
+// A region is named by its index (RegionInfo::GetIndex), the same number the
+// memory viewer's dump gives it. Each instruction is named by its MIR text as
+// the dump prints it (InstrText). See
 // llvm/docs/AMDGPUMemoryViewerReorderPlan.md.
 //
 //===----------------------------------------------------------------------===//
@@ -23,20 +25,53 @@
 #define LLVM_LIB_TARGET_AMDGPU_HIERARCHICALSCHEDULER_ORDERREPLAY_H
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/CodeGen/ScheduleDAG.h"
+#include <map>
 #include <string>
+#include <vector>
 
 namespace llvm {
 namespace hierarchical_scheduler {
 
-// Return the path of the order file that names `function_name` (mangled), or
-// nullptr if none does. The returned pointer stays valid for the whole
-// compile.
+// One region of an order file: its block's number, and its instructions'
+// texts (InstrText) in the order to replay.
+struct OrderFileRegion {
+  int block_number = -1;
+  std::vector<std::string> instr_texts;
+};
+
+// One order file, read whole.
+struct OrderFile {
+  std::string path;
+  std::string function_name;
+  // Keyed by region index (RegionInfo::GetIndex).
+  std::map<int, OrderFileRegion> regions;
+};
+
+// Return the order file that names `function_name` (mangled), or nullptr if
+// none does. The returned pointer stays valid for the whole compile.
 //
-// The first call reads the "function" field of every order file in
-// HierarchicalConfig::Get().order_files; later calls reuse what it read.
-// Fatal on a file that can't be read, isn't valid JSON, or has no "function"
-// string, and on two files naming the same function.
-const std::string *FindOrderFile(StringRef function_name);
+// The first call reads every order file in HierarchicalConfig::Get().order_files;
+// later calls reuse what it read. Fatal on a file that can't be read, isn't
+// valid JSON, or doesn't follow the format above (including a region index
+// listed twice), and on two files naming the same function.
+const OrderFile *FindOrderFile(StringRef function_name);
+
+// Return a region's instructions in the order `order_file` gives them.
+// `sunits` are the region's SUnits as buildSchedGraph made them;
+// `region_index` and `block_number` identify the region.
+//
+// Fatal if the file has no region with that index, or if that region's block
+// number or instruction texts (each text the same number of times) differ
+// from the compiler's region. Each text in the file's region is then paired
+// with the first instruction, in the region's current order, that has that
+// text and isn't paired yet.
+//
+// The caller builds the region's graph beforehand and applies the returned
+// order afterwards, as with ComputeMaliciousSchedule.
+std::vector<SUnit *> ComputeReplayOrder(const OrderFile &order_file,
+                                        int region_index, int block_number,
+                                        std::vector<SUnit> &sunits);
 
 } // namespace hierarchical_scheduler
 } // namespace llvm

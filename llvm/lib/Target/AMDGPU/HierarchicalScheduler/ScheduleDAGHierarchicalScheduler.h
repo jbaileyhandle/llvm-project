@@ -22,7 +22,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineScheduler.h"
 #include <optional>
-#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -32,6 +31,7 @@ class SIMachineFunctionInfo;
 
 namespace hierarchical_scheduler {
 
+struct OrderFile;
 class ScheduleConstructor;
 class ScheduleGraph;
 class ScheduleNode;
@@ -92,8 +92,9 @@ public:
 
   // Put this function's regions in the order given by `order_file`, the order
   // file FindOrderFile returned for it (see OrderReplay.h). Runs after the
-  // configured scheduler.
-  void RunOrderReplay(const std::string &order_file);
+  // configured scheduler. Fatal if the file doesn't have exactly this
+  // function's regions with exactly their instructions.
+  void RunOrderReplay(const OrderFile &order_file);
 
   // Main hierarchical scheduling path. Builds the LLVM DAG and our
   // ScheduleGraph for each region. Currently a no-op for scheduling — this

@@ -113,12 +113,21 @@ first reader. It mirrors the `memory_viz` dump's fields:
 
 ```json
 {"function": "_Z8dfs_testPKfPfi",
- "regions": [{"block": 0, "instrs": ["%2:sgpr_64 = PRED_COPY $sgpr4_sgpr5", "..."]}, ...]}
+ "regions": [{"index": 3, "block": 0, "instrs": ["%2:sgpr_64 = PRED_COPY $sgpr4_sgpr5", "..."]}, ...]}
 ```
 
 - `function`: the function's name, as LLVM has it (mangled).
-- `regions`: every region in program order, with its block number and its instructions' texts
-  in order.
+- `regions`: each region with its index, its block number, and its instructions' texts in
+  order.
+
+**A region's index** names it across compiles. It's the order the scheduling driver
+(`scheduleRegions`) visits regions in: blocks in function order, each block's regions bottom-up.
+That's the dump's `index` (the length analyzer counts every region it's given), and Hier's pass
+records the same number in `schedule()` (`RegionInfo::GetIndex`), before `finalizeSchedule`
+sorts its regions by occupancy. Both passes get the same regions from the same driver, and
+region boundaries don't move when a region is reordered. The block number and the texts are
+then checked against the compiler's region, so a misnumbered region is a fatal error, not a
+silent mismatch.
 
 A file that can't be read, isn't valid JSON or has no `function` string is a fatal error, and
 so are two files naming one function.
@@ -138,14 +147,29 @@ file with two independent rows swapped by hand.
 `ComputeMaliciousSchedule`, `OrderReplay.{h,cpp}` returns a region's order, and the caller
 builds the graph and applies it.
 
-**3a: match only.** For each region of a named function:
-1. Find the order file's region in the same block with the same instructions, meaning the same
-   texts with the same counts. If there is none, or more than one, stop with a fatal error.
-2. Match the texts to instructions as above, and print the resulting order without applying
-   it.
+**3a: match only.** The compiler and the dump print instructions with one shared function,
+`InstrText` (`InstrText.{h,cpp}`). For each region of a named function, `ComputeReplayOrder`:
+1. Takes the order file's region with the same index. It's a fatal error if there is none, if
+   its block differs, or if its texts (with their counts) differ from the region's.
+   `RunOrderReplay` also checks that the file has as many regions as the function.
+2. Pairs each text with the first unpaired instruction that has it, and returns the order.
+   `RunOrderReplay` prints whether it equals the current order, without applying it.
 
 **Check:** an unedited file, replayed after the same scheduler that made the dump, matches the
-current order in every region.
+current order in every region. Done for MaxOccupancy on `dfs_test` and hip_stencil `high_rp`,
+and Hier on `dfs_test`.
+
+This needed a fix to `RegionInfo`: it stored the region's first instruction, which a stage that
+reorders the region can move down, so a later stage saw the region with its top cut off. It now
+anchors on the scheduling boundary above the region, which no scheduler moves. Before the fix,
+Hier's own length pass hit this on d3q19 (7 regions one instruction short).
+
+**Hier isn't deterministic on every kernel.** Its occupancy search has a wall-clock budget
+(`occupancy.timeout_us`, 10 s by default). On hip_stencil `high_rp` region 7 (639 instructions)
+it reaches occupancy 4 or 5 depending on how far it gets (20.5M to 22.1M search calls seen). A
+replay compile then starts from a different order, and sets a different occupancy target, than
+the dump compile did. So checks that expect identical output under Hier are run only where Hier
+is deterministic (`dfs_test`); `high_rp` is checked under MaxOccupancy.
 
 **3b: apply.** Check and measure the order with `MakeConstructorForInstrOrder`, which is fatal
 if it isn't legal. Then write it with `ApplyScheduleOrder`.
@@ -153,7 +177,8 @@ if it isn't legal. Then write it with `ApplyScheduleOrder`.
 **Checks:**
 - Replaying an unedited export changes nothing: with the dump compile's `misched.txt` plus the
   `order_file` line, the device assembly is identical to the dump compile's. Run it for
-  hip_stencil `high_rp` under MaxOccupancy, the same under Hier, and `dfs_test`.
+  hip_stencil `high_rp` and `dfs_test` under MaxOccupancy, and `dfs_test` under Hier (see the
+  determinism note in 3a).
 - Replaying an edited file: the new dump has the moved rows where they were put.
 - A hand-edited file that puts a use above its def stops with the fatal error.
 
