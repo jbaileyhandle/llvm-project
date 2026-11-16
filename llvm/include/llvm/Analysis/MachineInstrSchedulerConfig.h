@@ -317,6 +317,9 @@ class MachineInstrSchedulerConfig {
         // `GetConfig().GetFlags().skip_length_pass`.
         const Flags &GetFlags() const { return flags_; }
 
+        // The paths from misched.txt's `order_file` lines.
+        const std::vector<std::string> &GetOrderFiles() const { return order_files_; }
+
         // The typed unscoped global settings parsed from misched.txt. Read e.g.
         // `GetConfig().GetGlobalSettings().unroll_threshold`.
         const GlobalSettings &GetGlobalSettings() const { return global_settings_; }
@@ -353,8 +356,8 @@ class MachineInstrSchedulerConfig {
         void ParseConfigFile(std::ifstream &misched_config_file);
         // ... dispatching each line on its first word (the per-function
         // line kinds `kernel`, `kernel_latencies`, `kernel_scheduler_only`
-        // / `_skip`; anything else is whitespace-tokenized option
-        // tokens) ...
+        // / `_skip`, and `order_file`; anything else is whitespace-tokenized
+        // option tokens) ...
         void ParseConfigLine(llvm::StringRef trimmed);
         // ... then enforce the cross-line rules that need the whole file
         // parsed (exactly one scheduler; scheduler-filter support;
@@ -437,6 +440,11 @@ class MachineInstrSchedulerConfig {
         void ParseKernelSchedulerFilterLine(const std::string &rest,
                                             bool only_mode);
 
+        // Parse an `order_file <path>` line (the text after the leading
+        // `order_file` keyword). Fatal on: an empty or unreadable path, or a
+        // path listed twice.
+        void ParseOrderFileLine(const std::string &rest);
+
         // Map a scheduler-name token to the Scheduler enum, or
         // Scheduler::InvalidOption if it is not a scheduler name.
         static Scheduler GetSchedulerFromName(llvm::StringRef name);
@@ -457,6 +465,11 @@ class MachineInstrSchedulerConfig {
         KernelSchedulerFilterMode kernel_scheduler_filter_mode_ =
             KernelSchedulerFilterMode::kNone;
         std::set<std::string> kernel_scheduler_filter_signatures_;
+
+        // Paths from `order_file` lines. Each names a file giving one
+        // function's instruction order, which the hierarchical scheduler's
+        // pass replays.
+        std::vector<std::string> order_files_;
 
         // Typed boolean flags (the spelling -> field table is in the .cpp).
         Flags flags_;

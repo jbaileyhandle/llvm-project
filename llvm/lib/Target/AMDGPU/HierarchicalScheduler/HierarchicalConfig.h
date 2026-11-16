@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace llvm {
 
@@ -329,6 +330,10 @@ struct HierarchicalConfig {
   // length_ignore_occupancy (enforced in Build).
   MinAdjustedLengthConfig min_adjusted_length_config;
   PipeMixConfig pipe_mix_config;
+  // Paths from misched.txt's `order_file` lines. Each file gives one
+  // function's instruction order, replayed after the configured scheduler
+  // has run.
+  std::vector<std::string> order_files;
 
   /// Build the typed config from the generic config's scoped settings.
   /// Per pass: built-in defaults -> named preset (if any) -> explicit

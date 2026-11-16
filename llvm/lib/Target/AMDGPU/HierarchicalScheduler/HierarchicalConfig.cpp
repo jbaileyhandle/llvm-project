@@ -756,6 +756,7 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   MirrorFlags(cfg.GetFlags(), hs);
   ValidatePassComposition(hs);
   MirrorAndValidateTimeBudgets(cfg.GetGlobalSettings(), hs);
+  hs.order_files = cfg.GetOrderFiles();
 
   return hs;
 }
@@ -842,6 +843,14 @@ std::string HierarchicalConfig::ToString() const {
              ? std::to_string(*pipe_mix_config.time_per_instr_us)
              : "off")
      << "\n";
+  if (order_files.empty()) {
+    os << "\torder_files: none\n";
+  } else {
+    os << "\torder_files:\n";
+    for (const std::string &order_file : order_files) {
+      os << "\t\t" << order_file << "\n";
+    }
+  }
   return os.str();
 }
 

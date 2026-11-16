@@ -538,6 +538,32 @@ void MachineInstrSchedulerConfig::ParseKernelLatenciesLine(const std::string &re
         demangled_func_signature_to_latencies_[demangled_func_signature]);
 }
 
+void MachineInstrSchedulerConfig::ParseOrderFileLine(const std::string &rest) {
+    if (rest.empty()) {
+        report_fatal_error("misched.txt: order_file line has no path "
+                           "(expected `order_file <path>`)");
+    }
+
+    // The file must be readable now, so a typo in the path stops the compile
+    // instead of leaving the function unreplayed. A relative path resolves
+    // against the compiler's working directory, as misched.txt itself does.
+    std::ifstream probe(rest);
+    if (!probe) {
+        report_fatal_error(Twine("misched.txt: order_file '") + rest +
+                           "' is not readable");
+    }
+
+    // A path listed twice is fatal, like a duplicate kernel_scheduler_only line.
+    for (const std::string &existing : order_files_) {
+        if (existing == rest) {
+            report_fatal_error(Twine("misched.txt: duplicate order_file line "
+                                     "for '") + rest + "'");
+        }
+    }
+
+    order_files_.push_back(rest);
+}
+
 std::string MachineInstrSchedulerConfig::ResolveConfigFilePath() {
     // If the MISCHED_CONFIG_FILE environment variable is set, it must name
     // a readable config file -- anything else (missing file, empty value)
@@ -579,6 +605,11 @@ void MachineInstrSchedulerConfig::ParseConfigLine(llvm::StringRef trimmed) {
         first_word == "kernel_scheduler_skip") {
         ParseKernelSchedulerFilterLine(rest.str(),
                                        first_word == "kernel_scheduler_only");
+        return;
+    }
+    // A path can contain spaces too, so the whole rest of the line is the path.
+    if (first_word == "order_file") {
+        ParseOrderFileLine(rest.str());
         return;
     }
     // Anything else is a whitespace-separated list of option tokens (a
@@ -976,6 +1007,14 @@ std::string MachineInstrSchedulerConfig::ToString() const {
         if (latencies.lds_load_latency.has_value()) {
             result += "\t\tlds_load_latency:" +
                       std::to_string(*latencies.lds_load_latency) + "\n";
+        }
+    }
+
+    // Order files, as listed in misched.txt
+    if (!order_files_.empty()) {
+        result += "\tOrder files:\n";
+        for (const std::string &order_file : order_files_) {
+            result += "\t\t" + order_file + "\n";
         }
     }
 
