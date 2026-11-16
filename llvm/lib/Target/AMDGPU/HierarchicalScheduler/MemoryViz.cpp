@@ -8,6 +8,7 @@
 #include "GCNRegPressure.h"
 #include "GCNRegisterTracker.h"
 #include "GCNSubtarget.h"
+#include "InstrText.h"
 #include "MemoryGraph.h"
 #include "RegionInfo.h"
 #include "SIMachineFunctionInfo.h"
@@ -37,28 +38,6 @@ using namespace llvm;
 using namespace llvm::hierarchical_scheduler;
 
 namespace {
-
-// One line of an instruction's text, with no debug location and its
-// newlines and tabs flattened to spaces. A copy of ScheduleLengthAnalysis.cpp's
-// InstrText, so the two viewers print instructions the same way.
-std::string InstrText(const MachineInstr &mi) {
-  std::string text;
-  raw_string_ostream os(text);
-  mi.print(os, /*IsStandalone=*/true, /*SkipOpers=*/false,
-           /*SkipDebugLoc=*/true, /*AddNewLine=*/false);
-  os.flush();
-  for (char &c : text) {
-    if (c == '\n' || c == '\t' || c == '\r') {
-      c = ' ';
-    }
-  }
-  const size_t begin = text.find_first_not_of(' ');
-  const size_t end = text.find_last_not_of(' ');
-  if (begin == std::string::npos) {
-    return std::string();
-  }
-  return text.substr(begin, end - begin + 1);
-}
 
 // `name` made safe for a filename. A copy of ScheduleLengthAnalysis.cpp's
 // SanitizeForFilename, so both viewers' files for a function have the same

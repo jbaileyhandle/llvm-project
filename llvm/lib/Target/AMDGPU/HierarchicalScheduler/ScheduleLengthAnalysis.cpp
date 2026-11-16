@@ -9,6 +9,7 @@
 #include "GCNRegPressure.h"
 #include "GCNRegisterTracker.h"
 #include "GCNSubtarget.h"
+#include "InstrText.h"
 #include "RegionInfo.h"
 #include "SIMachineFunctionInfo.h"
 #include "ScheduleConstructor.h"
@@ -39,26 +40,6 @@ namespace {
 // part as a percentage of whole; 0 when whole is 0.
 double Percent(int part, int whole) {
   return whole > 0 ? 100.0 * part / whole : 0.0;
-}
-
-// One line of an instruction's text (no debug location, no trailing newline),
-// with internal newlines/tabs flattened to single spaces so it stays on one
-// timeline row.
-std::string InstrText(const MachineInstr &mi) {
-  std::string s;
-  raw_string_ostream os(s);
-  mi.print(os, /*IsStandalone=*/true, /*SkipOpers=*/false,
-           /*SkipDebugLoc=*/true, /*AddNewLine=*/false);
-  os.flush();
-  for (char &c : s) {
-    if (c == '\n' || c == '\t' || c == '\r') {
-      c = ' ';
-    }
-  }
-  // Trim leading/trailing spaces.
-  size_t b = s.find_first_not_of(' ');
-  size_t e = s.find_last_not_of(' ');
-  return b == std::string::npos ? std::string() : s.substr(b, e - b + 1);
 }
 
 // Escape a string for embedding in a JSON double-quoted literal.
