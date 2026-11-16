@@ -48,9 +48,10 @@ void ScheduleDAGLengthAnalyzer::schedule() {
     printed_banner_ = true;
   }
 
-  // Both analyses label the region with the same program-order index.
+  // Both analyses label the region with the same visit-order index (see
+  // RegionInfo::GetIndex).
   const int region_index = region_index_++;
-  RegionInfo region(RegionBegin, RegionEnd, *lis_);
+  RegionInfo region(RegionBegin, RegionEnd, *lis_, region_index);
 
   // Schedule length and bubbles.
   RegionViz viz = ScheduleLengthAnalyzer::AnalyzeRegionFinalSchedule(

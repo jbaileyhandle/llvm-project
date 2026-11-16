@@ -85,7 +85,11 @@ void ScheduleDAGHierarchicalScheduler::schedule() {
   // binding region first; if we can't raise its occupancy, no
   // amount of work on the other regions can raise the kernel
   // ceiling, and the occupancy pass can exit immediately.
-  RegionInfo region(RegionBegin, RegionEnd, *LIS);
+  //
+  // The index numbers the region in visit order, which finalizeSchedule's
+  // sort of regions_ loses (see RegionInfo::GetIndex).
+  RegionInfo region(RegionBegin, RegionEnd, *LIS,
+                    static_cast<int>(regions_.size()));
   regions_.push_back(region);
 
   // TODO: Remove this temporary print once we've confirmed the pass runs.

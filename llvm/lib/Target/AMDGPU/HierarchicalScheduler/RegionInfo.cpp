@@ -19,8 +19,15 @@ using namespace llvm::hierarchical_scheduler;
 
 RegionInfo::RegionInfo(MachineBasicBlock::iterator begin,
                        MachineBasicBlock::iterator end,
-                       const LiveIntervals &lis)
-    : begin_(begin), end_(end) {
+                       const LiveIntervals &lis, int index)
+    : block_(begin->getParent()),
+      starts_block_(begin == begin->getParent()->begin()), end_(end),
+      index_(index) {
+  // Anchor the region on the boundary above it (see boundary_above_).
+  if (!starts_block_) {
+    boundary_above_ = std::prev(begin);
+  }
+
   // Walk [begin, end) forward, letting LLVM's downward tracker
   // compute the per-dimension peak pressure from LiveIntervals.
   GCNDownwardRPTracker tracker(lis);
