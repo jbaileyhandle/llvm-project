@@ -14,6 +14,7 @@ set(HIERARCHICAL_SCHEDULER_SOURCES
   HierarchicalScheduler/HierarchicalConfig.cpp
   HierarchicalScheduler/Shakedowns.cpp
   HierarchicalScheduler/MaliciousScheduler.cpp
+  HierarchicalScheduler/OrderReplay.cpp
   HierarchicalScheduler/ScheduleGraph.cpp
   HierarchicalScheduler/DominatorTree.cpp
   HierarchicalScheduler/RegisterTracker.cpp

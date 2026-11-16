@@ -18,6 +18,7 @@
 #include "GCNRegisterTracker.h"
 #include "HierarchicalConfig.h"
 #include "MaliciousScheduler.h"
+#include "OrderReplay.h"
 #include "ScheduleConstructor.h"
 #include "SearchPolicies.h"
 #include "SubgraphDagDump.h"
@@ -58,6 +59,17 @@ NextIfDebug(MachineBasicBlock::iterator I,
 ScheduleDAGHierarchicalScheduler::ScheduleDAGHierarchicalScheduler(
     MachineSchedContext *C, std::unique_ptr<MachineSchedStrategy> S)
     : ScheduleDAGMILive(C, std::move(S)) {}
+
+// Reads the generic config, not HierarchicalConfig::Get(): this runs at pass
+// setup for every gfx906 compile, and Get() would build and validate the whole
+// hierarchical config even when only MaxOccupancy is configured.
+bool ScheduleDAGHierarchicalScheduler::IsPassWanted() {
+  const MachineInstrSchedulerConfig &config =
+      MachineInstrSchedulerConfig::GetConfig();
+  return config.IsHierarchicalScheduler() ||
+         config.GetFlags().malicious ||
+         !config.GetOrderFiles().empty();
+}
 
 // Called per-region by the outer driver (scheduleRegions). We record the region
 // boundaries for later use in finalizeSchedule(), rather than scheduling now.
@@ -146,10 +158,21 @@ void ScheduleDAGHierarchicalScheduler::finalizeSchedule() {
                  << r.GetOriginalRegisterOnlyOccupancy() << "\n";
   }
 
+  // The scheduler, if this pass has one to run: the malicious scheduler, or
+  // the hierarchical scheduler when it is the configured scheduler. Neither
+  // runs when the pass is here only to replay order files (see IsPassWanted).
+  const bool hierarchical_configured =
+      MachineInstrSchedulerConfig::GetConfig().IsHierarchicalScheduler();
   if (HierarchicalConfig::Get().malicious) {
     RunMaliciousScheduler();
-  } else {
+  } else if (hierarchical_configured) {
     RunHierarchicalScheduler();
+  }
+
+  // Then, if an order file names this function, replay its order.
+  const std::string *order_file = FindOrderFile(MF.getName());
+  if (order_file != nullptr) {
+    RunOrderReplay(*order_file);
   }
 
   FlushSearchOutcomes();
@@ -176,6 +199,15 @@ void ScheduleDAGHierarchicalScheduler::RunMaliciousScheduler() {
       ApplyScheduleOrder(region, order);
     });
   }
+}
+
+// Put this function's regions in the order `order_file` gives. For now this
+// only reports that the function would be replayed.
+void ScheduleDAGHierarchicalScheduler::RunOrderReplay(
+    const std::string &order_file) {
+  // TODO: Replace this temporary print with the replay.
+  llvm::outs() << "OrderReplay: order this function: " << MF.getName()
+               << " (from " << order_file << ")\n";
 }
 
 // Per-region graph-construction helper. See header for rationale.

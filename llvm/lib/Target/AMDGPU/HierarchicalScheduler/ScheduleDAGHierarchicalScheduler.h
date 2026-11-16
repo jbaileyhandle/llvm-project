@@ -22,6 +22,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineScheduler.h"
 #include <optional>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -46,6 +47,12 @@ class ScheduleDAGHierarchicalScheduler : public ScheduleDAGMILive {
 public:
   ScheduleDAGHierarchicalScheduler(MachineSchedContext *C,
                                    std::unique_ptr<MachineSchedStrategy> S);
+
+  // True if misched.txt wants this scheduler's pass for any of its three
+  // jobs: the hierarchical scheduler is the configured scheduler, the
+  // `malicious` flag is set, or an `order_file` line names a function to
+  // replay. GCNPassConfig inserts the pass only then.
+  static bool IsPassWanted();
 
   // Called per-region by the outer driver. Records the region for later
   // processing in finalizeSchedule().
@@ -82,6 +89,11 @@ public:
   // Run the malicious scheduler over all recorded regions. For each region,
   // builds the DAG, computes the malicious schedule, and applies it.
   void RunMaliciousScheduler();
+
+  // Put this function's regions in the order given by `order_file`, the order
+  // file FindOrderFile returned for it (see OrderReplay.h). Runs after the
+  // configured scheduler.
+  void RunOrderReplay(const std::string &order_file);
 
   // Main hierarchical scheduling path. Builds the LLVM DAG and our
   // ScheduleGraph for each region. Currently a no-op for scheduling — this

@@ -88,30 +88,40 @@ Plugged in the way the malicious scheduler is: a setting in `misched.txt`, a cal
 `ScheduleDAGHierarchicalScheduler::finalizeSchedule`, and the logic in its own files.
 
 **When Hier's pass runs:** if any of three is wanted: the hierarchical scheduler, the malicious
-scheduler, or an order file. Today `GCNPassConfig` (`AMDGPUTargetMachine.cpp`) inserts Hier's
-pass only when the scheduler is `HierarchicalScheduler`. It would also insert it when
-`misched.txt` has an `order_file` line, right after whichever scheduler pass runs last (the
-normal one, or OptSched's), with the length analysis after it. So with `MaxOccupancy`,
-`MaxIlp` or OptSched (ACO) configured, that scheduler runs as usual, and Hier's pass then only
-replays.
+scheduler, or an order file. `ScheduleDAGHierarchicalScheduler::IsPassWanted()` says whether
+`misched.txt` asks for any of them, reading the generic config. When it does, `GCNPassConfig`
+(`AMDGPUTargetMachine.cpp`) inserts Hier's pass right after the configured scheduler's last
+pass (OptSched's when OptSched is configured, else the normal one), and the length analysis
+goes after Hier's pass. So with `MaxOccupancy`, `MaxIlp` or OptSched (ACO) configured, that
+scheduler runs as usual, and Hier's pass then only does what `misched.txt` asks of it. One
+consequence: `MaxOccupancy` plus `malicious` used to do nothing, and now runs the malicious
+scheduler after MaxOccupancy.
 
 **`finalizeSchedule`** does each wanted part in turn:
-1. The hierarchical or the malicious scheduler, if one is configured. This is the existing
-   branch, now with a check that the hierarchical scheduler is configured, since Hier's pass
-   also runs without it.
-2. Right after it, if an order file names this function, the replay. In this step it only
-   prints a line.
+1. The malicious scheduler if `malicious` is set, else the hierarchical scheduler if it is the
+   configured scheduler.
+2. Right after it, if an order file names this function, the replay (`RunOrderReplay`). In
+   this step it only prints a line.
 
 The `kernel_scheduler` filter's early return at the top stays as it is, so a function the
 filter excludes isn't replayed. A function no order file names keeps the schedule of the
 scheduler in use.
 
 **New files `OrderReplay.{h,cpp}`** read the order files, enough to know which function each
-names. That fixes the file format here, not in step 4, since this is its first reader:
-- The function's name, as LLVM has it (mangled).
-- For every region in program order: its block number, and its instructions' texts in order.
+names (`FindOrderFile`). That fixes the file format here, not in step 4, since this is its
+first reader. It mirrors the `memory_viz` dump's fields:
 
-Two files naming one function is a fatal error.
+```json
+{"function": "_Z8dfs_testPKfPfi",
+ "regions": [{"block": 0, "instrs": ["%2:sgpr_64 = PRED_COPY $sgpr4_sgpr5", "..."]}, ...]}
+```
+
+- `function`: the function's name, as LLVM has it (mangled).
+- `regions`: every region in program order, with its block number and its instructions' texts
+  in order.
+
+A file that can't be read, isn't valid JSON or has no `function` string is a fatal error, and
+so are two files naming one function.
 
 **Checks** on `dfs_test`:
 - With an order file naming a function, the line prints for that function only.

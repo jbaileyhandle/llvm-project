@@ -1561,22 +1561,27 @@ void GCNPassConfig::addOptimizedRegAlloc() {
   // We insert them after whichever scheduler pass runs last.
   const MachineInstrSchedulerConfig &config = MachineInstrSchedulerConfig::GetConfig();
 
-  // If the hierarchical scheduler is configured, insert it right after the
-  // normal MachineScheduler pass. This is the "packaged pair" — the normal
-  // AMDGPU scheduler runs first (added by TargetPassConfig::addOptimizedRegAlloc),
-  // then our scheduler runs immediately after it.
-  if (config.IsHierarchicalScheduler()) {
-      insertPass(&MachineSchedulerID, &MachineSchedulerHierarchicalID);
-  }
-
   // Determine which pass ID is the last *real* (reordering) pre-RA scheduler.
+  // Start with the configured scheduler's last pass: OptSched's when it is
+  // configured (TargetPassConfig::addOptimizedRegAlloc adds it right after the
+  // normal MachineScheduler pass), else the normal MachineScheduler pass.
   const char *last_real_sched_pass_id;
-  if (config.IsHierarchicalScheduler()) {
-      last_real_sched_pass_id = &MachineSchedulerHierarchicalID;
-  } else if (config.IsOptSched()) {
+  if (config.IsOptSched()) {
       last_real_sched_pass_id = &MachineSchedulerOptSchedID;
   } else {
       last_real_sched_pass_id = &MachineSchedulerID;
+  }
+
+  // If misched.txt wants the hierarchical scheduler's pass (see
+  // ScheduleDAGHierarchicalScheduler::IsPassWanted), insert it right after
+  // that pass, where it becomes the last. With HierarchicalScheduler
+  // configured this is the "packaged pair": the normal AMDGPU scheduler runs
+  // first, then ours. With another scheduler configured, that scheduler runs
+  // as usual and ours then does only what misched.txt asks of it (the
+  // malicious scheduler, or replaying an order file).
+  if (hierarchical_scheduler::ScheduleDAGHierarchicalScheduler::IsPassWanted()) {
+      insertPass(last_real_sched_pass_id, &MachineSchedulerHierarchicalID);
+      last_real_sched_pass_id = &MachineSchedulerHierarchicalID;
   }
 
   // Always insert the schedule-length analyzer immediately after the last real
