@@ -61,9 +61,10 @@ const OrderFile *FindOrderFile(StringRef function_name);
 // `sunits` are the region's SUnits as buildSchedGraph made them;
 // `region_index` and `block_number` identify the region.
 //
-// Fatal if the file has no region with that index, or if that region's block
+// Fatal if the file has no region with that index, if that region's block
 // number or instruction texts (each text the same number of times) differ
-// from the compiler's region. Each text in the file's region is then paired
+// from the compiler's region, or if the file's order puts an instruction
+// above one it depends on. Each text in the file's region is then paired
 // with the first instruction, in the region's current order, that has that
 // text and isn't paired yet.
 //

@@ -141,6 +141,43 @@ const StringMap<OrderFile> &OrderFilesByFunction() {
   return order_files_by_function;
 }
 
+// Stop the compile if `order`, the file's order for region `region_index`,
+// puts an instruction above one of its predecessors. `order` must hold each
+// of the region's SUnits exactly once. The region's graph would reject such an
+// order too, when the caller schedules it, but its error can't name the
+// instructions.
+void CheckOrderKeepsDependences(const OrderFile &order_file, int region_index,
+                                const std::vector<SUnit *> &order) {
+  // Each instruction's position in the order, indexed by NodeNum
+  // (buildSchedGraph numbers a region's SUnits 0, 1, ...).
+  std::vector<int> position_in_order(order.size());
+  for (int position = 0; position < static_cast<int>(order.size());
+       ++position) {
+    position_in_order[order[position]->NodeNum] = position;
+  }
+
+  // Every instruction must come after its predecessors. Edges are skipped
+  // like the graph skips them: weak edges, which the scheduler doesn't wait
+  // on, and edges from the region's boundary.
+  for (SUnit *sunit : order) {
+    for (const SDep &edge : sunit->Preds) {
+      const SUnit *predecessor = edge.getSUnit();
+      if (edge.isWeak() || predecessor->isBoundaryNode()) {
+        continue;
+      }
+
+      if (position_in_order[predecessor->NodeNum] >
+          position_in_order[sunit->NodeNum]) {
+        FailOrderFile(order_file.path,
+                      Twine("region ") + Twine(region_index) + " puts '" +
+                          InstrText(*sunit->getInstr()) + "' above '" +
+                          InstrText(*predecessor->getInstr()) +
+                          "', which it depends on");
+      }
+    }
+  }
+}
+
 } // namespace
 
 const OrderFile *
@@ -206,6 +243,9 @@ std::vector<SUnit *> hierarchical_scheduler::ComputeReplayOrder(
                       " instructions, but the compiler's region has " +
                       Twine(sunits.size()));
   }
+
+  // The order must keep every dependence.
+  CheckOrderKeepsDependences(order_file, region_index, order);
 
   return order;
 }

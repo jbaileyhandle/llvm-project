@@ -93,7 +93,8 @@ public:
   // Put this function's regions in the order given by `order_file`, the order
   // file FindOrderFile returned for it (see OrderReplay.h). Runs after the
   // configured scheduler. Fatal if the file doesn't have exactly this
-  // function's regions with exactly their instructions.
+  // function's regions with exactly their instructions, or puts an
+  // instruction above one it depends on.
   void RunOrderReplay(const OrderFile &order_file);
 
   // Main hierarchical scheduling path. Builds the LLVM DAG and our

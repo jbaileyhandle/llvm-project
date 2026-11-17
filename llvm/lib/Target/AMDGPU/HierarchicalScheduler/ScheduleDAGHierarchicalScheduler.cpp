@@ -17,7 +17,6 @@
 #include "OccupancySearchDispatch.h"
 #include "GCNRegisterTracker.h"
 #include "HierarchicalConfig.h"
-#include "InstrText.h"
 #include "MaliciousScheduler.h"
 #include "OrderReplay.h"
 #include "ScheduleConstructor.h"
@@ -206,9 +205,9 @@ void ScheduleDAGHierarchicalScheduler::RunMaliciousScheduler() {
   }
 }
 
-// Put this function's regions in the order `order_file` gives. For now this
-// only matches the file to the regions and reports, per region, whether its
-// order would change; nothing is applied.
+// Put this function's regions in the order `order_file` gives. Like
+// RunTopoPass, each region's order is scheduled on the region's graph, then
+// applied.
 void ScheduleDAGHierarchicalScheduler::RunOrderReplay(
     const OrderFile &order_file) {
   // The file must have exactly this function's regions. ComputeReplayOrder
@@ -219,41 +218,35 @@ void ScheduleDAGHierarchicalScheduler::RunOrderReplay(
                        MF.getName() + " has " + Twine(regions_.size()));
   }
 
-  // TODO: Remove this temporary print.
+  // Kept so the log shows which compiles replayed a file. Without it, a
+  // replay that leaves the order unchanged looks like a normal compile.
   llvm::outs() << "OrderReplay: " << MF.getName() << " from "
                << order_file.path << "\n";
 
+  const GCNSubtarget &st =
+      static_cast<const GCNSubtarget &>(MF.getSubtarget());
+
   for (RegionInfo &region : regions_) {
-    ProcessRegion(region, [&]() {
-      buildSchedGraph(AA);
+    WithRegionGraph(region, [&](ScheduleGraph &graph) {
+      // The file's order for this region, paired with the region's
+      // instructions.
       std::vector<SUnit *> order =
           ComputeReplayOrder(order_file, region.GetIndex(),
                              region.GetBlock()->getNumber(), SUnits);
 
-      // TODO: Apply the order. For now, compare it with the current order,
-      // which is the order of SUnits, and find where they first differ.
-      int first_difference = -1;
-      for (size_t i = 0; i < order.size(); ++i) {
-        if (order[i] != &SUnits[i]) {
-          first_difference = static_cast<int>(i);
-          break;
-        }
+      std::vector<MachineInstr *> instr_order;
+      instr_order.reserve(order.size());
+      for (SUnit *su : order) {
+        instr_order.push_back(su->getInstr());
       }
 
-      // TODO: Remove this temporary print.
-      llvm::outs() << "\tregion " << region.GetIndex() << " (block "
-                   << region.GetBlock()->getNumber() << ", " << order.size()
-                   << " instrs): ";
-      if (first_difference < 0) {
-        llvm::outs() << "same as current\n";
-      } else {
-        llvm::outs() << "differs at position " << first_difference
-                     << ": file has '"
-                     << InstrText(*order[first_difference]->getInstr())
-                     << "', current has '"
-                     << InstrText(*SUnits[first_difference].getInstr())
-                     << "'\n";
-      }
+      // Schedule the graph in that order. ComputeReplayOrder has checked that
+      // it keeps every dependence.
+      const ScheduleConstructor schedule_constructor =
+          graph.MakeConstructorForInstrOrder(instr_order, st, MF);
+
+      // Write the order into the function.
+      ApplyScheduleOrder(region, schedule_constructor);
     });
   }
 }
