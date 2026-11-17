@@ -38,26 +38,75 @@ struct MemoryTimes {
   int ideal = 0;
 };
 
-// A function's memory times and whole schedule times, each region's weighted
-// by how many times its block runs, and added up.
+// A function's totals: each region's value weighted by how many times its
+// block runs, and added up.
 struct WeightedTotals {
-  double scheduled_memory_time = 0;
+  // Memory time, in the memory model's time.
+  double memory_time = 0;
   double ideal_memory_time = 0;
 
-  // ideal / scheduled; none when scheduled is 0.
-  std::optional<double> efficiency;
+  // ideal_memory_time / memory_time; none for a function with no reads.
+  std::optional<double> memory_efficiency;
 
-  // Time for all of the schedule's instructions, not just its memory waits:
-  // the sum of the regions' schedule lengths. The ideal one is the same
-  // schedule with only its memory work made ideal: each region's length minus
-  // its memory time gap, floored (see MemoryTimeAnalysis.h).
-  double scheduled_whole_schedule_time = 0;
-  double ideal_whole_schedule_time = 0;
+  // Latency: schedule length in cycles (raw lens), the time for all of the
+  // regions' instructions, and the floor no order beats.
+  double latency = 0;
+  double latency_floor = 0;
 
-  // scheduled / ideal whole schedule time; none when the ideal is 0, which
-  // happens only for a function with no regions.
-  std::optional<double> whole_schedule_time_speedup;
+  // latency_floor / latency; none for a function with no regions.
+  std::optional<double> latency_efficiency;
+
+  // The latency if only the memory work were ideal: each region's latency
+  // minus its memory time gap, never below its floor (see
+  // MemoryTimeAnalysis.h).
+  double latency_with_ideal_memory = 0;
+
+  // The speedups: latency / latency_with_ideal_memory, and latency /
+  // latency_floor. None for a function with no regions.
+  std::optional<double> speedup_with_ideal_memory;
+  std::optional<double> speedup_with_ideal_latency;
 };
+
+// Adds one region's values to `totals`, each weighted by `frequency`. Returns
+// the region's latency with ideal memory: its latency minus its memory time
+// gap, never below its floor (see MemoryTimeAnalysis.h for why the floor).
+int AddRegion(double frequency, int memory_time, int ideal_memory_time,
+              int latency, int latency_floor, WeightedTotals &totals) {
+  // The region's latency with ideal memory.
+  const int memory_time_gap = memory_time - ideal_memory_time;
+  const int latency_with_ideal_memory =
+      std::max(latency - memory_time_gap, latency_floor);
+
+  // Its weighted values.
+  totals.memory_time += frequency * memory_time;
+  totals.ideal_memory_time += frequency * ideal_memory_time;
+  totals.latency += frequency * latency;
+  totals.latency_floor += frequency * latency_floor;
+  totals.latency_with_ideal_memory += frequency * latency_with_ideal_memory;
+  return latency_with_ideal_memory;
+}
+
+// Fills in `totals`' efficiencies and speedups, once every region is added.
+void ComputeRatios(WeightedTotals &totals) {
+  // The efficiencies, ideal / actual. A function with no reads has no memory
+  // time, and no memory efficiency; one with no regions has no latency.
+  if (totals.memory_time > 0) {
+    totals.memory_efficiency = totals.ideal_memory_time / totals.memory_time;
+  }
+  if (totals.latency > 0) {
+    totals.latency_efficiency = totals.latency_floor / totals.latency;
+  }
+
+  // The speedups: the latency over the latency with ideal memory, and over
+  // the floor. A function with no regions has neither.
+  if (totals.latency_with_ideal_memory > 0) {
+    totals.speedup_with_ideal_memory =
+        totals.latency / totals.latency_with_ideal_memory;
+  }
+  if (totals.latency_floor > 0) {
+    totals.speedup_with_ideal_latency = totals.latency / totals.latency_floor;
+  }
+}
 
 // Builds the region's graphs from its final order, then scores that order and
 // the ideal. `sunits` must already be built by buildSchedGraph for `region`.
@@ -98,27 +147,36 @@ MemoryTimes ScoreFinalOrderAndIdeal(MutableArrayRef<SUnit> sunits,
   return memory_times;
 }
 
+// Prints a ratio with three decimals, or "none".
+void PrintRatio(const std::optional<double> &ratio) {
+  if (ratio) {
+    llvm::outs() << format("%.3f", *ratio);
+  } else {
+    llvm::outs() << "none";
+  }
+}
+
 // Prints a function's weighted totals as one line.
 void PrintWeightedTotals(const WeightedTotals &totals) {
-  llvm::outs() << format("\tweighted total: scheduled %.1f, ideal %.1f",
-                         totals.scheduled_memory_time,
-                         totals.ideal_memory_time);
-  if (totals.efficiency) {
-    llvm::outs() << format(", efficiency %.3f", *totals.efficiency);
-  } else {
-    llvm::outs() << ", efficiency none";
-  }
+  // Memory time.
+  llvm::outs() << format("\tweighted total: memory time %.1f, ideal %.1f",
+                         totals.memory_time, totals.ideal_memory_time)
+               << ", efficiency ";
+  PrintRatio(totals.memory_efficiency);
 
-  // The whole schedule times, on the same line.
-  llvm::outs() << format("; whole schedule: scheduled %.1f, ideal %.1f",
-                         totals.scheduled_whole_schedule_time,
-                         totals.ideal_whole_schedule_time);
-  if (totals.whole_schedule_time_speedup) {
-    llvm::outs() << format(", speedup %.3f",
-                           *totals.whole_schedule_time_speedup);
-  } else {
-    llvm::outs() << ", speedup none";
-  }
+  // Latency.
+  llvm::outs() << format("; latency %.1f, floor %.1f", totals.latency,
+                         totals.latency_floor)
+               << ", efficiency ";
+  PrintRatio(totals.latency_efficiency);
+
+  // The what-ifs.
+  llvm::outs() << format("; with ideal memory: latency %.1f",
+                         totals.latency_with_ideal_memory)
+               << ", speedup ";
+  PrintRatio(totals.speedup_with_ideal_memory);
+  llvm::outs() << "; with ideal latency: speedup ";
+  PrintRatio(totals.speedup_with_ideal_latency);
   llvm::outs() << "\n";
 }
 
@@ -136,11 +194,11 @@ std::string QuoteCsvField(StringRef field) {
   return quoted;
 }
 
-// Appends a function's weighted totals as one row of
-// memory_time_analysis.csv:
-//   function,scheduled_memory_time,ideal_memory_time,memory_time_efficiency,
-//   scheduled_whole_schedule_time,ideal_whole_schedule_time,
-//   whole_schedule_time_speedup
+// Appends a function's weighted totals as one row of ideal_time_analysis.csv:
+//   function,memory_time,ideal_memory_time,memory_efficiency,
+//   latency,latency_floor,latency_efficiency,
+//   latency_with_ideal_memory,speedup_with_ideal_memory,
+//   speedup_with_ideal_latency
 // (one line in the file). The function is the demangled signature
 // kernel_resource_usage.csv uses, so the harness can match kernels across the
 // two files. A signature has commas between its parameters, so it's quoted.
@@ -152,31 +210,42 @@ std::string QuoteCsvField(StringRef field) {
 // would write its own.
 void AppendCsvRow(StringRef mangled_function_name,
                   const WeightedTotals &totals) {
-  // Build the row: the function and its memory times.
   std::string row;
   raw_string_ostream row_stream(row);
-  row_stream << QuoteCsvField(
-                    MachineInstrSchedulerConfig::DemangleFunctionSignature(
-                        mangled_function_name.str()))
-             << format(",%.1f,%.1f,", totals.scheduled_memory_time,
-                       totals.ideal_memory_time);
-  if (totals.efficiency) {
-    row_stream << format("%.4f", *totals.efficiency);
-  }
 
-  // Then its whole schedule times.
-  row_stream << format(",%.1f,%.1f,", totals.scheduled_whole_schedule_time,
-                       totals.ideal_whole_schedule_time);
-  if (totals.whole_schedule_time_speedup) {
-    row_stream << format("%.4f", *totals.whole_schedule_time_speedup);
-  }
+  // A ratio with four decimals, or an empty field when there's none.
+  auto append_ratio = [&](const std::optional<double> &ratio) {
+    if (ratio) {
+      row_stream << format("%.4f", *ratio);
+    }
+  };
+
+  // The function.
+  row_stream << QuoteCsvField(
+      MachineInstrSchedulerConfig::DemangleFunctionSignature(
+          mangled_function_name.str()));
+
+  // Its memory time.
+  row_stream << format(",%.1f,%.1f,", totals.memory_time,
+                       totals.ideal_memory_time);
+  append_ratio(totals.memory_efficiency);
+
+  // Its latency.
+  row_stream << format(",%.1f,%.1f,", totals.latency, totals.latency_floor);
+  append_ratio(totals.latency_efficiency);
+
+  // The what-ifs.
+  row_stream << format(",%.1f,", totals.latency_with_ideal_memory);
+  append_ratio(totals.speedup_with_ideal_memory);
+  row_stream << ",";
+  append_ratio(totals.speedup_with_ideal_latency);
   row_stream << "\n";
 
   // Several clang processes of one build can append to the file at the same
   // time. Opened for appending, each write goes to the end of the file with
   // nothing else written in between (POSIX write() with O_APPEND), so sending
   // the whole row in one write keeps rows from mixing, with no lock.
-  std::ofstream csv_file("memory_time_analysis.csv", std::ios::app);
+  std::ofstream csv_file("ideal_time_analysis.csv", std::ios::app);
   if (!csv_file) {
     return;
   }
@@ -247,54 +316,27 @@ void MemoryTimeAnalysis::AnalyzeRegion(MutableArrayRef<SUnit> sunits,
 void MemoryTimeAnalysis::Report() const {
   llvm::outs() << "\n=== Memory-time analysis: " << mf_->getName() << " ===\n";
 
-  // For each region: work out its whole schedule time with only its memory
-  // work made ideal, print the region, and add its times to the function's,
-  // each weighted by how many times its block runs.
+  // For each region: add its values to the function's, weighted by how many
+  // times its block runs, and print it.
   WeightedTotals totals;
   for (const RegionMemoryTime &region : regions_) {
-    // The region's length minus its memory time gap, but never below its
-    // floor. See MemoryTimeAnalysis.h for why the floor.
-    const int memory_time_gap =
-        region.scheduled_memory_time - region.ideal_memory_time;
-    const int ideal_whole_schedule_time =
-        std::max(region.schedule_length - memory_time_gap,
-                 region.schedule_length_floor);
+    const int latency_with_ideal_memory =
+        AddRegion(region.block_frequency, region.scheduled_memory_time,
+                  region.ideal_memory_time, region.schedule_length,
+                  region.schedule_length_floor, totals);
 
-    // Print the region.
     llvm::outs() << "\tregion[" << region.region_index << "] block "
                  << region.block_number << ", loop depth " << region.loop_depth
                  << format(", frequency %.2f", region.block_frequency)
-                 << ": scheduled " << region.scheduled_memory_time
-                 << ", ideal " << region.ideal_memory_time
-                 << "; whole schedule: length " << region.schedule_length
-                 << ", floor " << region.schedule_length_floor << ", ideal "
-                 << ideal_whole_schedule_time << "\n";
-
-    // Add its weighted times.
-    totals.scheduled_memory_time +=
-        region.block_frequency * region.scheduled_memory_time;
-    totals.ideal_memory_time +=
-        region.block_frequency * region.ideal_memory_time;
-    totals.scheduled_whole_schedule_time +=
-        region.block_frequency * region.schedule_length;
-    totals.ideal_whole_schedule_time +=
-        region.block_frequency * ideal_whole_schedule_time;
+                 << ": memory time " << region.scheduled_memory_time
+                 << ", ideal " << region.ideal_memory_time << "; latency "
+                 << region.schedule_length << ", floor "
+                 << region.schedule_length_floor << ", with ideal memory "
+                 << latency_with_ideal_memory << "\n";
   }
 
-  // Efficiency is ideal / scheduled. A function with no reads has 0 for both,
-  // and no efficiency.
-  if (totals.scheduled_memory_time > 0) {
-    totals.efficiency =
-        totals.ideal_memory_time / totals.scheduled_memory_time;
-  }
-
-  // Speedup is scheduled / ideal whole schedule time. A function with no
-  // regions has 0 for both, and no speedup.
-  if (totals.ideal_whole_schedule_time > 0) {
-    totals.whole_schedule_time_speedup =
-        totals.scheduled_whole_schedule_time /
-        totals.ideal_whole_schedule_time;
-  }
+  // The efficiencies and speedups.
+  ComputeRatios(totals);
 
   // Then the totals.
   PrintWeightedTotals(totals);

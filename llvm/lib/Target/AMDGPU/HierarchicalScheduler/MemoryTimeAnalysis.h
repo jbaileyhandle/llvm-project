@@ -22,28 +22,32 @@
 // through the kernel. Its efficiency is ideal / scheduled: 1 means the
 // schedule's memory work is as fast as the ideal, lower means slower.
 //
-// It also estimates how much faster the function would run if each region's
-// memory work took its ideal time. Whole schedule time is the time for all of
-// a region's instructions, not just its memory waits:
-//   - scheduled: the region's schedule length from the schedule-length
-//                analysis (ScheduleLengthAnalysis.h, raw lens: one wave, one
-//                instruction issued per cycle, LLVM's latencies).
-//   - ideal:     the same schedule with only its memory work made ideal: the
-//                schedule length minus the gap between scheduled and ideal
-//                memory time, but never below the region's length floor,
-//                which no order beats.
-// Both are weighted and summed like the memory times, and the speedup is
-// scheduled / ideal whole schedule time.
+// Latency is the time for all of a region's instructions, not just its memory
+// waits: the region's schedule length from the schedule-length analysis
+// (ScheduleLengthAnalysis.h, raw lens: one wave, one instruction issued per
+// cycle, LLVM's latencies). Its ideal is the region's length floor, which no
+// order beats. A function's latency and floor are weighted and summed like its
+// memory time, and its latency efficiency is floor / latency.
 //
-// The floor is needed because the two models count time differently. Memory
-// time gives issuing no time, so its gap can be time the schedule already fills
-// with other instructions; and it runs until every read's data is back, so its
-// gap can include waits for data the region never uses. Without the floor,
-// subtracting the gap could claim a length no order reaches.
+// Two speedups estimate how much faster the function would run, each the
+// function's latency over its latency in that case:
+//   - with ideal memory: each region's memory work takes its ideal time. A
+//     region's latency is then its latency minus the gap between its scheduled
+//     and ideal memory time, but never below its floor.
+//   - with ideal latency: each region reaches its floor.
 //
-// The estimate is optimistic. Where other instructions hide only part of the
-// gap, or other waves on the SIMD run during the waits, the real gain is
-// smaller.
+// The floor is needed with ideal memory because the two models count time
+// differently. Memory time gives issuing no time, so its gap can be time the
+// schedule already fills with other instructions; and it runs until every
+// read's data is back, so its gap can include waits for data the region never
+// uses. Without the floor, subtracting the gap could claim a length no order
+// reaches.
+//
+// Both estimates are optimistic. They're for one wave: other waves on the SIMD
+// can run during a region's waits and its short latency gaps, so the real gain
+// is smaller. With ideal memory, other instructions may hide only part of the
+// gap; with ideal latency, the floor may take more registers than the
+// occupancy allows.
 //
 //===----------------------------------------------------------------------===//
 
@@ -87,11 +91,11 @@ public:
                      int region_index, int schedule_length,
                      int schedule_length_floor);
 
-  /// Prints each region's memory times and schedule length, and the
-  /// function's weighted totals: memory times, efficiency, whole schedule
-  /// times and speedup. Appends the totals as one row to
-  /// memory_time_analysis.csv in the compile's working directory. Call once,
-  /// after the last region.
+  /// Prints each region's memory times, latency and floor, and the
+  /// function's weighted totals: memory time and latency with their ideals
+  /// and efficiencies, and the speedups with ideal memory and with ideal
+  /// latency. Appends the totals as one row to ideal_time_analysis.csv in the
+  /// compile's working directory. Call once, after the last region.
   void Report() const;
 
 private:
