@@ -5,9 +5,19 @@
 
   Four panes, each shown or hidden with the checkboxes at the top and resized
   by dragging the dividers between them:
-    - Blocks: one node per region, shaded by the region's share of the
-      function's total weighted gain from ideal memory work. Click one to
-      open it in the other panes.
+    - Blocks: one node per region, in program order within a block. Each
+      shows the region's share of the kernel's weighted memory time and of
+      its weighted latency, and its opportunity for each: how much the
+      kernel's total would drop, as a percentage, if this region alone went
+      from its memory time to the ideal, or from its latency to its floor.
+      "Shade by" at the top of the pane picks which opportunity shades the
+      nodes. Click a node to open its region in the other panes.
+
+  Weighted means each region's number times its block's frequency (how many
+  times the block runs per run of the kernel), summed over the regions.
+  Latency is the region's schedule length in the length analysis's raw lens
+  (one wave, LLVM's latencies); its floor is the length no order beats. The
+  kernel's weighted totals are at the top.
     - Original: the region's instructions in the dumped order, with the
       memory clock and the schedule clock (the cycle each issues at in the
       length analysis's raw lens), the vmcnt and lgkmcnt queues (one bar per
@@ -20,8 +30,9 @@
       click to keep it. Lines are shown in full: the pane scrolls sideways,
       with the row number, clocks, lanes and op chips pinned at the left.
     - Edited: the same region in the order you've put it in, laid out the
-      same way. Rows keep their dumped numbers in both panes; hover a row to
-      see the same instruction in the other one.
+      same way. Rows keep their dumped numbers in both panes. Hover a row to
+      see the same instruction in the other pane; click it to keep both
+      marked, and the other pane scrolls to it if it's out of view.
     - Tiers: the memory ops of one of the two panes (switch at the top)
       grouped into tiers, that order next to the ideal. A tier is a group of
       ops no wait separates. Hover a chip to see the ops it waits on and the
@@ -94,7 +105,8 @@
   #main { flex: 1; min-height: 0; display: flex; }
   .pane { min-width: 0; overflow: auto; }
   .pane.hidden { display: none; }
-  #blocks { overflow: hidden; }
+  #blocks { overflow: hidden; display: flex; flex-direction: column; }
+  #blockgraph { flex: 1; min-height: 0; }
   #tiers { padding: 6px 10px; }
   .splitter { flex: 0 0 6px; cursor: col-resize; background: var(--grid); }
   .splitter:hover, .splitter.drag { background: #a8a6a2; }
@@ -173,7 +185,10 @@
 
   /* Tier view */
   .tierswitch { margin-bottom: 6px; display: flex; gap: 4px; align-items: center; }
-  .tierswitch button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .tierswitch button.on, .shadeby button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .shadeby { font-weight: normal; color: var(--muted); }
+  .panetitle.shadeby { height: auto; white-space: normal; line-height: 18px; padding: 1px 8px; }
+  .shadeby button { margin-left: 2px; }
   .tierintro { color: var(--muted); margin-bottom: 6px; max-width: 900px; line-height: 1.4; }
   .tiersummary { font-family: monospace; margin-bottom: 8px; }
   .tiercols { display: flex; gap: 14px; align-items: flex-start; }
@@ -196,6 +211,7 @@
      their number. */
   #edited .row:not(.head):not(.start):not(.end) .num { cursor: grab; user-select: none; }
   .row.twin, .row.twin.waitrow { background: #ece6fb; }
+  .row.linked { outline: 2px solid var(--flat); outline-offset: -2px; }
   .row.window, .row.window.waitrow { background: #e6f2e6; }
   .row.sel, .row.sel.waitrow { background: #cfe0f7; }
   .row.bound, .row.bound.waitrow { background: #fbe0df; }
@@ -250,7 +266,12 @@
 </div>
 <div id="regionbar"></div>
 <div id="main">
-  <div id="blocks" class="pane"></div>
+  <div id="blocks" class="pane">
+    <div class="panetitle shadeby" title="Which opportunity shades the region nodes">Shade by opportunity:
+      <button data-shade="latency" title="How much the kernel's weighted latency would drop if this region's schedule length were its floor">latency</button>
+      <button data-shade="memory" title="How much the kernel's weighted memory time would drop if this region's memory time were ideal">memory</button></div>
+    <div id="blockgraph"></div>
+  </div>
   <div id="code" class="pane"><div class="hint" style="padding:8px">Load a memory_viz/&lt;function&gt;.json file.</div></div>
   <div id="edited" class="pane"></div>
   <div id="tiers" class="pane"></div>
@@ -295,8 +316,83 @@ function blockName(block) {
   return block.name && block.name.length ? block.name : "bb." + block.number;
 }
 
-// One hue, light to dark, by share. The square root spreads out the small
-// shares, which would otherwise all look the same.
+// --- Shares --------------------------------------------------------------
+
+// The kernel's weighted totals, and per region index its shares of them:
+//   memory, latency: the region's part of the kernel's weighted memory time
+//     and weighted latency (schedule length).
+//   memory_opportunity, latency_opportunity: how much that total would drop,
+//     as a fraction of it, if this region alone went from its memory time to
+//     the ideal, or from its length to its floor.
+let TOTALS = null;
+const SHARES = new Map();
+let SHADE = "memory";  // which opportunity shades the block graph
+try { SHADE = localStorage.getItem("memory_viewer_shade") || "memory"; } catch (e) {}
+
+function computeShares() {
+  TOTALS = { memory: 0, ideal_memory: 0, latency: 0, floor: 0 };
+  for (const block of DATA.blocks) {
+    for (const region of block.regions) {
+      TOTALS.memory += block.frequency * region.scheduled_memory_time;
+      TOTALS.ideal_memory += block.frequency * region.ideal_memory_time;
+      TOTALS.latency += block.frequency * region.schedule_length;
+      TOTALS.floor += block.frequency * region.schedule_length_floor;
+    }
+  }
+  const of = (part, total) => (total > 0 ? part / total : 0);
+  SHARES.clear();
+  for (const block of DATA.blocks) {
+    for (const region of block.regions) {
+      const f = block.frequency;
+      SHARES.set(region.index, {
+        memory: of(f * region.scheduled_memory_time, TOTALS.memory),
+        latency: of(f * region.schedule_length, TOTALS.latency),
+        memory_opportunity: of(f * (region.scheduled_memory_time - region.ideal_memory_time), TOTALS.memory),
+        latency_opportunity: of(f * (region.schedule_length - region.schedule_length_floor), TOTALS.latency),
+      });
+    }
+  }
+}
+
+const percent = (x, digits) => (100 * x).toFixed(digits) + "%";
+const shadedOpportunity = (index) => SHARES.get(index)[SHADE + "_opportunity"];
+
+// A region node's label: the region, then its latency and memory shares,
+// each with its opportunity.
+function nodeLabel(block, region) {
+  const share = SHARES.get(region.index);
+  return blockName(block) + " r" + region.index + " · f " + block.frequency.toPrecision(3) +
+         "\nlat " + percent(share.latency, 1) + " · opp " + percent(share.latency_opportunity, 2) +
+         "\nmem " + percent(share.memory, 1) + " · opp " + percent(share.memory_opportunity, 2);
+}
+
+// Shades each region node by the chosen opportunity, relative to the
+// largest one in the kernel.
+function shadeGraph() {
+  let largest = 0;
+  for (const share of SHARES.values()) largest = Math.max(largest, share[SHADE + "_opportunity"]);
+  cy.nodes().forEach((node) => {
+    const index = node.data("region");
+    if (index === undefined) return;
+    const shade = largest > 0 ? shadedOpportunity(index) / largest : 0;
+    node.data("color", shareColor(shade));
+    node.data("text", shade > 0.35 ? "#fff" : "#0b0b0b");
+  });
+  for (const button of document.querySelectorAll(".shadeby button")) {
+    button.classList.toggle("on", button.dataset.shade === SHADE);
+  }
+}
+
+for (const button of document.querySelectorAll(".shadeby button")) {
+  button.addEventListener("click", () => {
+    SHADE = button.dataset.shade;
+    try { localStorage.setItem("memory_viewer_shade", SHADE); } catch (e) {}
+    if (cy) shadeGraph();
+  });
+}
+
+// One hue, light to dark, by a value from 0 to 1. The square root spreads
+// out the small values, which would otherwise all look the same.
 function shareColor(share) {
   if (share <= 0) return "#f1f0ed";
   const lightness = 90 - 52 * Math.sqrt(Math.min(share, 1));
@@ -398,6 +494,7 @@ function buildGraph() {
   setStatus("");
   document.getElementById("export").disabled = false;
   document.getElementById("replayfile").disabled = false;
+  computeShares();
   const elements = [];
   const firstNode = {}, lastNode = {};
   let best = null;
@@ -412,11 +509,7 @@ function buildGraph() {
     let previous = null;
     for (const region of block.regions) {
       const id = "r" + region.index;
-      const label = blockName(block) + "  r" + region.index +
-        "\nshare " + (100 * region.share).toFixed(1) + "% · f " +
-        block.frequency.toPrecision(3) + "\ngain " + region.gain + " cyc";
-      elements.push({ data: { id, label, color: shareColor(region.share),
-                              text: region.share > 0.35 ? "#fff" : "#0b0b0b",
+      elements.push({ data: { id, label: nodeLabel(block, region), color: "#f1f0ed", text: "#0b0b0b",
                               block: block.number, region: region.index } });
       if (previous) {
         elements.push({ data: { id: previous + "_" + id, source: previous, target: id },
@@ -425,7 +518,9 @@ function buildGraph() {
         firstNode[block.number] = id;
       }
       previous = id;
-      if (!best || region.share > best.region.share) best = { block, region };
+      if (!best || shadedOpportunity(region.index) > shadedOpportunity(best.region.index)) {
+        best = { block, region };
+      }
     }
     lastNode[block.number] = previous;
   }
@@ -439,13 +534,13 @@ function buildGraph() {
 
   if (cy) cy.destroy();
   cy = cytoscape({
-    container: document.getElementById("blocks"),
+    container: document.getElementById("blockgraph"),
     elements,
     style: [
       { selector: "node", style: {
           "background-color": "data(color)", "label": "data(label)", "color": "data(text)",
           "text-wrap": "wrap", "text-valign": "center", "text-halign": "center",
-          "font-size": 9, "font-family": "monospace", "width": 130, "height": 44,
+          "font-size": 9, "font-family": "monospace", "width": 136, "height": 44,
           "shape": "round-rectangle", "border-width": 1, "border-color": "#a8a6a2" } },
       { selector: "node.sel", style: { "border-width": 3, "border-color": "#0b0b0b" } },
       { selector: "node.edited", style: { "border-style": "dashed", "border-width": 3,
@@ -472,10 +567,12 @@ function buildGraph() {
   meta.classList.remove("hint");
   meta.innerHTML = "<b>" + esc(DATA.function) + "</b> — " + esc(DATA.scheduler) +
     " — occupancy " + DATA.occupancy + " (VGPR budget " + DATA.vgpr_budget +
-    ", SGPR " + DATA.sgpr_budget + ") — total weighted gain " +
-    DATA.total_weighted_gain.toFixed(1) + " cyc";
+    ", SGPR " + DATA.sgpr_budget + ") — weighted memory time <b>" + TOTALS.memory.toFixed(1) +
+    "</b> (ideal " + TOTALS.ideal_memory.toFixed(1) + ") — weighted latency <b>" +
+    TOTALS.latency.toFixed(1) + "</b> (floor " + TOTALS.floor.toFixed(1) + ")";
+  shadeGraph();
 
-  // Open on the region with the biggest share.
+  // Open on the region with the biggest opportunity of the shaded kind.
   if (best) selectRegion(best.block.number, best.region.index);
 }
 
@@ -576,6 +673,8 @@ function rerender(resetScroll) {
   pinnedReg = resetScroll ? null : pinned;
   if (pinnedReg !== null) showRegister(pinnedReg);
   cy.getElementById("r" + REGION.index).toggleClass("edited", isEdited(REGION));
+  if (resetScroll) LINKED = null;
+  paintLinked();
   paintSelection();
 }
 
@@ -680,7 +779,10 @@ function renderRegionBar() {
   const edited = VIEWS.edited;
   let h = `<h2>${esc(blockName(BLOCK))} — region ${region.index} — ${region.rows.length} instructions</h2>` +
           `<span class="stats">frequency <b>${BLOCK.frequency.toPrecision(3)}</b> · ` +
-          `share <b>${(100 * region.share).toFixed(1)}%</b></span>` +
+          `memory <b>${percent(SHARES.get(region.index).memory, 1)}</b> of the kernel's, ` +
+          `opportunity <b>${percent(SHARES.get(region.index).memory_opportunity, 2)}</b> · ` +
+          `latency <b>${percent(SHARES.get(region.index).latency, 1)}</b> of the kernel's, ` +
+          `opportunity <b>${percent(SHARES.get(region.index).latency_opportunity, 2)}</b></span>` +
           `<div class="statline stats"><span class="which">original</span>${statsHtml(BLOCK, region)}</div>`;
   if (edited.replay) {
     const r = edited.region;
@@ -1796,6 +1898,12 @@ for (const id of ["code", "edited"]) {
       return;
     }
 
+    // Any plain click on an instruction marks it in both panes.
+    if (rowElement) {
+      const row = +rowElement.dataset.row;
+      if (row >= 0 && row < REGION.rows.length) linkRow(row, rowElement);
+    }
+
     const numElement = event.target.closest(".num");
     if (id === "edited" && numElement && rowElement && canReorder(REGION)) {
       const row = +rowElement.dataset.row;
@@ -1814,7 +1922,37 @@ for (const id of ["code", "edited"]) {
   });
 }
 
-// Esc cancels a drag, then drops the selection, then the pinned register.
+// The instruction last clicked in a code pane, by its dump number, marked in
+// both panes; null for none.
+let LINKED = null;
+
+function paintLinked() {
+  for (const el of document.querySelectorAll(".row.linked")) el.classList.remove("linked");
+  if (LINKED === null) return;
+  for (const view of codePanes()) {
+    const el = rowIn(view.pane, LINKED);
+    if (el) el.classList.add("linked");
+  }
+}
+
+// Marks dump row `row` in both panes. If the other pane's copy is out of
+// view, scrolls that pane to put it level with the clicked one.
+function linkRow(row, clicked) {
+  LINKED = row;
+  paintLinked();
+  const from = clicked.closest(".pane");
+  const other = from.id === "code" ? VIEWS.edited.pane : VIEWS.code.pane;
+  if (other.classList.contains("hidden")) return;
+  const twin = rowIn(other, row);
+  const head = other.querySelector(".row.head").getBoundingClientRect();
+  const box = other.getBoundingClientRect();
+  const twinBox = twin.getBoundingClientRect();
+  if (twinBox.top >= head.bottom && twinBox.bottom <= box.bottom) return;
+  other.scrollTop += twinBox.top - clicked.getBoundingClientRect().top;
+}
+
+// Esc cancels a drag, then drops the selection, then the linked
+// instruction, then the pinned register.
 // Ctrl+Z and Ctrl+Y (or Ctrl+Shift+Z) undo and redo moves in the shown
 // region.
 document.addEventListener("keydown", (event) => {
@@ -1828,6 +1966,9 @@ document.addEventListener("keydown", (event) => {
     } else if (SELECTION) {
       SELECTION = null;
       paintSelection();
+    } else if (LINKED !== null) {
+      LINKED = null;
+      paintLinked();
     } else if (pinnedReg !== null) {
       pinnedReg = null;
       showRegister(null);

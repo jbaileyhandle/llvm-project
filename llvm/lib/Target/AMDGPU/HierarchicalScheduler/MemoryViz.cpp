@@ -185,6 +185,8 @@ void MemoryViz::AnalyzeRegion(MutableArrayRef<SUnit> sunits,
 
   MemoryVizRegion result;
   result.index = region_index;
+  result.position_in_block = static_cast<int>(
+      std::distance(region.GetBlock()->begin(), region.Begin()));
   result.schedule_length = schedule_length;
   result.schedule_length_floor = schedule_length_floor;
 
@@ -625,8 +627,15 @@ void MemoryViz::AnalyzeRegion(MutableArrayRef<SUnit> sunits,
     }
   }
 
-  regions_by_block_[region.GetBlock()->getNumber()].push_back(
-      std::move(result));
+  // Keep the block's regions in program order.
+  std::vector<MemoryVizRegion> &block_regions =
+      regions_by_block_[region.GetBlock()->getNumber()];
+  auto later_region = std::find_if(
+      block_regions.begin(), block_regions.end(),
+      [&](const MemoryVizRegion &other) {
+        return other.position_in_block > result.position_in_block;
+      });
+  block_regions.insert(later_region, std::move(result));
 }
 
 void MemoryViz::WriteJson(StringRef scheduler_name) const {

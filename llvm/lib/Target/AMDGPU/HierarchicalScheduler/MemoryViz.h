@@ -185,6 +185,11 @@ struct MemoryVizTier {
 /// One region's visualization data.
 struct MemoryVizRegion {
   int index = 0;
+
+  // Its first instruction's position in its block, to keep a block's regions
+  // in program order. Not written out.
+  int position_in_block = 0;
+
   int scheduled_memory_time = 0;
   int ideal_memory_time = 0;
   int schedule_length = 0;
@@ -233,6 +238,8 @@ private:
   MachineBlockFrequencyInfo block_frequency_info_;
 
   // Recorded regions, by block number, in program order within each block.
+  // The scheduling driver visits a block's regions bottom-up, so
+  // AnalyzeRegion inserts each one in place.
   std::map<int, std::vector<MemoryVizRegion>> regions_by_block_;
 };
 
