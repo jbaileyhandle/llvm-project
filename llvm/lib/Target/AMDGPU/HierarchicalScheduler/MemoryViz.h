@@ -12,6 +12,9 @@
 //     yet (in flight), and everything else.
 //   - The virtual registers each instruction writes and reads, and those the
 //     region leaves live, so the viewer can link definitions to uses.
+//   - The rows each instruction must come after (its strong predecessors in
+//     the schedule graph, with the edge's kind), so the viewer can show
+//     where rows can move.
 //   - Every memory op: its type, which wait queues it goes in, when it issues
 //     and when its data is back, and the rows whose waits pop it. Barriers
 //     are listed with the ops, so the tier view can place them.
@@ -60,6 +63,15 @@ namespace hierarchical_scheduler {
 
 class RegionInfo;
 
+/// A row an instruction must come after, and why.
+struct MemoryVizPredecessor {
+  int row = 0;
+
+  // The kind of edge: data, anti, output, barrier, may-alias, must-alias or
+  // artificial.
+  std::string kind;
+};
+
 /// One instruction of a region's final order.
 struct MemoryVizRow {
   std::string text;
@@ -96,6 +108,11 @@ struct MemoryVizRow {
   // without undef) also reads it.
   std::vector<int> defs;
   std::vector<int> uses;
+
+  // The rows it must come after: its predecessors in the region's schedule
+  // graph over strong edges, the ones the scheduler waits on. Edges from the
+  // region's entry are left out.
+  std::vector<MemoryVizPredecessor> predecessors;
 };
 
 /// A wait that moved the clock past a stuck load's inputs, and by how much.

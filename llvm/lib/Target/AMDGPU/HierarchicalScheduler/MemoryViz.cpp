@@ -115,6 +115,32 @@ bool IsWrittenByLoad(Register reg, const MachineRegisterInfo &mri) {
   return false;
 }
 
+// The viewer's name for a strong edge's kind.
+const char *StrongEdgeKindName(ScheduleEdge::Kind kind) {
+  switch (kind) {
+  case ScheduleEdge::kData:
+    return "data";
+  case ScheduleEdge::kAnti:
+    return "anti";
+  case ScheduleEdge::kOutput:
+    return "output";
+  case ScheduleEdge::kBarrier:
+    return "barrier";
+  case ScheduleEdge::kMayAliasMem:
+    return "may-alias";
+  case ScheduleEdge::kMustAliasMem:
+    return "must-alias";
+  case ScheduleEdge::kArtificial:
+    return "artificial";
+  case ScheduleEdge::kSubgraphOrderEdge:
+    return "subgraph-order";
+  case ScheduleEdge::kCluster:
+  case ScheduleEdge::kWeak:
+    break;
+  }
+  llvm_unreachable("not a strong edge kind");
+}
+
 // Whether two ops share a wait queue.
 bool ShareAQueue(const MemoryVizOp &a, const MemoryVizOp &b) {
   return (a.vmcnt && b.vmcnt) || (a.lgkmcnt && b.lgkmcnt);
@@ -208,6 +234,20 @@ void MemoryViz::AnalyzeRegion(MutableArrayRef<SUnit> sunits,
       if (operand.readsReg() && !is_contained(row.uses, reg_number)) {
         row.uses.push_back(reg_number);
       }
+    }
+
+    // The rows it must come after. Its predecessors are earlier in the order,
+    // so they already have rows; the entry node has none and is skipped.
+    for (const ScheduleEdge &edge : node->Predecessors()) {
+      if (!edge.IsStrongEdge()) {
+        continue;
+      }
+      auto predecessor_row = row_of_schedule_node.find(edge.node_);
+      if (predecessor_row == row_of_schedule_node.end()) {
+        continue;
+      }
+      row.predecessors.push_back(
+          {predecessor_row->second, StrongEdgeKindName(edge.kind_)});
     }
 
     row_of_schedule_node[node] = static_cast<int>(result.rows.size());
@@ -698,6 +738,15 @@ void MemoryViz::WriteJson(StringRef scheduler_name) const {
                       out.attributeArray("uses", [&] {
                         for (int reg : row.uses) {
                           out.value(reg);
+                        }
+                      });
+                      out.attributeArray("predecessors", [&] {
+                        for (const MemoryVizPredecessor &predecessor :
+                             row.predecessors) {
+                          out.object([&] {
+                            out.attribute("row", predecessor.row);
+                            out.attribute("kind", predecessor.kind);
+                          });
                         }
                       });
                     });

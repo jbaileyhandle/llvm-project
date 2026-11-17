@@ -22,6 +22,15 @@
     - Tiers: the region's memory ops grouped into tiers, this schedule next
       to the ideal. A tier is a group of ops no wait separates. Hover a chip
       to see the ops it waits on and the ops that wait on it.
+
+  Trying a reorder: click a row number to select it, shift-click to extend
+  the selection. The rows it can move between are shaded; the two rows that
+  bound them say why on hover. Alt-click a shaded row to move the selection
+  just above it. Moved rows keep their numbers. The model's columns and the
+  tiers describe the dumped order, so they fade after a move. "Export order"
+  writes the function's order file (OrderReplay.h); name it in misched.txt
+  with `order_file <path>` and recompile for the new order's numbers and
+  code.
 -->
 <html>
 <head>
@@ -159,11 +168,32 @@
   .endmark { font-size: 11px; color: var(--muted); margin-top: 4px; font-style: italic; }
   svg.links { position: absolute; left: 0; top: 0; width: 100%; height: 100%;
               pointer-events: none; overflow: visible; }
+
+  /* Reordering. The selection, the rows it can move between, and the two
+     rows that bound them; moved rows get a bar by their number. */
+  .row:not(.head) .num { cursor: pointer; user-select: none; }
+  .row.window, .row.window.waitrow { background: #e6f2e6; }
+  .row.sel, .row.sel.waitrow { background: #cfe0f7; }
+  .row.bound, .row.bound.waitrow { background: #fbe0df; }
+  .row.bound .num { color: var(--stuck); font-weight: bold; }
+  .codewrap.selecting .row.window:hover { box-shadow: inset 0 2px 0 var(--vector); }
+  .row.moved .num { box-shadow: inset 3px 0 0 var(--flat); color: var(--ink); }
+  .codewrap.stale .clock, .codewrap.stale .badge, .codewrap.stale .note,
+  .codewrap.stale .reg { opacity: 0.35; }
+  .stats.stale { opacity: 0.45; }
+  #tiers.stale > :not(.stalenote) { opacity: 0.35; }
+  .stalenote { color: var(--ink); background: var(--highlight); padding: 3px 6px;
+               border-radius: 3px; margin-bottom: 6px; }
+  #editbar { margin-top: 3px; color: var(--muted); display: flex; gap: 8px; align-items: center;
+             flex-wrap: wrap; }
+  #editbar b { color: var(--ink); }
+  button { font-size: 11px; padding: 1px 8px; }
 </style>
 </head>
 <body>
 <div id="top">
   <label><b>Load...</b> <input type="file" id="file" accept=".json"></label>
+  <button id="export" disabled title="Download this function's order file, with every region in its shown order">Export order</button>
   <span class="toggles">
     <label><input type="checkbox" data-pane="blocks" checked> Blocks</label>
     <label><input type="checkbox" data-pane="code" checked> Code</label>
@@ -197,6 +227,7 @@ const TYPE_COLOR = { vector: "#2a78d6", flat: "#6250d6", scalar: "#eb6834",
 let DATA = null;
 let cy = null;
 let REGION = null;     // the selected region
+let BLOCK = null;      // its block
 let CONSUMERS = [];    // per op: the ops that list it as an input
 
 document.getElementById("file").addEventListener("change", (event) => {
@@ -307,6 +338,9 @@ applyPanes();
 // no region. Control-flow edges run from a block's last node to each
 // successor's first.
 function buildGraph() {
+  EDITS.clear();
+  SELECTION = null;
+  document.getElementById("export").disabled = false;
   const elements = [];
   const firstNode = {}, lastNode = {};
   let best = null;
@@ -357,6 +391,8 @@ function buildGraph() {
           "font-size": 9, "font-family": "monospace", "width": 130, "height": 44,
           "shape": "round-rectangle", "border-width": 1, "border-color": "#a8a6a2" } },
       { selector: "node.sel", style: { "border-width": 3, "border-color": "#0b0b0b" } },
+      { selector: "node.edited", style: { "border-style": "dashed", "border-width": 3,
+                                          "border-color": "#6250d6" } },
       { selector: "edge", style: {
           "width": 1.5, "line-color": "#c4c2be", "target-arrow-color": "#c4c2be",
           "target-arrow-shape": "triangle", "curve-style": "bezier" } },
@@ -392,8 +428,16 @@ function selectRegion(blockNumber, regionIndex) {
   const block = DATA.blocks.find((b) => b.number === blockNumber);
   const region = block.regions.find((r) => r.index === regionIndex);
   REGION = region;
+  BLOCK = block;
   CONSUMERS = region.ops.map(() => []);
   region.ops.forEach((op, i) => op.inputs.forEach((j) => CONSUMERS[j].push(i)));
+  SUCCESSORS = region.rows.map(() => []);
+  region.rows.forEach((row, i) => {
+    for (const predecessor of row.predecessors || []) {
+      SUCCESSORS[predecessor.row].push({ row: i, kind: predecessor.kind });
+    }
+  });
+  SELECTION = null;
   renderRegionBar(block, region);
   renderCode(region);
   renderTiers(region);
@@ -484,11 +528,13 @@ function renderRegionBar(block, region) {
   const stuck = memOps.filter((op) => op.stuck > 0).length;
   document.getElementById("regionbar").innerHTML =
     `<h2>${esc(blockName(block))} — region ${region.index} — ${region.rows.length} instructions</h2>` +
-    `<span class="stats">frequency <b>${block.frequency.toPrecision(3)}</b> · ` +
+    `<span class="stats${isEdited(region) ? " stale" : ""}">frequency <b>${block.frequency.toPrecision(3)}</b> · ` +
     `memory time <b>${region.scheduled_memory_time}</b> vs ideal <b>${region.ideal_memory_time}</b> · ` +
     `length <b>${region.schedule_length}</b> (floor ${region.schedule_length_floor}) · ` +
     `gain <b>${region.gain}</b> cyc · share <b>${(100 * region.share).toFixed(1)}%</b> · ` +
-    `${memOps.length} memory ops, <b>${stuck}</b> loads issued late</span>`;
+    `${memOps.length} memory ops, <b>${stuck}</b> loads issued late</span>` +
+    `<div id="editbar"></div>`;
+  renderEditBar();
 }
 
 // --- Code view ---------------------------------------------------------
@@ -716,8 +762,9 @@ function drawRegister() {
   }
 
   if (info.reads.some((read) => read.from < 0) || (!info.defs.length && info.reads.length)) {
-    paths += label(0, "from before the region");
-    reach(rowTop(0) + 1);
+    const firstRow = editOf(REGION).order[0];
+    paths += label(firstRow, "from before the region");
+    reach(rowTop(firstRow) + 1);
   }
   if (REGION.live_out.includes(reg)) {
     paths += label(REGION.rows.length, "read after the region");
@@ -744,9 +791,16 @@ function renderCode(region) {
                    laneSvgBody(vm, 0, "vmcnt", totalRows) + laneSvgBody(lgkm, vm.width, "lgkmcnt", totalRows) +
                    `</svg>`;
 
+  // The rows in their shown order. After a move, the model's columns still
+  // describe the dumped order, so they fade, and the lanes, which are drawn
+  // by row position, are left out.
+  const edit = editOf(region);
+  const edited = isEdited(region);
+
   // The instruction column fits the longest line, plus its padding.
   const longest = Math.max(16, ...rows.map((row) => row.text.length));
-  let h = `<div class="codewrap" style="--lanes-w:${lanesWidth}px;--text-w:calc(${longest}ch + 24px)">`;
+  let h = `<div class="codewrap${edited ? " stale" : ""}" ` +
+          `style="--lanes-w:${lanesWidth}px;--text-w:calc(${longest}ch + 24px)">`;
   h += `<div class="row head"><div class="num">row</div>` +
        `<div class="clock memclock" title="The memory model's clock when the instruction issues: it only moves at a wait that stalls">mem<br>clock</div>` +
        `<div class="clock schedclock" title="The cycle the instruction issues at in the whole schedule time (the length analysis's raw lens)">sched<br>clock</div>` +
@@ -760,7 +814,8 @@ function renderCode(region) {
        `light blue: holding a load result that's back; grey: other">VGPR (of ${DATA.vgpr_budget})</div>` +
        `<div class="reg" title="SGPRs in use, split the same way">SGPR (of ${DATA.sgpr_budget})</div></div>`;
 
-  for (let i = 0; i < rows.length; i++) {
+  for (let position = 0; position < rows.length; position++) {
+    const i = edit.order[position];
     const row = rows[i];
     const op = row.op >= 0 ? region.ops[row.op] : null;
     const wait = row.wait >= 0 ? region.waits[row.wait] : null;
@@ -790,12 +845,13 @@ function renderCode(region) {
       }
     }
 
-    h += `<div class="row${wait ? " waitrow" : ""}" id="row-${i}">` +
+    h += `<div class="row${wait ? " waitrow" : ""}${edit.moved.has(i) ? " moved" : ""}" ` +
+      `id="row-${i}" data-row="${i}">` +
       `<div class="num">${i}</div><div class="clock memclock">${row.memory_time}</div>` +
       `<div class="clock schedclock">${row.schedule_cycle}</div>` +
-      (i === 0 ? `<div class="lanes lanehost">${lanesSvg}</div>` : lanesCell) +
+      (position === 0 ? `<div class="lanes lanehost">${edited ? "" : lanesSvg}</div>` : lanesCell) +
       `<div class="tags">${tags}</div>` +
-      `<div class="text${op ? " mem" : ""}">${textHtml(row, i)}</div>` +
+      `<div class="text${op ? " mem" : ""}">${textHtml(row, position)}</div>` +
       `<div class="${noteClass}" title="${esc(noteTitle)}"${noteData}>${esc(note)}</div>` +
       pressureCell(row.vgpr, row.vgpr_load, row.vgpr_load_in_flight, DATA.vgpr_budget, "VGPR") +
       pressureCell(row.sgpr, row.sgpr_load, row.sgpr_load_in_flight, DATA.sgpr_budget, "SGPR") +
@@ -806,7 +862,8 @@ function renderCode(region) {
   const sinkIndex = region.waits.findIndex((w) => isSinkWait(region, w));
   const sink = sinkIndex >= 0 ? region.waits[sinkIndex] : null;
   const sinkNote = sink ? waitNote(region, sink).note : "";
-  h += `<div class="row end" id="row-${rows.length}"><div class="num">${rows.length}</div>` +
+  h += `<div class="row end" id="row-${rows.length}" data-row="${rows.length}">` +
+    `<div class="num">${rows.length}</div>` +
     `<div class="clock memclock">${sink ? sink.end_time : region.scheduled_memory_time}</div>` +
     `<div class="clock schedclock" title="The exit issues at cycle ${region.schedule_length - 1}; the length is ` +
     `${region.schedule_length}">${region.schedule_length - 1}</div>${lanesCell}` +
@@ -904,6 +961,14 @@ function renderTiers(region) {
   h += `<div class="tiercols"><div class="tiercol" id="tc-actual">${actual}<svg class="links"></svg></div>` +
        `<div class="tiercol" id="tc-ideal">${idealHtml}<svg class="links"></svg></div></div>`;
   if (!ops.length) h = `<div class="hint">No memory ops in this region.</div>`;
+
+  // After a move, these are still the dumped order's tiers.
+  const edited = isEdited(region);
+  if (edited) {
+    h = `<div class="stalenote">Rows in this region have moved. These tiers are the dumped order's; ` +
+        `export the order and replay it to see the new order's.</div>` + h;
+  }
+  pane.classList.toggle("stale", edited);
   pane.innerHTML = h;
   pane.scrollTop = 0;
 }
@@ -934,6 +999,258 @@ function drawLinks(index) {
     svg.innerHTML = paths;
   }
 }
+
+// --- Reordering ----------------------------------------------------------
+
+// Per region index, the order its rows are shown in. order holds the rows'
+// dumped numbers in shown order; moved, the rows moved by hand. undo and
+// redo hold {order, moved} states.
+const EDITS = new Map();
+let SUCCESSORS = [];   // per row of the shown region: the rows that must come after it
+let SELECTION = null;  // {anchor, start, end}: positions in the shown order
+let WINDOW = null;     // the selection's legal window (legalWindow)
+
+function editOf(region) {
+  if (!EDITS.has(region.index)) {
+    EDITS.set(region.index, { order: region.rows.map((_, i) => i), moved: new Set(),
+                              undo: [], redo: [] });
+  }
+  return EDITS.get(region.index);
+}
+
+function isEdited(region) {
+  return EDITS.has(region.index) &&
+         editOf(region).order.some((row, position) => row !== position);
+}
+
+// A dump written before the dumper listed predecessors can't be reordered.
+const canReorder = (region) => region.rows.every((row) => Array.isArray(row.predecessors));
+
+// A row's position in the shown order; the region end is after every row.
+function positionOfRow(row) {
+  return row === REGION.rows.length ? row : editOf(REGION).order.indexOf(row);
+}
+
+// Why row `later` must stay below row `earlier`, for an edge of `kind`.
+// A register edge names the virtual registers; one through a physical
+// register (exec, vcc, scc, ...) can't be named from the dump.
+function edgeReason(earlier, later, kind) {
+  const rows = REGION.rows;
+  const shared = (a, b) => a.filter((reg) => b.includes(reg)).map((reg) => "%" + reg).join(", ");
+  if (kind === "data") {
+    const regs = shared(rows[earlier].defs, rows[later].uses);
+    return `row ${later} reads ${regs || "a physical register"} that row ${earlier} writes`;
+  }
+  if (kind === "output") {
+    const regs = shared(rows[earlier].defs, rows[later].defs);
+    return `rows ${earlier} and ${later} both write ${regs || "a physical register"}`;
+  }
+  if (kind === "anti") {
+    const regs = shared(rows[earlier].uses, rows[later].defs);
+    return `row ${later} writes ${regs || "a physical register"} that row ${earlier} reads`;
+  }
+  const what = { "barrier": "a scheduling barrier", "may-alias": "memory that may alias",
+                 "must-alias": "memory that aliases", "artificial": "an artificial edge" }[kind] || kind;
+  return `row ${later} must stay below row ${earlier}: ${what}`;
+}
+
+// The selection's legal window, as positions in the shown order. top is the
+// last row outside the selection that the selection depends on (-1 for
+// none), bottom the first row outside it that depends on the selection (the
+// row count, for the region end, if none). The rows between them depend on
+// neither, so the selection can move as a block to just above any position
+// in (top, bottom]. Each bound comes with its reasons.
+function legalWindow(region, start, end) {
+  const order = editOf(region).order;
+  const position = new Array(order.length);
+  order.forEach((row, p) => { position[row] = p; });
+  const inSelection = (row) => position[row] >= start && position[row] <= end;
+
+  const bounds = { top: -1, bottom: order.length, topReasons: [], bottomReasons: [] };
+  for (let p = start; p <= end; p++) {
+    const row = order[p];
+    for (const predecessor of region.rows[row].predecessors) {
+      if (inSelection(predecessor.row)) continue;
+      const at = position[predecessor.row];
+      const reason = edgeReason(predecessor.row, row, predecessor.kind);
+      if (at > bounds.top) {
+        bounds.top = at;
+        bounds.topReasons = [reason];
+      } else if (at === bounds.top) {
+        bounds.topReasons.push(reason);
+      }
+    }
+    for (const successor of SUCCESSORS[row]) {
+      if (inSelection(successor.row)) continue;
+      const at = position[successor.row];
+      const reason = edgeReason(row, successor.row, successor.kind);
+      if (at < bounds.bottom) {
+        bounds.bottom = at;
+        bounds.bottomReasons = [reason];
+      } else if (at === bounds.bottom) {
+        bounds.bottomReasons.push(reason);
+      }
+    }
+  }
+  return bounds;
+}
+
+// Shades the selection and its window, and marks the two rows that bound it
+// with their reasons.
+function paintSelection() {
+  const wrap = document.querySelector("#code .codewrap");
+  if (!wrap) return;
+  for (const el of wrap.querySelectorAll(".row.sel, .row.window, .row.bound")) {
+    el.classList.remove("sel", "window", "bound");
+    el.removeAttribute("title");
+  }
+  wrap.classList.toggle("selecting", SELECTION !== null);
+  WINDOW = null;
+  if (SELECTION) {
+    const order = editOf(REGION).order;
+    const { start, end } = SELECTION;
+    const rowAt = (p) => rowOf(p === order.length ? p : order[p]);
+    WINDOW = legalWindow(REGION, start, end);
+    for (let p = WINDOW.top + 1; p <= WINDOW.bottom; p++) {
+      rowAt(p).classList.add(p >= start && p <= end ? "sel" : "window");
+    }
+    if (WINDOW.top >= 0) {
+      const el = rowAt(WINDOW.top);
+      el.classList.add("bound");
+      el.title = "The selection can't move above this row:\n" + WINDOW.topReasons.join("\n");
+    }
+    if (WINDOW.bottom < order.length) {
+      const el = rowAt(WINDOW.bottom);
+      el.classList.add("bound");
+      el.title = "The selection can't move below this row:\n" + WINDOW.bottomReasons.join("\n");
+    }
+  }
+  renderEditBar();
+}
+
+// The line under the region's stats: what's selected and where it can go,
+// what's been moved, and undo / redo / reset.
+function renderEditBar() {
+  const bar = document.getElementById("editbar");
+  if (!bar || !REGION) return;
+  if (!canReorder(REGION)) {
+    bar.innerHTML = "This dump has no dependence lists, so its rows can't be moved. " +
+                    "Recompile to get a new one.";
+    return;
+  }
+  const edit = editOf(REGION);
+  const order = edit.order;
+  let h = `<button data-action="undo"${edit.undo.length ? "" : " disabled"}>Undo</button>` +
+          `<button data-action="redo"${edit.redo.length ? "" : " disabled"}>Redo</button>` +
+          `<button data-action="reset"${edit.undo.length || isEdited(REGION) ? "" : " disabled"}>` +
+          `Reset region</button>`;
+  if (SELECTION && WINDOW) {
+    const { start, end } = SELECTION;
+    const count = end - start + 1;
+    const rows = count === 1 ? `row ${order[start]}` : `rows ${order[start]}–${order[end]} (${count})`;
+    const above = WINDOW.top >= 0 ? "row " + order[WINDOW.top] : "the region start";
+    const below = WINDOW.bottom < order.length ? "row " + order[WINDOW.bottom] : "the region end";
+    h += `<span>Selected <b>${rows}</b>: can move anywhere between ${above} and ${below}. ` +
+         `Alt-click a shaded row to move it just above that row; Esc to deselect.</span>`;
+  } else {
+    h += `<span>Click a row number to select it; shift-click to extend.</span>`;
+  }
+  if (isEdited(REGION)) {
+    h += `<span><b>${edit.moved.size}</b> row${edit.moved.size === 1 ? "" : "s"} moved. ` +
+         `The model's columns, the tiers and the ` +
+         `stats above are the dumped order's (the lanes are hidden) until you export and replay.</span>`;
+  }
+  bar.innerHTML = h;
+}
+
+// Redraws everything that depends on the region's order, keeping the code
+// pane's scroll position and the pinned register.
+function rerender() {
+  const pane = document.getElementById("code");
+  const top = pane.scrollTop, left = pane.scrollLeft;
+  const pinned = pinnedReg;
+  renderRegionBar(BLOCK, REGION);
+  renderCode(REGION);
+  renderTiers(REGION);
+  pane.scrollTop = top;
+  pane.scrollLeft = left;
+  if (pinned !== null) {
+    pinnedReg = pinned;
+    showRegister(pinned);
+  }
+  cy.getElementById("r" + REGION.index).toggleClass("edited", isEdited(REGION));
+  paintSelection();
+}
+
+// Moves the selection to just above the row at `target` (the row count for
+// the region end). The caller checks that `target` is in the window.
+function moveSelection(target) {
+  const edit = editOf(REGION);
+  const { start, end } = SELECTION;
+  if (target >= start && target <= end + 1) return;  // it's already there
+  const block = edit.order.slice(start, end + 1);
+  const rest = edit.order.slice(0, start).concat(edit.order.slice(end + 1));
+  const at = target === edit.order.length ? rest.length : rest.indexOf(edit.order[target]);
+  edit.undo.push({ order: edit.order, moved: edit.moved });
+  edit.redo = [];
+  edit.order = rest.slice(0, at).concat(block, rest.slice(at));
+  edit.moved = new Set([...edit.moved, ...block]);
+  SELECTION = { anchor: at, start: at, end: at + block.length - 1 };
+  rerender();
+}
+
+// Undo, redo and reset. Each clears the selection, whose rows may be
+// anywhere afterwards.
+function editAction(action) {
+  const edit = editOf(REGION);
+  const current = { order: edit.order, moved: edit.moved };
+  let next = null;
+  if (action === "undo" && edit.undo.length) {
+    edit.redo.push(current);
+    next = edit.undo.pop();
+  } else if (action === "redo" && edit.redo.length) {
+    edit.undo.push(current);
+    next = edit.redo.pop();
+  } else if (action === "reset" && (edit.undo.length || isEdited(REGION))) {
+    edit.undo.push(current);
+    edit.redo = [];
+    next = { order: REGION.rows.map((_, i) => i), moved: new Set() };
+  }
+  if (!next) return;
+  edit.order = next.order;
+  edit.moved = next.moved;
+  SELECTION = null;
+  rerender();
+}
+
+// The function's order file (OrderReplay.h): every region, in block order,
+// with its rows' texts in shown order. A region never edited is as dumped.
+function buildOrderFile() {
+  const regions = [];
+  for (const block of DATA.blocks) {
+    for (const region of block.regions) {
+      const order = EDITS.has(region.index) ? editOf(region).order : region.rows.map((_, i) => i);
+      regions.push({ index: region.index, block: block.number,
+                     instrs: order.map((row) => region.rows[row].text) });
+    }
+  }
+  return { function: DATA.function, regions };
+}
+
+document.getElementById("export").addEventListener("click", () => {
+  if (!DATA) return;
+  const blob = new Blob([JSON.stringify(buildOrderFile(), null, 1)], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = DATA.function + ".order.json";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+});
+
+document.getElementById("regionbar").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (button && REGION) editAction(button.dataset.action);
+});
 
 // --- Hover and click -----------------------------------------------------
 
@@ -1015,18 +1332,70 @@ document.getElementById("tiers").addEventListener("click", (event) => {
   row.classList.add("flash");
 });
 
-// Clicking a register keeps it shown while you scroll to far-off reads;
-// clicking it again or Esc lets go.
+// A shift-click on a row number extends the row selection, not the page's
+// text selection.
+document.getElementById("code").addEventListener("mousedown", (event) => {
+  if (event.shiftKey && event.target.closest(".num")) event.preventDefault();
+});
+
+// In the code view:
+//   - Alt-click a row in the selection's window: move the selection just
+//     above it.
+//   - Click a row number: select that row. Shift-click: extend the selection
+//     from the row first clicked.
+//   - Click a register: keep it shown while you scroll to far-off reads;
+//     click it again or Esc to let go.
 document.getElementById("code").addEventListener("click", (event) => {
+  if (!REGION) return;
+  const rowElement = event.target.closest(".row[data-row]");
+
+  if (event.altKey) {
+    event.preventDefault();
+    if (rowElement && SELECTION && WINDOW) {
+      const target = positionOfRow(+rowElement.dataset.row);
+      if (target > WINDOW.top && target <= WINDOW.bottom) moveSelection(target);
+    }
+    return;
+  }
+
+  const numElement = event.target.closest(".num");
+  if (numElement && rowElement && !rowElement.classList.contains("end") && canReorder(REGION)) {
+    const position = positionOfRow(+rowElement.dataset.row);
+    const anchor = event.shiftKey && SELECTION ? SELECTION.anchor : position;
+    SELECTION = { anchor, start: Math.min(anchor, position), end: Math.max(anchor, position) };
+    paintSelection();
+    return;
+  }
+
   const regElement = event.target.closest(".vr");
-  if (!regElement || !REGION) return;
+  if (!regElement) return;
   const reg = +regElement.dataset.reg;
   pinnedReg = pinnedReg === reg ? null : reg;
 });
+
+// Esc drops the selection first, then the pinned register. Ctrl+Z and
+// Ctrl+Y (or Ctrl+Shift+Z) undo and redo moves in the shown region.
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape" || pinnedReg === null) return;
-  pinnedReg = null;
-  showRegister(null);
+  if (!REGION) return;
+  if (event.key === "Escape") {
+    if (SELECTION) {
+      SELECTION = null;
+      paintSelection();
+    } else if (pinnedReg !== null) {
+      pinnedReg = null;
+      showRegister(null);
+    }
+    return;
+  }
+  if (!(event.ctrlKey || event.metaKey) || event.target.tagName === "INPUT") return;
+  const key = event.key.toLowerCase();
+  if (key === "z" && !event.shiftKey) {
+    event.preventDefault();
+    editAction("undo");
+  } else if (key === "y" || (key === "z" && event.shiftKey)) {
+    event.preventDefault();
+    editAction("redo");
+  }
 });
 
 // The register rail follows the pinned columns when the pane scrolls sideways.
