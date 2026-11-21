@@ -432,9 +432,9 @@ MlpMeasure MeasureMlp(std::vector<MemOpFlight> flights) {
 IdealScore
 MemoryGraph::ScoreIdeal(LatencySetting setting,
                         const TrackedReadTypes &tracked_read_types) const {
-  // The earliest time each node can run, indexed by topo index. Filled in
+  // The earliest time each node can run, indexed by node id. Filled in
   // topological order, so a node's predecessors are always done before it.
-  std::vector<int> earliest_start_by_topo_index(topo_order_.size(), 0);
+  std::vector<int> earliest_start_by_node_id(nodes_.size(), 0);
 
   // Each tracked read's flight: from its earliest start until its data is
   // back.
@@ -454,7 +454,7 @@ MemoryGraph::ScoreIdeal(LatencySetting setting,
     for (const MemoryEdge &edge : node->Predecessors()) {
       const MemoryNode &predecessor = *edge.node;
       const int predecessor_start =
-          earliest_start_by_topo_index[predecessor.GetTopoIndex()];
+          earliest_start_by_node_id[predecessor.GetId()];
 
       // An ordering-only edge into a node that isn't a barrier only keeps the
       // node from starting before the predecessor. An edge that waits for
@@ -469,7 +469,7 @@ MemoryGraph::ScoreIdeal(LatencySetting setting,
 
       earliest_start = std::max(earliest_start, allowed_from);
     }
-    earliest_start_by_topo_index[node->GetTopoIndex()] = earliest_start;
+    earliest_start_by_node_id[node->GetId()] = earliest_start;
 
     if (tracked_read_types.Tracks(*node)) {
       tracked_read_flights.push_back(MemOpFlight{
@@ -481,10 +481,50 @@ MemoryGraph::ScoreIdeal(LatencySetting setting,
 
   // The sink waits for every load, tracked or not, so the earliest it can
   // start is when the last read's data is back.
-  score.elapsed_time = earliest_start_by_topo_index[sink_->GetTopoIndex()];
+  score.elapsed_time = earliest_start_by_node_id[sink_->GetId()];
 
   score.latency_based_mlp = MeasureMlp(std::move(tracked_read_flights));
+
+  // Every node's earliest start, for callers that show it per op.
+  score.earliest_start_by_node_id = std::move(earliest_start_by_node_id);
   return score;
+}
+
+MemoryTiers MemoryGraph::GetIdealTiers() const {
+  // Each node's tier, indexed by node id. Filled in topological order, so a
+  // node's predecessors always have their tiers before it does.
+  MemoryTiers tiers;
+  tiers.tier_by_node_id.assign(nodes_.size(), 0);
+
+  for (const MemoryNode *node : topo_order_) {
+    // A barrier waits for every memory op before it to finish (see
+    // ScoreIdeal), whether or not it reads that op's data.
+    const bool is_barrier = node->GetKind() == MemoryNodeKind::kBarrier;
+
+    // The node's tier is the highest its predecessors push it to.
+    int tier = 0;
+    for (const MemoryEdge &edge : node->Predecessors()) {
+      const MemoryNode &predecessor = *edge.node;
+      const int predecessor_tier = tiers.tier_by_node_id[predecessor.GetId()];
+
+      // Waiting for the predecessor to finish starts a new round. A
+      // predecessor that isn't a memory op, like a user, has latency 0, so
+      // there's nothing to wait for.
+      const bool waits_for_predecessor =
+          (edge.waits_for_data || is_barrier) &&
+          predecessor.GetLatency(LatencySetting::kLlvm) > 0;
+
+      int allowed_tier = predecessor_tier;
+      if (waits_for_predecessor) {
+        allowed_tier += 1;
+      }
+
+      tier = std::max(tier, allowed_tier);
+    }
+    tiers.tier_by_node_id[node->GetId()] = tier;
+  }
+
+  return tiers;
 }
 
 // Fails hard unless `order` holds every node of `graph` once, each after its

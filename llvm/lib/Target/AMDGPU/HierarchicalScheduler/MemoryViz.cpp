@@ -282,9 +282,9 @@ void MemoryViz::AnalyzeRegion(MutableArrayRef<SUnit> sunits,
           ->ScoreSchedule(final_order, LatencySetting::kLlvm,
                           tracked_read_types, &steps)
           .elapsed_time;
-  result.ideal_memory_time =
-      memory_graph->ScoreIdeal(LatencySetting::kLlvm, tracked_read_types)
-          .elapsed_time;
+  const IdealScore ideal_score =
+      memory_graph->ScoreIdeal(LatencySetting::kLlvm, tracked_read_types);
+  result.ideal_memory_time = ideal_score.elapsed_time;
   const int memory_time_gap =
       result.scheduled_memory_time - result.ideal_memory_time;
   result.gain = schedule_length -
@@ -488,30 +488,15 @@ void MemoryViz::AnalyzeRegion(MutableArrayRef<SUnit> sunits,
     }
   }
 
-  // The ideal tiers: how many rounds of waiting must come before each node,
-  // in any order. An edge adds a round where the ideal's earliest start adds
-  // the predecessor's latency (MemoryGraph::ScoreIdeal): it waits for data,
-  // or it goes into a barrier, and the predecessor takes time.
-  DenseMap<const MemoryNode *, int> ideal_tier_of;
-  DenseMap<const MemoryNode *, int> ideal_start_of;
-  for (const MemoryNode *node : memory_graph->GetTopoOrder()) {
-    const bool is_barrier = node->GetKind() == MemoryNodeKind::kBarrier;
-    int ideal_tier = 0;
-    int ideal_start = 0;
-    for (const MemoryEdge &edge : node->Predecessors()) {
-      const int latency = edge.node->GetLatency(LatencySetting::kLlvm);
-      const bool waits = (edge.waits_for_data || is_barrier) && latency > 0;
-      ideal_tier =
-          std::max(ideal_tier, ideal_tier_of.lookup(edge.node) + (waits ? 1 : 0));
-      ideal_start = std::max(ideal_start, ideal_start_of.lookup(edge.node) +
-                                              (waits ? latency : 0));
-    }
-    ideal_tier_of[node] = ideal_tier;
-    ideal_start_of[node] = ideal_start;
-    auto op_it = op_of_node.find(node);
+  // Each op's tier and earliest start in the ideal, both from MemoryGraph.
+  const MemoryTiers ideal_tiers = memory_graph->GetIdealTiers();
+  for (const MemoryNode &node : memory_graph->Nodes()) {
+    auto op_it = op_of_node.find(&node);
     if (op_it != op_of_node.end()) {
-      result.ops[op_it->second].ideal_tier = ideal_tier;
-      result.ops[op_it->second].ideal_start = ideal_start;
+      result.ops[op_it->second].ideal_tier =
+          ideal_tiers.tier_by_node_id[node.GetId()];
+      result.ops[op_it->second].ideal_start =
+          ideal_score.earliest_start_by_node_id[node.GetId()];
     }
   }
 

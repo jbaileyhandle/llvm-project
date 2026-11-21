@@ -191,6 +191,9 @@ struct IdealScore {
   MlpMeasure latency_based_mlp;  // each tracked read in flight from its start
                                  // time until its start time plus its latency
   int elapsed_time = 0;          // when the last read's data is back
+
+  // The earliest time each node can start, indexed by MemoryNode::GetId().
+  std::vector<int> earliest_start_by_node_id;
 };
 
 /// One order's memory work, walked through the wait queues (design doc
@@ -236,6 +239,12 @@ struct WalkStep {
   std::vector<const MemoryNode *> popped;
 };
 
+/// A tier structure: a tier number for every node of a MemoryGraph, the sink
+/// included. No node of tier k+1 may go before any node of tier k.
+struct MemoryTiers {
+  std::vector<int> tier_by_node_id;  // indexed by MemoryNode::GetId()
+};
+
 /// A graph of one region's memory ops (design doc section 3). Organized like
 /// ScheduleGraph: nodes reserved up front so pointers into them stay valid,
 /// edges hold node pointers, and each node stores its own id and topo index.
@@ -267,6 +276,14 @@ public:
   /// every op.
   IdealScore ScoreIdeal(LatencySetting setting,
                         const TrackedReadTypes &tracked_read_types) const;
+
+  /// The ideal tiers: each node's tier is how many rounds of waiting must
+  /// come before it in any order. A node's tier is the highest, over its
+  /// predecessors, of the predecessor's tier, plus one if the node waits for
+  /// that predecessor to finish. A node waits for a predecessor to finish when
+  /// the predecessor is a memory op that takes time, and the node either reads
+  /// its data or is a barrier.
+  MemoryTiers GetIdealTiers() const;
 
   /// Walks `order` through the wait queues and scores it (design doc section
   /// 5). `order` must hold every node of this graph once, each after its
