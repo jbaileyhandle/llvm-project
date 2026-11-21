@@ -155,6 +155,7 @@ const char *EdgeKindName(ScheduleEdge::Kind kind) {
   case ScheduleEdge::kBarrier: return "barrier";
   case ScheduleEdge::kMayAliasMem: return "may_alias";
   case ScheduleEdge::kMustAliasMem: return "must_alias";
+  case ScheduleEdge::kMemoryTier: return "memory_tier";
   case ScheduleEdge::kArtificial: return "artificial";
   case ScheduleEdge::kSubgraphOrderEdge: return "subgraph_order";
   case ScheduleEdge::kCluster: return "cluster";

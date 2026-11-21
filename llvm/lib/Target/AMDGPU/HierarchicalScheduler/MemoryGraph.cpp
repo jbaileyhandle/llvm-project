@@ -527,6 +527,37 @@ MemoryTiers MemoryGraph::GetIdealTiers() const {
   return tiers;
 }
 
+ScheduleTiers MemoryGraph::ToOriginalTiers(const MemoryTiers &tiers) const {
+  // A structure from another graph would have a different node count.
+  if (tiers.tier_by_node_id.size() != nodes_.size()) {
+    report_fatal_error("MemoryGraph::ToOriginalTiers: the tiers must have one "
+                       "entry per node of this graph");
+  }
+
+  ScheduleTiers original_tiers;
+  for (const MemoryNode &node : nodes_) {
+    // The sink has no instruction, so there's nothing to order.
+    if (node.GetKind() == MemoryNodeKind::kSink) {
+      continue;
+    }
+
+    // Grow the list of tiers as higher tier numbers show up.
+    const int tier = tiers.tier_by_node_id[node.GetId()];
+    if (tier >= static_cast<int>(original_tiers.graph_local_ids_by_tier.size())) {
+      original_tiers.graph_local_ids_by_tier.resize(tier + 1);
+    }
+
+    original_tiers.graph_local_ids_by_tier[tier].push_back(
+        node.GetOriginalNode()->GetGraphLocalId());
+  }
+
+  return original_tiers;
+}
+
+ScheduleTiers MemoryGraph::GetIdealTiersInOriginalGraph() const {
+  return ToOriginalTiers(GetIdealTiers());
+}
+
 // Fails hard unless `order` holds every node of `graph` once, each after its
 // predecessors. The sink comes after every other node, so this also puts it
 // last.

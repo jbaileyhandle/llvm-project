@@ -25,6 +25,7 @@ namespace hierarchical_scheduler {
 
 class ScheduleGraph;
 class ScheduleNode;
+struct ScheduleTiers;
 
 /// Whether a memory op reads (later code can wait on its data) or writes.
 enum class MemAccess { kRead, kWrite };
@@ -284,6 +285,15 @@ public:
   /// the predecessor is a memory op that takes time, and the node either reads
   /// its data or is a barrier.
   MemoryTiers GetIdealTiers() const;
+
+  /// Translates `tiers`, a tier structure on this graph, to the ScheduleGraph
+  /// this graph was built from: each memory node's ScheduleNode goes in the
+  /// same tier. The sink has no ScheduleNode, so it's left out.
+  ScheduleTiers ToOriginalTiers(const MemoryTiers &tiers) const;
+
+  /// The ideal tiers as a structure on the ScheduleGraph this graph was
+  /// built from.
+  ScheduleTiers GetIdealTiersInOriginalGraph() const;
 
   /// Walks `order` through the wait queues and scores it (design doc section
   /// 5). `order` must hold every node of this graph once, each after its

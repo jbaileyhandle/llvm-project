@@ -130,6 +130,8 @@ const char *StrongEdgeKindName(ScheduleEdge::Kind kind) {
     return "may-alias";
   case ScheduleEdge::kMustAliasMem:
     return "must-alias";
+  case ScheduleEdge::kMemoryTier:
+    return "memory-tier";
   case ScheduleEdge::kArtificial:
     return "artificial";
   case ScheduleEdge::kSubgraphOrderEdge:

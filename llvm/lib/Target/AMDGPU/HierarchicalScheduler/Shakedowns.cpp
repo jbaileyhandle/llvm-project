@@ -3515,7 +3515,7 @@ void RunLengthHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   auto graph = ScheduleGraph::BuildHistoryPruneTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
   graph->ComputeCriticalPaths();
-  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+  graph->PopulateInputScheduleConstructorByTopoOrder(st, mf);
 
   DfsSearch<TestLengthPolicyNoBoundsNoHistory> no_hist_search(
       *graph, st, mf, lis);
@@ -3648,7 +3648,7 @@ void RunPressureHistoryDfsComparisonShakedown(const GCNSubtarget &st,
   auto graph = ScheduleGraph::BuildPressureHistoryPruneTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
   graph->ComputeCriticalPaths();
-  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+  graph->PopulateInputScheduleConstructorByTopoOrder(st, mf);
 
   std::vector<int> vgpr_deltas = {+1, +1, +1, -1, -1, -1};
 
@@ -3777,7 +3777,7 @@ void RunBfsDpVsDfsComparisonOnGraph(StringRef case_name,
 
   graph.ValidateAndComputeTopologicalOrder();
   graph.ComputeCriticalPaths();
-  graph.PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+  graph.PopulateInputScheduleConstructorByTopoOrder(st, mf);
 
   // DFS oracle: production policy with timeout + early-exit disabled
   // (see BfsDpVsDfsShakedownOraclePolicy). Pruning stays on; it's
@@ -4041,7 +4041,7 @@ void RunDfsAreaTiebreakShakedown(const GCNSubtarget &st,
   auto graph = ScheduleGraph::BuildAreaTiebreakTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
   graph->ComputeCriticalPaths();
-  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+  graph->PopulateInputScheduleConstructorByTopoOrder(st, mf);
 
   std::vector<int> vgpr_deltas = {+1, +2, 0, -1, -2, 0};
 
@@ -6338,6 +6338,266 @@ void RunMemoryGraphIdealUnitTests() {
   }
 }
 
+// The memory tier tests run on BuildMemoryGraphTestDAG with every load a
+// vector load at LLVM latency 100. Its ideal tiers, worked out by hand from
+// the factory's drawing:
+//   tier 0: L1
+//   tier 1: A (waits for L1's data), L2, S, L3 (only come after L1 or A)
+//   tier 2: U (waits for L2's data), B (the barrier waits for L2, S and L3
+//           to finish), L4 (only comes after B)
+//   tier 3: the sink (waits for L4's data)
+NodeRole TierTestDagRole(const ScheduleNode &node) {
+  return TestDagRole(node, {100, 100, 100, 100},
+                     {MemType::kVector, MemType::kVector, MemType::kVector,
+                      MemType::kVector});
+}
+
+// BuildMemoryGraphTestDAG set up the way a region's graph arrives from
+// BuildFromSUnits: topologically sorted, with critical paths and an input
+// schedule. The input schedule here is the topological order.
+std::unique_ptr<ScheduleGraph> BuildTierTestGraph(const GCNSubtarget &st,
+                                                  const MachineFunction &mf) {
+  auto graph = ScheduleGraph::BuildMemoryGraphTestDAG();
+  graph->ValidateAndComputeTopologicalOrder();
+  graph->ComputeCriticalPaths();
+  graph->PopulateInputScheduleConstructorByTopoOrder(st, mf);
+  return graph;
+}
+
+// The debug name of `graph`'s node with graph-local id `graph_local_id`.
+std::string NameOfGraphLocalId(const ScheduleGraph &graph,
+                               int graph_local_id) {
+  for (const ScheduleNode &node : graph.Nodes()) {
+    if (node.GetGraphLocalId() == graph_local_id) {
+      return node.GetDebugName().str();
+    }
+  }
+  return "?";
+}
+
+// A tier structure on `graph` from tiers of node names.
+ScheduleTiers
+TiersFromNames(const ScheduleGraph &graph,
+               const std::vector<std::vector<std::string>> &names_by_tier) {
+  ScheduleTiers tiers;
+  for (const std::vector<std::string> &names : names_by_tier) {
+    std::vector<int> graph_local_ids;
+    for (const std::string &name : names) {
+      for (const ScheduleNode &node : graph.Nodes()) {
+        if (node.GetDebugName() == name) {
+          graph_local_ids.push_back(node.GetGraphLocalId());
+        }
+      }
+    }
+    tiers.graph_local_ids_by_tier.push_back(graph_local_ids);
+  }
+  return tiers;
+}
+
+// One line per tier, "tier k: names", with the names sorted so the line
+// doesn't depend on the order the translation listed them in.
+std::multiset<std::string> ScheduleTierLines(const ScheduleGraph &graph,
+                                             const ScheduleTiers &tiers) {
+  std::multiset<std::string> lines;
+  for (int tier = 0;
+       tier < static_cast<int>(tiers.graph_local_ids_by_tier.size()); ++tier) {
+    std::vector<std::string> names;
+    for (int graph_local_id : tiers.graph_local_ids_by_tier[tier]) {
+      names.push_back(NameOfGraphLocalId(graph, graph_local_id));
+    }
+    std::sort(names.begin(), names.end());
+
+    std::string line = "tier " + std::to_string(tier) + ":";
+    for (const std::string &name : names) {
+      line += " " + name;
+    }
+    lines.insert(line);
+  }
+  return lines;
+}
+
+// One line per kMemoryTier edge of `graph`, "from->to". A multiset, so a
+// duplicated edge shows up.
+std::multiset<std::string> MemoryTierEdgeLines(const ScheduleGraph &graph) {
+  std::multiset<std::string> lines;
+  for (const ScheduleNode &node : graph.Nodes()) {
+    for (const ScheduleEdge &edge : node.Successors()) {
+      if (edge.kind_ == ScheduleEdge::kMemoryTier) {
+        lines.insert(node.GetDebugName().str() + "->" +
+                     edge.node_->GetDebugName().str());
+      }
+    }
+  }
+  return lines;
+}
+
+// Whether every strong edge between nodes of `order` goes forward in it:
+// each edge's source comes before its target. Read from the nodes' own
+// successor lists, so a tier edge counts like any other.
+bool OrderObeysEdges(ArrayRef<const ScheduleNode *> order) {
+  DenseMap<const ScheduleNode *, int> position_of;
+  for (int position = 0; position < static_cast<int>(order.size());
+       ++position) {
+    position_of[order[position]] = position;
+  }
+
+  for (const ScheduleNode *node : order) {
+    const int node_position = position_of.lookup(node);
+    for (const ScheduleEdge &edge : node->Successors()) {
+      auto successor_it = position_of.find(edge.node_);
+      if (edge.IsStrongEdge() && successor_it != position_of.end() &&
+          successor_it->second < node_position) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// Whether the node named `first` comes before the node named `second` in
+// `order`.
+bool ComesBefore(ArrayRef<const ScheduleNode *> order, StringRef first,
+                 StringRef second) {
+  for (const ScheduleNode *node : order) {
+    if (node->GetDebugName() == first) {
+      return true;
+    }
+    if (node->GetDebugName() == second) {
+      return false;
+    }
+  }
+  return false;
+}
+
+// Prints "label: yes" or "label: no", then PASS when that's `expected`.
+bool CheckYesNo(StringRef label, bool actual, bool expected) {
+  const bool pass = actual == expected;
+  llvm::outs() << "\t\t\t" << label << ": " << (actual ? "yes" : "no")
+               << (pass ? "  PASS" : "  FAIL") << "\n";
+  return pass;
+}
+
+// GetIdealTiers and GetIdealTiersInOriginalGraph against the tiers above.
+bool CheckIdealTiers() {
+  auto original = ScheduleGraph::BuildMemoryGraphTestDAG();
+  auto graph =
+      MemoryGraph::BuildWithRoleClassifier(*original, TierTestDagRole);
+
+  // Every memory node's tier, the sink included.
+  const MemoryTiers tiers = graph->GetIdealTiers();
+  std::multiset<std::string> tier_lines;
+  for (const MemoryNode &node : graph->Nodes()) {
+    tier_lines.insert(MemoryNodeName(node) + " " +
+                      std::to_string(tiers.tier_by_node_id[node.GetId()]));
+  }
+  bool pass = CheckSameLines(
+      "ideal tiers", tier_lines,
+      {"L1 0", "A 1", "L2 1", "S 1", "L3 1", "U 2", "B 2", "L4 2", "sink 3"});
+
+  // The same tiers on the original graph. The sink has no original node, and
+  // N, X and E aren't in the memory graph.
+  pass &= CheckSameLines(
+      "ideal tiers in the original graph",
+      ScheduleTierLines(*original, graph->GetIdealTiersInOriginalGraph()),
+      {"tier 0: L1", "tier 1: A L2 L3 S", "tier 2: B L4 U"});
+  return pass;
+}
+
+// EnforceMemoryTiers with the ideal tiers: the edges it adds, and the input
+// schedule it replaces.
+bool CheckEnforceIdealTiers(const GCNSubtarget &st,
+                            const MachineFunction &mf) {
+  auto original = BuildTierTestGraph(st, mf);
+  auto memory_graph =
+      MemoryGraph::BuildWithRoleClassifier(*original, TierTestDagRole);
+  const ScheduleTiers tiers = memory_graph->GetIdealTiersInOriginalGraph();
+
+  // The topological order puts U (tier 2) before S (tier 1), so the input
+  // breaks the tiers before the edges go in. Checked, so that the
+  // replacement below is really exercised.
+  bool pass = CheckYesNo(
+      "U before S in the input before",
+      ComesBefore(original->GetInputScheduleConstructor().GetScheduleOrder(),
+                  "U", "S"),
+      /*expected=*/true);
+
+  original->EnforceMemoryTiers(tiers, st, mf);
+
+  // Each node of a tier gets an edge to each node of the next: L1 to the
+  // four nodes of tier 1, and each of those to the three of tier 2.
+  pass &= CheckSameLines("tier edges", MemoryTierEdgeLines(*original),
+                         {"L1->A", "L1->L2", "L1->S", "L1->L3",
+                          "A->U", "A->B", "A->L4",
+                          "L2->U", "L2->B", "L2->L4",
+                          "S->U", "S->B", "S->L4",
+                          "L3->U", "L3->B", "L3->L4"});
+
+  // With the tier edges in place, an input that obeys every edge keeps the
+  // tiers.
+  pass &= CheckYesNo(
+      "input obeys every edge after",
+      OrderObeysEdges(original->GetInputScheduleConstructor().GetScheduleOrder()),
+      /*expected=*/true);
+  return pass;
+}
+
+// EnforceMemoryTiers with L1, then an empty tier, then L4. The empty tier is
+// skipped, so L1 -> L4 is the only edge. The topological order already has
+// L1 before L4, so the input schedule is kept.
+bool CheckEnforceTiersWithEmptyTier(const GCNSubtarget &st,
+                                    const MachineFunction &mf) {
+  auto original = BuildTierTestGraph(st, mf);
+  const ScheduleTiers tiers = TiersFromNames(*original, {{"L1"}, {}, {"L4"}});
+  const ScheduleConstructor *input_before =
+      &original->GetInputScheduleConstructor();
+
+  original->EnforceMemoryTiers(tiers, st, mf);
+
+  bool pass = CheckSameLines("tier edges", MemoryTierEdgeLines(*original),
+                             {"L1->L4"});
+  pass &= CheckYesNo("input kept",
+                     &original->GetInputScheduleConstructor() == input_before,
+                     /*expected=*/true);
+  return pass;
+}
+
+void RunMemoryTierUnitTests(const MachineFunction &mf) {
+  llvm::outs() << "\tMemory tier unit tests:\n";
+  const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
+
+  llvm::outs() << "\t\tideal tiers:\n";
+  bool pass = CheckIdealTiers();
+  llvm::outs() << "\t\tEnforceMemoryTiers with the ideal tiers:\n";
+  pass &= CheckEnforceIdealTiers(st, mf);
+  llvm::outs() << "\t\tEnforceMemoryTiers with an empty middle tier:\n";
+  pass &= CheckEnforceTiersWithEmptyTier(st, mf);
+
+  if (!pass) {
+    report_fatal_error("Memory tier unit tests failed");
+  }
+}
+
+// EnforceIdealMemoryTiers on a real region's graph. A cycle would fail hard
+// inside it. Afterwards, the input schedule must obey every edge, the tier
+// edges included. Prints one line for the region, saying whether its input
+// was replaced, and returns whether it passed.
+bool CheckEnforceIdealMemoryTiersOnRegion(ScheduleGraph &graph,
+                                          const GCNSubtarget &st,
+                                          const MachineFunction &mf) {
+  const ScheduleConstructor *input_before = &graph.GetInputScheduleConstructor();
+
+  graph.EnforceIdealMemoryTiers(st, mf);
+
+  const bool replaced = &graph.GetInputScheduleConstructor() != input_before;
+  const bool pass =
+      OrderObeysEdges(graph.GetInputScheduleConstructor().GetScheduleOrder());
+
+  llvm::outs() << "\t\tregion: " << MemoryTierEdgeLines(graph).size()
+               << " tier edges, input " << (replaced ? "replaced" : "kept")
+               << "  " << (pass ? "PASS" : "FAIL") << "\n";
+  return pass;
+}
+
 // What each kind of op looks like to the wait queues, for the queue tests.
 const MemOpInfo kVectorLoadInfo{MemAccess::kRead, MemType::kVector, true,
                                 false};
@@ -7233,7 +7493,7 @@ void RunBuildFromNodeSubsetShakedown(const GCNSubtarget &st,
   // paths, and input schedule BuildFromNodeSubset reads.
   parent_graph->ValidateAndComputeTopologicalOrder();
   parent_graph->ComputeCriticalPaths();
-  parent_graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+  parent_graph->PopulateInputScheduleConstructorByTopoOrder(st, mf);
 
   std::vector<ScheduleNode *> members = {pC, pD, pE, pF};
   DenseMap<const ScheduleNode *, ScheduleNode *> subgraph_to_parent;
@@ -7417,7 +7677,7 @@ void RunScheduleSubgraphShakedown(const GCNSubtarget &st,
   parent_graph->SetNodeRegInfoTable(std::move(parent_table));
   parent_graph->ValidateAndComputeTopologicalOrder();
   parent_graph->ComputeCriticalPaths();
-  parent_graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+  parent_graph->PopulateInputScheduleConstructorByTopoOrder(st, mf);
 
   auto check = [](StringRef desc, bool ok) {
     llvm::outs() << "    " << desc << ": " << (ok ? "PASS" : "FAIL")
@@ -7772,7 +8032,7 @@ void RunDecomposeAndScheduleShakedown(const GCNSubtarget &st,
   auto graph = ScheduleGraph::BuildSubgraphFormationTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
   graph->ComputeCriticalPaths();
-  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+  graph->PopulateInputScheduleConstructorByTopoOrder(st, mf);
 
   auto inner_search =
       [&st, &mf](ScheduleGraph &sub) -> SearchResult {
@@ -7877,7 +8137,7 @@ void RunDecomposeAndScheduleFactoryShakedown(const GCNSubtarget &st,
   auto graph = ScheduleGraph::BuildSubgraphFormationTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
   graph->ComputeCriticalPaths();
-  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+  graph->PopulateInputScheduleConstructorByTopoOrder(st, mf);
 
   DecomposeAndScheduleOptions opts = DecomposeAndScheduleOptions::Make(
       st, mf, lis, /*seed_occupancy=*/1,
@@ -8425,7 +8685,7 @@ void RunDfsMinimizeLengthBoundedSpillSignalsPolicyShakedown(
   auto graph = ScheduleGraph::BuildTestDAG();
   graph->ValidateAndComputeTopologicalOrder();
   graph->ComputeCriticalPaths();
-  graph->PopulateInputScheduleConstructorByTopoOrderForTest(st, mf);
+  graph->PopulateInputScheduleConstructorByTopoOrder(st, mf);
 
   // Stage the input baseline's spill area. The policy reads this
   // via working.GetGraph().GetInputScheduleConstructor().GetPressureTracker().
@@ -9138,6 +9398,7 @@ void ScheduleDAGHierarchicalScheduler::RunMemoryGraphShakedowns() {
   RunClassifyMemOpUnitTests(MF);
   RunMemoryGraphBuildUnitTests();
   RunMemoryGraphIdealUnitTests();
+  RunMemoryTierUnitTests(MF);
   RunWaitQueueUnitTests();
   RunMemoryGraphWalkUnitTests();
 
@@ -9151,6 +9412,19 @@ void ScheduleDAGHierarchicalScheduler::RunMemoryGraphShakedowns() {
   }
   if (!pass) {
     report_fatal_error("MemoryGraph checks on real regions failed");
+  }
+
+  // Each region gets a fresh graph, so the tier edges added here stay in it
+  // and nothing is applied to the function.
+  llvm::outs() << "\tEnforceIdealMemoryTiers on real regions:\n";
+  bool tiers_pass = true;
+  for (auto &region : regions_) {
+    WithRegionGraph(region, [&](ScheduleGraph &graph) {
+      tiers_pass &= CheckEnforceIdealMemoryTiersOnRegion(graph, st, MF);
+    });
+  }
+  if (!tiers_pass) {
+    report_fatal_error("EnforceIdealMemoryTiers checks on real regions failed");
   }
 }
 

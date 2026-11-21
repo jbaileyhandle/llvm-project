@@ -8,6 +8,7 @@
 #include "DominatorTree.h"
 #include "GCNRegPressure.h"
 #include "HierarchicalConfig.h"
+#include "MemoryGraph.h"
 #include "NodeRegInfo.h"
 #include "RegionInfo.h"
 #include "ScheduleConstructor.h"
@@ -1150,13 +1151,106 @@ void ScheduleGraph::AddEdgesBetweenLeafNodes(
   }
 }
 
-void ScheduleGraph::PopulateInputScheduleConstructorByTopoOrderForTest(
+void ScheduleGraph::PopulateInputScheduleConstructorByTopoOrder(
     const GCNSubtarget &st, const MachineFunction &mf) {
   input_schedule_constructor_ =
       std::make_unique<ScheduleConstructor>(*this, st, mf);
   for (ScheduleNode *node : topo_order_) {
     input_schedule_constructor_->Schedule(node);
   }
+}
+
+void ScheduleGraph::AddTierEdges(const ScheduleTiers &tiers) {
+  // Find each node by its graph-local id. Ids are dense, so every slot of
+  // this table holds a node.
+  std::vector<ScheduleNode *> node_by_graph_local_id(GetNumGraphLocalIds(),
+                                                     nullptr);
+  for (ScheduleNode &node : nodes_) {
+    node_by_graph_local_id[node.GetGraphLocalId()] = &node;
+  }
+
+  // Order each non-empty tier after the last non-empty tier before it.
+  // Tiers further apart are ordered through the tiers between them.
+  const std::vector<int> *previous_tier = nullptr;
+  for (const std::vector<int> &tier : tiers.graph_local_ids_by_tier) {
+    if (tier.empty()) {
+      continue;
+    }
+
+    if (previous_tier != nullptr) {
+      for (int from_id : *previous_tier) {
+        for (int to_id : tier) {
+          AddEdge(node_by_graph_local_id[from_id],
+                  node_by_graph_local_id[to_id], ScheduleEdge::kMemoryTier);
+        }
+      }
+    }
+
+    previous_tier = &tier;
+  }
+
+  // Adding edges cleared the topological order and critical paths, so
+  // recompute them, as InsertSubgraphProxies does. The topological sort
+  // fails hard if the new edges formed a cycle.
+  ValidateAndComputeTopologicalOrder();
+  ComputeCriticalPaths();
+}
+
+// Whether `order` keeps the tiers: walking it, the tier of each tiered node
+// never goes below the highest tier seen before it. Nodes in no tier are
+// skipped.
+static bool OrderRespectsTiers(ArrayRef<const ScheduleNode *> order,
+                               const ScheduleTiers &tiers) {
+  // Each tiered node's tier, by graph-local id.
+  DenseMap<int, int> tier_by_graph_local_id;
+  for (int tier = 0;
+       tier < static_cast<int>(tiers.graph_local_ids_by_tier.size()); ++tier) {
+    for (int graph_local_id : tiers.graph_local_ids_by_tier[tier]) {
+      tier_by_graph_local_id[graph_local_id] = tier;
+    }
+  }
+
+  int highest_tier_seen = 0;
+  for (const ScheduleNode *node : order) {
+    auto tier_it = tier_by_graph_local_id.find(node->GetGraphLocalId());
+    if (tier_it == tier_by_graph_local_id.end()) {
+      continue;
+    }
+
+    const int tier = tier_it->second;
+    if (tier < highest_tier_seen) {
+      return false;
+    }
+    highest_tier_seen = tier;
+  }
+
+  return true;
+}
+
+void ScheduleGraph::EnforceMemoryTiers(const ScheduleTiers &tiers,
+                                       const GCNSubtarget &st,
+                                       const MachineFunction &mf) {
+  AddTierEdges(tiers);
+
+  // The input schedule (the region's current order) was built before the
+  // tier edges existed, so it may put a node of a later tier before one of
+  // an earlier tier. If it does, replace it with a topological order of the
+  // graph, which obeys every edge, tier edges included. An input that
+  // already obeys the tiers is kept, since nothing about it needs fixing.
+  if (!OrderRespectsTiers(GetInputScheduleConstructor().GetScheduleOrder(),
+                          tiers)) {
+    PopulateInputScheduleConstructorByTopoOrder(st, mf);
+  }
+}
+
+void ScheduleGraph::EnforceIdealMemoryTiers(const GCNSubtarget &st,
+                                            const MachineFunction &mf) {
+  std::unique_ptr<MemoryGraph> memory_graph = MemoryGraph::Build(*this, st);
+  EnforceMemoryTiers(memory_graph->GetIdealTiersInOriginalGraph(), st, mf);
+}
+
+std::unique_ptr<ScheduleGraph> ScheduleGraph::Clone() const {
+  report_fatal_error("ScheduleGraph::Clone: not yet implemented");
 }
 
 void ScheduleGraph::PopulateInputScheduleConstructor(

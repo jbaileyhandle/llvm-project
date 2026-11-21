@@ -145,6 +145,9 @@ struct ScheduleEdge {
                    // ordering when alias analysis cannot prove independence.
     kMustAliasMem, // Memory operations that definitely alias. Strict
                    // ordering to preserve memory semantics.
+    kMemoryTier,   // Ours, not from SDep: no node of a later memory tier
+                   // may go before a node of an earlier one (AddTierEdges).
+                   // Latency 0.
     kArtificial,   // Arbitrary strong edge, typically added by DAG mutations
                    // (e.g., to prevent reordering within a cluster).
 
@@ -188,8 +191,8 @@ struct ScheduleEdge {
 
   /// True for all edges that block readiness: register dependencies
   /// (Data, Anti, Output), strong ordering constraints (Barrier,
-  /// MayAliasMem, MustAliasMem, Artificial), and subgraph proxy
-  /// wiring (kSubgraphOrderEdge).
+  /// MayAliasMem, MustAliasMem, MemoryTier, Artificial), and subgraph
+  /// proxy wiring (kSubgraphOrderEdge).
   bool IsStrongEdge() const { return kind_ <= kSubgraphOrderEdge; }
 
   /// True for edges that are hints only and do not block readiness.
@@ -464,6 +467,15 @@ private:
   /// InsertSubgraphProxies; see GetParentSubgraphProxy /
   /// SetParentSubgraphProxy.
   ScheduleNode *parent_subgraph_proxy_ = nullptr;
+};
+
+/// A tier structure on a ScheduleGraph: element k holds the graph-local ids
+/// of the nodes in tier k. No node of tier k+1 may go before any node of
+/// tier k. Nodes outside the memory graph aren't listed. Ids, not node
+/// pointers, so a structure translated against one graph also applies to a
+/// clone of it.
+struct ScheduleTiers {
+  std::vector<std::vector<int>> graph_local_ids_by_tier;
 };
 
 /// A graph of ScheduleNodes. Used at every level of the hierarchy:
@@ -1034,6 +1046,20 @@ public:
     InvalidateDerivedData();
   }
 
+  /// Adds `tiers`' edges (AddTierEdges). If the input schedule then breaks
+  /// them, it becomes this graph's topological order.
+  void EnforceMemoryTiers(const ScheduleTiers &tiers, const GCNSubtarget &st,
+                          const MachineFunction &mf);
+
+  /// EnforceMemoryTiers with the ideal tiers of this graph's MemoryGraph.
+  void EnforceIdealMemoryTiers(const GCNSubtarget &st,
+                               const MachineFunction &mf);
+
+  /// A copy of this graph that keeps every node's graph-local id, so tiers
+  /// translated against this graph apply to the copy. Not yet implemented:
+  /// fails with a fatal error.
+  std::unique_ptr<ScheduleGraph> Clone() const;
+
   /// Add subgraph-proxy nodes to this graph, TWO per SubgraphInfo
   /// in `infos` (start proxy + end proxy). For each SubgraphInfo:
   ///   1. Emplace the START proxy node owning the SubgraphInfo
@@ -1415,16 +1441,17 @@ public:
     return *input_schedule_constructor_;
   }
 
-  /// Test-only: populate input_schedule_constructor_ by Schedule()-
-  /// ing every node in topo order. Synthetic test DAGs (BuildTestDAG
-  /// etc.) lack the entry/exit + region-tied setup that the
-  /// production PopulateInputScheduleConstructor relies on; this
-  /// fallback gives DfsSearch a complete-schedule baseline to
-  /// compare against. Production code should never call this.
+  /// Populate input_schedule_constructor_ by Schedule()-ing every node
+  /// in topo order. Two users: synthetic test DAGs (BuildTestDAG etc.),
+  /// which lack the entry/exit + region-tied setup that
+  /// PopulateInputScheduleConstructor relies on, so this gives
+  /// DfsSearch a complete-schedule baseline to compare against; and
+  /// EnforceIdealMemoryTiers, when the input order breaks the new tier
+  /// edges.
   ///
   /// Preconditions: ValidateAndComputeTopologicalOrder and
   /// ComputeCriticalPathFromExit have been called.
-  void PopulateInputScheduleConstructorByTopoOrderForTest(
+  void PopulateInputScheduleConstructorByTopoOrder(
       const GCNSubtarget &st, const MachineFunction &mf);
 
 private:
@@ -1445,6 +1472,12 @@ private:
   /// ValidateAndComputeTopologicalOrder so structural invariants are
   /// also verified.
   void ComputeTopologicalOrder(bool include_weak_edges);
+
+  /// Adds a kMemoryTier edge (latency 0) from every node of a tier to every
+  /// node of the next non-empty tier, then recomputes the topological order
+  /// and critical paths, which adding edges clears. A step of
+  /// EnforceMemoryTiers, which also fixes the input schedule.
+  void AddTierEdges(const ScheduleTiers &tiers);
 
   int64_t id_;
 
