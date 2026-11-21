@@ -193,7 +193,8 @@ public:
   }
 
   /// Occupancy based on peak register pressure only (SGPR and VGPR
-  /// limits). Does NOT account for LDS or launch bounds.
+  /// limits), with the registers.* buffers counted as in use
+  /// (GetBufferedOccupancy). Does NOT account for LDS or launch bounds.
   unsigned GetRegisterOnlyOccupancy() const;
 
   /// Effective occupancy: max(register-only, MFI->getMinWavesPerEU()).
@@ -209,9 +210,9 @@ public:
   unsigned GetLaunchFloorClampedRegisterOnlyOccupancy() const;
 
   /// True when current VGPR pressure (cur_pressure_'s VGPR count)
-  /// exceeds the VGPR cap permitted at the occupancy floor
-  /// (getMaxNumVGPRs(GetLaunchOccupancyFloor())). Per-step view; useful
-  /// for per-step area accumulators.
+  /// exceeds the VGPR cap permitted at the occupancy floor, less the
+  /// registers.* buffer (GetBufferedMaxVGPRs(GetLaunchOccupancyFloor())).
+  /// Per-step view; useful for per-step area accumulators.
   bool IsCurVGPRInSpillRegime() const;
 
   /// SGPR-side parallel of IsCurVGPRInSpillRegime.
@@ -240,9 +241,10 @@ public:
   /// occupancy floor), but on a caller-supplied pressure so code holding a
   /// recorded peak -- e.g. RegionInfo::GetOriginalPeakPressure() -- can ask the
   /// question without constructing a tracker over a graph. `launch_floor` is the
-  /// occupancy floor whose register budget is the spill threshold
-  /// (getMaxNum{V,S}GPRs(launch_floor)); the instance methods pass their own
-  /// pressure and GetLaunchOccupancyFloor() and delegate here.
+  /// occupancy floor whose register budget, less the registers.* buffer, is the
+  /// spill threshold (GetBufferedMax{V,S}GPRs(launch_floor)); the instance
+  /// methods pass their own pressure and GetLaunchOccupancyFloor() and delegate
+  /// here.
   static bool IsVGPRInSpillRegime(const GCNSubtarget &st, unsigned launch_floor,
                                   const GCNRegPressure &pressure);
   static bool IsSGPRInSpillRegime(const GCNSubtarget &st, unsigned launch_floor,
@@ -252,6 +254,30 @@ public:
     return IsVGPRInSpillRegime(st, launch_floor, pressure) ||
            IsSGPRInSpillRegime(st, launch_floor, pressure);
   }
+
+  /// Register limits and occupancy with the registers.* buffers applied (see
+  /// RegisterBufferConfig): each register file's buffer counts as in use, so
+  /// every limit is the hardware's minus the buffer. Every place Hier decides
+  /// against a register limit, or credits a pressure with an occupancy, goes
+  /// through these. Places that only report (dumps, CSVs, the cross-check
+  /// against LLVM's own tracker) use the hardware values. With both buffers 0
+  /// these return exactly the LLVM functions they stand in for, which is also
+  /// why they return unsigned.
+  ///
+  /// VGPRs allowed at `occupancy`: getMaxNumVGPRs(occupancy) minus
+  /// registers.vgpr_buffer, never below 0.
+  static unsigned GetBufferedMaxVGPRs(const GCNSubtarget &st,
+                                      unsigned occupancy);
+  /// Addressable SGPRs allowed at `occupancy`:
+  /// getMaxNumSGPRs(occupancy, /*Addressable=*/true) minus
+  /// registers.sgpr_buffer, never below 0.
+  static unsigned GetBufferedMaxSGPRs(const GCNSubtarget &st,
+                                      unsigned occupancy);
+  /// The occupancy `pressure` gets with the buffers counted as in use:
+  /// GCNRegPressure::getOccupancy with registers.vgpr_buffer added to the
+  /// VGPR count and registers.sgpr_buffer to the SGPR count.
+  static unsigned GetBufferedOccupancy(const GCNSubtarget &st,
+                                       const GCNRegPressure &pressure);
 
   /// Peak VGPR count seen so far (max_pressure_'s VGPR count, with the
   /// gfx90a-aware accounting baked in). Convenience accessor that hides
@@ -268,7 +294,8 @@ public:
   // (MFI->getOccupancy()). All read cur_pressure_ rather than
   // max_pressure_ -- suitable for per-step area accumulators and
   // gates that reason about the live step. Limits come from
-  // GCNSubtarget::getMaxNum{VGPR,SGPR}s(MFI->getOccupancy(), ...).
+  // GetBufferedMax{V,S}GPRs(MFI->getOccupancy()): the hardware limits
+  // less the registers.* buffers.
   // Separate VGPR / SGPR so callers needn't fold the two tracks
   // together (typical metrics in practice care about VGPR; SGPR
   // helpers are here for the rare SGPR-bound case).
@@ -299,7 +326,7 @@ public:
 
   /// SGPR-side parallels of the four VGPR helpers above. Same
   /// semantics, swapping VGPR for SGPR and using
-  /// getMaxNumSGPRs(target, /*Addressable=*/true) as the cap.
+  /// GetBufferedMaxSGPRs(target) as the cap.
   bool IsCurSGPRCountAtOrBelowTargetLimit() const;
   bool IsCurSGPRCountAboveTargetLimit() const;
   unsigned GetCurSGPRCountBelowTargetLimit() const;
@@ -307,24 +334,24 @@ public:
 
   // ----------------------------------------------------------------
   // Current-pressure helpers, relative to the per-track spill cap --
-  // the per-track cap at the occupancy floor (GetLaunchOccupancyFloor()).
-  // Cur counts above this cap are the per-step magnitude of actual
-  // spilling: any VGPR/SGPR beyond the cap will be spilled by the
-  // allocator. Bool-predicate parallels exist as
+  // the per-track cap at the occupancy floor (GetLaunchOccupancyFloor()),
+  // less the registers.* buffer. Cur counts above this cap are the
+  // per-step magnitude of spilling: Hier treats any VGPR/SGPR beyond
+  // the cap as spilled. Bool-predicate parallels exist as
   // IsCurVGPRInSpillRegime / IsCurSGPRInSpillRegime (above); these
   // helpers add the magnitude variants used by the per-step
   // VGPR-spill-area accumulator and by direct count-magnitude
   // callers.
   // ----------------------------------------------------------------
 
-  /// max(0, getMaxNumVGPRs(GetLaunchOccupancyFloor()) - cur_VGPR). The
-  /// count of VGPRs by which the current step is below the spill
+  /// max(0, GetBufferedMaxVGPRs(GetLaunchOccupancyFloor()) - cur_VGPR).
+  /// The count of VGPRs by which the current step is below the spill
   /// cap; 0 if at or above. Suitable for per-step "below-spill-cap
   /// area" measures.
   unsigned GetCurVGPRCountBelowSpillCap() const;
 
-  /// max(0, cur_VGPR - getMaxNumVGPRs(GetLaunchOccupancyFloor())). The
-  /// count of VGPRs by which the current step is over the spill cap;
+  /// max(0, cur_VGPR - GetBufferedMaxVGPRs(GetLaunchOccupancyFloor())).
+  /// The count of VGPRs by which the current step is over the spill cap;
   /// 0 if at or below. Backs the per-step VGPR spill-area
   /// accumulator (see GetVGPRSpillArea) and is suitable for callers
   /// that want the live "how-much-spill-this-step" count directly.
@@ -332,8 +359,7 @@ public:
 
   /// SGPR-side parallels of the two VGPR spill-cap helpers above.
   /// Same semantics, swapping VGPR for SGPR and using
-  /// getMaxNumSGPRs(GetLaunchOccupancyFloor(), /*Addressable=*/true) as
-  /// the cap.
+  /// GetBufferedMaxSGPRs(GetLaunchOccupancyFloor()) as the cap.
   unsigned GetCurSGPRCountBelowSpillCap() const;
   unsigned GetCurSGPRCountAboveSpillCap() const;
 
@@ -347,7 +373,7 @@ public:
   /// NoHistoryClone, like occ_area_.
   int64_t GetVGPRSpillArea() const { return vgpr_spill_area_; }
 
-  /// max(0, peak_VGPR - getMaxNumVGPRs(GetLaunchOccupancyFloor())): the
+  /// max(0, peak_VGPR - GetBufferedMaxVGPRs(GetLaunchOccupancyFloor())): the
   /// maximum number of VGPRs above the spill cap at any point in the
   /// schedule -- the worst-case count of registers that must be spilled
   /// at once, a proxy for scratch size. Peak-style (reads max_pressure_

@@ -300,6 +300,20 @@ struct PipeMixConfig {
   }
 };
 
+/// Registers to keep free below every register limit (the `registers.*`
+/// scope). Wherever Hier compares register pressure with a limit or turns
+/// pressure into an occupancy, it counts pressure plus the buffer, which
+/// lowers both the occupancy-target limit and the spill cap. A count that
+/// fits a limit doesn't always fit the registers: 64- and 128-bit values
+/// need adjacent ones (see llvm/docs/AMDGPURegisterBufferPlan.md).
+/// 0 = no buffer, Hier's behavior without the scope.
+struct RegisterBufferConfig {
+  // VGPRs to keep free (registers.vgpr_buffer).
+  int vgpr_buffer = 0;
+  // SGPRs to keep free (registers.sgpr_buffer).
+  int sgpr_buffer = 0;
+};
+
 /// The HierarchicalScheduler's whole typed configuration, built once at
 /// scheduler init by Build(). Call sites read typed fields (e.g.
 /// `hs.occupancy.search == Search::kBfsDp`) instead of querying the generic
@@ -330,6 +344,9 @@ struct HierarchicalConfig {
   // length_ignore_occupancy (enforced in Build).
   MinAdjustedLengthConfig min_adjusted_length_config;
   PipeMixConfig pipe_mix_config;
+  // Registers kept free below every register limit, in every pass (see
+  // RegisterBufferConfig).
+  RegisterBufferConfig registers;
   // Paths from misched.txt's `order_file` lines. Each file gives one
   // function's instruction order, replayed after the configured scheduler
   // has run.

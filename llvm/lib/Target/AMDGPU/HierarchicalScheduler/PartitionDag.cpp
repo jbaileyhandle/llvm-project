@@ -291,7 +291,8 @@ int PartitionDag::ComputeScoreFromPressure(
           static_cast<int>(pressure.getSGPRNum()));
     }
     case ScoreDimension::kRegisterOcc:
-      return static_cast<int>(pressure.getOccupancy(*st_));
+      return static_cast<int>(
+          GCNRegisterTracker::GetBufferedOccupancy(*st_, pressure));
     default:
       // Constructor rejected all other dims.
       llvm_unreachable(

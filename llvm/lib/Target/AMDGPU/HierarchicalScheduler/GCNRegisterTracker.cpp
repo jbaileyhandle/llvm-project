@@ -188,7 +188,7 @@ GCNRegPressure GCNRegisterTracker::Schedule(const ScheduleNode *node) {
     step.area_contribution = ContinuousScoreForPressure(cur_pressure_);
     occ_area_ += step.area_contribution;
     // VGPR spill area: add this step's above-spill-cap VGPR count
-    // (cur_pressure_ - getMaxNumVGPRs(floor), or 0 below cap). Cheap
+    // (cur_pressure_ - GetBufferedMaxVGPRs(floor), or 0 below cap). Cheap
     // subtract; consumers read vgpr_spill_area_ for spill-area-based
     // metrics. Recorded on the step so Unschedule can subtract it.
     step.vgpr_spill_area_contribution =
@@ -390,7 +390,7 @@ int GCNRegisterTracker::GetContinuousOccupancyScore() const {
 }
 
 unsigned GCNRegisterTracker::GetRegisterOnlyOccupancy() const {
-  return max_pressure_.getOccupancy(*st_);
+  return GetBufferedOccupancy(*st_, max_pressure_);
 }
 
 unsigned GCNRegisterTracker::GetLaunchFloorClampedRegisterOnlyOccupancy() const {
@@ -401,14 +401,50 @@ bool GCNRegisterTracker::IsVGPRInSpillRegime(const GCNSubtarget &st,
                                              unsigned launch_floor,
                                              const GCNRegPressure &pressure) {
   return pressure.getVGPRNum(st.hasGFX90AInsts()) >
-         st.getMaxNumVGPRs(launch_floor);
+         GetBufferedMaxVGPRs(st, launch_floor);
 }
 
 bool GCNRegisterTracker::IsSGPRInSpillRegime(const GCNSubtarget &st,
                                              unsigned launch_floor,
                                              const GCNRegPressure &pressure) {
-  return pressure.getSGPRNum() >
-         st.getMaxNumSGPRs(launch_floor, /*Addressable=*/true);
+  return pressure.getSGPRNum() > GetBufferedMaxSGPRs(st, launch_floor);
+}
+
+unsigned GCNRegisterTracker::GetBufferedMaxVGPRs(const GCNSubtarget &st,
+                                                 unsigned occupancy) {
+  // The hardware limit at this occupancy, and the VGPRs to keep free below it.
+  const int hardware_limit = static_cast<int>(st.getMaxNumVGPRs(occupancy));
+  const int buffer = HierarchicalConfig::Get().registers.vgpr_buffer;
+
+  // In int, so a buffer larger than the limit gives 0 rather than wrapping.
+  return static_cast<unsigned>(std::max(hardware_limit - buffer, 0));
+}
+
+unsigned GCNRegisterTracker::GetBufferedMaxSGPRs(const GCNSubtarget &st,
+                                                 unsigned occupancy) {
+  // The hardware limit at this occupancy, and the SGPRs to keep free below it.
+  const int hardware_limit = static_cast<int>(
+      st.getMaxNumSGPRs(occupancy, /*Addressable=*/true));
+  const int buffer = HierarchicalConfig::Get().registers.sgpr_buffer;
+
+  // In int, so a buffer larger than the limit gives 0 rather than wrapping.
+  return static_cast<unsigned>(std::max(hardware_limit - buffer, 0));
+}
+
+unsigned GCNRegisterTracker::GetBufferedOccupancy(
+    const GCNSubtarget &st, const GCNRegPressure &pressure) {
+  const RegisterBufferConfig &buffers = HierarchicalConfig::Get().registers;
+
+  // Each register file's count, with its buffer counted as in use. The
+  // buffers are non-negative (HierarchicalConfig rejects negative ones).
+  const unsigned vgpr_count = pressure.getVGPRNum(st.hasGFX90AInsts()) +
+                              static_cast<unsigned>(buffers.vgpr_buffer);
+  const unsigned sgpr_count =
+      pressure.getSGPRNum() + static_cast<unsigned>(buffers.sgpr_buffer);
+
+  // The same formula as GCNRegPressure::getOccupancy.
+  return std::min(st.getOccupancyWithNumSGPRs(sgpr_count),
+                  st.getOccupancyWithNumVGPRs(vgpr_count));
 }
 
 bool GCNRegisterTracker::IsCurVGPRInSpillRegime() const {
@@ -459,88 +495,88 @@ unsigned GCNRegisterTracker::GetPeakSGPRNum() const {
 
 bool GCNRegisterTracker::IsCurVGPRCountAtOrBelowTargetLimit() const {
   return cur_pressure_.getVGPRNum(st_->hasGFX90AInsts()) <=
-         st_->getMaxNumVGPRs(GetConfiguredMachineFunctionOccupancyTarget());
+         GetBufferedMaxVGPRs(*st_, GetConfiguredMachineFunctionOccupancyTarget());
 }
 
 bool GCNRegisterTracker::IsCurVGPRCountAboveTargetLimit() const {
   return cur_pressure_.getVGPRNum(st_->hasGFX90AInsts()) >
-         st_->getMaxNumVGPRs(GetConfiguredMachineFunctionOccupancyTarget());
+         GetBufferedMaxVGPRs(*st_, GetConfiguredMachineFunctionOccupancyTarget());
 }
 
 unsigned GCNRegisterTracker::GetCurVGPRCountBelowTargetLimit() const {
   unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
-  unsigned limit = st_->getMaxNumVGPRs(GetConfiguredMachineFunctionOccupancyTarget());
+  unsigned limit =
+      GetBufferedMaxVGPRs(*st_, GetConfiguredMachineFunctionOccupancyTarget());
   return (cur <= limit) ? (limit - cur) : 0;
 }
 
 unsigned GCNRegisterTracker::GetCurVGPRCountAboveTargetLimit() const {
   unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
-  unsigned limit = st_->getMaxNumVGPRs(GetConfiguredMachineFunctionOccupancyTarget());
+  unsigned limit =
+      GetBufferedMaxVGPRs(*st_, GetConfiguredMachineFunctionOccupancyTarget());
   return (cur > limit) ? (cur - limit) : 0;
 }
 
 bool GCNRegisterTracker::IsCurSGPRCountAtOrBelowTargetLimit() const {
   return cur_pressure_.getSGPRNum() <=
-         st_->getMaxNumSGPRs(GetConfiguredMachineFunctionOccupancyTarget(), /*Addressable=*/true);
+         GetBufferedMaxSGPRs(*st_, GetConfiguredMachineFunctionOccupancyTarget());
 }
 
 bool GCNRegisterTracker::IsCurSGPRCountAboveTargetLimit() const {
   return cur_pressure_.getSGPRNum() >
-         st_->getMaxNumSGPRs(GetConfiguredMachineFunctionOccupancyTarget(), /*Addressable=*/true);
+         GetBufferedMaxSGPRs(*st_, GetConfiguredMachineFunctionOccupancyTarget());
 }
 
 unsigned GCNRegisterTracker::GetCurSGPRCountBelowTargetLimit() const {
   unsigned cur = cur_pressure_.getSGPRNum();
   unsigned limit =
-      st_->getMaxNumSGPRs(GetConfiguredMachineFunctionOccupancyTarget(), /*Addressable=*/true);
+      GetBufferedMaxSGPRs(*st_, GetConfiguredMachineFunctionOccupancyTarget());
   return (cur <= limit) ? (limit - cur) : 0;
 }
 
 unsigned GCNRegisterTracker::GetCurSGPRCountAboveTargetLimit() const {
   unsigned cur = cur_pressure_.getSGPRNum();
   unsigned limit =
-      st_->getMaxNumSGPRs(GetConfiguredMachineFunctionOccupancyTarget(), /*Addressable=*/true);
+      GetBufferedMaxSGPRs(*st_, GetConfiguredMachineFunctionOccupancyTarget());
   return (cur > limit) ? (cur - limit) : 0;
 }
 
 // ---- Current-pressure helpers, relative to per-track spill cap ----
 //
 // Spill cap = per-track register limit at the occupancy floor
-// (GetLaunchOccupancyFloor()). Counts above this cap are the per-step
-// magnitude of actual spilling. Cap formulas match the floor-cap-
-// based spill predicates above (getMaxNumVGPRs(floor) /
-// getMaxNumSGPRs(floor, /*Addressable=*/true)) so the bool-version /
-// magnitude-version pair stays self-consistent.
+// (GetLaunchOccupancyFloor()), less the registers.* buffer. Counts above
+// this cap are the per-step magnitude of actual spilling. Cap formulas
+// match the floor-cap-based spill predicates above
+// (GetBufferedMaxVGPRs(floor) / GetBufferedMaxSGPRs(floor)) so the
+// bool-version / magnitude-version pair stays self-consistent.
 
 unsigned GCNRegisterTracker::GetCurVGPRCountBelowSpillCap() const {
   unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
-  unsigned cap = st_->getMaxNumVGPRs(GetLaunchOccupancyFloor());
+  unsigned cap = GetBufferedMaxVGPRs(*st_, GetLaunchOccupancyFloor());
   return (cur <= cap) ? (cap - cur) : 0;
 }
 
 unsigned GCNRegisterTracker::GetCurVGPRCountAboveSpillCap() const {
   unsigned cur = cur_pressure_.getVGPRNum(st_->hasGFX90AInsts());
-  unsigned cap = st_->getMaxNumVGPRs(GetLaunchOccupancyFloor());
+  unsigned cap = GetBufferedMaxVGPRs(*st_, GetLaunchOccupancyFloor());
   return (cur > cap) ? (cur - cap) : 0;
 }
 
 unsigned GCNRegisterTracker::GetPeakVGPRCountAboveSpillCap() const {
   int above = static_cast<int>(GetPeakVGPRNum()) -
-              static_cast<int>(st_->getMaxNumVGPRs(GetLaunchOccupancyFloor()));
+              static_cast<int>(GetBufferedMaxVGPRs(*st_, GetLaunchOccupancyFloor()));
   return static_cast<unsigned>(std::max(above, 0));
 }
 
 unsigned GCNRegisterTracker::GetCurSGPRCountBelowSpillCap() const {
   unsigned cur = cur_pressure_.getSGPRNum();
-  unsigned cap =
-      st_->getMaxNumSGPRs(GetLaunchOccupancyFloor(), /*Addressable=*/true);
+  unsigned cap = GetBufferedMaxSGPRs(*st_, GetLaunchOccupancyFloor());
   return (cur <= cap) ? (cap - cur) : 0;
 }
 
 unsigned GCNRegisterTracker::GetCurSGPRCountAboveSpillCap() const {
   unsigned cur = cur_pressure_.getSGPRNum();
-  unsigned cap =
-      st_->getMaxNumSGPRs(GetLaunchOccupancyFloor(), /*Addressable=*/true);
+  unsigned cap = GetBufferedMaxSGPRs(*st_, GetLaunchOccupancyFloor());
   return (cur > cap) ? (cur - cap) : 0;
 }
 

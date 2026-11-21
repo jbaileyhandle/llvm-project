@@ -42,7 +42,8 @@ RegionInfo::RegionInfo(MachineBasicBlock::iterator begin,
   const MachineFunction &mf = *begin->getParent()->getParent();
   const GCNSubtarget &st = mf.getSubtarget<GCNSubtarget>();
   original_register_only_occupancy_ =
-      static_cast<int>(original_peak_pressure_.getOccupancy(st));
+      static_cast<int>(GCNRegisterTracker::GetBufferedOccupancy(
+          st, original_peak_pressure_));
 
   // Ask GCNRegisterTracker's spill-regime predicate about the recorded peak:
   // the input schedule is in the spill regime if its peak exceeds the register

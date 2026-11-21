@@ -468,6 +468,40 @@ void BuildPipeMix(const std::map<std::string, std::string> *kv,
   }
 }
 
+// One key of the registers.* scope: a count of registers to keep free below
+// every register limit (see RegisterBufferConfig).
+void ApplyRegistersKey(StringRef key, StringRef val, RegisterBufferConfig &c) {
+  StringRef scope = "registers";
+
+  // The field this key sets.
+  int *buffer = nullptr;
+  if (key == "vgpr_buffer") {
+    buffer = &c.vgpr_buffer;
+  } else if (key == "sgpr_buffer") {
+    buffer = &c.sgpr_buffer;
+  } else {
+    UnknownKey(scope, key);
+  }
+
+  // A negative buffer would let Hier go past its limits.
+  const int buffer_value = ParseInt(scope, key, val);
+  if (buffer_value < 0) {
+    BadValue(scope, key, val, "a non-negative integer");
+  }
+
+  *buffer = buffer_value;
+}
+
+// No presets for this scope, just the explicit keys.
+void BuildRegisters(const std::map<std::string, std::string> *kv,
+                    RegisterBufferConfig &c) {
+  if (kv) {
+    for (const auto &p : *kv) {
+      ApplyRegistersKey(p.first, p.second, c);
+    }
+  }
+}
+
 void BuildLength(const std::map<std::string, std::string> *kv, LengthConfig &c) {
   StringRef preset_name = GetPresetName(kv);
   if (!preset_name.empty()) {
@@ -596,7 +630,8 @@ void RejectUnknownScopes(
   for (const auto &entry : scoped) {
     const std::string &scope = entry.first;
     if (scope == "occupancy" || scope == "length" ||
-        scope == "min_adjusted_length" || scope == "pipe_mix") {
+        scope == "min_adjusted_length" || scope == "pipe_mix" ||
+        scope == "registers") {
       continue;
     }
     report_fatal_error(Twine("misched.txt: unknownscope '") + scope +
@@ -748,6 +783,7 @@ HierarchicalConfig::Build(const MachineInstrSchedulerConfig &cfg) {
   BuildMinAdjustedLength(find_scope("min_adjusted_length"),
                          hs.min_adjusted_length_config);
   BuildPipeMix(find_scope("pipe_mix"), hs.pipe_mix_config);
+  BuildRegisters(find_scope("registers"), hs.registers);
 
   ValidateOccupancy(hs.occupancy);
   ValidateLength(hs.length);
@@ -843,6 +879,8 @@ std::string HierarchicalConfig::ToString() const {
              ? std::to_string(*pipe_mix_config.time_per_instr_us)
              : "off")
      << "\n";
+  os << "\tregisters: vgpr_buffer=" << registers.vgpr_buffer
+     << " sgpr_buffer=" << registers.sgpr_buffer << "\n";
   if (order_files.empty()) {
     os << "\torder_files: none\n";
   } else {

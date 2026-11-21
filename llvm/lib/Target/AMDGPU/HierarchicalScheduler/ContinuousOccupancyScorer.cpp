@@ -24,7 +24,8 @@
 //   Scheduler:
 //
 //     GCNRegisterTracker::GetRegisterOnlyOccupancy
-//       ──▶ GCNRegPressure::getOccupancy
+//       ──▶ GCNRegisterTracker::GetBufferedOccupancy (the registers.*
+//           buffers counted as in use)
 //             ──▶ getOccupancyWithNumSGPRs, getOccupancyWithNumVGPRs
 //
 //     ContinuousOccupancyScorer (construction)
@@ -32,16 +33,19 @@
 //           for every count up to the hardware limit
 //
 //     GCNRegisterTracker, PartitionDag ──▶ ContinuousOccupancyScorer::Score
+//       (looks up each count plus its registers.* buffer)
 //
 // The scorer derives each occupancy's register ceiling from the
 // occupancy functions instead of calling getMaxNumSGPRs/getMaxNumVGPRs,
 // so its scores always agree with the occupancy the tracker reports,
-// under either SGPR table.
+// under either SGPR table. Both apply the buffers the same way, as
+// registers already in use.
 //
 //===----------------------------------------------------------------------===//
 
 #include "ContinuousOccupancyScorer.h"
 #include "GCNSubtarget.h"
+#include "HierarchicalConfig.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <memory>
@@ -64,6 +68,11 @@ ContinuousOccupancyScorer::Get(const GCNSubtarget &st) {
 }
 
 ContinuousOccupancyScorer::ContinuousOccupancyScorer(const GCNSubtarget &st) {
+  // The registers.* buffers, which Score counts as in use.
+  const RegisterBufferConfig &buffers = HierarchicalConfig::Get().registers;
+  vgpr_buffer_ = buffers.vgpr_buffer;
+  sgpr_buffer_ = buffers.sgpr_buffer;
+
   int max_waves = static_cast<int>(st.getMaxWavesPerEU());
 
   // Occupancy for each count from 0 to the hardware limit (see file

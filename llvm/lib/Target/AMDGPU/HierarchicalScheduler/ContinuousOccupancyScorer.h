@@ -29,11 +29,14 @@ public:
   static const ContinuousOccupancyScorer &Get(const GCNSubtarget &st);
 
   /// Score for `num_vgpr` VGPRs and `num_sgpr` SGPRs: the lower of the
-  /// two per-class scores. A count past the hardware limit scores
-  /// -(amount over), below every count that fits.
+  /// two per-class scores. Each count is scored with its registers.*
+  /// buffer counted as in use (see RegisterBufferConfig), the same rule
+  /// as GCNRegisterTracker::GetBufferedOccupancy. A count past the
+  /// hardware limit scores -(amount over), below every count that fits.
   int Score(int num_vgpr, int num_sgpr) const {
-    return std::min(ScoreForClass(vgpr_score_by_count_, num_vgpr),
-                    ScoreForClass(sgpr_score_by_count_, num_sgpr));
+    return std::min(
+        ScoreForClass(vgpr_score_by_count_, num_vgpr + vgpr_buffer_),
+        ScoreForClass(sgpr_score_by_count_, num_sgpr + sgpr_buffer_));
   }
 
 private:
@@ -59,6 +62,11 @@ private:
   /// Index = register count (0..hardware limit), value = score.
   std::vector<int> vgpr_score_by_count_;
   std::vector<int> sgpr_score_by_count_;
+
+  /// The registers.* buffers (RegisterBufferConfig), read once when the
+  /// scorer is built. Score counts them as in use.
+  int vgpr_buffer_ = 0;
+  int sgpr_buffer_ = 0;
 };
 
 } // namespace hierarchical_scheduler
