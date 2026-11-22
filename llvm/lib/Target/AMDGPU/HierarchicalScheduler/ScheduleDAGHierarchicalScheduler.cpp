@@ -273,6 +273,12 @@ void ScheduleDAGHierarchicalScheduler::WithRegionGraph(
         SUnits, st, MF, *LIS, MF.getRegInfo(), region, latency_divisor,
         HierarchicalConfig::Get().live_out_latency);
 
+    // The enforce_ideal_memory_tiers misched token adds ideal memory tier
+    // edges to every graph built here, before the callback sees it.
+    if (HierarchicalConfig::Get().enforce_ideal_memory_tiers) {
+      graph->EnforceIdealMemoryTiers(st, MF);
+    }
+
     callback(*graph);
   });
 }

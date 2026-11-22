@@ -96,6 +96,12 @@ class MachineInstrSchedulerConfig {
             // always counts it, whatever this says. Consumed via
             // HierarchicalConfig.
             bool live_out_latency = false;
+            // HierarchicalScheduler: add memory tier edges to every region
+            // graph it builds, so no instruction of a later ideal memory tier
+            // can go before one of an earlier tier
+            // (ScheduleGraph::EnforceIdealMemoryTiers). Consumed via
+            // HierarchicalConfig.
+            bool enforce_ideal_memory_tiers = false;
             bool skip_occupancy_pass = false;
             bool skip_length_pass = false;
             // HierarchicalScheduler length pass: ignore the occupancy target.

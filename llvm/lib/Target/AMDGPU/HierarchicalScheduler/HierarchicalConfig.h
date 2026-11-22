@@ -332,6 +332,9 @@ struct HierarchicalConfig {
   bool dump_search_outcomes = false; // per-search outcome CSV
   bool scale_edge_latencies = false; // scale edge latency by target occupancy
   bool live_out_latency = false;     // exit waits for values leaving the region
+  // Every region graph gets ideal memory tier edges right after it's built
+  // (ScheduleGraph::EnforceIdealMemoryTiers).
+  bool enforce_ideal_memory_tiers = false;
   bool skip_occupancy_pass = false;  // bypass RunMaximizeOccupancyPass entirely
   bool skip_length_pass = false;     // bypass RunLengthPass entirely
   // Length pass ignores the occupancy target: the length DFS skips its
